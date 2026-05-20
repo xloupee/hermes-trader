@@ -204,7 +204,7 @@ function isMigrationEvent(event) {
     return false;
   }
 
-  return config.pumpPortalSubscriptionMethod === "subscribeMigration";
+  return getSubscriptionMethods().includes("subscribeMigration");
 }
 
 async function getSolUsdPrice() {
@@ -373,6 +373,9 @@ function testMigrationMessage() {
         name: "Test Token",
         symbol: "TEST",
         image: "https://ipfs.io/ipfs/QmTyuok2MLsRxwy2uJWjMgHZuATetVzLk7HfxYC4X9yohw"
+      },
+      tokenInfo: {
+        is_cashback_enabled: true
       }
     }
   );

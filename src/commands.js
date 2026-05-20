@@ -36,9 +36,7 @@ export function helpText(chatId) {
     "/migrations - Watch migrated coins only",
     "/newtokens - Watch newly created tokens only",
     "/both - Watch new tokens and migrated coins",
-    "/help - Show commands",
-    "",
-    `This chat id is <code>${chatId}</code>. Add it to <code>TELEGRAM_CHAT_ID</code> in <code>.env</code>.`
+    "/help - Show commands"
   ].join("\n");
 }
 

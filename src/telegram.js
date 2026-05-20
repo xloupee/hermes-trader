@@ -51,6 +51,24 @@ export async function sendTelegramMessage({ token, chatId, text, replyMarkup }) 
   return body;
 }
 
+export async function sendTelegramPhoto({ token, chatId, photoUrl, caption, replyMarkup }) {
+  assertTelegramConfig({ token, chatId });
+
+  const body = await callTelegramApi({
+    token,
+    method: "sendPhoto",
+    payload: {
+      chat_id: chatId,
+      photo: photoUrl,
+      caption,
+      parse_mode: "HTML",
+      reply_markup: replyMarkup
+    }
+  });
+
+  return body;
+}
+
 export async function getTelegramUpdates({ token, offset, timeout = 0 }) {
   assertTelegramConfig({ token, chatIdRequired: false });
 

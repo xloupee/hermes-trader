@@ -162,6 +162,8 @@ export function extractMigrationData(event, config) {
     imageUrl: pickMetadataValue(metadata, ["image", "image_url", "imageUrl"]) || tokenInfo.image_uri,
     cashbackEnabled: pickBooleanValue(event, ["is_cashback_enabled", "isCashbackEnabled", "cashbackEnabled"]) ??
       pickBooleanValue(tokenInfo, ["is_cashback_enabled", "isCashbackEnabled", "cashbackEnabled"]),
+    agentBuybacksEnabled: pickBooleanValue(event, ["tokenized_agent", "tokenizedAgent", "agentBuybacksEnabled"]) ??
+      pickBooleanValue(tokenInfo, ["tokenized_agent", "tokenizedAgent", "agentBuybacksEnabled"]),
     transactionAnalysis: config.transactionAnalysis || null,
     pool: pickFirstObjectValue(event, ["pool", "poolAddress", "bondingCurve", "raydiumPool", "poolCandidate"]) || tokenInfo.pool_address,
     destination: pickFirstObjectValue(event, ["destination", "dex", "exchange", "migrationTarget"]),
@@ -299,6 +301,10 @@ export function formatMigrationMessage(event, config) {
 
   if (migration.cashbackEnabled !== null) {
     lines.push(`<b>Cashback:</b> ${migration.cashbackEnabled ? "Enabled" : "Disabled"}`);
+  }
+
+  if (migration.agentBuybacksEnabled !== null) {
+    lines.push(`<b>Agent buybacks:</b> ${migration.agentBuybacksEnabled ? "Enabled" : "Disabled"}`);
   }
 
   if (migration.transactionAnalysis) {

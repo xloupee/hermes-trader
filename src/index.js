@@ -375,7 +375,8 @@ function testMigrationMessage() {
         image: "https://ipfs.io/ipfs/QmTyuok2MLsRxwy2uJWjMgHZuATetVzLk7HfxYC4X9yohw"
       },
       tokenInfo: {
-        is_cashback_enabled: true
+        is_cashback_enabled: true,
+        tokenized_agent: true
       }
     }
   );

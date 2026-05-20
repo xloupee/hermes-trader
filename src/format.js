@@ -111,6 +111,32 @@ function pickMetadataValue(metadata, keys) {
   return pickFirstObjectValue(metadata, keys);
 }
 
+function pickBooleanValue(object, keys) {
+  const value = pickFirstObjectValue(object, keys);
+
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.toLowerCase();
+
+    if (normalized === "true" || normalized === "yes" || normalized === "1") {
+      return true;
+    }
+
+    if (normalized === "false" || normalized === "no" || normalized === "0") {
+      return false;
+    }
+  }
+
+  return null;
+}
+
 export function extractMigrationData(event, config) {
   const links = buildExplorerLinks(event, config);
   const metadata = config.metadata || {};
@@ -134,6 +160,8 @@ export function extractMigrationData(event, config) {
     symbol: pickFirstObjectValue(event, ["symbol", "ticker"]) || pickMetadataValue(metadata, ["symbol", "ticker"]) || tokenInfo.symbol,
     description: pickMetadataValue(metadata, ["description"]) || tokenInfo.description,
     imageUrl: pickMetadataValue(metadata, ["image", "image_url", "imageUrl"]) || tokenInfo.image_uri,
+    cashbackEnabled: pickBooleanValue(event, ["is_cashback_enabled", "isCashbackEnabled", "cashbackEnabled"]) ??
+      pickBooleanValue(tokenInfo, ["is_cashback_enabled", "isCashbackEnabled", "cashbackEnabled"]),
     transactionAnalysis: config.transactionAnalysis || null,
     pool: pickFirstObjectValue(event, ["pool", "poolAddress", "bondingCurve", "raydiumPool", "poolCandidate"]) || tokenInfo.pool_address,
     destination: pickFirstObjectValue(event, ["destination", "dex", "exchange", "migrationTarget"]),
@@ -267,6 +295,10 @@ export function formatMigrationMessage(event, config) {
     const marketCap = migration.marketCapUsd !== null ? formatUsd(migration.marketCapUsd) : formatSol(migration.marketCapSol);
     lines.push("");
     lines.push(`<b>Market cap:</b> ${escapeHtml(marketCap)}`);
+  }
+
+  if (migration.cashbackEnabled !== null) {
+    lines.push(`<b>Cashback:</b> ${migration.cashbackEnabled ? "Enabled" : "Disabled"}`);
   }
 
   if (migration.transactionAnalysis) {

@@ -22,6 +22,7 @@ export function setupStatus(config) {
     `${config.telegramToken ? "OK" : "Missing"} TELEGRAM_BOT_TOKEN`,
     `${config.telegramChatId ? "OK" : "Missing"} TELEGRAM_CHAT_ID`,
     `${config.pumpPortalApiKey ? "OK" : "Missing"} PUMPPORTAL_API_KEY`,
+    `<b>Alert mode:</b> ${config.getModeLabel ? config.getModeLabel() : config.pumpPortalSubscriptionMethod}`,
     `<b>PumpPortal URL:</b> <code>${config.pumpPortalWsUrl}</code>`
   ].join("\n");
 }
@@ -34,6 +35,9 @@ export function helpText(chatId) {
     "/start - Show setup help",
     "/status - Check configured env vars",
     "/chatid - Show this Telegram chat id",
+    "/mode - Show or change alert mode",
+    "/migrations - Watch migrated coins only",
+    "/newtokens - Watch newly created tokens only",
     "/test - Send a sample migration alert",
     "/help - Show commands",
     "",
@@ -41,7 +45,7 @@ export function helpText(chatId) {
   ].join("\n");
 }
 
-export function createTelegramCommandPoller({ config, testMessage }) {
+export function createTelegramCommandPoller({ config, testMessage, setAlertMode, getModeLabel }) {
   let nextOffset;
   let shouldPoll = true;
 
@@ -77,7 +81,28 @@ export function createTelegramCommandPoller({ config, testMessage }) {
         await reply(chatId, `<b>Chat id:</b> <code>${chatId}</code>`);
         break;
       case "/status":
-        await reply(chatId, setupStatus(config));
+        await reply(chatId, setupStatus({ ...config, getModeLabel }));
+        break;
+      case "/mode":
+        if (parsed.args[0]) {
+          await reply(chatId, await changeMode(chatId, parsed.args[0]));
+        } else {
+          await reply(
+            chatId,
+            [
+              `<b>Current alert mode:</b> ${getModeLabel?.() || config.pumpPortalSubscriptionMethod}`,
+              "",
+              "Use /migrations for migrated coins only.",
+              "Use /newtokens for newly created tokens only."
+            ].join("\n")
+          );
+        }
+        break;
+      case "/migrations":
+        await reply(chatId, await changeMode(chatId, "migrations"));
+        break;
+      case "/newtokens":
+        await reply(chatId, await changeMode(chatId, "newtokens"));
         break;
       case "/test":
         await reply(chatId, testMessage());
@@ -85,6 +110,30 @@ export function createTelegramCommandPoller({ config, testMessage }) {
       default:
         await reply(chatId, "Unknown command. Send /help to see the bot commands.");
     }
+  }
+
+  async function changeMode(chatId, requestedMode) {
+    if (config.telegramChatId && String(chatId) !== String(config.telegramChatId)) {
+      return "Only the configured alert chat can change bot mode.";
+    }
+
+    if (!setAlertMode) {
+      return "Mode switching is not available in this bot process.";
+    }
+
+    const mode = requestedMode.toLowerCase();
+    const result = await setAlertMode(mode);
+
+    if (!result.ok) {
+      return [
+        "<b>Unknown mode.</b>",
+        "",
+        "Use /migrations for migrated coins only.",
+        "Use /newtokens for newly created tokens only."
+      ].join("\n");
+    }
+
+    return `<b>Alert mode changed:</b> ${result.label}`;
   }
 
   async function pollOnce() {

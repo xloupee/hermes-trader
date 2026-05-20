@@ -46,7 +46,49 @@ function formatSol(value) {
     return null;
   }
 
-  return `${formatNumber(value, 4)} SOL`;
+  const number = toFiniteNumber(value);
+  const precision = number !== null && Math.abs(number) < 0.001 ? 9 : 4;
+
+  return `${formatNumber(value, precision)} SOL`;
+}
+
+function formatSolUsd(value, solUsdPrice) {
+  const sol = formatSol(value);
+  const solNumber = toFiniteNumber(value);
+  const priceNumber = toFiniteNumber(solUsdPrice);
+
+  if (solNumber === null || priceNumber === null) {
+    return sol;
+  }
+
+  return `${sol} (${formatUsd(solNumber * priceNumber)})`;
+}
+
+function formatUsd(value) {
+  const number = Number(value);
+
+  if (!Number.isFinite(number)) {
+    return value;
+  }
+
+  if (number >= 1000000) {
+    return `$${formatNumber(number / 1000000, 2)}M`;
+  }
+
+  if (number >= 1000) {
+    return `$${formatNumber(number / 1000, 2)}K`;
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: number >= 100 ? 0 : 2
+  }).format(number);
+}
+
+function toFiniteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 function shortenAddress(value) {
@@ -65,18 +107,35 @@ function link(label, url) {
   return `<a href="${escapeHtml(url)}">${escapeHtml(label)}</a>`;
 }
 
+function pickMetadataValue(metadata, keys) {
+  return pickFirstObjectValue(metadata, keys);
+}
+
 export function extractMigrationData(event, config) {
   const links = buildExplorerLinks(event, config);
+  const metadata = config.metadata || {};
+  const marketCapSol = pickFirstObjectValue(event, ["marketCapSol", "marketCap"]);
+  const explicitMarketCapUsd = pickFirstObjectValue(event, ["usdMarketCap", "marketCapUsd", "marketCapUSD"]);
+  const solUsdPrice = toFiniteNumber(config.solUsdPrice);
+  const marketCapSolNumber = toFiniteNumber(marketCapSol);
+  const marketCapUsd =
+    explicitMarketCapUsd ?? (marketCapSolNumber !== null && solUsdPrice !== null ? marketCapSolNumber * solUsdPrice : null);
 
   return {
     observedAt: new Date().toISOString(),
     eventType: pickFirstObjectValue(event, ["txType", "type", "eventType"]),
     coinAddress: links.mint,
-    name: pickFirstObjectValue(event, ["name", "tokenName"]),
-    symbol: pickFirstObjectValue(event, ["symbol", "ticker"]),
+    name: pickFirstObjectValue(event, ["name", "tokenName"]) || pickMetadataValue(metadata, ["name"]),
+    symbol: pickFirstObjectValue(event, ["symbol", "ticker"]) || pickMetadataValue(metadata, ["symbol", "ticker"]),
+    description: pickMetadataValue(metadata, ["description"]),
+    imageUrl: pickMetadataValue(metadata, ["image", "image_url", "imageUrl"]),
+    transactionAnalysis: config.transactionAnalysis || null,
     pool: pickFirstObjectValue(event, ["pool", "poolAddress", "bondingCurve", "raydiumPool", "poolCandidate"]),
     destination: pickFirstObjectValue(event, ["destination", "dex", "exchange", "migrationTarget"]),
-    marketCap: pickFirstObjectValue(event, ["marketCapSol", "marketCap", "usdMarketCap"]),
+    marketCap: marketCapSol,
+    marketCapSol,
+    marketCapUsd,
+    solUsdPrice,
     initialBuy: pickFirstObjectValue(event, ["initialBuy"]),
     solAmount: pickFirstObjectValue(event, ["solAmount"]),
     traderPublicKey: pickFirstObjectValue(event, ["traderPublicKey", "creator", "creatorPublicKey", "user"]),
@@ -89,6 +148,7 @@ export function extractMigrationData(event, config) {
     pumpFunUrl: links.pumpFunUrl,
     solscanTokenUrl: links.solscanTokenUrl,
     solscanTxUrl: links.solscanTxUrl,
+    metadata,
     raw: readableWebsocketData(event)
   };
 }
@@ -181,55 +241,41 @@ export function formatMigrationMessage(event, config) {
 
   const lines = [`<b>${heading}</b>`, `<b>${escapeHtml(tokenName)}${escapeHtml(tokenSymbol)}</b>`];
 
+  if (migration.description) {
+    lines.push(escapeHtml(String(migration.description).slice(0, 180)));
+  }
+
   if (migration.coinAddress) {
     lines.push("");
     lines.push("<b>Contract address</b>");
     lines.push(`<code>${escapeHtml(migration.coinAddress)}</code>`);
   }
 
-  const stats = [];
-
   if (migration.marketCap !== null) {
-    stats.push(`<b>Market cap:</b> ${escapeHtml(formatSol(migration.marketCap))}`);
-  }
-
-  if (migration.solAmount !== null) {
-    stats.push(`<b>SOL spent:</b> ${escapeHtml(formatSol(migration.solAmount))}`);
-  }
-
-  if (migration.initialBuy !== null) {
-    stats.push(`<b>Initial buy:</b> ${escapeHtml(formatNumber(migration.initialBuy, 2))} tokens`);
-  }
-
-  if (migration.virtualSolInBondingCurve !== null) {
-    stats.push(`<b>Curve SOL:</b> ${escapeHtml(formatSol(migration.virtualSolInBondingCurve))}`);
-  }
-
-  if (stats.length > 0) {
+    const marketCap = migration.marketCapUsd !== null ? formatUsd(migration.marketCapUsd) : formatSol(migration.marketCapSol);
     lines.push("");
-    lines.push("<b>Stats</b>");
-    lines.push(...stats);
+    lines.push(`<b>Market cap:</b> ${escapeHtml(marketCap)}`);
   }
 
-  const details = [
-    migration.pool ? `<b>Pool:</b> ${escapeHtml(migration.pool)}` : null,
-    migration.destination ? `<b>Destination:</b> ${escapeHtml(migration.destination)}` : null,
-    migration.isMayhemMode !== null ? `<b>Mayhem mode:</b> ${migration.isMayhemMode ? "Yes" : "No"}` : null,
-    migration.traderPublicKey
-      ? `<b>Creator:</b> <code>${escapeHtml(shortenAddress(migration.traderPublicKey))}</code>`
-      : null,
-    migration.bondingCurveKey
-      ? `<b>Bonding curve:</b> <code>${escapeHtml(shortenAddress(migration.bondingCurveKey))}</code>`
-      : null,
-    migration.virtualTokensInBondingCurve !== null
-      ? `<b>Curve tokens:</b> ${escapeHtml(formatNumber(migration.virtualTokensInBondingCurve, 2))}`
-      : null
-  ].filter(Boolean);
+  if (migration.transactionAnalysis) {
+    const flow = migration.transactionAnalysis;
+    const flowLines = [];
 
-  if (details.length > 0) {
-    lines.push("");
-    lines.push("<b>Details</b>");
-    lines.push(...details);
+    if (flow.networkFeeSol !== null && flow.networkFeeSol !== undefined) {
+      flowLines.push(`<b>Network fee:</b> ${escapeHtml(formatSolUsd(flow.networkFeeSol, migration.solUsdPrice))}`);
+    }
+
+    for (const recipient of flow.recipients || []) {
+      flowLines.push(
+        `<b>${escapeHtml(recipient.label)}:</b> +${escapeHtml(formatSolUsd(recipient.deltaSol, migration.solUsdPrice))} <code>${escapeHtml(shortenAddress(recipient.address))}</code>`
+      );
+    }
+
+    if (flowLines.length > 0) {
+      lines.push("");
+      lines.push("<b>Fees / SOL flow</b>");
+      lines.push(...flowLines);
+    }
   }
 
   const fallbackLinks = [

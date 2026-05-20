@@ -1,4 +1,6 @@
 import "dotenv/config";
+import { asRecord, stringValue } from "./types.js";
+import type { LooseRecord } from "./types.js";
 
 const MIGRATION_ACCOUNT = "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg";
 const PUMPFUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
@@ -9,7 +11,19 @@ const rpcUrl = process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.co
 const requestedLimit = Number.parseInt(process.argv[2] || "10", 10);
 const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 100) : 10;
 
-async function rpc(method, params) {
+interface SignatureInfo {
+  signature: string;
+  slot: unknown;
+  blockTime: number | null;
+  err?: unknown;
+}
+
+interface MigrationInstruction {
+  programId?: unknown;
+  accounts?: unknown;
+}
+
+async function rpc(method: string, params: unknown[]): Promise<unknown> {
   const response = await fetch(rpcUrl, {
     method: "POST",
     headers: {
@@ -23,22 +37,28 @@ async function rpc(method, params) {
     })
   });
 
-  const body = await response.json();
+  const body = asRecord(await response.json());
 
   if (body.error) {
-    throw new Error(`${method} failed: ${body.error.message}`);
+    throw new Error(`${method} failed: ${stringValue(asRecord(body.error).message)}`);
   }
 
   return body.result;
 }
 
-function findMigrationInstruction(transaction) {
-  return transaction?.transaction?.message?.instructions?.find((instruction) => {
-    return instruction.programId === PUMPFUN_PROGRAM && instruction.accounts?.includes(MIGRATION_ACCOUNT);
+function findMigrationInstruction(transaction: unknown): MigrationInstruction | undefined {
+  const transactionBody = asRecord(asRecord(transaction).transaction);
+  const message = asRecord(transactionBody.message);
+  const instructions = Array.isArray(message.instructions) ? message.instructions : [];
+
+  return instructions.find((instructionValue): instructionValue is MigrationInstruction => {
+    const instruction = asRecord(instructionValue);
+    const accounts = Array.isArray(instruction.accounts) ? instruction.accounts : [];
+    return instruction.programId === PUMPFUN_PROGRAM && accounts.includes(MIGRATION_ACCOUNT);
   });
 }
 
-function detectDestination(accounts, logs) {
+function detectDestination(accounts: string[], logs: string[]): string {
   if (accounts.includes(PUMPSWAP_PROGRAM) || logs.some((log) => log.includes("Instruction: CreatePool"))) {
     return "PumpSwap";
   }
@@ -50,10 +70,11 @@ function detectDestination(accounts, logs) {
   return "Unknown";
 }
 
-function extractMigration(signatureInfo, transaction) {
+function extractMigration(signatureInfo: SignatureInfo, transaction: unknown): LooseRecord | null {
   const instruction = findMigrationInstruction(transaction);
-  const logs = transaction?.meta?.logMessages || [];
-  const accounts = instruction?.accounts || [];
+  const meta = asRecord(asRecord(transaction).meta);
+  const logs = Array.isArray(meta.logMessages) ? meta.logMessages.map(String) : [];
+  const accounts = Array.isArray(instruction?.accounts) ? instruction.accounts.map(String) : [];
 
   if (!instruction || !logs.some((log) => log.includes("Instruction: Migrate"))) {
     return null;
@@ -81,9 +102,23 @@ const signatures = await rpc("getSignaturesForAddress", [
   { limit: Math.max(limit * 3, 20) }
 ]);
 
-const migrations = [];
+const migrations: LooseRecord[] = [];
 
-for (const signatureInfo of signatures) {
+for (const signatureInfoValue of Array.isArray(signatures) ? signatures : []) {
+  const signatureRecord = asRecord(signatureInfoValue);
+  const signature = stringValue(signatureRecord.signature);
+
+  if (!signature) {
+    continue;
+  }
+
+  const signatureInfo: SignatureInfo = {
+    signature,
+    slot: signatureRecord.slot,
+    blockTime: typeof signatureRecord.blockTime === "number" ? signatureRecord.blockTime : null,
+    err: signatureRecord.err
+  };
+
   if (signatureInfo.err) {
     continue;
   }

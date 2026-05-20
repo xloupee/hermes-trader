@@ -1,8 +1,9 @@
 import "dotenv/config";
 import { createTelegramCommandPoller } from "./commands.js";
 import { formatMigrationMessage } from "./format.js";
+import type { LegacyBotConfig } from "./types.js";
 
-const config = {
+const config: LegacyBotConfig = {
   telegramToken: process.env.TELEGRAM_BOT_TOKEN,
   telegramChatId: process.env.TELEGRAM_CHAT_ID,
   pumpPortalApiKey: process.env.PUMPPORTAL_API_KEY,
@@ -11,7 +12,7 @@ const config = {
   pumpFunBaseUrl: process.env.PUMPFUN_BASE_URL || "https://pump.fun"
 };
 
-function testMigrationMessage() {
+function testMigrationMessage(): string {
   return formatMigrationMessage(
     {
       name: "Test Token",
@@ -27,7 +28,7 @@ function testMigrationMessage() {
   );
 }
 
-function assertConfig() {
+function assertConfig(): void {
   if (!config.telegramToken) {
     throw new Error("Missing required env var: TELEGRAM_BOT_TOKEN");
   }
@@ -38,7 +39,7 @@ const commandPoller = createTelegramCommandPoller({
   testMessage: testMigrationMessage
 });
 
-function shutdown() {
+function shutdown(): void {
   commandPoller.stop();
   console.log("Shutting down Telegram bot");
   process.exit(0);

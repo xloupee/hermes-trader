@@ -141,6 +141,26 @@ function pickBooleanValue(object, keys) {
   return null;
 }
 
+function formatBooleanStatus(value) {
+  if (value === true) {
+    return "Enabled";
+  }
+
+  if (value === false) {
+    return "Disabled";
+  }
+
+  return "Unknown";
+}
+
+function formatCreatorFeeStatus(migration) {
+  if (!migration.creatorAddress) {
+    return "Unknown";
+  }
+
+  return `Creator eligible for <code>${escapeHtml(shortenAddress(migration.creatorAddress))}</code>`;
+}
+
 export function extractMigrationData(event, config) {
   const links = buildExplorerLinks(event, config);
   const metadata = config.metadata || {};
@@ -311,18 +331,9 @@ export function formatMigrationMessage(event, config) {
     lines.push(`<b>Market cap:</b> ${escapeHtml(marketCap)}`);
   }
 
-  if (migration.cashbackEnabled !== null) {
-    lines.push(`<b>Cashback:</b> ${migration.cashbackEnabled ? "Enabled" : "Disabled"}`);
-  }
-
-  if (migration.agentBuybacksEnabled !== null) {
-    lines.push(`<b>Agent buybacks:</b> ${migration.agentBuybacksEnabled ? "Enabled" : "Disabled"}`);
-  }
-
-  if (migration.creatorFeeEligible) {
-    const creatorText = migration.creatorAddress ? ` for <code>${escapeHtml(shortenAddress(migration.creatorAddress))}</code>` : "";
-    lines.push(`<b>Creator fees:</b> Creator eligible${creatorText}`);
-  }
+  lines.push(`<b>Cashback:</b> ${formatBooleanStatus(migration.cashbackEnabled)}`);
+  lines.push(`<b>Agent buybacks:</b> ${formatBooleanStatus(migration.agentBuybacksEnabled)}`);
+  lines.push(`<b>Creator fees:</b> ${formatCreatorFeeStatus(migration)}`);
 
   if (migration.transactionAnalysis) {
     const flow = migration.transactionAnalysis;

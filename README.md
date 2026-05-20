@@ -63,6 +63,7 @@ npm run chat-id
 - `/help` - Show the command list.
 - `/migrations` - Watch migrated coins only.
 - `/newtokens` - Watch newly created tokens only.
+- `/both` - Watch new tokens and migrated coins.
 
 ## Notes
 

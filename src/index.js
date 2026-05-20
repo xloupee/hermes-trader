@@ -12,10 +12,11 @@ const config = {
   telegramChatId: process.env.TELEGRAM_CHAT_ID,
   pumpPortalApiKey: process.env.PUMPPORTAL_API_KEY,
   pumpPortalWsUrl: process.env.PUMPPORTAL_WS_URL || "wss://pumpportal.fun/api/data",
-  pumpPortalSubscriptionMethod: process.env.PUMPPORTAL_SUBSCRIPTION_METHOD || "subscribeMigration",
+  alertMode: process.env.ALERT_MODE || process.env.PUMPPORTAL_ALERT_MODE || "migrations",
   solscanBaseUrl: process.env.SOLSCAN_BASE_URL || "https://solscan.io",
   pumpFunBaseUrl: process.env.PUMPFUN_BASE_URL || "https://pump.fun",
   migrationLogPath: process.env.MIGRATION_LOG_PATH || "logs/migrations.jsonl",
+  pumpFunCoinApiBaseUrl: process.env.PUMPFUN_COIN_API_BASE_URL || "https://frontend-api-v3.pump.fun/coins",
   solUsdPriceUrl: process.env.SOL_USD_PRICE_URL || "https://api.coinbase.com/v2/prices/SOL-USD/spot",
   solanaRpcUrl: process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
   transactionFlowEnabled: process.env.TRANSACTION_FLOW_ENABLED === "true",
@@ -26,29 +27,41 @@ const seenEvents = new Set();
 let cachedSolUsdPrice;
 let cachedSolUsdPriceAt = 0;
 const metadataCache = new Map();
+const tokenInfoCache = new Map();
+let isShuttingDown = false;
 
 const alertModes = {
   migrations: {
     label: "Migrated coins only",
-    method: "subscribeMigration"
+    methods: ["subscribeMigration"]
   },
   migration: {
     label: "Migrated coins only",
-    method: "subscribeMigration"
+    methods: ["subscribeMigration"]
   },
   newtokens: {
     label: "New tokens only",
-    method: "subscribeNewToken"
+    methods: ["subscribeNewToken"]
   },
   newtoken: {
     label: "New tokens only",
-    method: "subscribeNewToken"
+    methods: ["subscribeNewToken"]
   },
   tokens: {
     label: "New tokens only",
-    method: "subscribeNewToken"
+    methods: ["subscribeNewToken"]
+  },
+  both: {
+    label: "New tokens and migrated coins",
+    methods: ["subscribeNewToken", "subscribeMigration"]
+  },
+  all: {
+    label: "New tokens and migrated coins",
+    methods: ["subscribeNewToken", "subscribeMigration"]
   }
 };
+
+let currentAlertMode = normalizeAlertMode(config.alertMode);
 
 function rememberEvent(id) {
   if (!id) {
@@ -70,10 +83,11 @@ function rememberEvent(id) {
 }
 
 function getModeLabel() {
-  return (
-    Object.values(alertModes).find((mode) => mode.method === config.pumpPortalSubscriptionMethod)?.label ||
-    config.pumpPortalSubscriptionMethod
-  );
+  return currentAlertMode.label;
+}
+
+function getSubscriptionMethods() {
+  return currentAlertMode.methods;
 }
 
 async function setAlertMode(requestedMode) {
@@ -83,16 +97,25 @@ async function setAlertMode(requestedMode) {
     return { ok: false };
   }
 
-  if (config.pumpPortalSubscriptionMethod === nextMode.method) {
+  if (sameMethods(currentAlertMode.methods, nextMode.methods)) {
     return { ok: true, label: nextMode.label };
   }
 
-  config.pumpPortalSubscriptionMethod = nextMode.method;
+  currentAlertMode = nextMode;
+  config.alertMode = requestedMode;
   seenEvents.clear();
-  migrationListener.setSubscriptionMethod(nextMode.method);
-  console.log(`Alert mode changed to ${nextMode.label} (${nextMode.method})`);
+  migrationListener.setSubscriptionMethods(nextMode.methods);
+  console.log(`Alert mode changed to ${nextMode.label} (${nextMode.methods.join(", ")})`);
 
   return { ok: true, label: nextMode.label };
+}
+
+function normalizeAlertMode(value) {
+  return alertModes[String(value || "").toLowerCase()] || alertModes.migrations;
+}
+
+function sameMethods(left, right) {
+  return left.length === right.length && left.every((method) => right.includes(method));
 }
 
 async function handleMigration(event) {
@@ -101,14 +124,18 @@ async function handleMigration(event) {
     return;
   }
 
-  const [solUsdPrice, metadata, transactionAnalysis] = await Promise.all([
+  const [solUsdPrice, tokenInfo, transactionAnalysis] = await Promise.all([
     getSolUsdPrice(),
-    getTokenMetadata(event),
+    getPumpFunCoinInfo(event),
     getTransactionAnalysis(event)
   ]);
+  const metadata = await getTokenMetadata(event, tokenInfo);
   const eventConfig = {
     ...config,
+    alertModeLabel: getModeLabel(),
+    activeSubscriptionMethods: getSubscriptionMethods(),
     solUsdPrice,
+    tokenInfo,
     metadata,
     transactionAnalysis
   };
@@ -221,11 +248,55 @@ function normalizeIpfsUrl(value) {
   return value;
 }
 
-async function getTokenMetadata(event) {
-  const uri = normalizeIpfsUrl(event?.uri || event?.metadataUri || event?.metadata);
+async function getPumpFunCoinInfo(event) {
+  const mint = event?.mint || event?.ca || event?.token || event?.tokenAddress || event?.address;
+
+  if (!mint) {
+    return null;
+  }
+
+  if (tokenInfoCache.has(mint)) {
+    return tokenInfoCache.get(mint);
+  }
+
+  try {
+    const response = await fetch(`${config.pumpFunCoinApiBaseUrl}/${mint}`, {
+      headers: {
+        accept: "application/json"
+      }
+    });
+    const tokenInfo = await response.json();
+
+    if (!response.ok || !tokenInfo || typeof tokenInfo !== "object") {
+      throw new Error(`Unexpected Pump.fun coin response: ${response.status}`);
+    }
+
+    const normalizedTokenInfo = {
+      ...tokenInfo,
+      image_uri: normalizeIpfsUrl(tokenInfo.image_uri),
+      metadata_uri: normalizeIpfsUrl(tokenInfo.metadata_uri)
+    };
+
+    tokenInfoCache.set(mint, normalizedTokenInfo);
+
+    if (tokenInfoCache.size > 500) {
+      const oldest = tokenInfoCache.keys().next().value;
+      tokenInfoCache.delete(oldest);
+    }
+
+    return normalizedTokenInfo;
+  } catch (error) {
+    console.warn(`Could not fetch Pump.fun coin info: ${error.message}`);
+    tokenInfoCache.set(mint, null);
+    return null;
+  }
+}
+
+async function getTokenMetadata(event, tokenInfo) {
+  const uri = normalizeIpfsUrl(event?.uri || event?.metadataUri || event?.metadata || tokenInfo?.metadata_uri);
 
   if (!uri || typeof uri !== "string" || !uri.startsWith("http")) {
-    return null;
+    return tokenInfo ? metadataFromTokenInfo(tokenInfo) : null;
   }
 
   if (metadataCache.has(uri)) {
@@ -252,12 +323,29 @@ async function getTokenMetadata(event) {
       metadataCache.delete(oldest);
     }
 
-    return normalizedMetadata;
+    return {
+      ...metadataFromTokenInfo(tokenInfo),
+      ...normalizedMetadata
+    };
   } catch (error) {
     console.warn(`Could not fetch token metadata: ${error.message}`);
     metadataCache.set(uri, null);
+    return tokenInfo ? metadataFromTokenInfo(tokenInfo) : null;
+  }
+}
+
+function metadataFromTokenInfo(tokenInfo) {
+  if (!tokenInfo) {
     return null;
   }
+
+  return {
+    name: tokenInfo.name,
+    symbol: tokenInfo.symbol,
+    description: tokenInfo.description,
+    image: normalizeIpfsUrl(tokenInfo.image_uri),
+    createdOn: "https://pump.fun"
+  };
 }
 
 async function writeMigrationLog(migration) {
@@ -311,7 +399,7 @@ const commandPoller = createTelegramCommandPoller({
 const migrationListener = createPumpPortalMigrationListener({
   pumpPortalWsUrl: config.pumpPortalWsUrl,
   pumpPortalApiKey: config.pumpPortalApiKey,
-  subscriptionMethod: config.pumpPortalSubscriptionMethod,
+  subscriptionMethods: getSubscriptionMethods(),
   onMigration: (event) => {
     handleMigration(event).catch((error) => {
       console.error("Failed to process migration event:", error);
@@ -321,15 +409,43 @@ const migrationListener = createPumpPortalMigrationListener({
   onError: (error) => console.error("PumpPortal websocket error:", error.message)
 });
 
-function shutdown() {
+async function shutdown() {
+  if (isShuttingDown) {
+    return;
+  }
+
+  isShuttingDown = true;
   console.log("Shutting down");
   commandPoller.stop();
   migrationListener.stop();
+
+  if (config.telegramToken && config.telegramChatId) {
+    try {
+      await sendTelegramMessage({
+        token: config.telegramToken,
+        chatId: config.telegramChatId,
+        text: "<b>Bot stopped.</b>"
+      });
+    } catch (error) {
+      console.warn(`Could not send shutdown notification: ${error.message}`);
+    }
+  }
+
   process.exit(0);
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on("SIGINT", () => {
+  shutdown().catch((error) => {
+    console.error("Shutdown failed:", error);
+    process.exit(1);
+  });
+});
+process.on("SIGTERM", () => {
+  shutdown().catch((error) => {
+    console.error("Shutdown failed:", error);
+    process.exit(1);
+  });
+});
 
 assertConfig();
 migrationListener.start();

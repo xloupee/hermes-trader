@@ -114,10 +114,15 @@ function pickMetadataValue(metadata, keys) {
 export function extractMigrationData(event, config) {
   const links = buildExplorerLinks(event, config);
   const metadata = config.metadata || {};
+  const tokenInfo = config.tokenInfo || {};
   const marketCapSol = pickFirstObjectValue(event, ["marketCapSol", "marketCap"]);
-  const explicitMarketCapUsd = pickFirstObjectValue(event, ["usdMarketCap", "marketCapUsd", "marketCapUSD"]);
+  const tokenInfoMarketCapSol = pickFirstObjectValue(tokenInfo, ["market_cap_quote", "market_cap"]);
+  const effectiveMarketCapSol = marketCapSol ?? tokenInfoMarketCapSol;
+  const explicitMarketCapUsd =
+    pickFirstObjectValue(event, ["usdMarketCap", "marketCapUsd", "marketCapUSD"]) ??
+    pickFirstObjectValue(tokenInfo, ["usd_market_cap", "market_cap_usd", "usdMarketCap", "marketCapUsd", "marketCapUSD"]);
   const solUsdPrice = toFiniteNumber(config.solUsdPrice);
-  const marketCapSolNumber = toFiniteNumber(marketCapSol);
+  const marketCapSolNumber = toFiniteNumber(effectiveMarketCapSol);
   const marketCapUsd =
     explicitMarketCapUsd ?? (marketCapSolNumber !== null && solUsdPrice !== null ? marketCapSolNumber * solUsdPrice : null);
 
@@ -125,30 +130,33 @@ export function extractMigrationData(event, config) {
     observedAt: new Date().toISOString(),
     eventType: pickFirstObjectValue(event, ["txType", "type", "eventType"]),
     coinAddress: links.mint,
-    name: pickFirstObjectValue(event, ["name", "tokenName"]) || pickMetadataValue(metadata, ["name"]),
-    symbol: pickFirstObjectValue(event, ["symbol", "ticker"]) || pickMetadataValue(metadata, ["symbol", "ticker"]),
-    description: pickMetadataValue(metadata, ["description"]),
-    imageUrl: pickMetadataValue(metadata, ["image", "image_url", "imageUrl"]),
+    name: pickFirstObjectValue(event, ["name", "tokenName"]) || pickMetadataValue(metadata, ["name"]) || tokenInfo.name,
+    symbol: pickFirstObjectValue(event, ["symbol", "ticker"]) || pickMetadataValue(metadata, ["symbol", "ticker"]) || tokenInfo.symbol,
+    description: pickMetadataValue(metadata, ["description"]) || tokenInfo.description,
+    imageUrl: pickMetadataValue(metadata, ["image", "image_url", "imageUrl"]) || tokenInfo.image_uri,
     transactionAnalysis: config.transactionAnalysis || null,
-    pool: pickFirstObjectValue(event, ["pool", "poolAddress", "bondingCurve", "raydiumPool", "poolCandidate"]),
+    pool: pickFirstObjectValue(event, ["pool", "poolAddress", "bondingCurve", "raydiumPool", "poolCandidate"]) || tokenInfo.pool_address,
     destination: pickFirstObjectValue(event, ["destination", "dex", "exchange", "migrationTarget"]),
-    marketCap: marketCapSol,
-    marketCapSol,
+    marketCap: effectiveMarketCapSol,
+    marketCapSol: effectiveMarketCapSol,
     marketCapUsd,
     solUsdPrice,
     initialBuy: pickFirstObjectValue(event, ["initialBuy"]),
     solAmount: pickFirstObjectValue(event, ["solAmount"]),
-    traderPublicKey: pickFirstObjectValue(event, ["traderPublicKey", "creator", "creatorPublicKey", "user"]),
-    bondingCurveKey: pickFirstObjectValue(event, ["bondingCurveKey", "bondingCurve"]),
-    virtualSolInBondingCurve: pickFirstObjectValue(event, ["vSolInBondingCurve", "virtualSolInBondingCurve"]),
-    virtualTokensInBondingCurve: pickFirstObjectValue(event, ["vTokensInBondingCurve", "virtualTokensInBondingCurve"]),
-    uri: pickFirstObjectValue(event, ["uri", "metadataUri", "metadata"]),
+    traderPublicKey: pickFirstObjectValue(event, ["traderPublicKey", "creator", "creatorPublicKey", "user"]) || tokenInfo.creator,
+    bondingCurveKey: pickFirstObjectValue(event, ["bondingCurveKey", "bondingCurve"]) || tokenInfo.bonding_curve,
+    virtualSolInBondingCurve:
+      pickFirstObjectValue(event, ["vSolInBondingCurve", "virtualSolInBondingCurve"]) || tokenInfo.virtual_quote_reserves,
+    virtualTokensInBondingCurve:
+      pickFirstObjectValue(event, ["vTokensInBondingCurve", "virtualTokensInBondingCurve"]) || tokenInfo.virtual_token_reserves,
+    uri: pickFirstObjectValue(event, ["uri", "metadataUri", "metadata"]) || tokenInfo.metadata_uri,
     isMayhemMode: pickFirstObjectValue(event, ["is_mayhem_mode", "isMayhemMode"]),
     signature: links.signature,
     pumpFunUrl: links.pumpFunUrl,
     solscanTokenUrl: links.solscanTokenUrl,
     solscanTxUrl: links.solscanTxUrl,
     metadata,
+    tokenInfo,
     raw: readableWebsocketData(event)
   };
 }
@@ -234,8 +242,12 @@ export function truncateForTelegram(value, maxLength = 2200) {
 
 export function formatMigrationMessage(event, config) {
   const migration = extractMigrationData(event, config);
-  const isCreateEvent = migration.eventType === "create" || config.pumpPortalSubscriptionMethod === "subscribeNewToken";
-  const heading = isCreateEvent ? "New Pump.fun token" : "Pump.fun migration detected";
+  const activeMethods = config.activeSubscriptionMethods || [];
+  const isCreateEvent =
+    migration.eventType === "create" ||
+    (activeMethods.length === 1 && activeMethods.includes("subscribeNewToken")) ||
+    config.alertMode === "newtokens";
+  const heading = isCreateEvent ? "New Pump.fun token" : "Pumpfun migration detected";
   const tokenName = migration.name || "Unknown token";
   const tokenSymbol = migration.symbol ? ` (${migration.symbol})` : "";
 

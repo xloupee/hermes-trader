@@ -35,6 +35,7 @@ export function helpText(chatId) {
     "/start - Show setup help",
     "/migrations - Watch migrated coins only",
     "/newtokens - Watch newly created tokens only",
+    "/both - Watch new tokens and migrated coins",
     "/help - Show commands",
     "",
     `This chat id is <code>${chatId}</code>. Add it to <code>TELEGRAM_CHAT_ID</code> in <code>.env</code>.`
@@ -79,6 +80,9 @@ export function createTelegramCommandPoller({ config, testMessage, setAlertMode,
       case "/newtokens":
         await reply(chatId, await changeMode(chatId, "newtokens"));
         break;
+      case "/both":
+        await reply(chatId, await changeMode(chatId, "both"));
+        break;
       default:
         await reply(chatId, "Unknown command. Send /help to see the bot commands.");
     }
@@ -101,11 +105,12 @@ export function createTelegramCommandPoller({ config, testMessage, setAlertMode,
         "<b>Unknown mode.</b>",
         "",
         "Use /migrations for migrated coins only.",
-        "Use /newtokens for newly created tokens only."
+        "Use /newtokens for newly created tokens only.",
+        "Use /both for both alert types."
       ].join("\n");
     }
 
-    return `<b>Alert mode changed:</b> ${result.label}`;
+    return `<b>Now watching:</b> ${result.label}`;
   }
 
   async function pollOnce() {
@@ -131,7 +136,7 @@ export function createTelegramCommandPoller({ config, testMessage, setAlertMode,
       const bot = await getTelegramBotInfo({ token: config.telegramToken });
       await clearTelegramWebhook({ token: config.telegramToken });
       console.log(`Telegram bot ready: @${bot.username}`);
-      console.log("Polling for /start, /help, /migrations, and /newtokens");
+      console.log("Polling for /start, /help, /migrations, /newtokens, and /both");
 
       while (shouldPoll) {
         try {

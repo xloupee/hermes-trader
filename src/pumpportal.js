@@ -13,14 +13,14 @@ export function buildPumpPortalUrl({ pumpPortalWsUrl, pumpPortalApiKey }) {
 export function createPumpPortalMigrationListener({
   pumpPortalWsUrl,
   pumpPortalApiKey,
-  subscriptionMethod = "subscribeMigration",
+  subscriptionMethods = ["subscribeMigration"],
   onMigration,
   onStatus = () => {},
   onError = () => {}
 }) {
   let reconnectAttempt = 0;
   let reconnectTimer;
-  let currentSubscriptionMethod = subscriptionMethod;
+  let currentSubscriptionMethods = normalizeSubscriptionMethods(subscriptionMethods);
   let intentionalRestart = false;
   let shouldReconnect = true;
   let ws;
@@ -32,8 +32,11 @@ export function createPumpPortalMigrationListener({
     ws.on("open", () => {
       reconnectAttempt = 0;
       onStatus("Connected to PumpPortal websocket");
-      ws.send(JSON.stringify({ method: currentSubscriptionMethod }));
-      onStatus(`Sent PumpPortal subscription: ${currentSubscriptionMethod}`);
+
+      for (const method of currentSubscriptionMethods) {
+        ws.send(JSON.stringify({ method }));
+        onStatus(`Sent PumpPortal subscription: ${method}`);
+      }
     });
 
     ws.on("message", (data) => {
@@ -87,8 +90,8 @@ export function createPumpPortalMigrationListener({
       clearTimeout(reconnectTimer);
       ws?.close();
     },
-    setSubscriptionMethod(nextSubscriptionMethod) {
-      currentSubscriptionMethod = nextSubscriptionMethod;
+    setSubscriptionMethods(nextSubscriptionMethods) {
+      currentSubscriptionMethods = normalizeSubscriptionMethods(nextSubscriptionMethods);
       reconnectAttempt = 0;
       clearTimeout(reconnectTimer);
 
@@ -102,4 +105,9 @@ export function createPumpPortalMigrationListener({
       }
     }
   };
+}
+
+function normalizeSubscriptionMethods(value) {
+  const methods = Array.isArray(value) ? value : [value];
+  return [...new Set(methods.filter(Boolean))];
 }

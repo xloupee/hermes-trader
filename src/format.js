@@ -111,9 +111,36 @@ function pickMetadataValue(metadata, keys) {
   return pickFirstObjectValue(metadata, keys);
 }
 
+function pickBooleanValue(object, keys) {
+  const value = pickFirstObjectValue(object, keys);
+
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.toLowerCase();
+
+    if (normalized === "true" || normalized === "yes" || normalized === "1") {
+      return true;
+    }
+
+    if (normalized === "false" || normalized === "no" || normalized === "0") {
+      return false;
+    }
+  }
+
+  return null;
+}
+
 export function extractMigrationData(event, config) {
   const links = buildExplorerLinks(event, config);
   const metadata = config.metadata || {};
+  const coinInfo = config.coinInfo || {};
   const marketCapSol = pickFirstObjectValue(event, ["marketCapSol", "marketCap"]);
   const explicitMarketCapUsd = pickFirstObjectValue(event, ["usdMarketCap", "marketCapUsd", "marketCapUSD"]);
   const solUsdPrice = toFiniteNumber(config.solUsdPrice);
@@ -129,6 +156,8 @@ export function extractMigrationData(event, config) {
     symbol: pickFirstObjectValue(event, ["symbol", "ticker"]) || pickMetadataValue(metadata, ["symbol", "ticker"]),
     description: pickMetadataValue(metadata, ["description"]),
     imageUrl: pickMetadataValue(metadata, ["image", "image_url", "imageUrl"]),
+    cashbackEnabled: pickBooleanValue(event, ["is_cashback_enabled", "isCashbackEnabled", "cashbackEnabled"]) ??
+      pickBooleanValue(coinInfo, ["is_cashback_enabled", "isCashbackEnabled", "cashbackEnabled"]),
     transactionAnalysis: config.transactionAnalysis || null,
     pool: pickFirstObjectValue(event, ["pool", "poolAddress", "bondingCurve", "raydiumPool", "poolCandidate"]),
     destination: pickFirstObjectValue(event, ["destination", "dex", "exchange", "migrationTarget"]),
@@ -149,6 +178,7 @@ export function extractMigrationData(event, config) {
     solscanTokenUrl: links.solscanTokenUrl,
     solscanTxUrl: links.solscanTxUrl,
     metadata,
+    coinInfo,
     raw: readableWebsocketData(event)
   };
 }
@@ -264,6 +294,10 @@ export function formatMigrationMessage(event, config) {
 
   if (migration.initialBuy !== null) {
     stats.push(`<b>Initial buy:</b> ${escapeHtml(formatNumber(migration.initialBuy, 2))} tokens`);
+  }
+
+  if (migration.cashbackEnabled !== null) {
+    stats.push(`<b>Cashback:</b> ${migration.cashbackEnabled ? "Enabled" : "Disabled"}`);
   }
 
   if (migration.virtualSolInBondingCurve !== null) {

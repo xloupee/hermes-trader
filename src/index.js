@@ -15,6 +15,7 @@ const config = {
   pumpPortalSubscriptionMethod: process.env.PUMPPORTAL_SUBSCRIPTION_METHOD || "subscribeMigration",
   solscanBaseUrl: process.env.SOLSCAN_BASE_URL || "https://solscan.io",
   pumpFunBaseUrl: process.env.PUMPFUN_BASE_URL || "https://pump.fun",
+  pumpFunCoinApiBaseUrl: process.env.PUMPFUN_COIN_API_BASE_URL || "https://frontend-api-v3.pump.fun/coins",
   migrationLogPath: process.env.MIGRATION_LOG_PATH || "logs/migrations.jsonl",
   solUsdPriceUrl: process.env.SOL_USD_PRICE_URL || "https://api.coinbase.com/v2/prices/SOL-USD/spot",
   solanaRpcUrl: process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
@@ -26,6 +27,7 @@ const seenEvents = new Set();
 let cachedSolUsdPrice;
 let cachedSolUsdPriceAt = 0;
 const metadataCache = new Map();
+const coinInfoCache = new Map();
 
 function rememberEvent(id) {
   if (!id) {
@@ -52,15 +54,17 @@ async function handleMigration(event) {
     return;
   }
 
-  const [solUsdPrice, metadata, transactionAnalysis] = await Promise.all([
+  const [solUsdPrice, metadata, coinInfo, transactionAnalysis] = await Promise.all([
     getSolUsdPrice(),
     getTokenMetadata(event),
+    getPumpFunCoinInfo(event),
     getTransactionAnalysis(event)
   ]);
   const eventConfig = {
     ...config,
     solUsdPrice,
     metadata,
+    coinInfo,
     transactionAnalysis
   };
   const migration = extractMigrationData(event, eventConfig);
@@ -211,6 +215,48 @@ async function getTokenMetadata(event) {
   }
 }
 
+function pickEventMint(event) {
+  return event?.mint || event?.ca || event?.token || event?.tokenAddress || event?.address;
+}
+
+async function getPumpFunCoinInfo(event) {
+  const mint = pickEventMint(event);
+
+  if (!mint) {
+    return null;
+  }
+
+  if (coinInfoCache.has(mint)) {
+    return coinInfoCache.get(mint);
+  }
+
+  try {
+    const response = await fetch(`${config.pumpFunCoinApiBaseUrl}/${mint}`, {
+      headers: {
+        accept: "application/json"
+      }
+    });
+    const coinInfo = await response.json();
+
+    if (!response.ok || !coinInfo || typeof coinInfo !== "object") {
+      throw new Error(`Unexpected Pump.fun coin response: ${response.status}`);
+    }
+
+    coinInfoCache.set(mint, coinInfo);
+
+    if (coinInfoCache.size > 500) {
+      const oldest = coinInfoCache.keys().next().value;
+      coinInfoCache.delete(oldest);
+    }
+
+    return coinInfo;
+  } catch (error) {
+    console.warn(`Could not fetch Pump.fun coin info: ${error.message}`);
+    coinInfoCache.set(mint, null);
+    return null;
+  }
+}
+
 async function writeMigrationLog(migration) {
   await mkdir(dirname(config.migrationLogPath), { recursive: true });
   await appendFile(config.migrationLogPath, `${JSON.stringify(migration)}\n`);
@@ -236,6 +282,9 @@ function testMigrationMessage() {
         name: "Test Token",
         symbol: "TEST",
         image: "https://ipfs.io/ipfs/QmTyuok2MLsRxwy2uJWjMgHZuATetVzLk7HfxYC4X9yohw"
+      },
+      coinInfo: {
+        is_cashback_enabled: true
       }
     }
   );

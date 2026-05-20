@@ -158,7 +158,7 @@ function formatCreatorFeeStatus(migration) {
     return "Unknown";
   }
 
-  return `Creator eligible for <code>${escapeHtml(shortenAddress(migration.creatorAddress))}</code>`;
+  return `Creator eligible for <code>${escapeHtml(migration.creatorAddress)}</code>`;
 }
 
 function hasObjectData(value) {

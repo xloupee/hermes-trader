@@ -25,7 +25,8 @@ const config: BotConfig = {
   solUsdPriceUrl: process.env.SOL_USD_PRICE_URL || "https://api.coinbase.com/v2/prices/SOL-USD/spot",
   solanaRpcUrl: process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
   transactionFlowEnabled: process.env.TRANSACTION_FLOW_ENABLED === "true",
-  transactionAccountLabels: process.env.TRANSACTION_ACCOUNT_LABELS
+  transactionAccountLabels: process.env.TRANSACTION_ACCOUNT_LABELS,
+  shutdownReason: process.env.BOT_SHUTDOWN_REASON
 };
 
 const seenEvents = new Set<string>();
@@ -34,6 +35,7 @@ let cachedSolUsdPriceAt = 0;
 const metadataCache = new Map<string, LooseRecord | null>();
 const tokenInfoCache = new Map<string, LooseRecord | null>();
 let isShuttingDown = false;
+const pumpFunCoinInfoRetryDelaysMs = [0, 750, 1500, 3000, 6000];
 const subscribers = createSubscriberStore({
   path: config.telegramSubscribersPath,
   initialChatIds: [config.telegramChatId]
@@ -187,6 +189,14 @@ async function notifySubscribers(text: string): Promise<void> {
   }
 }
 
+function shutdownMessage(): string {
+  if (config.shutdownReason === "deploy") {
+    return "<b>Bot stopped for an update, please restart the bot.</b>";
+  }
+
+  return "<b>Bot stopped.</b>";
+}
+
 async function getTransactionAnalysis(event: LooseRecord): Promise<TransactionAnalysis | null> {
   if (!config.transactionFlowEnabled) {
     return null;
@@ -262,6 +272,10 @@ function pickEventMint(event: LooseRecord): string | null {
   return stringValue(event.mint || event.ca || event.token || event.tokenAddress || event.address);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function getPumpFunCoinInfo(event: LooseRecord): Promise<LooseRecord | null> {
   const mint = pickEventMint(event);
 
@@ -273,39 +287,52 @@ async function getPumpFunCoinInfo(event: LooseRecord): Promise<LooseRecord | nul
     return tokenInfoCache.get(mint) ?? null;
   }
 
-  try {
-    const response = await fetch(`${config.pumpFunCoinApiBaseUrl}/${mint}`, {
-      headers: {
-        accept: "application/json"
-      }
-    });
-    const tokenInfo = await response.json();
+  let lastError: unknown;
 
-    if (!response.ok || !isRecord(tokenInfo)) {
-      throw new Error(`Unexpected Pump.fun coin response: ${response.status}`);
+  for (const [attempt, delayMs] of pumpFunCoinInfoRetryDelaysMs.entries()) {
+    if (delayMs > 0) {
+      await sleep(delayMs);
     }
 
-    const normalizedTokenInfo = {
-      ...tokenInfo,
-      image_uri: normalizeIpfsUrl(tokenInfo.image_uri),
-      metadata_uri: normalizeIpfsUrl(tokenInfo.metadata_uri)
-    };
+    try {
+      const response = await fetch(`${config.pumpFunCoinApiBaseUrl}/${mint}`, {
+        headers: {
+          accept: "application/json"
+        }
+      });
+      const body = await response.text();
+      const tokenInfo = JSON.parse(body) as unknown;
 
-    tokenInfoCache.set(mint, normalizedTokenInfo);
-
-    if (tokenInfoCache.size > 500) {
-      const oldest = tokenInfoCache.keys().next().value;
-      if (oldest) {
-        tokenInfoCache.delete(oldest);
+      if (!response.ok || !isRecord(tokenInfo)) {
+        throw new Error(`Unexpected Pump.fun coin response: ${response.status}`);
       }
-    }
 
-    return normalizedTokenInfo;
-  } catch (error) {
-    console.warn(`Could not fetch Pump.fun coin info: ${errorMessage(error)}`);
-    tokenInfoCache.set(mint, null);
-    return null;
+      const normalizedTokenInfo = {
+        ...tokenInfo,
+        image_uri: normalizeIpfsUrl(tokenInfo.image_uri),
+        metadata_uri: normalizeIpfsUrl(tokenInfo.metadata_uri)
+      };
+
+      tokenInfoCache.set(mint, normalizedTokenInfo);
+
+      if (tokenInfoCache.size > 500) {
+        const oldest = tokenInfoCache.keys().next().value;
+        if (oldest) {
+          tokenInfoCache.delete(oldest);
+        }
+      }
+
+      return normalizedTokenInfo;
+    } catch (error) {
+      lastError = error;
+      console.warn(
+        `Could not fetch Pump.fun coin info for ${mint} on attempt ${attempt + 1}/${pumpFunCoinInfoRetryDelaysMs.length}: ${errorMessage(error)}`
+      );
+    }
   }
+
+  console.warn(`Giving up on Pump.fun coin info for ${mint}: ${errorMessage(lastError)}`);
+  return null;
 }
 
 async function getTokenMetadata(event: LooseRecord, tokenInfo: LooseRecord | null): Promise<LooseRecord | null> {
@@ -442,7 +469,7 @@ async function shutdown(): Promise<void> {
   migrationListener.stop();
 
   if (config.telegramToken && subscribers.count() > 0) {
-    await notifySubscribers("<b>Bot stopped.</b>");
+    await notifySubscribers(shutdownMessage());
   }
 
   process.exit(0);

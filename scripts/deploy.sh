@@ -45,6 +45,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=$APP_DIR
 Environment=NODE_ENV=production
+Environment=BOT_SHUTDOWN_REASON=deploy
 ExecStart=/usr/bin/node dist/index.js
 Restart=always
 RestartSec=5

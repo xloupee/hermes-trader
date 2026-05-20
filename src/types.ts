@@ -31,6 +31,7 @@ export interface BotConfig extends MigrationFormatConfig {
   transactionFlowEnabled: boolean;
   transactionAccountLabels?: string;
   alertModeLabel?: string;
+  shutdownReason?: string;
 }
 
 export interface LegacyBotConfig extends MigrationFormatConfig {

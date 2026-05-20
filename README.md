@@ -13,10 +13,11 @@ wss://pumpportal.fun/api/data?api-key=your-api-key-here
 After connecting, this bot sends:
 
 ```json
+{ "method": "subscribeNewToken" }
 { "method": "subscribeMigration" }
 ```
 
-The docs list `subscribeMigration` as free, and warn to use only one websocket connection at a time.
+The bot keeps one websocket connection open and filters alerts per verified Telegram user.
 
 ## Setup
 
@@ -42,13 +43,14 @@ npm start
 
 6. In Telegram, open your bot and send `/start`.
 7. Send `/verify your-code` using the value from `TELEGRAM_VERIFY_CODE`.
-8. Restart the bot so automatic migration alerts can be sent to verified chats:
+8. Choose your alert mode with `/migrations`, `/newtokens`, or `/both`.
+9. Restart the bot if you changed `.env`:
 
 ```bash
 npm start
 ```
 
-Verified subscribers are stored in `TELEGRAM_SUBSCRIBERS_PATH`. `TELEGRAM_CHAT_ID` is optional, but when present it is treated as the admin chat that can change alert mode.
+Verified subscribers and their alert modes are stored in `TELEGRAM_SUBSCRIBERS_PATH`. `TELEGRAM_CHAT_ID` is optional, but when present it seeds that chat as an existing verified subscriber in migration-only mode.
 
 ## Bot commands
 
@@ -56,9 +58,9 @@ Verified subscribers are stored in `TELEGRAM_SUBSCRIBERS_PATH`. `TELEGRAM_CHAT_I
 - `/verify <code>` - Verify this chat for notifications.
 - `/stop` - Stop notifications for this chat.
 - `/help` - Show the command list.
-- `/migrations` - Watch migrated coins only.
-- `/newtokens` - Watch newly created tokens only.
-- `/both` - Watch new tokens and migrated coins.
+- `/migrations` - Watch migrated coins only for this chat.
+- `/newtokens` - Watch newly created tokens only for this chat.
+- `/both` - Watch new tokens and migrated coins for this chat.
 
 ## Notes
 

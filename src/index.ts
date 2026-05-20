@@ -8,7 +8,7 @@ import { analyzeSolanaTransaction } from "./solana.js";
 import { createSubscriberStore } from "./subscribers.js";
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
 import { asRecord, errorMessage, isRecord, stringValue } from "./types.js";
-import type { BotConfig, LooseRecord, MigrationData, TransactionAnalysis } from "./types.js";
+import type { AlertModeValue, BotConfig, LooseRecord, MigrationData, SubscriberRecord, TransactionAnalysis } from "./types.js";
 
 const config: BotConfig = {
   telegramToken: process.env.TELEGRAM_BOT_TOKEN,
@@ -39,43 +39,7 @@ const subscribers = createSubscriberStore({
   initialChatIds: [config.telegramChatId]
 });
 
-interface AlertMode {
-  label: string;
-  methods: string[];
-}
-
-const alertModes: Record<string, AlertMode> = {
-  migrations: {
-    label: "Migrated coins only",
-    methods: ["subscribeMigration"]
-  },
-  migration: {
-    label: "Migrated coins only",
-    methods: ["subscribeMigration"]
-  },
-  newtokens: {
-    label: "New tokens only",
-    methods: ["subscribeNewToken"]
-  },
-  newtoken: {
-    label: "New tokens only",
-    methods: ["subscribeNewToken"]
-  },
-  tokens: {
-    label: "New tokens only",
-    methods: ["subscribeNewToken"]
-  },
-  both: {
-    label: "New tokens and migrated coins",
-    methods: ["subscribeNewToken", "subscribeMigration"]
-  },
-  all: {
-    label: "New tokens and migrated coins",
-    methods: ["subscribeNewToken", "subscribeMigration"]
-  }
-};
-
-let currentAlertMode = normalizeAlertMode(config.alertMode);
+const activeSubscriptionMethods = ["subscribeNewToken", "subscribeMigration"];
 
 function rememberEvent(id: string | null): boolean {
   if (!id) {
@@ -98,43 +62,20 @@ function rememberEvent(id: string | null): boolean {
   return false;
 }
 
-function getModeLabel(): string {
-  return currentAlertMode.label;
-}
-
-function getSubscriptionMethods(): string[] {
-  return currentAlertMode.methods;
-}
-
-async function setAlertMode(requestedMode: string): Promise<{ ok: false } | { ok: true; label: string }> {
-  const nextMode = alertModes[requestedMode];
-
-  if (!nextMode) {
-    return { ok: false };
-  }
-
-  if (sameMethods(currentAlertMode.methods, nextMode.methods)) {
-    return { ok: true, label: nextMode.label };
-  }
-
-  currentAlertMode = nextMode;
-  config.alertMode = requestedMode;
-  seenEvents.clear();
-  migrationListener.setSubscriptionMethods(nextMode.methods);
-  console.log(`Alert mode changed to ${nextMode.label} (${nextMode.methods.join(", ")})`);
-
-  return { ok: true, label: nextMode.label };
-}
-
-function normalizeAlertMode(value: unknown): AlertMode {
-  return alertModes[String(value || "").toLowerCase()] || alertModes.migrations;
-}
-
-function sameMethods(left: string[], right: string[]): boolean {
-  return left.length === right.length && left.every((method) => right.includes(method));
-}
-
 async function handleMigration(event: LooseRecord): Promise<void> {
+  const eventMode = classifyEventMode(event);
+
+  if (!eventMode) {
+    console.warn(`Skipping unknown PumpPortal event type: ${JSON.stringify(event)}`);
+    return;
+  }
+
+  const recipients = subscribers.list().filter((subscriber) => shouldSendEventToSubscriber(eventMode, subscriber));
+
+  if (recipients.length === 0) {
+    return;
+  }
+
   const eventId = getEventId(event);
   if (rememberEvent(eventId)) {
     return;
@@ -148,8 +89,8 @@ async function handleMigration(event: LooseRecord): Promise<void> {
   const metadata = await getTokenMetadata(event, tokenInfo);
   const eventConfig = {
     ...config,
-    alertModeLabel: getModeLabel(),
-    activeSubscriptionMethods: getSubscriptionMethods(),
+    alertModeLabel: "New tokens and migrated coins",
+    activeSubscriptionMethods,
     solUsdPrice,
     tokenInfo,
     metadata,
@@ -157,33 +98,58 @@ async function handleMigration(event: LooseRecord): Promise<void> {
   };
   const migration = extractMigrationData(event, eventConfig);
   await writeMigrationLog(migration);
-  console.log(`Migration: ${JSON.stringify(migration)}`);
-
-  const chatIds = subscribers.list();
-
-  if (chatIds.length === 0) {
-    console.warn("Skipping migration alert because no verified Telegram subscribers are configured");
-    return;
-  }
+  console.log(`PumpPortal event: ${JSON.stringify(migration)}`);
 
   const text = formatMigrationMessage(event, eventConfig);
   const replyMarkup = buildMigrationReplyMarkup(event, eventConfig);
 
-  await sendAlertToSubscribers({ chatIds, migration, text, replyMarkup });
+  await sendAlertToSubscribers({ subscribers: recipients, migration, text, replyMarkup });
+}
+
+function classifyEventMode(event: LooseRecord): Exclude<AlertModeValue, "both"> | null {
+  const eventType = String(event?.txType ?? event?.type ?? event?.eventType ?? "").toLowerCase();
+
+  if (eventType === "create") {
+    return "newtokens";
+  }
+
+  if (eventType === "migration" || eventType === "migrate") {
+    return "migrations";
+  }
+
+  if (hasMigrationStyleFields(event)) {
+    return "migrations";
+  }
+
+  return null;
+}
+
+function hasMigrationStyleFields(event: LooseRecord): boolean {
+  return Boolean(
+    stringValue(event.signature || event.tx || event.txHash || event.transaction || event.transactionHash) &&
+      stringValue(event.mint || event.ca || event.token || event.tokenAddress || event.address) &&
+      stringValue(event.pool || event.poolAddress || event.raydiumPool || event.poolCandidate)
+  );
+}
+
+function shouldSendEventToSubscriber(eventMode: Exclude<AlertModeValue, "both">, subscriber: SubscriberRecord): boolean {
+  return subscriber.mode === "both" || subscriber.mode === eventMode;
 }
 
 async function sendAlertToSubscribers({
-  chatIds,
+  subscribers: recipients,
   migration,
   text,
   replyMarkup
 }: {
-  chatIds: string[];
+  subscribers: SubscriberRecord[];
   migration: MigrationData;
   text: string;
   replyMarkup: ReturnType<typeof buildMigrationReplyMarkup>;
 }): Promise<void> {
-  for (const chatId of chatIds) {
+  for (const subscriber of recipients) {
+    const chatId = subscriber.chatId;
+
     if (migration.imageUrl) {
       try {
         await sendTelegramPhoto({
@@ -208,15 +174,15 @@ async function sendAlertToSubscribers({
 }
 
 async function notifySubscribers(text: string): Promise<void> {
-  for (const chatId of subscribers.list()) {
+  for (const subscriber of subscribers.list()) {
     try {
       await sendTelegramMessage({
         token: config.telegramToken,
-        chatId,
+        chatId: subscriber.chatId,
         text
       });
     } catch (error) {
-      console.warn(`Could not notify Telegram subscriber ${chatId}: ${errorMessage(error)}`);
+      console.warn(`Could not notify Telegram subscriber ${subscriber.chatId}: ${errorMessage(error)}`);
     }
   }
 }
@@ -246,17 +212,7 @@ async function getTransactionAnalysis(event: LooseRecord): Promise<TransactionAn
 }
 
 function isMigrationEvent(event: LooseRecord): boolean {
-  const eventType = String(event?.txType ?? event?.type ?? event?.eventType ?? "").toLowerCase();
-
-  if (eventType === "migration" || eventType === "migrate") {
-    return true;
-  }
-
-  if (eventType === "create") {
-    return false;
-  }
-
-  return getSubscriptionMethods().includes("subscribeMigration");
+  return classifyEventMode(event) === "migrations";
 }
 
 async function getSolUsdPrice(): Promise<number | undefined> {
@@ -460,14 +416,12 @@ function assertConfig(): void {
 const commandPoller = createTelegramCommandPoller({
   config,
   testMessage: testMigrationMessage,
-  getModeLabel,
-  setAlertMode,
   subscribers
 });
 const migrationListener = createPumpPortalMigrationListener({
   pumpPortalWsUrl: config.pumpPortalWsUrl,
   pumpPortalApiKey: config.pumpPortalApiKey,
-  subscriptionMethods: getSubscriptionMethods(),
+  subscriptionMethods: activeSubscriptionMethods,
   onMigration: (event) => {
     handleMigration(event).catch((error) => {
       console.error("Failed to process migration event:", error);

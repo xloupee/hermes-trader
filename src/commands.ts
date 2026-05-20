@@ -6,7 +6,7 @@ import {
   setTelegramCommands
 } from "./telegram.js";
 import { errorMessage } from "./types.js";
-import type { LegacyBotConfig, SubscriberStore, TelegramChatId, TelegramMessage, TelegramUpdate } from "./types.js";
+import type { AlertModeValue, LegacyBotConfig, SubscriberStore, TelegramChatId, TelegramMessage, TelegramUpdate } from "./types.js";
 
 const telegramCommands = [
   { command: "start", description: "Start notifications" },
@@ -23,16 +23,9 @@ interface ParsedCommand {
   args: string[];
 }
 
-interface SetAlertModeResult {
-  ok: boolean;
-  label?: string;
-}
-
 interface CommandPollerOptions {
   config: LegacyBotConfig;
   testMessage: () => string;
-  setAlertMode?: (requestedMode: string) => Promise<SetAlertModeResult>;
-  getModeLabel?: () => string;
   subscribers?: SubscriberStore;
 }
 
@@ -68,6 +61,31 @@ export function setupStatus(config: LegacyBotConfig): string {
   ].join("\n");
 }
 
+function modeLabel(mode: AlertModeValue): string {
+  if (mode === "migrations") {
+    return "Migrated coins only";
+  }
+
+  if (mode === "newtokens") {
+    return "New tokens only";
+  }
+
+  return "New tokens and migrated coins";
+}
+
+function chooseModeText(): string {
+  return [
+    "Choose what you want to watch:",
+    "/migrations - Migrated coins only",
+    "/newtokens - Newly created tokens only",
+    "/both - New tokens and migrated coins"
+  ].join("\n");
+}
+
+function verificationPrompt(): string {
+  return ["<b>Verification required.</b>", "", "Send:", "<code>/verify your-code</code>"].join("\n");
+}
+
 export function helpText(_chatId?: TelegramChatId): string {
   return [
     "<b>Pump.fun notifier bot</b>",
@@ -86,8 +104,6 @@ export function helpText(_chatId?: TelegramChatId): string {
 export function createTelegramCommandPoller({
   config,
   testMessage: _testMessage,
-  setAlertMode,
-  getModeLabel: _getModeLabel,
   subscribers
 }: CommandPollerOptions): TelegramCommandPoller {
   let nextOffset: number | undefined;
@@ -144,8 +160,14 @@ export function createTelegramCommandPoller({
   }
 
   async function startNotifications(chatId: TelegramChatId, args: string[]): Promise<string> {
-    if (subscribers?.has(chatId)) {
-      return `<b>You are verified.</b>\nNotifications are on for this chat.\n\n${helpText(chatId)}`;
+    const subscriber = subscribers?.get(chatId);
+
+    if (subscriber) {
+      if (!subscriber.mode) {
+        return `<b>You are verified.</b>\nNotifications are not on yet.\n\n${chooseModeText()}`;
+      }
+
+      return `<b>You are verified.</b>\nCurrent alerts: ${modeLabel(subscriber.mode)}\n\n${helpText(chatId)}`;
     }
 
     if (args.length > 0) {
@@ -153,7 +175,7 @@ export function createTelegramCommandPoller({
     }
 
     if (config.telegramVerifyCode) {
-      return ["<b>Verification required.</b>", "", "Send:", "<code>/verify your-code</code>"].join("\n");
+      return verificationPrompt();
     }
 
     return verifyChat(chatId, args);
@@ -177,7 +199,7 @@ export function createTelegramCommandPoller({
     }
 
     await subscribers.add(chatId);
-    return "<b>Verified.</b>\nNotifications are now on for this chat.";
+    return `<b>Verified.</b>\n\n${chooseModeText()}`;
   }
 
   async function stopNotifications(chatId: TelegramChatId): Promise<string> {
@@ -189,29 +211,22 @@ export function createTelegramCommandPoller({
     return "Notifications are off for this chat.";
   }
 
-  async function changeMode(chatId: TelegramChatId, requestedMode: string): Promise<string> {
-    if (config.telegramChatId && String(chatId) !== String(config.telegramChatId)) {
-      return "Only the configured alert chat can change bot mode.";
+  async function changeMode(chatId: TelegramChatId, requestedMode: AlertModeValue): Promise<string> {
+    if (!subscribers) {
+      return "Subscriber controls are not available in this bot process.";
     }
 
-    if (!setAlertMode) {
-      return "Mode switching is not available in this bot process.";
+    if (!subscribers.has(chatId)) {
+      return verificationPrompt();
     }
 
-    const mode = requestedMode.toLowerCase();
-    const result = await setAlertMode(mode);
+    const updated = await subscribers.setMode(chatId, requestedMode);
 
-    if (!result.ok) {
-      return [
-        "<b>Unknown mode.</b>",
-        "",
-        "Use /migrations for migrated coins only.",
-        "Use /newtokens for newly created tokens only.",
-        "Use /both for both alert types."
-      ].join("\n");
+    if (!updated) {
+      return verificationPrompt();
     }
 
-    return `<b>Now watching:</b> ${result.label}`;
+    return `<b>Now watching:</b> ${modeLabel(requestedMode)}`;
   }
 
   async function pollOnce(): Promise<void> {

@@ -1,6 +1,7 @@
 export type LooseRecord = Record<string, unknown>;
 
 export type TelegramChatId = string | number;
+export type AlertModeValue = "migrations" | "newtokens" | "both";
 
 export interface ExplorerConfig {
   pumpFunBaseUrl: string;
@@ -83,8 +84,17 @@ export interface SubscriberStore {
   has: (chatId: TelegramChatId) => boolean;
   add: (chatId: TelegramChatId) => Promise<void>;
   remove: (chatId: TelegramChatId) => Promise<void>;
-  list: () => string[];
+  get: (chatId: TelegramChatId) => SubscriberRecord | null;
+  setMode: (chatId: TelegramChatId, mode: AlertModeValue) => Promise<boolean>;
+  list: () => SubscriberRecord[];
   count: () => number;
+}
+
+export interface SubscriberRecord {
+  chatId: string;
+  mode: AlertModeValue | null;
+  verifiedAt: string;
+  updatedAt: string;
 }
 
 export interface TransactionAccountChange {

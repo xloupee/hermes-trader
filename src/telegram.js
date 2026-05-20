@@ -33,7 +33,7 @@ export function assertTelegramConfig({ token, chatIdRequired = true, chatId }) {
   }
 }
 
-export async function sendTelegramMessage({ token, chatId, text }) {
+export async function sendTelegramMessage({ token, chatId, text, replyMarkup }) {
   assertTelegramConfig({ token, chatId });
 
   const body = await callTelegramApi({
@@ -43,7 +43,8 @@ export async function sendTelegramMessage({ token, chatId, text }) {
       chat_id: chatId,
       text,
       parse_mode: "HTML",
-      disable_web_page_preview: true
+      disable_web_page_preview: true,
+      reply_markup: replyMarkup
     }
   });
 

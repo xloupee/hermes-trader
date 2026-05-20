@@ -27,27 +27,29 @@ The docs list `subscribeMigration` as free, and warn to use only one websocket c
 cp .env.example .env
 ```
 
-3. Fill in `TELEGRAM_BOT_TOKEN` and `PUMPPORTAL_API_KEY`.
+3. Fill in `TELEGRAM_BOT_TOKEN`. `PUMPPORTAL_API_KEY` is optional for migrations, but supported if you have one.
 4. Install dependencies:
 
 ```bash
 npm install
 ```
 
-5. Start the Telegram command bot:
+5. Start the bot:
 
 ```bash
-npm run bot
+npm start
 ```
 
 6. In Telegram, open your bot and send `/start`.
 7. Copy the chat id from `/start` or `/chatid`, then add it to `.env` as `TELEGRAM_CHAT_ID`.
 8. Send `/test` to confirm Telegram alerts render correctly.
-9. Start the migration notifier:
+9. Restart the bot so automatic migration alerts can be sent to that chat:
 
 ```bash
 npm start
 ```
+
+If `TELEGRAM_CHAT_ID` is empty, commands still work, but live migration alerts are skipped until you add it.
 
 You can also use the one-shot chat-id helper after messaging the bot:
 

@@ -161,6 +161,10 @@ function formatCreatorFeeStatus(migration) {
   return `Creator eligible for <code>${escapeHtml(shortenAddress(migration.creatorAddress))}</code>`;
 }
 
+function hasObjectData(value) {
+  return Boolean(value && typeof value === "object" && Object.keys(value).length > 0);
+}
+
 export function extractMigrationData(event, config) {
   const links = buildExplorerLinks(event, config);
   const metadata = config.metadata || {};
@@ -176,6 +180,10 @@ export function extractMigrationData(event, config) {
   const marketCapUsd =
     explicitMarketCapUsd ?? (marketCapSolNumber !== null && solUsdPrice !== null ? marketCapSolNumber * solUsdPrice : null);
   const creatorAddress = pickCreatorAddress(event, tokenInfo);
+  const agentBuybacksEnabled =
+    pickBooleanValue(event, ["tokenized_agent", "tokenizedAgent", "agentBuybacksEnabled"]) ??
+    pickBooleanValue(tokenInfo, ["tokenized_agent", "tokenizedAgent", "agentBuybacksEnabled"]) ??
+    (hasObjectData(tokenInfo) ? false : null);
 
   return {
     observedAt: new Date().toISOString(),
@@ -187,8 +195,7 @@ export function extractMigrationData(event, config) {
     imageUrl: pickMetadataValue(metadata, ["image", "image_url", "imageUrl"]) || tokenInfo.image_uri,
     cashbackEnabled: pickBooleanValue(event, ["is_cashback_enabled", "isCashbackEnabled", "cashbackEnabled"]) ??
       pickBooleanValue(tokenInfo, ["is_cashback_enabled", "isCashbackEnabled", "cashbackEnabled"]),
-    agentBuybacksEnabled: pickBooleanValue(event, ["tokenized_agent", "tokenizedAgent", "agentBuybacksEnabled"]) ??
-      pickBooleanValue(tokenInfo, ["tokenized_agent", "tokenizedAgent", "agentBuybacksEnabled"]),
+    agentBuybacksEnabled,
     creatorFeeEligible: Boolean(creatorAddress),
     creatorAddress,
     transactionAnalysis: config.transactionAnalysis || null,

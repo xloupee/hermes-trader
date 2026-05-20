@@ -1,0 +1,20 @@
+{
+  "name": "pumpfun-migration-telegram-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "bot": "node src/bot.js",
+    "chat-id": "node src/get-chat-id.js",
+    "past-migrations": "node src/past-migrations.js",
+    "check": "node --check src/*.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

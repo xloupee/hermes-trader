@@ -5,11 +5,14 @@ import { buildMigrationReplyMarkup, extractMigrationData, formatMigrationMessage
 import { createTelegramCommandPoller } from "./commands.js";
 import { createPumpPortalMigrationListener } from "./pumpportal.js";
 import { analyzeSolanaTransaction } from "./solana.js";
+import { createSubscriberStore } from "./subscribers.js";
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
 
 const config = {
   telegramToken: process.env.TELEGRAM_BOT_TOKEN,
   telegramChatId: process.env.TELEGRAM_CHAT_ID,
+  telegramVerifyCode: process.env.TELEGRAM_VERIFY_CODE,
+  telegramSubscribersPath: process.env.TELEGRAM_SUBSCRIBERS_PATH || "data/telegram-subscribers.json",
   pumpPortalApiKey: process.env.PUMPPORTAL_API_KEY,
   pumpPortalWsUrl: process.env.PUMPPORTAL_WS_URL || "wss://pumpportal.fun/api/data",
   alertMode: process.env.ALERT_MODE || process.env.PUMPPORTAL_ALERT_MODE || "migrations",
@@ -29,6 +32,10 @@ let cachedSolUsdPriceAt = 0;
 const metadataCache = new Map();
 const tokenInfoCache = new Map();
 let isShuttingDown = false;
+const subscribers = createSubscriberStore({
+  path: config.telegramSubscribersPath,
+  initialChatIds: [config.telegramChatId]
+});
 
 const alertModes = {
   migrations: {
@@ -143,30 +150,56 @@ async function handleMigration(event) {
   await writeMigrationLog(migration);
   console.log(`Migration: ${JSON.stringify(migration)}`);
 
-  if (!config.telegramChatId) {
-    console.warn("Skipping migration alert because TELEGRAM_CHAT_ID is not configured");
+  const chatIds = subscribers.list();
+
+  if (chatIds.length === 0) {
+    console.warn("Skipping migration alert because no verified Telegram subscribers are configured");
     return;
   }
 
   const text = formatMigrationMessage(event, eventConfig);
   const replyMarkup = buildMigrationReplyMarkup(event, eventConfig);
 
-  if (migration.imageUrl) {
+  await sendAlertToSubscribers({ chatIds, migration, text, replyMarkup });
+}
+
+async function sendAlertToSubscribers({ chatIds, migration, text, replyMarkup }) {
+  for (const chatId of chatIds) {
+    if (migration.imageUrl) {
+      try {
+        await sendTelegramPhoto({
+          token: config.telegramToken,
+          chatId,
+          photoUrl: migration.imageUrl,
+          caption: text,
+          replyMarkup
+        });
+        continue;
+      } catch (error) {
+        console.warn(`Could not send token photo to ${chatId}; sending text alert instead: ${error.message}`);
+      }
+    }
+
     try {
-      await sendTelegramPhoto({
-        token: config.telegramToken,
-        chatId: config.telegramChatId,
-        photoUrl: migration.imageUrl,
-        caption: text,
-        replyMarkup
-      });
-      return;
+      await sendTelegramMessage({ token: config.telegramToken, chatId, text, replyMarkup });
     } catch (error) {
-      console.warn(`Could not send token photo; sending text alert instead: ${error.message}`);
+      console.warn(`Could not send Telegram alert to ${chatId}: ${error.message}`);
     }
   }
+}
 
-  await sendTelegramMessage({ token: config.telegramToken, chatId: config.telegramChatId, text, replyMarkup });
+async function notifySubscribers(text) {
+  for (const chatId of subscribers.list()) {
+    try {
+      await sendTelegramMessage({
+        token: config.telegramToken,
+        chatId,
+        text
+      });
+    } catch (error) {
+      console.warn(`Could not notify Telegram subscriber ${chatId}: ${error.message}`);
+    }
+  }
 }
 
 async function getTransactionAnalysis(event) {
@@ -399,7 +432,8 @@ const commandPoller = createTelegramCommandPoller({
   config,
   testMessage: testMigrationMessage,
   getModeLabel,
-  setAlertMode
+  setAlertMode,
+  subscribers
 });
 const migrationListener = createPumpPortalMigrationListener({
   pumpPortalWsUrl: config.pumpPortalWsUrl,
@@ -424,16 +458,8 @@ async function shutdown() {
   commandPoller.stop();
   migrationListener.stop();
 
-  if (config.telegramToken && config.telegramChatId) {
-    try {
-      await sendTelegramMessage({
-        token: config.telegramToken,
-        chatId: config.telegramChatId,
-        text: "<b>Bot stopped.</b>"
-      });
-    } catch (error) {
-      console.warn(`Could not send shutdown notification: ${error.message}`);
-    }
+  if (config.telegramToken && subscribers.count() > 0) {
+    await notifySubscribers("<b>Bot stopped.</b>");
   }
 
   process.exit(0);
@@ -453,5 +479,7 @@ process.on("SIGTERM", () => {
 });
 
 assertConfig();
+await subscribers.init();
+console.log(`Loaded ${subscribers.count()} verified Telegram subscriber(s)`);
 migrationListener.start();
 await commandPoller.start();

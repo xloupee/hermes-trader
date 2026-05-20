@@ -27,7 +27,7 @@ The docs list `subscribeMigration` as free, and warn to use only one websocket c
 cp .env.example .env
 ```
 
-3. Fill in `TELEGRAM_BOT_TOKEN`. `PUMPPORTAL_API_KEY` is optional for migrations, but supported if you have one.
+3. Fill in `TELEGRAM_BOT_TOKEN`. Set `TELEGRAM_VERIFY_CODE` to a private invite code people must send before receiving alerts. `PUMPPORTAL_API_KEY` is optional for migrations, but supported if you have one.
 4. Install dependencies:
 
 ```bash
@@ -41,25 +41,20 @@ npm start
 ```
 
 6. In Telegram, open your bot and send `/start`.
-7. Copy the chat id from `/start` or `/chatid`, then add it to `.env` as `TELEGRAM_CHAT_ID`.
-8. Send `/test` to confirm Telegram alerts render correctly.
-9. Restart the bot so automatic migration alerts can be sent to that chat:
+7. Send `/verify your-code` using the value from `TELEGRAM_VERIFY_CODE`.
+8. Restart the bot so automatic migration alerts can be sent to verified chats:
 
 ```bash
 npm start
 ```
 
-If `TELEGRAM_CHAT_ID` is empty, commands still work, but live migration alerts are skipped until you add it.
-
-You can also use the one-shot chat-id helper after messaging the bot:
-
-```bash
-npm run chat-id
-```
+Verified subscribers are stored in `TELEGRAM_SUBSCRIBERS_PATH`. `TELEGRAM_CHAT_ID` is optional, but when present it is treated as the admin chat that can change alert mode.
 
 ## Bot commands
 
-- `/start` - Show setup help and the current chat id.
+- `/start` - Start notifications.
+- `/verify <code>` - Verify this chat for notifications.
+- `/stop` - Stop notifications for this chat.
 - `/help` - Show the command list.
 - `/migrations` - Watch migrated coins only.
 - `/newtokens` - Watch newly created tokens only.

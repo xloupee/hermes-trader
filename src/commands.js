@@ -1,4 +1,20 @@
-import { clearTelegramWebhook, getTelegramBotInfo, getTelegramUpdates, sendTelegramMessage } from "./telegram.js";
+import {
+  clearTelegramWebhook,
+  getTelegramBotInfo,
+  getTelegramUpdates,
+  sendTelegramMessage,
+  setTelegramCommands
+} from "./telegram.js";
+
+const telegramCommands = [
+  { command: "start", description: "Start notifications" },
+  { command: "verify", description: "Verify this chat" },
+  { command: "stop", description: "Stop notifications" },
+  { command: "migrations", description: "Watch migrated coins only" },
+  { command: "newtokens", description: "Watch newly created tokens only" },
+  { command: "both", description: "Watch new tokens and migrated coins" },
+  { command: "help", description: "Show commands" }
+];
 
 export function commandFromMessage(message) {
   const text = message?.text?.trim();
@@ -32,7 +48,9 @@ export function helpText(chatId) {
     "<b>Pump.fun notifier bot</b>",
     "",
     "Commands:",
-    "/start - Show setup help",
+    "/start - Start notifications",
+    "/verify &lt;code&gt; - Verify this chat",
+    "/stop - Stop notifications",
     "/migrations - Watch migrated coins only",
     "/newtokens - Watch newly created tokens only",
     "/both - Watch new tokens and migrated coins",
@@ -40,7 +58,7 @@ export function helpText(chatId) {
   ].join("\n");
 }
 
-export function createTelegramCommandPoller({ config, testMessage, setAlertMode, getModeLabel }) {
+export function createTelegramCommandPoller({ config, testMessage, setAlertMode, getModeLabel, subscribers }) {
   let nextOffset;
   let shouldPoll = true;
 
@@ -69,8 +87,16 @@ export function createTelegramCommandPoller({ config, testMessage, setAlertMode,
 
     switch (parsed.command) {
       case "/start":
+        await reply(chatId, await startNotifications(chatId, parsed.args));
+        break;
       case "/help":
         await reply(chatId, helpText(chatId));
+        break;
+      case "/verify":
+        await reply(chatId, await verifyChat(chatId, parsed.args));
+        break;
+      case "/stop":
+        await reply(chatId, await stopNotifications(chatId));
         break;
       case "/migrations":
         await reply(chatId, await changeMode(chatId, "migrations"));
@@ -84,6 +110,57 @@ export function createTelegramCommandPoller({ config, testMessage, setAlertMode,
       default:
         await reply(chatId, "Unknown command. Send /help to see the bot commands.");
     }
+  }
+
+  async function startNotifications(chatId, args) {
+    if (subscribers?.has(chatId)) {
+      return `<b>You are verified.</b>\nNotifications are on for this chat.\n\n${helpText(chatId)}`;
+    }
+
+    if (args.length > 0) {
+      return verifyChat(chatId, args);
+    }
+
+    if (config.telegramVerifyCode) {
+      return [
+        "<b>Verification required.</b>",
+        "",
+        "Send:",
+        "<code>/verify your-code</code>"
+      ].join("\n");
+    }
+
+    return verifyChat(chatId, args);
+  }
+
+  async function verifyChat(chatId, args) {
+    if (!subscribers) {
+      return "Subscriber verification is not available in this bot process.";
+    }
+
+    if (config.telegramVerifyCode) {
+      const submittedCode = args.join(" ").trim();
+
+      if (!submittedCode) {
+        return "Send <code>/verify your-code</code> to turn on notifications for this chat.";
+      }
+
+      if (submittedCode !== config.telegramVerifyCode) {
+        return "Invalid verification code.";
+      }
+    }
+
+    await subscribers.add(chatId);
+    return "<b>Verified.</b>\nNotifications are now on for this chat.";
+  }
+
+  async function stopNotifications(chatId) {
+    if (!subscribers) {
+      return "Subscriber controls are not available in this bot process.";
+    }
+
+    await subscribers.remove(chatId);
+    return "Notifications are off for this chat.";
   }
 
   async function changeMode(chatId, requestedMode) {
@@ -133,8 +210,9 @@ export function createTelegramCommandPoller({ config, testMessage, setAlertMode,
     async start() {
       const bot = await getTelegramBotInfo({ token: config.telegramToken });
       await clearTelegramWebhook({ token: config.telegramToken });
+      await setTelegramCommands({ token: config.telegramToken, commands: telegramCommands });
       console.log(`Telegram bot ready: @${bot.username}`);
-      console.log("Polling for /start, /help, /migrations, /newtokens, and /both");
+      console.log("Polling for /start, /help, /verify, /stop, /migrations, /newtokens, and /both");
 
       while (shouldPoll) {
         try {

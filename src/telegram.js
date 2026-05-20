@@ -109,3 +109,15 @@ export async function clearTelegramWebhook({ token }) {
 
   return body.result;
 }
+
+export async function setTelegramCommands({ token, commands }) {
+  const body = await callTelegramApi({
+    token,
+    method: "setMyCommands",
+    payload: {
+      commands
+    }
+  });
+
+  return body.result;
+}

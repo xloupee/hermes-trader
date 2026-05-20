@@ -8,7 +8,8 @@
     "bot": "node src/bot.js",
     "chat-id": "node src/get-chat-id.js",
     "past-migrations": "node src/past-migrations.js",
-    "check": "node --check src/*.js"
+    "check": "node --check src/*.js",
+    "deploy": "bash scripts/deploy.sh"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

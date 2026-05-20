@@ -147,6 +147,10 @@ async function getTransactionAnalysis(event) {
     return null;
   }
 
+  if (!isMigrationEvent(event)) {
+    return null;
+  }
+
   const signature = getEventId(event);
 
   try {
@@ -160,6 +164,20 @@ async function getTransactionAnalysis(event) {
     console.warn(`Could not analyze transaction SOL flow: ${error.message}`);
     return null;
   }
+}
+
+function isMigrationEvent(event) {
+  const eventType = String(event?.txType ?? event?.type ?? event?.eventType ?? "").toLowerCase();
+
+  if (eventType === "migration" || eventType === "migrate") {
+    return true;
+  }
+
+  if (eventType === "create") {
+    return false;
+  }
+
+  return config.pumpPortalSubscriptionMethod === "subscribeMigration";
 }
 
 async function getSolUsdPrice() {

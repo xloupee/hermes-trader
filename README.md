@@ -61,12 +61,8 @@ npm run chat-id
 
 - `/start` - Show setup help and the current chat id.
 - `/help` - Show the command list.
-- `/chatid` - Print the chat id to put in `.env`.
-- `/status` - Show which environment variables are configured.
-- `/mode` - Show the current alert mode.
 - `/migrations` - Watch migrated coins only.
 - `/newtokens` - Watch newly created tokens only.
-- `/test` - Send a sample migration alert without needing PumpPortal.
 
 ## Notes
 

@@ -33,12 +33,8 @@ export function helpText(chatId) {
     "",
     "Commands:",
     "/start - Show setup help",
-    "/status - Check configured env vars",
-    "/chatid - Show this Telegram chat id",
-    "/mode - Show or change alert mode",
     "/migrations - Watch migrated coins only",
     "/newtokens - Watch newly created tokens only",
-    "/test - Send a sample migration alert",
     "/help - Show commands",
     "",
     `This chat id is <code>${chatId}</code>. Add it to <code>TELEGRAM_CHAT_ID</code> in <code>.env</code>.`
@@ -77,35 +73,11 @@ export function createTelegramCommandPoller({ config, testMessage, setAlertMode,
       case "/help":
         await reply(chatId, helpText(chatId));
         break;
-      case "/chatid":
-        await reply(chatId, `<b>Chat id:</b> <code>${chatId}</code>`);
-        break;
-      case "/status":
-        await reply(chatId, setupStatus({ ...config, getModeLabel }));
-        break;
-      case "/mode":
-        if (parsed.args[0]) {
-          await reply(chatId, await changeMode(chatId, parsed.args[0]));
-        } else {
-          await reply(
-            chatId,
-            [
-              `<b>Current alert mode:</b> ${getModeLabel?.() || config.pumpPortalSubscriptionMethod}`,
-              "",
-              "Use /migrations for migrated coins only.",
-              "Use /newtokens for newly created tokens only."
-            ].join("\n")
-          );
-        }
-        break;
       case "/migrations":
         await reply(chatId, await changeMode(chatId, "migrations"));
         break;
       case "/newtokens":
         await reply(chatId, await changeMode(chatId, "newtokens"));
-        break;
-      case "/test":
-        await reply(chatId, testMessage());
         break;
       default:
         await reply(chatId, "Unknown command. Send /help to see the bot commands.");
@@ -159,7 +131,7 @@ export function createTelegramCommandPoller({ config, testMessage, setAlertMode,
       const bot = await getTelegramBotInfo({ token: config.telegramToken });
       await clearTelegramWebhook({ token: config.telegramToken });
       console.log(`Telegram bot ready: @${bot.username}`);
-      console.log("Polling for /start, /help, /chatid, /status, and /test");
+      console.log("Polling for /start, /help, /migrations, and /newtokens");
 
       while (shouldPoll) {
         try {

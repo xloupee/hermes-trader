@@ -1,6 +1,26 @@
-import WebSocket from "ws";
+import WebSocket, { type RawData } from "ws";
+import { isRecord } from "./types.js";
+import type { LooseRecord } from "./types.js";
 
-export function buildPumpPortalUrl({ pumpPortalWsUrl, pumpPortalApiKey }) {
+interface PumpPortalUrlOptions {
+  pumpPortalWsUrl: string;
+  pumpPortalApiKey?: string;
+}
+
+interface PumpPortalMigrationListenerOptions extends PumpPortalUrlOptions {
+  subscriptionMethods?: string[];
+  onMigration: (event: LooseRecord) => void | Promise<void>;
+  onStatus?: (message: string) => void;
+  onError?: (error: Error) => void;
+}
+
+interface PumpPortalMigrationListener {
+  start: () => void;
+  stop: () => void;
+  setSubscriptionMethods: (nextSubscriptionMethods: string[] | string) => void;
+}
+
+export function buildPumpPortalUrl({ pumpPortalWsUrl, pumpPortalApiKey }: PumpPortalUrlOptions): string {
   const url = new URL(pumpPortalWsUrl);
 
   if (pumpPortalApiKey) {
@@ -17,30 +37,31 @@ export function createPumpPortalMigrationListener({
   onMigration,
   onStatus = () => {},
   onError = () => {}
-}) {
+}: PumpPortalMigrationListenerOptions): PumpPortalMigrationListener {
   let reconnectAttempt = 0;
-  let reconnectTimer;
+  let reconnectTimer: NodeJS.Timeout | undefined;
   let currentSubscriptionMethods = normalizeSubscriptionMethods(subscriptionMethods);
   let intentionalRestart = false;
   let shouldReconnect = true;
-  let ws;
+  let ws: WebSocket | undefined;
 
-  function connect() {
+  function connect(): void {
     const wsUrl = buildPumpPortalUrl({ pumpPortalWsUrl, pumpPortalApiKey });
-    ws = new WebSocket(wsUrl);
+    const socket = new WebSocket(wsUrl);
+    ws = socket;
 
-    ws.on("open", () => {
+    socket.on("open", () => {
       reconnectAttempt = 0;
       onStatus("Connected to PumpPortal websocket");
 
       for (const method of currentSubscriptionMethods) {
-        ws.send(JSON.stringify({ method }));
+        socket.send(JSON.stringify({ method }));
         onStatus(`Sent PumpPortal subscription: ${method}`);
       }
     });
 
-    ws.on("message", (data) => {
-      let event;
+    socket.on("message", (data: RawData) => {
+      let event: unknown;
 
       try {
         event = JSON.parse(data.toString());
@@ -49,19 +70,21 @@ export function createPumpPortalMigrationListener({
         return;
       }
 
-      if (event?.message || event?.error) {
-        onStatus(`PumpPortal: ${JSON.stringify(event)}`);
+      const eventRecord = isRecord(event) ? event : {};
+
+      if (eventRecord.message || eventRecord.error) {
+        onStatus(`PumpPortal: ${JSON.stringify(eventRecord)}`);
         return;
       }
 
-      onMigration(event);
+      onMigration(eventRecord);
     });
 
-    ws.on("error", (error) => {
+    socket.on("error", (error) => {
       onError(error);
     });
 
-    ws.on("close", (code, reason) => {
+    socket.on("close", (code, reason) => {
       onStatus(`PumpPortal websocket closed: ${code} ${reason}`);
 
       if (intentionalRestart) {
@@ -90,7 +113,7 @@ export function createPumpPortalMigrationListener({
       clearTimeout(reconnectTimer);
       ws?.close();
     },
-    setSubscriptionMethods(nextSubscriptionMethods) {
+    setSubscriptionMethods(nextSubscriptionMethods: string[] | string) {
       currentSubscriptionMethods = normalizeSubscriptionMethods(nextSubscriptionMethods);
       reconnectAttempt = 0;
       clearTimeout(reconnectTimer);
@@ -107,7 +130,7 @@ export function createPumpPortalMigrationListener({
   };
 }
 
-function normalizeSubscriptionMethods(value) {
+function normalizeSubscriptionMethods(value: string[] | string): string[] {
   const methods = Array.isArray(value) ? value : [value];
   return [...new Set(methods.filter(Boolean))];
 }

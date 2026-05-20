@@ -99,6 +99,10 @@ function shortenAddress(value) {
   return `${value.slice(0, 6)}...${value.slice(-6)}`;
 }
 
+function pickCreatorAddress(event, tokenInfo) {
+  return pickFirstObjectValue(event, ["creator", "creatorPublicKey", "creatorAddress"]) || tokenInfo.creator;
+}
+
 function link(label, url) {
   if (!url) {
     return null;
@@ -151,6 +155,7 @@ export function extractMigrationData(event, config) {
   const marketCapSolNumber = toFiniteNumber(effectiveMarketCapSol);
   const marketCapUsd =
     explicitMarketCapUsd ?? (marketCapSolNumber !== null && solUsdPrice !== null ? marketCapSolNumber * solUsdPrice : null);
+  const creatorAddress = pickCreatorAddress(event, tokenInfo);
 
   return {
     observedAt: new Date().toISOString(),
@@ -164,6 +169,8 @@ export function extractMigrationData(event, config) {
       pickBooleanValue(tokenInfo, ["is_cashback_enabled", "isCashbackEnabled", "cashbackEnabled"]),
     agentBuybacksEnabled: pickBooleanValue(event, ["tokenized_agent", "tokenizedAgent", "agentBuybacksEnabled"]) ??
       pickBooleanValue(tokenInfo, ["tokenized_agent", "tokenizedAgent", "agentBuybacksEnabled"]),
+    creatorFeeEligible: Boolean(creatorAddress),
+    creatorAddress,
     transactionAnalysis: config.transactionAnalysis || null,
     pool: pickFirstObjectValue(event, ["pool", "poolAddress", "bondingCurve", "raydiumPool", "poolCandidate"]) || tokenInfo.pool_address,
     destination: pickFirstObjectValue(event, ["destination", "dex", "exchange", "migrationTarget"]),
@@ -236,6 +243,9 @@ export function readableWebsocketData(event) {
     "marketCapSol",
     "marketCap",
     "usdMarketCap",
+    "creator",
+    "creatorPublicKey",
+    "creatorAddress",
     "traderPublicKey",
     "txType",
     "initialBuy",
@@ -243,6 +253,8 @@ export function readableWebsocketData(event) {
     "vTokensInBondingCurve",
     "vSolInBondingCurve",
     "uri",
+    "is_cashback_enabled",
+    "tokenized_agent",
     "is_mayhem_mode"
   ];
   const selected = {};
@@ -305,6 +317,11 @@ export function formatMigrationMessage(event, config) {
 
   if (migration.agentBuybacksEnabled !== null) {
     lines.push(`<b>Agent buybacks:</b> ${migration.agentBuybacksEnabled ? "Enabled" : "Disabled"}`);
+  }
+
+  if (migration.creatorFeeEligible) {
+    const creatorText = migration.creatorAddress ? ` for <code>${escapeHtml(shortenAddress(migration.creatorAddress))}</code>` : "";
+    lines.push(`<b>Creator fees:</b> Creator eligible${creatorText}`);
   }
 
   if (migration.transactionAnalysis) {

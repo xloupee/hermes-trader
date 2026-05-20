@@ -375,6 +375,7 @@ function testMigrationMessage() {
         image: "https://ipfs.io/ipfs/QmTyuok2MLsRxwy2uJWjMgHZuATetVzLk7HfxYC4X9yohw"
       },
       tokenInfo: {
+        creator: "CreatorWallet111111111111111111111111111111111",
         is_cashback_enabled: true,
         tokenized_agent: true
       }

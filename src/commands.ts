@@ -1,6 +1,30 @@
 import { clearTelegramWebhook, getTelegramBotInfo, getTelegramUpdates, sendTelegramMessage } from "./telegram.js";
+import { errorMessage } from "./types.js";
+import type { LegacyBotConfig, TelegramChatId, TelegramMessage, TelegramUpdate } from "./types.js";
 
-export function commandFromMessage(message) {
+interface ParsedCommand {
+  command: string;
+  args: string[];
+}
+
+interface SetAlertModeResult {
+  ok: boolean;
+  label?: string;
+}
+
+interface CommandPollerOptions {
+  config: LegacyBotConfig;
+  testMessage: () => string;
+  setAlertMode?: (requestedMode: string) => Promise<SetAlertModeResult>;
+  getModeLabel?: () => string;
+}
+
+interface TelegramCommandPoller {
+  start: () => Promise<void>;
+  stop: () => void;
+}
+
+export function commandFromMessage(message: TelegramMessage): ParsedCommand | null {
   const text = message?.text?.trim();
 
   if (!text?.startsWith("/")) {
@@ -16,7 +40,7 @@ export function commandFromMessage(message) {
   };
 }
 
-export function setupStatus(config) {
+export function setupStatus(config: LegacyBotConfig): string {
   return [
     "<b>Setup status</b>",
     `${config.telegramToken ? "OK" : "Missing"} TELEGRAM_BOT_TOKEN`,
@@ -27,7 +51,7 @@ export function setupStatus(config) {
   ].join("\n");
 }
 
-export function helpText(chatId) {
+export function helpText(_chatId?: TelegramChatId): string {
   return [
     "<b>Pump.fun notifier bot</b>",
     "",
@@ -40,11 +64,16 @@ export function helpText(chatId) {
   ].join("\n");
 }
 
-export function createTelegramCommandPoller({ config, testMessage, setAlertMode, getModeLabel }) {
-  let nextOffset;
+export function createTelegramCommandPoller({
+  config,
+  testMessage: _testMessage,
+  setAlertMode,
+  getModeLabel: _getModeLabel
+}: CommandPollerOptions): TelegramCommandPoller {
+  let nextOffset: number | undefined;
   let shouldPoll = true;
 
-  async function reply(chatId, text) {
+  async function reply(chatId: TelegramChatId, text: string): Promise<void> {
     await sendTelegramMessage({
       token: config.telegramToken,
       chatId,
@@ -52,7 +81,7 @@ export function createTelegramCommandPoller({ config, testMessage, setAlertMode,
     });
   }
 
-  async function handleUpdate(update) {
+  async function handleUpdate(update: TelegramUpdate): Promise<void> {
     const message = update.message || update.channel_post;
     const chatId = message?.chat?.id;
 
@@ -86,7 +115,7 @@ export function createTelegramCommandPoller({ config, testMessage, setAlertMode,
     }
   }
 
-  async function changeMode(chatId, requestedMode) {
+  async function changeMode(chatId: TelegramChatId, requestedMode: string): Promise<string> {
     if (config.telegramChatId && String(chatId) !== String(config.telegramChatId)) {
       return "Only the configured alert chat can change bot mode.";
     }
@@ -111,7 +140,7 @@ export function createTelegramCommandPoller({ config, testMessage, setAlertMode,
     return `<b>Now watching:</b> ${result.label}`;
   }
 
-  async function pollOnce() {
+  async function pollOnce(): Promise<void> {
     const updates = await getTelegramUpdates({
       token: config.telegramToken,
       offset: nextOffset,
@@ -140,7 +169,7 @@ export function createTelegramCommandPoller({ config, testMessage, setAlertMode,
         try {
           await pollOnce();
         } catch (error) {
-          console.error("Telegram polling failed:", error.message);
+          console.error("Telegram polling failed:", errorMessage(error));
           await new Promise((resolve) => setTimeout(resolve, 3000));
         }
       }

@@ -6,8 +6,10 @@ import { createTelegramCommandPoller } from "./commands.js";
 import { createPumpPortalMigrationListener } from "./pumpportal.js";
 import { analyzeSolanaTransaction } from "./solana.js";
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
+import { asRecord, errorMessage, isRecord, stringValue } from "./types.js";
+import type { BotConfig, LooseRecord, MigrationData, TransactionAnalysis } from "./types.js";
 
-const config = {
+const config: BotConfig = {
   telegramToken: process.env.TELEGRAM_BOT_TOKEN,
   telegramChatId: process.env.TELEGRAM_CHAT_ID,
   pumpPortalApiKey: process.env.PUMPPORTAL_API_KEY,
@@ -23,14 +25,19 @@ const config = {
   transactionAccountLabels: process.env.TRANSACTION_ACCOUNT_LABELS
 };
 
-const seenEvents = new Set();
-let cachedSolUsdPrice;
+const seenEvents = new Set<string>();
+let cachedSolUsdPrice: number | undefined;
 let cachedSolUsdPriceAt = 0;
-const metadataCache = new Map();
-const tokenInfoCache = new Map();
+const metadataCache = new Map<string, LooseRecord | null>();
+const tokenInfoCache = new Map<string, LooseRecord | null>();
 let isShuttingDown = false;
 
-const alertModes = {
+interface AlertMode {
+  label: string;
+  methods: string[];
+}
+
+const alertModes: Record<string, AlertMode> = {
   migrations: {
     label: "Migrated coins only",
     methods: ["subscribeMigration"]
@@ -63,7 +70,7 @@ const alertModes = {
 
 let currentAlertMode = normalizeAlertMode(config.alertMode);
 
-function rememberEvent(id) {
+function rememberEvent(id: string | null): boolean {
   if (!id) {
     return false;
   }
@@ -76,21 +83,23 @@ function rememberEvent(id) {
 
   if (seenEvents.size > 1000) {
     const oldest = seenEvents.values().next().value;
-    seenEvents.delete(oldest);
+    if (oldest) {
+      seenEvents.delete(oldest);
+    }
   }
 
   return false;
 }
 
-function getModeLabel() {
+function getModeLabel(): string {
   return currentAlertMode.label;
 }
 
-function getSubscriptionMethods() {
+function getSubscriptionMethods(): string[] {
   return currentAlertMode.methods;
 }
 
-async function setAlertMode(requestedMode) {
+async function setAlertMode(requestedMode: string): Promise<{ ok: false } | { ok: true; label: string }> {
   const nextMode = alertModes[requestedMode];
 
   if (!nextMode) {
@@ -110,15 +119,15 @@ async function setAlertMode(requestedMode) {
   return { ok: true, label: nextMode.label };
 }
 
-function normalizeAlertMode(value) {
+function normalizeAlertMode(value: unknown): AlertMode {
   return alertModes[String(value || "").toLowerCase()] || alertModes.migrations;
 }
 
-function sameMethods(left, right) {
+function sameMethods(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((method) => right.includes(method));
 }
 
-async function handleMigration(event) {
+async function handleMigration(event: LooseRecord): Promise<void> {
   const eventId = getEventId(event);
   if (rememberEvent(eventId)) {
     return;
@@ -162,14 +171,14 @@ async function handleMigration(event) {
       });
       return;
     } catch (error) {
-      console.warn(`Could not send token photo; sending text alert instead: ${error.message}`);
+      console.warn(`Could not send token photo; sending text alert instead: ${errorMessage(error)}`);
     }
   }
 
   await sendTelegramMessage({ token: config.telegramToken, chatId: config.telegramChatId, text, replyMarkup });
 }
 
-async function getTransactionAnalysis(event) {
+async function getTransactionAnalysis(event: LooseRecord): Promise<TransactionAnalysis | null> {
   if (!config.transactionFlowEnabled) {
     return null;
   }
@@ -188,12 +197,12 @@ async function getTransactionAnalysis(event) {
       accountLabels: config.transactionAccountLabels
     });
   } catch (error) {
-    console.warn(`Could not analyze transaction SOL flow: ${error.message}`);
+    console.warn(`Could not analyze transaction SOL flow: ${errorMessage(error)}`);
     return null;
   }
 }
 
-function isMigrationEvent(event) {
+function isMigrationEvent(event: LooseRecord): boolean {
   const eventType = String(event?.txType ?? event?.type ?? event?.eventType ?? "").toLowerCase();
 
   if (eventType === "migration" || eventType === "migrate") {
@@ -207,7 +216,7 @@ function isMigrationEvent(event) {
   return getSubscriptionMethods().includes("subscribeMigration");
 }
 
-async function getSolUsdPrice() {
+async function getSolUsdPrice(): Promise<number | undefined> {
   const cacheMs = 60000;
 
   if (cachedSolUsdPrice && Date.now() - cachedSolUsdPriceAt < cacheMs) {
@@ -216,8 +225,10 @@ async function getSolUsdPrice() {
 
   try {
     const response = await fetch(config.solUsdPriceUrl);
-    const body = await response.json();
-    const price = Number(body?.data?.amount ?? body?.price ?? body?.solana?.usd);
+    const body = asRecord(await response.json());
+    const data = asRecord(body.data);
+    const solana = asRecord(body.solana);
+    const price = Number(data.amount ?? body.price ?? solana.usd);
 
     if (!response.ok || !Number.isFinite(price)) {
       throw new Error(`Unexpected SOL price response: ${response.status}`);
@@ -227,12 +238,12 @@ async function getSolUsdPrice() {
     cachedSolUsdPriceAt = Date.now();
     return price;
   } catch (error) {
-    console.warn(`Could not fetch SOL/USD price; falling back to SOL market cap: ${error.message}`);
+    console.warn(`Could not fetch SOL/USD price; falling back to SOL market cap: ${errorMessage(error)}`);
     return cachedSolUsdPrice;
   }
 }
 
-function normalizeIpfsUrl(value) {
+function normalizeIpfsUrl(value: unknown): unknown {
   if (!value || typeof value !== "string") {
     return value;
   }
@@ -248,15 +259,19 @@ function normalizeIpfsUrl(value) {
   return value;
 }
 
-async function getPumpFunCoinInfo(event) {
-  const mint = event?.mint || event?.ca || event?.token || event?.tokenAddress || event?.address;
+function pickEventMint(event: LooseRecord): string | null {
+  return stringValue(event.mint || event.ca || event.token || event.tokenAddress || event.address);
+}
+
+async function getPumpFunCoinInfo(event: LooseRecord): Promise<LooseRecord | null> {
+  const mint = pickEventMint(event);
 
   if (!mint) {
     return null;
   }
 
   if (tokenInfoCache.has(mint)) {
-    return tokenInfoCache.get(mint);
+    return tokenInfoCache.get(mint) ?? null;
   }
 
   try {
@@ -267,7 +282,7 @@ async function getPumpFunCoinInfo(event) {
     });
     const tokenInfo = await response.json();
 
-    if (!response.ok || !tokenInfo || typeof tokenInfo !== "object") {
+    if (!response.ok || !isRecord(tokenInfo)) {
       throw new Error(`Unexpected Pump.fun coin response: ${response.status}`);
     }
 
@@ -281,33 +296,35 @@ async function getPumpFunCoinInfo(event) {
 
     if (tokenInfoCache.size > 500) {
       const oldest = tokenInfoCache.keys().next().value;
-      tokenInfoCache.delete(oldest);
+      if (oldest) {
+        tokenInfoCache.delete(oldest);
+      }
     }
 
     return normalizedTokenInfo;
   } catch (error) {
-    console.warn(`Could not fetch Pump.fun coin info: ${error.message}`);
+    console.warn(`Could not fetch Pump.fun coin info: ${errorMessage(error)}`);
     tokenInfoCache.set(mint, null);
     return null;
   }
 }
 
-async function getTokenMetadata(event, tokenInfo) {
-  const uri = normalizeIpfsUrl(event?.uri || event?.metadataUri || event?.metadata || tokenInfo?.metadata_uri);
+async function getTokenMetadata(event: LooseRecord, tokenInfo: LooseRecord | null): Promise<LooseRecord | null> {
+  const uri = normalizeIpfsUrl(event.uri || event.metadataUri || event.metadata || tokenInfo?.metadata_uri);
 
   if (!uri || typeof uri !== "string" || !uri.startsWith("http")) {
     return tokenInfo ? metadataFromTokenInfo(tokenInfo) : null;
   }
 
   if (metadataCache.has(uri)) {
-    return metadataCache.get(uri);
+    return metadataCache.get(uri) ?? null;
   }
 
   try {
     const response = await fetch(uri);
     const metadata = await response.json();
 
-    if (!response.ok || !metadata || typeof metadata !== "object") {
+    if (!response.ok || !isRecord(metadata)) {
       throw new Error(`Unexpected metadata response: ${response.status}`);
     }
 
@@ -320,21 +337,23 @@ async function getTokenMetadata(event, tokenInfo) {
 
     if (metadataCache.size > 500) {
       const oldest = metadataCache.keys().next().value;
-      metadataCache.delete(oldest);
+      if (oldest) {
+        metadataCache.delete(oldest);
+      }
     }
 
     return {
-      ...metadataFromTokenInfo(tokenInfo),
+      ...(metadataFromTokenInfo(tokenInfo) || {}),
       ...normalizedMetadata
     };
   } catch (error) {
-    console.warn(`Could not fetch token metadata: ${error.message}`);
+    console.warn(`Could not fetch token metadata: ${errorMessage(error)}`);
     metadataCache.set(uri, null);
     return tokenInfo ? metadataFromTokenInfo(tokenInfo) : null;
   }
 }
 
-function metadataFromTokenInfo(tokenInfo) {
+function metadataFromTokenInfo(tokenInfo: LooseRecord | null): LooseRecord | null {
   if (!tokenInfo) {
     return null;
   }
@@ -348,12 +367,12 @@ function metadataFromTokenInfo(tokenInfo) {
   };
 }
 
-async function writeMigrationLog(migration) {
+async function writeMigrationLog(migration: MigrationData): Promise<void> {
   await mkdir(dirname(config.migrationLogPath), { recursive: true });
   await appendFile(config.migrationLogPath, `${JSON.stringify(migration)}\n`);
 }
 
-function testMigrationMessage() {
+function testMigrationMessage(): string {
   return formatMigrationMessage(
     {
       name: "Test Token",
@@ -383,8 +402,8 @@ function testMigrationMessage() {
   );
 }
 
-function assertConfig() {
-  const missing = [];
+function assertConfig(): void {
+  const missing: string[] = [];
 
   if (!config.telegramToken) {
     missing.push("TELEGRAM_BOT_TOKEN");
@@ -410,11 +429,11 @@ const migrationListener = createPumpPortalMigrationListener({
       console.error("Failed to process migration event:", error);
     });
   },
-  onStatus: (message) => console.log(message),
-  onError: (error) => console.error("PumpPortal websocket error:", error.message)
+  onStatus: (message: string) => console.log(message),
+  onError: (error: Error) => console.error("PumpPortal websocket error:", error.message)
 });
 
-async function shutdown() {
+async function shutdown(): Promise<void> {
   if (isShuttingDown) {
     return;
   }
@@ -432,7 +451,7 @@ async function shutdown() {
         text: "<b>Bot stopped.</b>"
       });
     } catch (error) {
-      console.warn(`Could not send shutdown notification: ${error.message}`);
+      console.warn(`Could not send shutdown notification: ${errorMessage(error)}`);
     }
   }
 

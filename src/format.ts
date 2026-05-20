@@ -1,4 +1,15 @@
-export function escapeHtml(value) {
+import { asRecord, stringValue } from "./types.js";
+import type { ExplorerConfig, LooseRecord, MigrationData, MigrationFormatConfig, TelegramReplyMarkup } from "./types.js";
+
+interface ExplorerLinks {
+  mint: string | null;
+  signature: string | null;
+  pumpFunUrl: string | null;
+  solscanTokenUrl: string | null;
+  solscanTxUrl: string | null;
+}
+
+export function escapeHtml(value: unknown): string {
   return String(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -6,7 +17,7 @@ export function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
-export function pickFirstObjectValue(object, keys) {
+export function pickFirstObjectValue(object: LooseRecord | null | undefined, keys: readonly string[]): unknown {
   for (const key of keys) {
     if (object?.[key] !== undefined && object[key] !== null && object[key] !== "") {
       return object[key];
@@ -16,9 +27,13 @@ export function pickFirstObjectValue(object, keys) {
   return null;
 }
 
-export function buildExplorerLinks(event, config) {
-  const mint = pickFirstObjectValue(event, ["mint", "ca", "token", "tokenAddress", "address"]);
-  const signature = pickFirstObjectValue(event, ["signature", "tx", "txHash", "transaction", "transactionHash"]);
+function pickFirstString(object: LooseRecord | null | undefined, keys: readonly string[]): string | null {
+  return stringValue(pickFirstObjectValue(object, keys));
+}
+
+export function buildExplorerLinks(event: LooseRecord, config: ExplorerConfig): ExplorerLinks {
+  const mint = pickFirstString(event, ["mint", "ca", "token", "tokenAddress", "address"]);
+  const signature = pickFirstString(event, ["signature", "tx", "txHash", "transaction", "transactionHash"]);
 
   return {
     mint,
@@ -29,11 +44,11 @@ export function buildExplorerLinks(event, config) {
   };
 }
 
-function formatNumber(value, maximumFractionDigits = 4) {
+function formatNumber(value: unknown, maximumFractionDigits = 4): string {
   const number = Number(value);
 
   if (!Number.isFinite(number)) {
-    return value;
+    return String(value);
   }
 
   return new Intl.NumberFormat("en-US", {
@@ -41,7 +56,7 @@ function formatNumber(value, maximumFractionDigits = 4) {
   }).format(number);
 }
 
-function formatSol(value) {
+function formatSol(value: unknown): string | null {
   if (value === null || value === undefined || value === "") {
     return null;
   }
@@ -52,7 +67,7 @@ function formatSol(value) {
   return `${formatNumber(value, precision)} SOL`;
 }
 
-function formatSolUsd(value, solUsdPrice) {
+function formatSolUsd(value: unknown, solUsdPrice: unknown): string | null {
   const sol = formatSol(value);
   const solNumber = toFiniteNumber(value);
   const priceNumber = toFiniteNumber(solUsdPrice);
@@ -64,11 +79,11 @@ function formatSolUsd(value, solUsdPrice) {
   return `${sol} (${formatUsd(solNumber * priceNumber)})`;
 }
 
-function formatUsd(value) {
+function formatUsd(value: unknown): string {
   const number = Number(value);
 
   if (!Number.isFinite(number)) {
-    return value;
+    return String(value);
   }
 
   if (number >= 1000000) {
@@ -86,12 +101,12 @@ function formatUsd(value) {
   }).format(number);
 }
 
-function toFiniteNumber(value) {
+function toFiniteNumber(value: unknown): number | null {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
 
-function shortenAddress(value) {
+function shortenAddress(value: string): string {
   if (!value || value.length <= 16) {
     return value;
   }
@@ -99,11 +114,11 @@ function shortenAddress(value) {
   return `${value.slice(0, 6)}...${value.slice(-6)}`;
 }
 
-function pickCreatorAddress(event, tokenInfo) {
-  return pickFirstObjectValue(event, ["creator", "creatorPublicKey", "creatorAddress"]) || tokenInfo.creator;
+function pickCreatorAddress(event: LooseRecord, tokenInfo: LooseRecord): string | null {
+  return pickFirstString(event, ["creator", "creatorPublicKey", "creatorAddress"]) || stringValue(tokenInfo.creator);
 }
 
-function link(label, url) {
+function link(label: string, url: string | null): string | null {
   if (!url) {
     return null;
   }
@@ -111,11 +126,11 @@ function link(label, url) {
   return `<a href="${escapeHtml(url)}">${escapeHtml(label)}</a>`;
 }
 
-function pickMetadataValue(metadata, keys) {
-  return pickFirstObjectValue(metadata, keys);
+function pickMetadataString(metadata: LooseRecord, keys: readonly string[]): string | null {
+  return pickFirstString(metadata, keys);
 }
 
-function pickBooleanValue(object, keys) {
+function pickBooleanValue(object: LooseRecord | null | undefined, keys: readonly string[]): boolean | null {
   const value = pickFirstObjectValue(object, keys);
 
   if (value === null) {
@@ -141,7 +156,7 @@ function pickBooleanValue(object, keys) {
   return null;
 }
 
-function formatBooleanStatus(value) {
+function formatBooleanStatus(value: boolean | null): string {
   if (value === true) {
     return "Enabled";
   }
@@ -153,7 +168,7 @@ function formatBooleanStatus(value) {
   return "Unknown";
 }
 
-function formatCreatorFeeStatus(migration) {
+function formatCreatorFeeStatus(migration: MigrationData): string {
   if (!migration.creatorAddress) {
     return "Unknown";
   }
@@ -161,14 +176,14 @@ function formatCreatorFeeStatus(migration) {
   return `Creator eligible for <code>${escapeHtml(migration.creatorAddress)}</code>`;
 }
 
-function hasObjectData(value) {
+function hasObjectData(value: LooseRecord): boolean {
   return Boolean(value && typeof value === "object" && Object.keys(value).length > 0);
 }
 
-export function extractMigrationData(event, config) {
+export function extractMigrationData(event: LooseRecord, config: MigrationFormatConfig): MigrationData {
   const links = buildExplorerLinks(event, config);
-  const metadata = config.metadata || {};
-  const tokenInfo = config.tokenInfo || {};
+  const metadata = asRecord(config.metadata);
+  const tokenInfo = asRecord(config.tokenInfo);
   const marketCapSol = pickFirstObjectValue(event, ["marketCapSol", "marketCap"]);
   const tokenInfoMarketCapSol = pickFirstObjectValue(tokenInfo, ["market_cap_quote", "market_cap"]);
   const effectiveMarketCapSol = marketCapSol ?? tokenInfoMarketCapSol;
@@ -187,33 +202,33 @@ export function extractMigrationData(event, config) {
 
   return {
     observedAt: new Date().toISOString(),
-    eventType: pickFirstObjectValue(event, ["txType", "type", "eventType"]),
+    eventType: pickFirstString(event, ["txType", "type", "eventType"]),
     coinAddress: links.mint,
-    name: pickFirstObjectValue(event, ["name", "tokenName"]) || pickMetadataValue(metadata, ["name"]) || tokenInfo.name,
-    symbol: pickFirstObjectValue(event, ["symbol", "ticker"]) || pickMetadataValue(metadata, ["symbol", "ticker"]) || tokenInfo.symbol,
-    description: pickMetadataValue(metadata, ["description"]) || tokenInfo.description,
-    imageUrl: pickMetadataValue(metadata, ["image", "image_url", "imageUrl"]) || tokenInfo.image_uri,
+    name: pickFirstString(event, ["name", "tokenName"]) || pickMetadataString(metadata, ["name"]) || stringValue(tokenInfo.name),
+    symbol: pickFirstString(event, ["symbol", "ticker"]) || pickMetadataString(metadata, ["symbol", "ticker"]) || stringValue(tokenInfo.symbol),
+    description: pickMetadataString(metadata, ["description"]) || stringValue(tokenInfo.description),
+    imageUrl: pickMetadataString(metadata, ["image", "image_url", "imageUrl"]) || stringValue(tokenInfo.image_uri),
     cashbackEnabled: pickBooleanValue(event, ["is_cashback_enabled", "isCashbackEnabled", "cashbackEnabled"]) ??
       pickBooleanValue(tokenInfo, ["is_cashback_enabled", "isCashbackEnabled", "cashbackEnabled"]),
     agentBuybacksEnabled,
     creatorFeeEligible: Boolean(creatorAddress),
     creatorAddress,
     transactionAnalysis: config.transactionAnalysis || null,
-    pool: pickFirstObjectValue(event, ["pool", "poolAddress", "bondingCurve", "raydiumPool", "poolCandidate"]) || tokenInfo.pool_address,
-    destination: pickFirstObjectValue(event, ["destination", "dex", "exchange", "migrationTarget"]),
+    pool: pickFirstString(event, ["pool", "poolAddress", "bondingCurve", "raydiumPool", "poolCandidate"]) || stringValue(tokenInfo.pool_address),
+    destination: pickFirstString(event, ["destination", "dex", "exchange", "migrationTarget"]),
     marketCap: effectiveMarketCapSol,
     marketCapSol: effectiveMarketCapSol,
     marketCapUsd,
     solUsdPrice,
     initialBuy: pickFirstObjectValue(event, ["initialBuy"]),
     solAmount: pickFirstObjectValue(event, ["solAmount"]),
-    traderPublicKey: pickFirstObjectValue(event, ["traderPublicKey", "creator", "creatorPublicKey", "user"]) || tokenInfo.creator,
-    bondingCurveKey: pickFirstObjectValue(event, ["bondingCurveKey", "bondingCurve"]) || tokenInfo.bonding_curve,
+    traderPublicKey: pickFirstString(event, ["traderPublicKey", "creator", "creatorPublicKey", "user"]) || stringValue(tokenInfo.creator),
+    bondingCurveKey: pickFirstString(event, ["bondingCurveKey", "bondingCurve"]) || stringValue(tokenInfo.bonding_curve),
     virtualSolInBondingCurve:
       pickFirstObjectValue(event, ["vSolInBondingCurve", "virtualSolInBondingCurve"]) || tokenInfo.virtual_quote_reserves,
     virtualTokensInBondingCurve:
       pickFirstObjectValue(event, ["vTokensInBondingCurve", "virtualTokensInBondingCurve"]) || tokenInfo.virtual_token_reserves,
-    uri: pickFirstObjectValue(event, ["uri", "metadataUri", "metadata"]) || tokenInfo.metadata_uri,
+    uri: pickFirstString(event, ["uri", "metadataUri", "metadata"]) || stringValue(tokenInfo.metadata_uri),
     isMayhemMode: pickFirstObjectValue(event, ["is_mayhem_mode", "isMayhemMode"]),
     signature: links.signature,
     pumpFunUrl: links.pumpFunUrl,
@@ -225,7 +240,7 @@ export function extractMigrationData(event, config) {
   };
 }
 
-function compactValue(value, depth = 0) {
+function compactValue(value: unknown, depth = 0): unknown {
   if (depth > 3) {
     return "[nested data]";
   }
@@ -249,7 +264,7 @@ function compactValue(value, depth = 0) {
   return value;
 }
 
-export function readableWebsocketData(event) {
+export function readableWebsocketData(event: LooseRecord): LooseRecord {
   const priorityKeys = [
     "signature",
     "tx",
@@ -284,7 +299,7 @@ export function readableWebsocketData(event) {
     "tokenized_agent",
     "is_mayhem_mode"
   ];
-  const selected = {};
+  const selected: LooseRecord = {};
 
   for (const key of priorityKeys) {
     if (event?.[key] !== undefined && event[key] !== null && event[key] !== "") {
@@ -301,7 +316,7 @@ export function readableWebsocketData(event) {
   return selected;
 }
 
-export function truncateForTelegram(value, maxLength = 2200) {
+export function truncateForTelegram(value: string, maxLength = 2200): string {
   if (value.length <= maxLength) {
     return value;
   }
@@ -309,7 +324,7 @@ export function truncateForTelegram(value, maxLength = 2200) {
   return `${value.slice(0, maxLength - 18)}\n... truncated`;
 }
 
-export function formatMigrationMessage(event, config) {
+export function formatMigrationMessage(event: LooseRecord, config: MigrationFormatConfig): string {
   const migration = extractMigrationData(event, config);
   const activeMethods = config.activeSubscriptionMethods || [];
   const isCreateEvent =
@@ -377,7 +392,7 @@ export function formatMigrationMessage(event, config) {
   return lines.join("\n");
 }
 
-export function buildMigrationReplyMarkup(event, config) {
+export function buildMigrationReplyMarkup(event: LooseRecord, config: MigrationFormatConfig): TelegramReplyMarkup | undefined {
   const migration = extractMigrationData(event, config);
 
   if (!migration.coinAddress) {
@@ -398,8 +413,8 @@ export function buildMigrationReplyMarkup(event, config) {
   };
 }
 
-export function getEventId(event) {
-  return pickFirstObjectValue(event, [
+export function getEventId(event: LooseRecord): string | null {
+  return pickFirstString(event, [
     "signature",
     "tx",
     "txHash",

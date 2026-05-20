@@ -1,3 +1,6 @@
+import { asRecord, isRecord, stringValue } from "./types.js";
+import type { LooseRecord, TransactionAnalysis } from "./types.js";
+
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const PUMPFUN_MIGRATION_ACCOUNT = "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg";
 const PUMPSWAP_PROGRAM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
@@ -5,7 +8,7 @@ const SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const WSOL_MINT = "So11111111111111111111111111111111111111112";
 
-const OFFICIAL_ACCOUNT_LABELS = {
+const OFFICIAL_ACCOUNT_LABELS: Record<string, string> = {
   [PUMPFUN_MIGRATION_ACCOUNT]: "Pump.fun migration fee",
   "62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV": "Pump.fun protocol fee",
   "7VtfL8fvgNfhz17qKRMjzQEXgbdpnHHHQRh54R9jP2RJ": "Pump.fun protocol fee",
@@ -34,11 +37,35 @@ const OFFICIAL_ACCOUNT_LABELS = {
   A7hAgCzFw14fejgCp387JUJRMNyz4j89JKnhtKU8piqW: "Pump.fun buyback fee"
 };
 
-function lamportsToSol(value) {
+interface RpcOptions {
+  rpcUrl: string;
+  method: string;
+  params: unknown[];
+}
+
+interface AnalyzeSolanaTransactionOptions {
+  signature: unknown;
+  rpcUrl: string;
+  event: LooseRecord;
+  accountLabels?: string;
+}
+
+interface RawAccountChange {
+  address: string;
+  deltaSol: number;
+}
+
+interface LabelAccountOptions extends RawAccountChange {
+  event: LooseRecord;
+  labels: Record<string, string>;
+  accountInfo: LooseRecord | null;
+}
+
+function lamportsToSol(value: number): number {
   return value / LAMPORTS_PER_SOL;
 }
 
-function accountKeyToAddress(accountKey) {
+function accountKeyToAddress(accountKey: unknown): string | null {
   if (!accountKey) {
     return null;
   }
@@ -47,31 +74,43 @@ function accountKeyToAddress(accountKey) {
     return accountKey;
   }
 
-  return accountKey.pubkey || accountKey.toString?.() || null;
+  if (isRecord(accountKey)) {
+    return stringValue(accountKey.pubkey) || accountKey.toString?.() || null;
+  }
+
+  return null;
 }
 
-function parseAccountLabels(value) {
+function parseAccountLabels(value?: string): Record<string, string> {
   if (!value) {
     return {};
   }
 
   try {
-    const labels = JSON.parse(value);
-    return labels && typeof labels === "object" && !Array.isArray(labels) ? labels : {};
+    const labels = JSON.parse(value) as unknown;
+
+    if (!isRecord(labels)) {
+      return {};
+    }
+
+    return Object.fromEntries(
+      Object.entries(labels).filter((entry): entry is [string, string] => typeof entry[1] === "string")
+    );
   } catch {
     return {};
   }
 }
 
-function pickEventMint(event) {
-  return event?.mint || event?.ca || event?.token || event?.tokenAddress || event?.address;
+function pickEventMint(event: LooseRecord): string | null {
+  return stringValue(event.mint || event.ca || event.token || event.tokenAddress || event.address);
 }
 
-function getParsedAccount(accountInfo) {
-  return accountInfo?.data && typeof accountInfo.data === "object" ? accountInfo.data.parsed : null;
+function getParsedAccount(accountInfo: LooseRecord | null): LooseRecord | null {
+  const data = asRecord(accountInfo?.data);
+  return isRecord(data.parsed) ? data.parsed : null;
 }
 
-function labelAccount({ address, event, labels, accountInfo, deltaSol }) {
+function labelAccount({ address, event, labels, accountInfo, deltaSol }: LabelAccountOptions): string {
   if (!address) {
     return "Unknown";
   }
@@ -98,7 +137,7 @@ function labelAccount({ address, event, labels, accountInfo, deltaSol }) {
 
   const parsedAccount = getParsedAccount(accountInfo);
   const parsedType = parsedAccount?.type;
-  const parsedInfo = parsedAccount?.info || {};
+  const parsedInfo = asRecord(parsedAccount?.info);
 
   if (accountInfo?.owner === PUMPSWAP_PROGRAM && deltaSol > 0) {
     return "PumpSwap pool state rent";
@@ -123,7 +162,7 @@ function labelAccount({ address, event, labels, accountInfo, deltaSol }) {
   return "Unlabeled wallet";
 }
 
-async function rpc({ rpcUrl, method, params }) {
+async function rpc({ rpcUrl, method, params }: RpcOptions): Promise<unknown> {
   const response = await fetch(rpcUrl, {
     method: "POST",
     headers: {
@@ -137,20 +176,21 @@ async function rpc({ rpcUrl, method, params }) {
     })
   });
 
-  const body = await response.json();
+  const body = asRecord(await response.json());
 
   if (!response.ok || body.error) {
-    throw new Error(body.error?.message || `RPC ${method} failed with ${response.status}`);
+    const rpcError = asRecord(body.error);
+    throw new Error(stringValue(rpcError.message) || `RPC ${method} failed with ${response.status}`);
   }
 
   return body.result;
 }
 
-async function wait(ms) {
+async function wait(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function getTransactionWithRetry({ signature, rpcUrl }) {
+async function getTransactionWithRetry({ signature, rpcUrl }: { signature: string; rpcUrl: string }): Promise<LooseRecord> {
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const transaction = await rpc({
       rpcUrl,
@@ -164,7 +204,7 @@ async function getTransactionWithRetry({ signature, rpcUrl }) {
       ]
     });
 
-    if (transaction) {
+    if (isRecord(transaction)) {
       return transaction;
     }
 
@@ -174,7 +214,13 @@ async function getTransactionWithRetry({ signature, rpcUrl }) {
   throw new Error("Transaction not available from RPC yet");
 }
 
-async function getAccountInfoMap({ addresses, rpcUrl }) {
+async function getAccountInfoMap({
+  addresses,
+  rpcUrl
+}: {
+  addresses: string[];
+  rpcUrl: string;
+}): Promise<Map<string, LooseRecord | null>> {
   if (addresses.length === 0) {
     return new Map();
   }
@@ -190,22 +236,38 @@ async function getAccountInfoMap({ addresses, rpcUrl }) {
     ]
   });
 
-  return new Map(addresses.map((address, index) => [address, result?.value?.[index] || null]));
+  const resultRecord = asRecord(result);
+  const values = Array.isArray(resultRecord.value) ? resultRecord.value : [];
+  return new Map(addresses.map((address, index) => [address, isRecord(values[index]) ? values[index] : null]));
 }
 
-export async function analyzeSolanaTransaction({ signature, rpcUrl, event, accountLabels }) {
-  if (!signature || !rpcUrl) {
+function numberArray(value: unknown): number[] {
+  return Array.isArray(value) ? value.map(Number).filter(Number.isFinite) : [];
+}
+
+export async function analyzeSolanaTransaction({
+  signature,
+  rpcUrl,
+  event,
+  accountLabels
+}: AnalyzeSolanaTransactionOptions): Promise<TransactionAnalysis | null> {
+  const transactionSignature = stringValue(signature);
+
+  if (!transactionSignature || !rpcUrl) {
     return null;
   }
 
-  const transaction = await getTransactionWithRetry({ signature, rpcUrl });
+  const transaction = await getTransactionWithRetry({ signature: transactionSignature, rpcUrl });
 
-  const accountKeys = transaction?.transaction?.message?.accountKeys || [];
-  const preBalances = transaction?.meta?.preBalances || [];
-  const postBalances = transaction?.meta?.postBalances || [];
+  const transactionBody = asRecord(transaction.transaction);
+  const message = asRecord(transactionBody.message);
+  const meta = asRecord(transaction.meta);
+  const accountKeys = Array.isArray(message.accountKeys) ? message.accountKeys : [];
+  const preBalances = numberArray(meta.preBalances);
+  const postBalances = numberArray(meta.postBalances);
   const labels = parseAccountLabels(accountLabels);
   const feePayer = accountKeyToAddress(accountKeys[0]);
-  const rawChanges = [];
+  const rawChanges: RawAccountChange[] = [];
 
   for (let index = 0; index < Math.min(preBalances.length, postBalances.length, accountKeys.length); index += 1) {
     const address = accountKeyToAddress(accountKeys[index]);
@@ -231,7 +293,7 @@ export async function analyzeSolanaTransaction({ signature, rpcUrl, event, accou
       ...change,
       event,
       labels,
-      accountInfo: accountInfoByAddress.get(change.address)
+      accountInfo: accountInfoByAddress.get(change.address) ?? null
     })
   }));
 
@@ -247,7 +309,7 @@ export async function analyzeSolanaTransaction({ signature, rpcUrl, event, accou
 
   return {
     feePayer,
-    networkFeeSol: lamportsToSol(transaction?.meta?.fee || 0),
+    networkFeeSol: lamportsToSol(Number(meta.fee || 0)),
     recipients,
     senders
   };

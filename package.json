@@ -4,11 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node src/index.js",
-    "bot": "node src/bot.js",
-    "chat-id": "node src/get-chat-id.js",
-    "past-migrations": "node src/past-migrations.js",
-    "check": "node --check src/*.js"
+    "build": "tsc",
+    "start": "npm run build && node dist/index.js",
+    "bot": "npm run build && node dist/bot.js",
+    "chat-id": "npm run build && node dist/get-chat-id.js",
+    "past-migrations": "npm run build && node dist/past-migrations.js",
+    "check": "tsc --noEmit"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
@@ -16,5 +17,10 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "@types/ws": "^8.18.1",
+    "typescript": "^6.0.3"
   }
 }

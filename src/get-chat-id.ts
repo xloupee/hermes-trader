@@ -1,11 +1,12 @@
 import "dotenv/config";
 import { getTelegramUpdates } from "./telegram.js";
+import type { TelegramChatId } from "./types.js";
 
 const updates = await getTelegramUpdates({
   token: process.env.TELEGRAM_BOT_TOKEN
 });
 
-const chats = new Map();
+const chats = new Map<TelegramChatId, unknown>();
 
 for (const update of updates) {
   const chat = update.message?.chat || update.channel_post?.chat;

@@ -1,0 +1,24 @@
+{
+  "type": "SWAP",
+  "source": "JUPITER",
+  "feePayer": "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg",
+  "signature": "3tokenToTokenExample1111111111111111111111111111",
+  "timestamp": 1770000200,
+  "nativeTransfers": [],
+  "tokenTransfers": [
+    {
+      "fromUserAccount": "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg",
+      "toUserAccount": "Pool111111111111111111111111111111111111111",
+      "mint": "DezXAZ8z7PnrnRJjz3n26VsZdrmRwNny4nBj9JkzjW7B",
+      "tokenAmount": 100,
+      "symbol": "BONK"
+    },
+    {
+      "fromUserAccount": "Pool222222222222222222222222222222222222222",
+      "toUserAccount": "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg",
+      "mint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY6JqTd6FJqyf2s",
+      "tokenAmount": 12.5,
+      "symbol": "USDT"
+    }
+  ]
+}

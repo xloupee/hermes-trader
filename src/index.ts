@@ -210,14 +210,20 @@ async function handleHeliusSwap(event: LooseRecord): Promise<boolean> {
 }
 
 async function sendWalletTradeAlert(subscriber: SubscriberRecord, trade: WalletTradeData): Promise<void> {
+  const copySettings =
+    subscriber.copyTargetWalletAddress && subscriber.copyTargetWalletAddress === trade.targetWallet
+      ? {
+          copyWalletAddress: subscriber.copyWalletAddress,
+          copyAmountSol: subscriber.copyAmountSol,
+          copyTargetWalletAddress: subscriber.copyTargetWalletAddress
+        }
+      : null;
+
   try {
     await sendTelegramMessage({
       token: config.telegramToken,
       chatId: subscriber.chatId,
-      text: formatWalletTradeMessageWithCopySettings(trade, {
-        copyWalletAddress: subscriber.copyWalletAddress,
-        copyAmountSol: subscriber.copyAmountSol
-      }),
+      text: formatWalletTradeMessageWithCopySettings(trade, copySettings),
       replyMarkup: buildWalletTradeReplyMarkup(trade)
     });
   } catch (error) {

@@ -20,6 +20,7 @@ function makeSubscriber(chatId: string, mode: AlertModeValue | null, now = new D
     watchedWallets: [],
     copyWalletAddress: null,
     copyAmountSol: null,
+    copyTargetWalletAddress: null,
     verifiedAt: now,
     updatedAt: now
   };
@@ -68,6 +69,7 @@ function mergeSubscriber(
     watchedWallets: existing?.watchedWallets || [],
     copyWalletAddress: stringValue(existing?.copyWalletAddress) || null,
     copyAmountSol: finiteNumber(existing?.copyAmountSol),
+    copyTargetWalletAddress: stringValue(existing?.copyTargetWalletAddress) || null,
     verifiedAt: typeof verifiedAt === "string" ? verifiedAt : existing?.verifiedAt || now,
     updatedAt: typeof updatedAt === "string" ? updatedAt : existing?.updatedAt || now
   });
@@ -160,7 +162,8 @@ export function createSubscriberStore({
         ...existing,
         watchedWallets: watchedWallets.length > 0 ? dedupeWatchedWallets(watchedWallets) : existing.watchedWallets,
         copyWalletAddress: stringValue(record.copyWalletAddress || record.copyWallet || record.copyPublicKey)?.trim() || existing.copyWalletAddress,
-        copyAmountSol: finiteNumber(record.copyAmountSol ?? record.copyAmount) ?? existing.copyAmountSol
+        copyAmountSol: finiteNumber(record.copyAmountSol ?? record.copyAmount) ?? existing.copyAmountSol,
+        copyTargetWalletAddress: stringValue(record.copyTargetWalletAddress || record.copyTargetWallet)?.trim() || existing.copyTargetWalletAddress
       });
     }
   }
@@ -324,6 +327,7 @@ export function createSubscriberStore({
       subscribers.set(normalized, {
         ...existing,
         watchedWallets,
+        copyTargetWalletAddress: existing.copyTargetWalletAddress === address ? null : existing.copyTargetWalletAddress,
         updatedAt: new Date().toISOString()
       });
       await save();
@@ -358,6 +362,28 @@ export function createSubscriberStore({
       subscribers.set(normalized, {
         ...existing,
         copyAmountSol: amountSol,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return true;
+    },
+    async setCopyTargetWallet(chatId, address) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+
+      if (address && !existing.watchedWallets.some((wallet) => wallet.address === address)) {
+        return false;
+      }
+
+      subscribers.set(normalized, {
+        ...existing,
+        copyTargetWalletAddress: address,
         updatedAt: new Date().toISOString()
       });
       await save();

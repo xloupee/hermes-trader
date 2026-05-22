@@ -78,6 +78,13 @@ export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
   channel_post?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
+}
+
+export interface TelegramCallbackQuery {
+  id: string;
+  data?: string;
+  message?: TelegramMessage;
 }
 
 export interface TelegramBotInfo {
@@ -90,6 +97,7 @@ export interface TelegramReplyMarkup {
 
 export interface TelegramInlineKeyboardButton {
   text: string;
+  callback_data?: string;
   copy_text?: {
     text: string;
   };
@@ -107,6 +115,7 @@ export interface SubscriberStore {
   unwatchWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   setCopyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   setCopyAmountSol: (chatId: TelegramChatId, amountSol: number) => Promise<boolean>;
+  setCopyTargetWallet: (chatId: TelegramChatId, address: string | null) => Promise<boolean>;
   listWatchedWallets: (chatId: TelegramChatId) => WatchedWallet[];
   list: () => SubscriberRecord[];
   count: () => number;
@@ -118,6 +127,7 @@ export interface SubscriberRecord {
   watchedWallets: WatchedWallet[];
   copyWalletAddress: string | null;
   copyAmountSol: number | null;
+  copyTargetWalletAddress: string | null;
   verifiedAt: string;
   updatedAt: string;
 }
@@ -156,6 +166,7 @@ export interface WalletTradeData {
 export interface CopyTradeSettings {
   copyWalletAddress: string | null;
   copyAmountSol: number | null;
+  copyTargetWalletAddress?: string | null;
 }
 
 export interface TransactionAccountChange {

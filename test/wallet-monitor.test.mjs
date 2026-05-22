@@ -31,6 +31,7 @@ test("telegram help exposes wallet nickname commands", () => {
   assert.match(help, /\/wallets - List watched wallets and nicknames/);
   assert.match(help, /\/copywallet &lt;public-wallet&gt;/);
   assert.match(help, /\/copyamount &lt;sol&gt;/);
+  assert.match(help, /\/copytrade - Open copy trade setup menu/);
   assert.match(help, /\/copystatus - Show copy settings and watched wallets/);
   assert.deepEqual(commandFromMessage({ text: "/renamewallet wallet Alpha Wallet" }), {
     command: "/renamewallet",
@@ -39,6 +40,10 @@ test("telegram help exposes wallet nickname commands", () => {
   assert.deepEqual(commandFromMessage({ text: "/copyamount 0.25" }), {
     command: "/copyamount",
     args: ["0.25"]
+  });
+  assert.deepEqual(commandFromMessage({ text: "/copytrade" }), {
+    command: "/copytrade",
+    args: []
   });
 });
 
@@ -78,10 +83,14 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(await store.renameWallet("chat-1", wallet, "Alpha <Wallet>"), true);
     assert.equal(await store.setCopyWallet("chat-1", otherWallet), true);
     assert.equal(await store.setCopyAmountSol("chat-1", 0.25), true);
+    assert.equal(await store.setCopyTargetWallet("chat-1", otherWallet), false);
+    assert.equal(await store.setCopyTargetWallet("chat-1", wallet), true);
     assert.equal(await store.setCopyWallet("chat-2", otherWallet), false);
     assert.equal(await store.setCopyAmountSol("chat-2", 0.25), false);
+    assert.equal(await store.setCopyTargetWallet("chat-2", wallet), false);
     assert.equal(store.get("chat-1")?.copyWalletAddress, otherWallet);
     assert.equal(store.get("chat-1")?.copyAmountSol, 0.25);
+    assert.equal(store.get("chat-1")?.copyTargetWalletAddress, wallet);
 
     const reloaded = createSubscriberStore({ path });
     await reloaded.init();
@@ -91,9 +100,11 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     );
     assert.equal(reloaded.get("chat-1")?.copyWalletAddress, otherWallet);
     assert.equal(reloaded.get("chat-1")?.copyAmountSol, 0.25);
+    assert.equal(reloaded.get("chat-1")?.copyTargetWalletAddress, wallet);
 
     assert.equal(await reloaded.unwatchWallet("chat-1", wallet), true);
     assert.deepEqual(reloaded.listWatchedWallets("chat-1"), []);
+    assert.equal(reloaded.get("chat-1")?.copyTargetWalletAddress, null);
 
     const body = JSON.parse(await readFile(path, "utf8"));
     assert.equal(body.subscribers[0].chatId, "chat-1");

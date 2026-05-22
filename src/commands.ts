@@ -6,6 +6,7 @@ import {
   setTelegramCommands
 } from "./telegram.js";
 import { errorMessage } from "./types.js";
+import { isValidSolanaAddress } from "./wallet-monitor.js";
 import type { AlertModeValue, LegacyBotConfig, SubscriberStore, TelegramChatId, TelegramMessage, TelegramUpdate } from "./types.js";
 
 const telegramCommands = [
@@ -15,6 +16,9 @@ const telegramCommands = [
   { command: "migrations", description: "Watch migrated coins only" },
   { command: "newtokens", description: "Watch newly created tokens only" },
   { command: "both", description: "Watch new tokens and migrated coins" },
+  { command: "watch", description: "Watch a wallet" },
+  { command: "unwatch", description: "Stop watching a wallet" },
+  { command: "wallets", description: "List watched wallets" },
   { command: "help", description: "Show commands" }
 ];
 
@@ -27,6 +31,7 @@ interface CommandPollerOptions {
   config: LegacyBotConfig;
   testMessage: () => string;
   subscribers?: SubscriberStore;
+  onWalletWatchlistChange?: () => void | Promise<void>;
 }
 
 interface TelegramCommandPoller {
@@ -97,6 +102,9 @@ export function helpText(_chatId?: TelegramChatId): string {
     "/migrations - Watch migrated coins only",
     "/newtokens - Watch newly created tokens only",
     "/both - Watch new tokens and migrated coins",
+    "/watch &lt;wallet&gt; [label] - Watch a wallet's Pump.fun trades",
+    "/unwatch &lt;wallet&gt; - Stop watching a wallet",
+    "/wallets - List watched wallets",
     "/help - Show commands"
   ].join("\n");
 }
@@ -104,7 +112,8 @@ export function helpText(_chatId?: TelegramChatId): string {
 export function createTelegramCommandPoller({
   config,
   testMessage: _testMessage,
-  subscribers
+  subscribers,
+  onWalletWatchlistChange
 }: CommandPollerOptions): TelegramCommandPoller {
   let nextOffset: number | undefined;
   let shouldPoll = true;
@@ -154,6 +163,15 @@ export function createTelegramCommandPoller({
       case "/both":
         await reply(chatId, await changeMode(chatId, "both"));
         break;
+      case "/watch":
+        await reply(chatId, await watchWallet(chatId, parsed.args));
+        break;
+      case "/unwatch":
+        await reply(chatId, await unwatchWallet(chatId, parsed.args));
+        break;
+      case "/wallets":
+        await reply(chatId, listWallets(chatId));
+        break;
       default:
         await reply(chatId, "Unknown command. Send /help to see the bot commands.");
     }
@@ -202,6 +220,18 @@ export function createTelegramCommandPoller({
     return `<b>Verified.</b>\n\n${chooseModeText()}`;
   }
 
+  function requireVerified(chatId: TelegramChatId): string | null {
+    if (!subscribers) {
+      return "Subscriber controls are not available in this bot process.";
+    }
+
+    if (!subscribers.has(chatId)) {
+      return verificationPrompt();
+    }
+
+    return null;
+  }
+
   async function stopNotifications(chatId: TelegramChatId): Promise<string> {
     if (!subscribers) {
       return "Subscriber controls are not available in this bot process.";
@@ -229,6 +259,88 @@ export function createTelegramCommandPoller({
     return `<b>Now watching:</b> ${modeLabel(requestedMode)}`;
   }
 
+  async function watchWallet(chatId: TelegramChatId, args: string[]): Promise<string> {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return gate;
+    }
+
+    const wallet = args[0]?.trim();
+    const label = args.slice(1).join(" ").trim();
+
+    if (!wallet) {
+      return "Send <code>/watch wallet-address optional-label</code> to monitor a wallet.";
+    }
+
+    if (!isValidSolanaAddress(wallet)) {
+      return "That does not look like a Solana wallet address.";
+    }
+
+    const updated = await subscribers?.watchWallet(chatId, wallet, label);
+
+    if (!updated) {
+      return verificationPrompt();
+    }
+
+    await onWalletWatchlistChange?.();
+    return label
+      ? `<b>Watching wallet:</b> ${escapeWalletLabel(label)}\n<code>${wallet}</code>`
+      : `<b>Watching wallet:</b>\n<code>${wallet}</code>`;
+  }
+
+  async function unwatchWallet(chatId: TelegramChatId, args: string[]): Promise<string> {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return gate;
+    }
+
+    const wallet = args[0]?.trim();
+
+    if (!wallet) {
+      return "Send <code>/unwatch wallet-address</code> to stop monitoring a wallet.";
+    }
+
+    if (!isValidSolanaAddress(wallet)) {
+      return "That does not look like a Solana wallet address.";
+    }
+
+    const removed = await subscribers?.unwatchWallet(chatId, wallet);
+
+    if (!removed) {
+      return "That wallet was not being watched in this chat.";
+    }
+
+    await onWalletWatchlistChange?.();
+    return `<b>Stopped watching wallet:</b>\n<code>${wallet}</code>`;
+  }
+
+  function listWallets(chatId: TelegramChatId): string {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return gate;
+    }
+
+    const wallets = subscribers?.listWatchedWallets(chatId) || [];
+
+    if (wallets.length === 0) {
+      return "No watched wallets for this chat. Add one with <code>/watch wallet-address optional-label</code>.";
+    }
+
+    return [
+      "<b>Watched wallets</b>",
+      ...wallets.map((wallet) =>
+        wallet.label ? `${escapeWalletLabel(wallet.label)}\n<code>${wallet.address}</code>` : `<code>${wallet.address}</code>`
+      )
+    ].join("\n\n");
+  }
+
+  function escapeWalletLabel(value: string): string {
+    return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+  }
+
   async function pollOnce(): Promise<void> {
     const updates = await getTelegramUpdates({
       token: config.telegramToken,
@@ -253,7 +365,7 @@ export function createTelegramCommandPoller({
       await clearTelegramWebhook({ token: config.telegramToken });
       await setTelegramCommands({ token: config.telegramToken, commands: telegramCommands });
       console.log(`Telegram bot ready: @${bot.username}`);
-      console.log("Polling for /start, /help, /verify, /stop, /migrations, /newtokens, and /both");
+      console.log("Polling for /start, /help, /verify, /stop, /migrations, /newtokens, /both, /watch, /unwatch, and /wallets");
 
       while (shouldPoll) {
         try {

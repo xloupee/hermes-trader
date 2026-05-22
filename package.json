@@ -10,6 +10,7 @@
     "chat-id": "npm run build && node dist/get-chat-id.js",
     "past-migrations": "npm run build && node dist/past-migrations.js",
     "check": "tsc --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs",
     "deploy": "bash scripts/deploy.sh"
   },
   "dependencies": {

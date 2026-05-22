@@ -2,13 +2,20 @@ import WebSocket, { type RawData } from "ws";
 import { isRecord } from "./types.js";
 import type { LooseRecord } from "./types.js";
 
+export type PumpPortalSubscription =
+  | string
+  | {
+      method: string;
+      keys?: string[];
+    };
+
 interface PumpPortalUrlOptions {
   pumpPortalWsUrl: string;
   pumpPortalApiKey?: string;
 }
 
 interface PumpPortalMigrationListenerOptions extends PumpPortalUrlOptions {
-  subscriptionMethods?: string[];
+  subscriptionMethods?: PumpPortalSubscription[];
   onMigration: (event: LooseRecord) => void | Promise<void>;
   onStatus?: (message: string) => void;
   onError?: (error: Error) => void;
@@ -17,7 +24,7 @@ interface PumpPortalMigrationListenerOptions extends PumpPortalUrlOptions {
 interface PumpPortalMigrationListener {
   start: () => void;
   stop: () => void;
-  setSubscriptionMethods: (nextSubscriptionMethods: string[] | string) => void;
+  setSubscriptionMethods: (nextSubscriptionMethods: PumpPortalSubscription[] | PumpPortalSubscription) => void;
 }
 
 export function buildPumpPortalUrl({ pumpPortalWsUrl, pumpPortalApiKey }: PumpPortalUrlOptions): string {
@@ -42,7 +49,7 @@ export function createPumpPortalMigrationListener({
   let reconnectTimer: NodeJS.Timeout | undefined;
   let currentSubscriptionMethods = normalizeSubscriptionMethods(subscriptionMethods);
   let intentionalRestart = false;
-  let shouldReconnect = true;
+  let shouldReconnect = false;
   let ws: WebSocket | undefined;
 
   function connect(): void {
@@ -54,9 +61,9 @@ export function createPumpPortalMigrationListener({
       reconnectAttempt = 0;
       onStatus("Connected to PumpPortal websocket");
 
-      for (const method of currentSubscriptionMethods) {
-        socket.send(JSON.stringify({ method }));
-        onStatus(`Sent PumpPortal subscription: ${method}`);
+      for (const subscription of currentSubscriptionMethods) {
+        socket.send(JSON.stringify(subscription));
+        onStatus(`Sent PumpPortal subscription: ${subscription.method}`);
       }
     });
 
@@ -113,7 +120,7 @@ export function createPumpPortalMigrationListener({
       clearTimeout(reconnectTimer);
       ws?.close();
     },
-    setSubscriptionMethods(nextSubscriptionMethods: string[] | string) {
+    setSubscriptionMethods(nextSubscriptionMethods: PumpPortalSubscription[] | PumpPortalSubscription) {
       currentSubscriptionMethods = normalizeSubscriptionMethods(nextSubscriptionMethods);
       reconnectAttempt = 0;
       clearTimeout(reconnectTimer);
@@ -130,7 +137,21 @@ export function createPumpPortalMigrationListener({
   };
 }
 
-function normalizeSubscriptionMethods(value: string[] | string): string[] {
+function normalizeSubscriptionMethods(value: PumpPortalSubscription[] | PumpPortalSubscription): Array<{ method: string; keys?: string[] }> {
   const methods = Array.isArray(value) ? value : [value];
-  return [...new Set(methods.filter(Boolean))];
+  const byPayload = new Map<string, { method: string; keys?: string[] }>();
+
+  for (const method of methods) {
+    const subscription = typeof method === "string" ? { method } : method;
+    const keys = Array.isArray(subscription.keys) ? [...new Set(subscription.keys.filter(Boolean))].sort() : undefined;
+
+    if (!subscription.method || (subscription.keys && (!keys || keys.length === 0))) {
+      continue;
+    }
+
+    const normalized = keys ? { method: subscription.method, keys } : { method: subscription.method };
+    byPayload.set(JSON.stringify(normalized), normalized);
+  }
+
+  return [...byPayload.values()];
 }

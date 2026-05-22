@@ -3,12 +3,19 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { buildMigrationReplyMarkup, extractMigrationData, formatMigrationMessage, getEventId } from "./format.js";
 import { createTelegramCommandPoller } from "./commands.js";
-import { createPumpPortalMigrationListener } from "./pumpportal.js";
+import { createPumpPortalMigrationListener, type PumpPortalSubscription } from "./pumpportal.js";
 import { analyzeSolanaTransaction } from "./solana.js";
 import { createSubscriberStore } from "./subscribers.js";
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
 import { asRecord, errorMessage, isRecord, stringValue } from "./types.js";
-import type { AlertModeValue, BotConfig, LooseRecord, MigrationData, SubscriberRecord, TransactionAnalysis } from "./types.js";
+import {
+  buildWalletTradeReplyMarkup,
+  eventMentionsWatchedWallet,
+  formatWalletTradeMessage,
+  getWalletTradeEventId,
+  normalizeWalletTradeData
+} from "./wallet-monitor.js";
+import type { AlertModeValue, BotConfig, LooseRecord, MigrationData, SubscriberRecord, TransactionAnalysis, WalletTradeData } from "./types.js";
 
 const config: BotConfig = {
   telegramToken: process.env.TELEGRAM_BOT_TOKEN,
@@ -21,6 +28,7 @@ const config: BotConfig = {
   solscanBaseUrl: process.env.SOLSCAN_BASE_URL || "https://solscan.io",
   pumpFunBaseUrl: process.env.PUMPFUN_BASE_URL || "https://pump.fun",
   migrationLogPath: process.env.MIGRATION_LOG_PATH || "logs/migrations.jsonl",
+  walletTradeLogPath: process.env.WALLET_TRADE_LOG_PATH || "logs/wallet-trades.jsonl",
   pumpFunCoinApiBaseUrl: process.env.PUMPFUN_COIN_API_BASE_URL || "https://frontend-api-v3.pump.fun/coins",
   solUsdPriceUrl: process.env.SOL_USD_PRICE_URL || "https://api.coinbase.com/v2/prices/SOL-USD/spot",
   solanaRpcUrl: process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
@@ -41,7 +49,37 @@ const subscribers = createSubscriberStore({
   initialChatIds: [config.telegramChatId]
 });
 
-const activeSubscriptionMethods = ["subscribeNewToken", "subscribeMigration"];
+const baseSubscriptionMethods = ["subscribeNewToken", "subscribeMigration"];
+
+function watchedWalletAddresses(): string[] {
+  return [
+    ...new Set(
+      subscribers
+        .list()
+        .flatMap((subscriber) => subscriber.watchedWallets || [])
+        .map((wallet) => wallet.address)
+        .filter(Boolean)
+    )
+  ].sort();
+}
+
+function activePumpPortalSubscriptions(): PumpPortalSubscription[] {
+  const subscriptions: PumpPortalSubscription[] = [...baseSubscriptionMethods];
+  const walletAddresses = watchedWalletAddresses();
+
+  if (walletAddresses.length > 0) {
+    subscriptions.push({
+      method: "subscribeAccountTrade",
+      keys: walletAddresses
+    });
+  }
+
+  return subscriptions;
+}
+
+function activeSubscriptionMethodNames(): string[] {
+  return activePumpPortalSubscriptions().map((subscription) => (typeof subscription === "string" ? subscription : subscription.method));
+}
 
 function rememberEvent(id: string | null): boolean {
   if (!id) {
@@ -68,7 +106,6 @@ async function handleMigration(event: LooseRecord): Promise<void> {
   const eventMode = classifyEventMode(event);
 
   if (!eventMode) {
-    console.warn(`Skipping unknown PumpPortal event type: ${JSON.stringify(event)}`);
     return;
   }
 
@@ -92,7 +129,7 @@ async function handleMigration(event: LooseRecord): Promise<void> {
   const eventConfig = {
     ...config,
     alertModeLabel: "New tokens and migrated coins",
-    activeSubscriptionMethods,
+    activeSubscriptionMethods: activeSubscriptionMethodNames(),
     solUsdPrice,
     tokenInfo,
     metadata,
@@ -108,6 +145,80 @@ async function handleMigration(event: LooseRecord): Promise<void> {
   await sendAlertToSubscribers({ subscribers: recipients, migration, text, replyMarkup });
 }
 
+async function handlePumpPortalEvent(event: LooseRecord): Promise<void> {
+  const eventMode = classifyEventMode(event);
+
+  if (eventMode) {
+    await handleMigration(event);
+    return;
+  }
+
+  if (await handleWalletTrade(event)) {
+    return;
+  }
+
+  console.warn(`Skipping unknown PumpPortal event type: ${JSON.stringify(event)}`);
+}
+
+async function handleWalletTrade(event: LooseRecord): Promise<boolean> {
+  const subscribersByWallet = new Map<string, Array<{ subscriber: SubscriberRecord; label: string | null }>>();
+
+  for (const subscriber of subscribers.list()) {
+    for (const wallet of subscriber.watchedWallets || []) {
+      if (!eventMentionsWatchedWallet(event, wallet.address)) {
+        continue;
+      }
+
+      const entries = subscribersByWallet.get(wallet.address) || [];
+      entries.push({ subscriber, label: wallet.label });
+      subscribersByWallet.set(wallet.address, entries);
+    }
+  }
+
+  if (subscribersByWallet.size === 0) {
+    return false;
+  }
+
+  for (const [targetWallet, entries] of subscribersByWallet) {
+    const loggedTrade = normalizeWalletTradeData({
+      event,
+      targetWallet,
+      label: null,
+      config
+    });
+    const eventId = getWalletTradeEventId(loggedTrade);
+
+    if (rememberEvent(eventId)) {
+      continue;
+    }
+
+    await writeWalletTradeLog(loggedTrade);
+    console.log(`Wallet trade event: ${JSON.stringify(loggedTrade)}`);
+
+    for (const entry of entries) {
+      await sendWalletTradeAlert(entry.subscriber, {
+        ...loggedTrade,
+        label: entry.label
+      });
+    }
+  }
+
+  return true;
+}
+
+async function sendWalletTradeAlert(subscriber: SubscriberRecord, trade: WalletTradeData): Promise<void> {
+  try {
+    await sendTelegramMessage({
+      token: config.telegramToken,
+      chatId: subscriber.chatId,
+      text: formatWalletTradeMessage(trade),
+      replyMarkup: buildWalletTradeReplyMarkup(trade)
+    });
+  } catch (error) {
+    console.warn(`Could not send wallet trade alert to ${subscriber.chatId}: ${errorMessage(error)}`);
+  }
+}
+
 function classifyEventMode(event: LooseRecord): Exclude<AlertModeValue, "both"> | null {
   const eventType = String(event?.txType ?? event?.type ?? event?.eventType ?? "").toLowerCase();
 
@@ -117,6 +228,10 @@ function classifyEventMode(event: LooseRecord): Exclude<AlertModeValue, "both"> 
 
   if (eventType === "migration" || eventType === "migrate") {
     return "migrations";
+  }
+
+  if (eventType === "buy" || eventType === "sell") {
+    return null;
   }
 
   if (hasMigrationStyleFields(event)) {
@@ -398,6 +513,11 @@ async function writeMigrationLog(migration: MigrationData): Promise<void> {
   await appendFile(config.migrationLogPath, `${JSON.stringify(migration)}\n`);
 }
 
+async function writeWalletTradeLog(trade: WalletTradeData): Promise<void> {
+  await mkdir(dirname(config.walletTradeLogPath), { recursive: true });
+  await appendFile(config.walletTradeLogPath, `${JSON.stringify(trade)}\n`);
+}
+
 function testMigrationMessage(): string {
   return formatMigrationMessage(
     {
@@ -443,20 +563,33 @@ function assertConfig(): void {
 const commandPoller = createTelegramCommandPoller({
   config,
   testMessage: testMigrationMessage,
-  subscribers
+  subscribers,
+  onWalletWatchlistChange: () => {
+    refreshPumpPortalSubscriptions();
+  }
 });
 const migrationListener = createPumpPortalMigrationListener({
   pumpPortalWsUrl: config.pumpPortalWsUrl,
   pumpPortalApiKey: config.pumpPortalApiKey,
-  subscriptionMethods: activeSubscriptionMethods,
+  subscriptionMethods: activePumpPortalSubscriptions(),
   onMigration: (event) => {
-    handleMigration(event).catch((error) => {
-      console.error("Failed to process migration event:", error);
+    handlePumpPortalEvent(event).catch((error) => {
+      console.error("Failed to process PumpPortal event:", error);
     });
   },
   onStatus: (message: string) => console.log(message),
   onError: (error: Error) => console.error("PumpPortal websocket error:", error.message)
 });
+
+function refreshPumpPortalSubscriptions(): void {
+  const watchedWallets = watchedWalletAddresses();
+
+  if (watchedWallets.length > 0 && !config.pumpPortalApiKey) {
+    console.warn("Wallet monitoring is configured, but PUMPPORTAL_API_KEY is missing. PumpPortal account-trade streams require an API key.");
+  }
+
+  migrationListener.setSubscriptionMethods(activePumpPortalSubscriptions());
+}
 
 async function shutdown(): Promise<void> {
   if (isShuttingDown) {
@@ -491,5 +624,9 @@ process.on("SIGTERM", () => {
 assertConfig();
 await subscribers.init();
 console.log(`Loaded ${subscribers.count()} verified Telegram subscriber(s)`);
+if (watchedWalletAddresses().length > 0 && !config.pumpPortalApiKey) {
+  console.warn("Wallet monitoring is configured, but PUMPPORTAL_API_KEY is missing. PumpPortal account-trade streams require an API key.");
+}
+refreshPumpPortalSubscriptions();
 migrationListener.start();
 await commandPoller.start();

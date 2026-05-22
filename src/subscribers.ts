@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { asRecord } from "./types.js";
-import type { AlertModeValue, SubscriberRecord, SubscriberStore, TelegramChatId } from "./types.js";
+import { asRecord, stringValue } from "./types.js";
+import type { AlertModeValue, SubscriberRecord, SubscriberStore, TelegramChatId, WatchedWallet } from "./types.js";
 
 const LEGACY_MODE: AlertModeValue = "migrations";
 
@@ -17,8 +17,27 @@ function makeSubscriber(chatId: string, mode: AlertModeValue | null, now = new D
   return {
     chatId,
     mode,
+    watchedWallets: [],
     verifiedAt: now,
     updatedAt: now
+  };
+}
+
+function normalizeWatchedWallet(value: unknown, fallbackNow = new Date().toISOString()): WatchedWallet | null {
+  const record = asRecord(value);
+  const address = stringValue(record.address || record.wallet || record.publicKey)?.trim();
+
+  if (!address) {
+    return null;
+  }
+
+  const label = stringValue(record.label)?.trim() || null;
+
+  return {
+    address,
+    label,
+    addedAt: typeof record.addedAt === "string" ? record.addedAt : fallbackNow,
+    updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : fallbackNow
   };
 }
 
@@ -35,6 +54,7 @@ function mergeSubscriber(
   subscribers.set(chatId, {
     chatId,
     mode,
+    watchedWallets: existing?.watchedWallets || [],
     verifiedAt: typeof verifiedAt === "string" ? verifiedAt : existing?.verifiedAt || now,
     updatedAt: typeof updatedAt === "string" ? updatedAt : existing?.updatedAt || now
   });
@@ -117,6 +137,27 @@ export function createSubscriberStore({
     }
 
     mergeSubscriber(subscribers, chatId, normalizeMode(record.mode), record.verifiedAt, record.updatedAt);
+    const existing = subscribers.get(chatId);
+    const watchedWallets = Array.isArray(record.watchedWallets)
+      ? record.watchedWallets.map((wallet) => normalizeWatchedWallet(wallet)).filter((wallet): wallet is WatchedWallet => Boolean(wallet))
+      : [];
+
+    if (existing && watchedWallets.length > 0) {
+      subscribers.set(chatId, {
+        ...existing,
+        watchedWallets: dedupeWatchedWallets(watchedWallets)
+      });
+    }
+  }
+
+  function dedupeWatchedWallets(watchedWallets: WatchedWallet[]): WatchedWallet[] {
+    const byAddress = new Map<string, WatchedWallet>();
+
+    for (const wallet of watchedWallets) {
+      byAddress.set(wallet.address, wallet);
+    }
+
+    return [...byAddress.values()].sort((left, right) => left.address.localeCompare(right.address));
   }
 
   async function save(): Promise<void> {
@@ -191,6 +232,56 @@ export function createSubscriberStore({
       });
       await save();
       return true;
+    },
+    async watchWallet(chatId, address, label) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const now = new Date().toISOString();
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const watchedWallets = existing.watchedWallets.filter((wallet) => wallet.address !== address);
+      const previous = existing.watchedWallets.find((wallet) => wallet.address === address);
+
+      watchedWallets.push({
+        address,
+        label: label?.trim() || null,
+        addedAt: previous?.addedAt || now,
+        updatedAt: now
+      });
+
+      subscribers.set(normalized, {
+        ...existing,
+        watchedWallets: dedupeWatchedWallets(watchedWallets),
+        updatedAt: now
+      });
+      await save();
+      return true;
+    },
+    async unwatchWallet(chatId, address) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const watchedWallets = existing.watchedWallets.filter((wallet) => wallet.address !== address);
+
+      subscribers.set(normalized, {
+        ...existing,
+        watchedWallets,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return watchedWallets.length !== existing.watchedWallets.length;
+    },
+    listWatchedWallets(chatId) {
+      return subscribers.get(String(chatId))?.watchedWallets || [];
     },
     list() {
       return [...subscribers.values()];

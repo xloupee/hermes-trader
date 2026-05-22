@@ -3,17 +3,17 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { buildMigrationReplyMarkup, extractMigrationData, formatMigrationMessage, getEventId } from "./format.js";
 import { createTelegramCommandPoller } from "./commands.js";
-import { createPumpPortalMigrationListener, type PumpPortalSubscription } from "./pumpportal.js";
+import { createHeliusWebhookServer, missingHeliusConfigWarning, syncHeliusWebhook } from "./helius.js";
+import { heliusEventMentionsWatchedWallet, isHeliusSwapEvent, normalizeHeliusSwapData } from "./helius-swaps.js";
+import { createPumpPortalMigrationListener } from "./pumpportal.js";
 import { analyzeSolanaTransaction } from "./solana.js";
 import { createSubscriberStore } from "./subscribers.js";
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
 import { asRecord, errorMessage, isRecord, stringValue } from "./types.js";
 import {
   buildWalletTradeReplyMarkup,
-  eventMentionsWatchedWallet,
   formatWalletTradeMessage,
-  getWalletTradeEventId,
-  normalizeWalletTradeData
+  getWalletTradeEventId
 } from "./wallet-monitor.js";
 import type { AlertModeValue, BotConfig, LooseRecord, MigrationData, SubscriberRecord, TransactionAnalysis, WalletTradeData } from "./types.js";
 
@@ -29,6 +29,13 @@ const config: BotConfig = {
   pumpFunBaseUrl: process.env.PUMPFUN_BASE_URL || "https://pump.fun",
   migrationLogPath: process.env.MIGRATION_LOG_PATH || "logs/migrations.jsonl",
   walletTradeLogPath: process.env.WALLET_TRADE_LOG_PATH || "logs/wallet-trades.jsonl",
+  heliusApiKey: process.env.HELIUS_API_KEY,
+  heliusApiBaseUrl: process.env.HELIUS_API_BASE_URL || "https://api-mainnet.helius-rpc.com",
+  heliusWebhookAuthHeader: process.env.HELIUS_WEBHOOK_AUTH_HEADER,
+  heliusWebhookId: process.env.HELIUS_WEBHOOK_ID,
+  heliusWebhookPublicUrl: process.env.HELIUS_WEBHOOK_PUBLIC_URL,
+  heliusWebhookStatePath: process.env.HELIUS_WEBHOOK_STATE_PATH || "data/helius-webhook.json",
+  webhookPort: Number(process.env.WEBHOOK_PORT || 3000),
   pumpFunCoinApiBaseUrl: process.env.PUMPFUN_COIN_API_BASE_URL || "https://frontend-api-v3.pump.fun/coins",
   solUsdPriceUrl: process.env.SOL_USD_PRICE_URL || "https://api.coinbase.com/v2/prices/SOL-USD/spot",
   solanaRpcUrl: process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
@@ -63,22 +70,12 @@ function watchedWalletAddresses(): string[] {
   ].sort();
 }
 
-function activePumpPortalSubscriptions(): PumpPortalSubscription[] {
-  const subscriptions: PumpPortalSubscription[] = [...baseSubscriptionMethods];
-  const walletAddresses = watchedWalletAddresses();
-
-  if (walletAddresses.length > 0) {
-    subscriptions.push({
-      method: "subscribeAccountTrade",
-      keys: walletAddresses
-    });
-  }
-
-  return subscriptions;
+function activePumpPortalSubscriptions(): string[] {
+  return [...baseSubscriptionMethods];
 }
 
 function activeSubscriptionMethodNames(): string[] {
-  return activePumpPortalSubscriptions().map((subscription) => (typeof subscription === "string" ? subscription : subscription.method));
+  return activePumpPortalSubscriptions();
 }
 
 function rememberEvent(id: string | null): boolean {
@@ -153,19 +150,25 @@ async function handlePumpPortalEvent(event: LooseRecord): Promise<void> {
     return;
   }
 
-  if (await handleWalletTrade(event)) {
-    return;
-  }
-
   console.warn(`Skipping unknown PumpPortal event type: ${JSON.stringify(event)}`);
 }
 
-async function handleWalletTrade(event: LooseRecord): Promise<boolean> {
+async function handleHeliusWebhookEvents(events: LooseRecord[]): Promise<void> {
+  for (const event of events) {
+    if (!isHeliusSwapEvent(event)) {
+      continue;
+    }
+
+    await handleHeliusSwap(event);
+  }
+}
+
+async function handleHeliusSwap(event: LooseRecord): Promise<boolean> {
   const subscribersByWallet = new Map<string, Array<{ subscriber: SubscriberRecord; label: string | null }>>();
 
   for (const subscriber of subscribers.list()) {
     for (const wallet of subscriber.watchedWallets || []) {
-      if (!eventMentionsWatchedWallet(event, wallet.address)) {
+      if (!heliusEventMentionsWatchedWallet(event, wallet.address)) {
         continue;
       }
 
@@ -180,7 +183,7 @@ async function handleWalletTrade(event: LooseRecord): Promise<boolean> {
   }
 
   for (const [targetWallet, entries] of subscribersByWallet) {
-    const loggedTrade = normalizeWalletTradeData({
+    const loggedTrade = normalizeHeliusSwapData({
       event,
       targetWallet,
       label: null,
@@ -565,7 +568,7 @@ const commandPoller = createTelegramCommandPoller({
   testMessage: testMigrationMessage,
   subscribers,
   onWalletWatchlistChange: () => {
-    refreshPumpPortalSubscriptions();
+    return syncHeliusWalletWebhook();
   }
 });
 const migrationListener = createPumpPortalMigrationListener({
@@ -581,14 +584,41 @@ const migrationListener = createPumpPortalMigrationListener({
   onError: (error: Error) => console.error("PumpPortal websocket error:", error.message)
 });
 
-function refreshPumpPortalSubscriptions(): void {
-  const watchedWallets = watchedWalletAddresses();
+const heliusWebhookServer = createHeliusWebhookServer({
+  authHeader: config.heliusWebhookAuthHeader,
+  port: config.webhookPort,
+  onEvents: handleHeliusWebhookEvents
+});
 
-  if (watchedWallets.length > 0 && !config.pumpPortalApiKey) {
-    console.warn("Wallet monitoring is configured, but PUMPPORTAL_API_KEY is missing. PumpPortal account-trade streams require an API key.");
+async function syncHeliusWalletWebhook(): Promise<string | undefined> {
+  let result: Awaited<ReturnType<typeof syncHeliusWebhook>>;
+
+  try {
+    result = await syncHeliusWebhook({
+      apiKey: config.heliusApiKey,
+      apiBaseUrl: config.heliusApiBaseUrl,
+      authHeader: config.heliusWebhookAuthHeader,
+      publicUrl: config.heliusWebhookPublicUrl,
+      webhookId: config.heliusWebhookId,
+      statePath: config.heliusWebhookStatePath,
+      accountAddresses: watchedWalletAddresses()
+    });
+  } catch (error) {
+    const warning = `Helius webhook sync failed: ${errorMessage(error)}`;
+    console.warn(warning);
+    return warning;
   }
 
-  migrationListener.setSubscriptionMethods(activePumpPortalSubscriptions());
+  if (result.warning) {
+    console.warn(result.warning);
+    return result.warning;
+  }
+
+  if (result.webhookId) {
+    console.log(`Helius webhook synced: ${result.webhookId}`);
+  }
+
+  return undefined;
 }
 
 async function shutdown(): Promise<void> {
@@ -600,6 +630,7 @@ async function shutdown(): Promise<void> {
   console.log("Shutting down");
   commandPoller.stop();
   migrationListener.stop();
+  await heliusWebhookServer.stop();
 
   if (config.telegramToken && subscribers.count() > 0) {
     await notifySubscribers(shutdownMessage());
@@ -624,9 +655,13 @@ process.on("SIGTERM", () => {
 assertConfig();
 await subscribers.init();
 console.log(`Loaded ${subscribers.count()} verified Telegram subscriber(s)`);
-if (watchedWalletAddresses().length > 0 && !config.pumpPortalApiKey) {
-  console.warn("Wallet monitoring is configured, but PUMPPORTAL_API_KEY is missing. PumpPortal account-trade streams require an API key.");
+if (watchedWalletAddresses().length > 0) {
+  await syncHeliusWalletWebhook();
 }
-refreshPumpPortalSubscriptions();
+if (config.heliusWebhookAuthHeader) {
+  await heliusWebhookServer.start();
+} else {
+  console.warn(missingHeliusConfigWarning());
+}
 migrationListener.start();
 await commandPoller.start();

@@ -10,15 +10,20 @@ PumpPortal's Data API exposes a websocket at:
 wss://pumpportal.fun/api/data?api-key=your-api-key-here
 ```
 
-After connecting, this bot sends:
+After connecting, this bot sends PumpPortal subscriptions for token events:
 
 ```json
 { "method": "subscribeNewToken" }
 { "method": "subscribeMigration" }
-{ "method": "subscribeAccountTrade", "keys": ["wallet-address"] }
 ```
 
-The bot keeps one websocket connection open and filters token, migration, and watched-wallet alerts per verified Telegram user.
+Watched-wallet swap alerts use Helius enhanced webhooks at:
+
+```text
+POST /webhooks/helius
+```
+
+The bot keeps one PumpPortal websocket connection open for token events and filters token, migration, and watched-wallet alerts per verified Telegram user.
 
 ## Setup
 
@@ -29,7 +34,7 @@ The bot keeps one websocket connection open and filters token, migration, and wa
 cp .env.example .env
 ```
 
-3. Fill in `TELEGRAM_BOT_TOKEN`. Set `TELEGRAM_VERIFY_CODE` to a private invite code people must send before receiving alerts. `PUMPPORTAL_API_KEY` is optional for migrations, but supported if you have one.
+3. Fill in `TELEGRAM_BOT_TOKEN`. Set `TELEGRAM_VERIFY_CODE` to a private invite code people must send before receiving alerts. `PUMPPORTAL_API_KEY` is optional for migrations, but supported if you have one. For `/watch` swap alerts, set `HELIUS_API_KEY`, `HELIUS_WEBHOOK_PUBLIC_URL`, and `HELIUS_WEBHOOK_AUTH_HEADER`.
 4. Install dependencies:
 
 ```bash
@@ -45,7 +50,7 @@ npm start
 6. In Telegram, open your bot and send `/start`.
 7. Send `/verify your-code` using the value from `TELEGRAM_VERIFY_CODE`.
 8. Choose your alert mode with `/migrations`, `/newtokens`, or `/both`.
-9. To monitor wallet trades, send `/watch wallet-address optional-label`. Wallet trade streams require `PUMPPORTAL_API_KEY`.
+9. To monitor wallet swaps, send `/watch wallet-address optional-label`. Wallet swap alerts require the Helius webhook env vars.
 10. Restart the bot if you changed `.env`:
 
 ```bash
@@ -63,7 +68,7 @@ Verified subscribers and their alert modes are stored in `TELEGRAM_SUBSCRIBERS_P
 - `/migrations` - Watch migrated coins only for this chat.
 - `/newtokens` - Watch newly created tokens only for this chat.
 - `/both` - Watch new tokens and migrated coins for this chat.
-- `/watch <wallet> [label]` - Watch a wallet's Pump.fun trades for this chat.
+- `/watch <wallet> [label]` - Watch a wallet's swaps for this chat.
 - `/unwatch <wallet>` - Stop watching a wallet for this chat.
 - `/wallets` - List watched wallets for this chat.
 
@@ -74,7 +79,8 @@ Verified subscribers and their alert modes are stored in `TELEGRAM_SUBSCRIBERS_P
 - Telegram messages are HTML escaped before sending.
 - To inspect recent on-chain migrations without waiting for a live event, run `npm run past-migrations -- 10`.
 - Set `SOLANA_RPC_URL` in `.env` if public Solana RPC rate limits you.
-- Wallet trade monitor events are stored in `WALLET_TRADE_LOG_PATH`.
+- Wallet swap monitor events are stored in `WALLET_TRADE_LOG_PATH`.
+- Expose `WEBHOOK_PORT` through your reverse proxy at the exact `HELIUS_WEBHOOK_PUBLIC_URL`, and forward the `Authorization` header unchanged.
 
 ## Research
 

@@ -31,7 +31,7 @@ interface CommandPollerOptions {
   config: LegacyBotConfig;
   testMessage: () => string;
   subscribers?: SubscriberStore;
-  onWalletWatchlistChange?: () => void | Promise<void>;
+  onWalletWatchlistChange?: () => string | void | Promise<string | void>;
 }
 
 interface TelegramCommandPoller {
@@ -102,7 +102,7 @@ export function helpText(_chatId?: TelegramChatId): string {
     "/migrations - Watch migrated coins only",
     "/newtokens - Watch newly created tokens only",
     "/both - Watch new tokens and migrated coins",
-    "/watch &lt;wallet&gt; [label] - Watch a wallet's Pump.fun trades",
+    "/watch &lt;wallet&gt; [label] - Watch a wallet's swaps",
     "/unwatch &lt;wallet&gt; - Stop watching a wallet",
     "/wallets - List watched wallets",
     "/help - Show commands"
@@ -283,10 +283,12 @@ export function createTelegramCommandPoller({
       return verificationPrompt();
     }
 
-    await onWalletWatchlistChange?.();
-    return label
+    const syncWarning = await onWalletWatchlistChange?.();
+    const success = label
       ? `<b>Watching wallet:</b> ${escapeWalletLabel(label)}\n<code>${wallet}</code>`
       : `<b>Watching wallet:</b>\n<code>${wallet}</code>`;
+
+    return syncWarning ? `${success}\n\n${syncWarning}` : success;
   }
 
   async function unwatchWallet(chatId: TelegramChatId, args: string[]): Promise<string> {
@@ -312,8 +314,9 @@ export function createTelegramCommandPoller({
       return "That wallet was not being watched in this chat.";
     }
 
-    await onWalletWatchlistChange?.();
-    return `<b>Stopped watching wallet:</b>\n<code>${wallet}</code>`;
+    const syncWarning = await onWalletWatchlistChange?.();
+    const success = `<b>Stopped watching wallet:</b>\n<code>${wallet}</code>`;
+    return syncWarning ? `${success}\n\n${syncWarning}` : success;
   }
 
   function listWallets(chatId: TelegramChatId): string {

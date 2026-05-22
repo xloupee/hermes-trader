@@ -18,6 +18,7 @@ ssh "$VPS_HOST" "mkdir -p '$APP_DIR'"
 COPYFILE_DISABLE=1 tar \
   --no-xattrs \
   --exclude='.git' \
+  --exclude='.env' \
   --exclude='node_modules' \
   --exclude='logs' \
   --exclude='data' \
@@ -27,7 +28,7 @@ COPYFILE_DISABLE=1 tar \
     set -euo pipefail
     TMP_DIR=\$(mktemp -d)
     tar -xzf - -C \"\$TMP_DIR\"
-    find '$APP_DIR' -mindepth 1 -maxdepth 1 ! -name logs ! -name node_modules ! -name data -exec rm -rf {} +
+    find '$APP_DIR' -mindepth 1 -maxdepth 1 ! -name .env ! -name logs ! -name node_modules ! -name data -exec rm -rf {} +
     cp -a \"\$TMP_DIR\"/. '$APP_DIR'/
     rm -rf \"\$TMP_DIR\"
     cd '$APP_DIR'

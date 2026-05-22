@@ -33,6 +33,13 @@ export interface BotConfig extends MigrationFormatConfig {
   pumpPortalWsUrl: string;
   migrationLogPath: string;
   walletTradeLogPath: string;
+  heliusApiKey?: string;
+  heliusApiBaseUrl: string;
+  heliusWebhookAuthHeader?: string;
+  heliusWebhookId?: string;
+  heliusWebhookPublicUrl?: string;
+  heliusWebhookStatePath: string;
+  webhookPort: number;
   pumpFunCoinApiBaseUrl: string;
   solUsdPriceUrl: string;
   solanaRpcUrl: string;
@@ -110,15 +117,27 @@ export interface SubscriberRecord {
   updatedAt: string;
 }
 
-export type WalletTradeAction = "buy" | "sell" | "unknown";
+export type WalletTradeAction = "buy" | "sell" | "swap" | "unknown";
+
+export interface WalletTradeAsset {
+  mint: string | null;
+  symbol: string | null;
+  amount: number | null;
+}
 
 export interface WalletTradeData {
   observedAt: string;
+  provider: "pumpportal" | "helius";
   targetWallet: string;
   label: string | null;
   action: WalletTradeAction;
   mint: string | null;
   signature: string | null;
+  timestamp: number | null;
+  feePayer: string | null;
+  source: string | null;
+  input: WalletTradeAsset | null;
+  output: WalletTradeAsset | null;
   solAmount: number | null;
   tokenAmount: number | null;
   pool: string | null;

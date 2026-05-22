@@ -69,3 +69,7 @@ Verified subscribers and their alert modes are stored in `TELEGRAM_SUBSCRIBERS_P
 - Telegram messages are HTML escaped before sending.
 - To inspect recent on-chain migrations without waiting for a live event, run `npm run past-migrations -- 10`.
 - Set `SOLANA_RPC_URL` in `.env` if public Solana RPC rate limits you.
+
+## Research
+
+- [Copy trading wallet research](docs/copy-trading-research.md) - technical plan for adding wallet trade monitoring, dry-run copy-trade planning, and guarded local execution.

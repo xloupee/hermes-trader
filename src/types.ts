@@ -3,6 +3,13 @@ export type LooseRecord = Record<string, unknown>;
 export type TelegramChatId = string | number;
 export type AlertModeValue = "migrations" | "newtokens" | "both";
 
+export interface WatchedWallet {
+  address: string;
+  label: string | null;
+  addedAt: string;
+  updatedAt: string;
+}
+
 export interface ExplorerConfig {
   pumpFunBaseUrl: string;
   solscanBaseUrl: string;
@@ -25,6 +32,7 @@ export interface BotConfig extends MigrationFormatConfig {
   pumpPortalApiKey?: string;
   pumpPortalWsUrl: string;
   migrationLogPath: string;
+  walletTradeLogPath: string;
   pumpFunCoinApiBaseUrl: string;
   solUsdPriceUrl: string;
   solanaRpcUrl: string;
@@ -87,6 +95,9 @@ export interface SubscriberStore {
   remove: (chatId: TelegramChatId) => Promise<void>;
   get: (chatId: TelegramChatId) => SubscriberRecord | null;
   setMode: (chatId: TelegramChatId, mode: AlertModeValue) => Promise<boolean>;
+  watchWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
+  unwatchWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
+  listWatchedWallets: (chatId: TelegramChatId) => WatchedWallet[];
   list: () => SubscriberRecord[];
   count: () => number;
 }
@@ -94,8 +105,28 @@ export interface SubscriberStore {
 export interface SubscriberRecord {
   chatId: string;
   mode: AlertModeValue | null;
+  watchedWallets: WatchedWallet[];
   verifiedAt: string;
   updatedAt: string;
+}
+
+export type WalletTradeAction = "buy" | "sell" | "unknown";
+
+export interface WalletTradeData {
+  observedAt: string;
+  targetWallet: string;
+  label: string | null;
+  action: WalletTradeAction;
+  mint: string | null;
+  signature: string | null;
+  solAmount: number | null;
+  tokenAmount: number | null;
+  pool: string | null;
+  marketCapSol: number | null;
+  pumpFunUrl: string | null;
+  solscanTokenUrl: string | null;
+  solscanTxUrl: string | null;
+  raw: LooseRecord;
 }
 
 export interface TransactionAccountChange {

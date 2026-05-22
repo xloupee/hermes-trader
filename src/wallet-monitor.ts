@@ -1,5 +1,5 @@
 import { escapeHtml } from "./format.js";
-import type { TelegramReplyMarkup, WalletTradeAction, WalletTradeAsset, WalletTradeData } from "./types.js";
+import type { CopyTradeSettings, TelegramReplyMarkup, WalletTradeAction, WalletTradeAsset, WalletTradeData } from "./types.js";
 
 const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
@@ -119,6 +119,38 @@ export function formatWalletTradeMessage(trade: WalletTradeData): string {
   }
 
   return lines.join("\n");
+}
+
+export function formatWalletTradeMessageWithCopySettings(trade: WalletTradeData, copySettings?: CopyTradeSettings | null): string {
+  const message = formatWalletTradeMessage(trade);
+
+  if (!copySettings?.copyWalletAddress && !copySettings?.copyAmountSol) {
+    return message;
+  }
+
+  const lines = [message, "", "<b>Copy trade</b>"];
+
+  lines.push(
+    `<b>Copy wallet:</b> ${copySettings.copyWalletAddress ? `<code>${escapeHtml(copySettings.copyWalletAddress)}</code>` : "Not set"}`
+  );
+  lines.push(`<b>Copy amount:</b> ${copySettings.copyAmountSol ? `${formatNumber(copySettings.copyAmountSol)} SOL` : "Not set"}`);
+
+  if (!copySettings.copyWalletAddress || !copySettings.copyAmountSol) {
+    lines.push("<b>Status:</b> Incomplete setup");
+    return lines.join("\n");
+  }
+
+  if (isSolToTokenSwap(trade)) {
+    lines.push(`<b>Status:</b> Ready to copy ${formatNumber(copySettings.copyAmountSol)} SOL into this token`);
+  } else {
+    lines.push("<b>Status:</b> Not a copyable SOL-to-token buy");
+  }
+
+  return lines.join("\n");
+}
+
+function isSolToTokenSwap(trade: WalletTradeData): boolean {
+  return trade.input?.symbol === "SOL" && Boolean(trade.output?.mint) && trade.output?.symbol !== "SOL";
 }
 
 function formatAsset({ amount, symbol, mint }: WalletTradeAsset): string | null {

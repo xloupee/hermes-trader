@@ -20,6 +20,9 @@ const telegramCommands = [
   { command: "renamewallet", description: "Rename a watched wallet" },
   { command: "unwatch", description: "Stop watching a wallet" },
   { command: "wallets", description: "List watched wallets" },
+  { command: "copywallet", description: "Set copy wallet" },
+  { command: "copyamount", description: "Set copy amount" },
+  { command: "copystatus", description: "Show copy settings" },
   { command: "help", description: "Show commands" }
 ];
 
@@ -109,6 +112,9 @@ export function helpText(_chatId?: TelegramChatId): string {
     "/renamewallet &lt;wallet&gt; &lt;nickname|-&gt; - Rename or clear a wallet nickname",
     "/unwatch &lt;wallet&gt; - Stop watching a wallet",
     "/wallets - List watched wallets and nicknames",
+    "/copywallet &lt;public-wallet&gt; - Save your copy wallet public address",
+    "/copyamount &lt;sol&gt; - Save your fixed copy size",
+    "/copystatus - Show copy settings and watched wallets",
     "/help - Show commands"
   ].join("\n");
 }
@@ -178,6 +184,15 @@ export function createTelegramCommandPoller({
         break;
       case "/wallets":
         await reply(chatId, listWallets(chatId));
+        break;
+      case "/copywallet":
+        await reply(chatId, await setCopyWallet(chatId, parsed.args));
+        break;
+      case "/copyamount":
+        await reply(chatId, await setCopyAmount(chatId, parsed.args));
+        break;
+      case "/copystatus":
+        await reply(chatId, copyStatus(chatId));
         break;
       default:
         await reply(chatId, "Unknown command. Send /help to see the bot commands.");
@@ -391,8 +406,89 @@ export function createTelegramCommandPoller({
     ].join("\n\n");
   }
 
+  async function setCopyWallet(chatId: TelegramChatId, args: string[]): Promise<string> {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return gate;
+    }
+
+    const wallet = args[0]?.trim();
+
+    if (!wallet) {
+      return "Send <code>/copywallet public-wallet-address</code> to save your copy wallet.";
+    }
+
+    if (!isValidSolanaAddress(wallet)) {
+      return "That does not look like a Solana wallet address.";
+    }
+
+    const updated = await subscribers?.setCopyWallet(chatId, wallet);
+
+    if (!updated) {
+      return verificationPrompt();
+    }
+
+    return `<b>Copy wallet saved:</b>\n<code>${wallet}</code>`;
+  }
+
+  async function setCopyAmount(chatId: TelegramChatId, args: string[]): Promise<string> {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return gate;
+    }
+
+    const rawAmount = args[0]?.trim();
+    const amount = Number(rawAmount);
+
+    if (!rawAmount || !Number.isFinite(amount) || amount <= 0) {
+      return "Send <code>/copyamount 0.1</code> to save a fixed copy size in SOL.";
+    }
+
+    const updated = await subscribers?.setCopyAmountSol(chatId, amount);
+
+    if (!updated) {
+      return verificationPrompt();
+    }
+
+    return `<b>Copy amount saved:</b> ${formatSolAmount(amount)} SOL`;
+  }
+
+  function copyStatus(chatId: TelegramChatId): string {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return gate;
+    }
+
+    const subscriber = subscribers?.get(chatId);
+    const wallets = subscriber?.watchedWallets || [];
+    const watchedWalletLines =
+      wallets.length === 0
+        ? ["No watched wallets."]
+        : wallets.map((wallet) =>
+            wallet.label ? `${escapeWalletLabel(wallet.label)}\n<code>${wallet.address}</code>` : `<code>${wallet.address}</code>`
+          );
+
+    return [
+      "<b>Copy settings</b>",
+      `<b>Copy wallet:</b> ${subscriber?.copyWalletAddress ? `<code>${subscriber.copyWalletAddress}</code>` : "Not set"}`,
+      `<b>Copy amount:</b> ${subscriber?.copyAmountSol ? `${formatSolAmount(subscriber.copyAmountSol)} SOL` : "Not set"}`,
+      "",
+      "<b>Watched wallets</b>",
+      ...watchedWalletLines
+    ].join("\n");
+  }
+
   function escapeWalletLabel(value: string): string {
     return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+  }
+
+  function formatSolAmount(value: number): string {
+    return new Intl.NumberFormat("en-US", {
+      maximumFractionDigits: 9
+    }).format(value);
   }
 
   function validateNickname(value: string): string | null {
@@ -427,7 +523,9 @@ export function createTelegramCommandPoller({
       await clearTelegramWebhook({ token: config.telegramToken });
       await setTelegramCommands({ token: config.telegramToken, commands: telegramCommands });
       console.log(`Telegram bot ready: @${bot.username}`);
-      console.log("Polling for /start, /help, /verify, /stop, /migrations, /newtokens, /both, /watch, /renamewallet, /unwatch, and /wallets");
+      console.log(
+        "Polling for /start, /help, /verify, /stop, /migrations, /newtokens, /both, /watch, /renamewallet, /unwatch, /wallets, /copywallet, /copyamount, and /copystatus"
+      );
 
       while (shouldPoll) {
         try {

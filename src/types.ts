@@ -105,6 +105,8 @@ export interface SubscriberStore {
   watchWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
   renameWallet: (chatId: TelegramChatId, address: string, label: string | null) => Promise<boolean>;
   unwatchWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
+  setCopyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
+  setCopyAmountSol: (chatId: TelegramChatId, amountSol: number) => Promise<boolean>;
   listWatchedWallets: (chatId: TelegramChatId) => WatchedWallet[];
   list: () => SubscriberRecord[];
   count: () => number;
@@ -114,6 +116,8 @@ export interface SubscriberRecord {
   chatId: string;
   mode: AlertModeValue | null;
   watchedWallets: WatchedWallet[];
+  copyWalletAddress: string | null;
+  copyAmountSol: number | null;
   verifiedAt: string;
   updatedAt: string;
 }
@@ -147,6 +151,11 @@ export interface WalletTradeData {
   solscanTokenUrl: string | null;
   solscanTxUrl: string | null;
   raw: LooseRecord;
+}
+
+export interface CopyTradeSettings {
+  copyWalletAddress: string | null;
+  copyAmountSol: number | null;
 }
 
 export interface TransactionAccountChange {

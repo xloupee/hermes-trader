@@ -72,6 +72,9 @@ Verified subscribers and their alert modes are stored in `TELEGRAM_SUBSCRIBERS_P
 - `/renamewallet <wallet> <nickname|->` - Rename or clear a watched wallet nickname.
 - `/unwatch <wallet>` - Stop watching a wallet for this chat.
 - `/wallets` - List watched wallets and nicknames for this chat.
+- `/copywallet <public-wallet>` - Save this chat's copy wallet public address.
+- `/copyamount <sol>` - Save this chat's fixed copy size in SOL.
+- `/copystatus` - Show copy settings and watched wallets.
 
 ## Notes
 
@@ -81,6 +84,7 @@ Verified subscribers and their alert modes are stored in `TELEGRAM_SUBSCRIBERS_P
 - To inspect recent on-chain migrations without waiting for a live event, run `npm run past-migrations -- 10`.
 - Set `SOLANA_RPC_URL` in `.env` if public Solana RPC rate limits you.
 - Wallet swap monitor events are stored in `WALLET_TRADE_LOG_PATH`.
+- Wallet swap alerts include copy-trade details when `/copywallet` or `/copyamount` is configured. This is alert output only; it does not execute trades.
 - Expose `WEBHOOK_PORT` through your reverse proxy at the exact `HELIUS_WEBHOOK_PUBLIC_URL`, and forward the `Authorization` header unchanged.
 
 ## Research

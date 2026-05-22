@@ -12,7 +12,7 @@ import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
 import { asRecord, errorMessage, isRecord, stringValue } from "./types.js";
 import {
   buildWalletTradeReplyMarkup,
-  formatWalletTradeMessage,
+  formatWalletTradeMessageWithCopySettings,
   getWalletTradeEventId
 } from "./wallet-monitor.js";
 import type { AlertModeValue, BotConfig, LooseRecord, MigrationData, SubscriberRecord, TransactionAnalysis, WalletTradeData } from "./types.js";
@@ -214,7 +214,10 @@ async function sendWalletTradeAlert(subscriber: SubscriberRecord, trade: WalletT
     await sendTelegramMessage({
       token: config.telegramToken,
       chatId: subscriber.chatId,
-      text: formatWalletTradeMessage(trade),
+      text: formatWalletTradeMessageWithCopySettings(trade, {
+        copyWalletAddress: subscriber.copyWalletAddress,
+        copyAmountSol: subscriber.copyAmountSol
+      }),
       replyMarkup: buildWalletTradeReplyMarkup(trade)
     });
   } catch (error) {

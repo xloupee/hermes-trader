@@ -10,6 +10,7 @@ import { createSubscriberStore } from "../dist/subscribers.js";
 import {
   buildWalletTradeReplyMarkup,
   formatWalletTradeMessage,
+  formatWalletTradeMessageWithCopySettings,
   getWalletTradeEventId,
   isValidSolanaAddress
 } from "../dist/wallet-monitor.js";
@@ -28,9 +29,16 @@ test("telegram help exposes wallet nickname commands", () => {
   assert.match(help, /\/watch &lt;wallet&gt; \[nickname\]/);
   assert.match(help, /\/renamewallet &lt;wallet&gt; &lt;nickname\|-\&gt;/);
   assert.match(help, /\/wallets - List watched wallets and nicknames/);
+  assert.match(help, /\/copywallet &lt;public-wallet&gt;/);
+  assert.match(help, /\/copyamount &lt;sol&gt;/);
+  assert.match(help, /\/copystatus - Show copy settings and watched wallets/);
   assert.deepEqual(commandFromMessage({ text: "/renamewallet wallet Alpha Wallet" }), {
     command: "/renamewallet",
     args: ["wallet", "Alpha", "Wallet"]
+  });
+  assert.deepEqual(commandFromMessage({ text: "/copyamount 0.25" }), {
+    command: "/copyamount",
+    args: ["0.25"]
   });
 });
 
@@ -68,6 +76,12 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(await store.renameWallet("chat-1", otherWallet, "Missing"), false);
     assert.equal(await store.renameWallet("chat-2", wallet, "Unverified"), false);
     assert.equal(await store.renameWallet("chat-1", wallet, "Alpha <Wallet>"), true);
+    assert.equal(await store.setCopyWallet("chat-1", otherWallet), true);
+    assert.equal(await store.setCopyAmountSol("chat-1", 0.25), true);
+    assert.equal(await store.setCopyWallet("chat-2", otherWallet), false);
+    assert.equal(await store.setCopyAmountSol("chat-2", 0.25), false);
+    assert.equal(store.get("chat-1")?.copyWalletAddress, otherWallet);
+    assert.equal(store.get("chat-1")?.copyAmountSol, 0.25);
 
     const reloaded = createSubscriberStore({ path });
     await reloaded.init();
@@ -75,6 +89,8 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
       reloaded.listWatchedWallets("chat-1").map((entry) => [entry.address, entry.label]),
       [[wallet, "Alpha <Wallet>"]]
     );
+    assert.equal(reloaded.get("chat-1")?.copyWalletAddress, otherWallet);
+    assert.equal(reloaded.get("chat-1")?.copyAmountSol, 0.25);
 
     assert.equal(await reloaded.unwatchWallet("chat-1", wallet), true);
     assert.deepEqual(reloaded.listWatchedWallets("chat-1"), []);
@@ -167,6 +183,15 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
   assert.match(message, /0.125 SOL -> 250,000 BONK/);
   assert.match(message, /0.125 SOL/);
   assert.match(message, /Source:<\/b> JUPITER/);
+
+  const copyMessage = formatWalletTradeMessageWithCopySettings(trade, {
+    copyWalletAddress: otherWallet,
+    copyAmountSol: 0.25
+  });
+  assert.match(copyMessage, /Copy trade/);
+  assert.match(copyMessage, new RegExp(otherWallet));
+  assert.match(copyMessage, /Copy amount:<\/b> 0.25 SOL/);
+  assert.match(copyMessage, /Status:<\/b> Ready to copy 0.25 SOL into this token/);
 });
 
 test("Helius swap normalization handles token to SOL and token to token swaps", () => {
@@ -228,6 +253,13 @@ test("Helius swap normalization handles token to SOL and token to token swaps", 
     symbol: "USDT",
     amount: 12.5
   });
+  assert.match(
+    formatWalletTradeMessageWithCopySettings(tokenToSol, {
+      copyWalletAddress: otherWallet,
+      copyAmountSol: 0.1
+    }),
+    /Status:<\/b> Not a copyable SOL-to-token buy/
+  );
 });
 
 test("Helius webhook payload uses enhanced SWAP config", () => {

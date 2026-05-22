@@ -182,7 +182,6 @@ export function createSubscriberStore({
   return {
     async init() {
       await load();
-      await save();
     },
     has(chatId) {
       return subscribers.has(String(chatId));
@@ -245,13 +244,48 @@ export function createSubscriberStore({
       const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
       const watchedWallets = existing.watchedWallets.filter((wallet) => wallet.address !== address);
       const previous = existing.watchedWallets.find((wallet) => wallet.address === address);
+      const nextLabel = label?.trim() || previous?.label || null;
 
       watchedWallets.push({
         address,
-        label: label?.trim() || null,
+        label: nextLabel,
         addedAt: previous?.addedAt || now,
         updatedAt: now
       });
+
+      subscribers.set(normalized, {
+        ...existing,
+        watchedWallets: dedupeWatchedWallets(watchedWallets),
+        updatedAt: now
+      });
+      await save();
+      return true;
+    },
+    async renameWallet(chatId, address, label) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const walletIndex = existing.watchedWallets.findIndex((wallet) => wallet.address === address);
+
+      if (walletIndex === -1) {
+        return false;
+      }
+
+      const now = new Date().toISOString();
+      const watchedWallets = existing.watchedWallets.map((wallet, index) =>
+        index === walletIndex
+          ? {
+              ...wallet,
+              label: label?.trim() || null,
+              updatedAt: now
+            }
+          : wallet
+      );
 
       subscribers.set(normalized, {
         ...existing,

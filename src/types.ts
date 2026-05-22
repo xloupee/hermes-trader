@@ -103,6 +103,7 @@ export interface SubscriberStore {
   get: (chatId: TelegramChatId) => SubscriberRecord | null;
   setMode: (chatId: TelegramChatId, mode: AlertModeValue) => Promise<boolean>;
   watchWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
+  renameWallet: (chatId: TelegramChatId, address: string, label: string | null) => Promise<boolean>;
   unwatchWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   listWatchedWallets: (chatId: TelegramChatId) => WatchedWallet[];
   list: () => SubscriberRecord[];

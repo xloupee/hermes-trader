@@ -17,10 +17,13 @@ const telegramCommands = [
   { command: "newtokens", description: "Watch newly created tokens only" },
   { command: "both", description: "Watch new tokens and migrated coins" },
   { command: "watch", description: "Watch a wallet" },
+  { command: "renamewallet", description: "Rename a watched wallet" },
   { command: "unwatch", description: "Stop watching a wallet" },
   { command: "wallets", description: "List watched wallets" },
   { command: "help", description: "Show commands" }
 ];
+
+const MAX_WALLET_NICKNAME_LENGTH = 48;
 
 interface ParsedCommand {
   command: string;
@@ -102,9 +105,10 @@ export function helpText(_chatId?: TelegramChatId): string {
     "/migrations - Watch migrated coins only",
     "/newtokens - Watch newly created tokens only",
     "/both - Watch new tokens and migrated coins",
-    "/watch &lt;wallet&gt; [label] - Watch a wallet's swaps",
+    "/watch &lt;wallet&gt; [nickname] - Watch a wallet's swaps",
+    "/renamewallet &lt;wallet&gt; &lt;nickname|-&gt; - Rename or clear a wallet nickname",
     "/unwatch &lt;wallet&gt; - Stop watching a wallet",
-    "/wallets - List watched wallets",
+    "/wallets - List watched wallets and nicknames",
     "/help - Show commands"
   ].join("\n");
 }
@@ -165,6 +169,9 @@ export function createTelegramCommandPoller({
         break;
       case "/watch":
         await reply(chatId, await watchWallet(chatId, parsed.args));
+        break;
+      case "/renamewallet":
+        await reply(chatId, await renameWallet(chatId, parsed.args));
         break;
       case "/unwatch":
         await reply(chatId, await unwatchWallet(chatId, parsed.args));
@@ -267,28 +274,72 @@ export function createTelegramCommandPoller({
     }
 
     const wallet = args[0]?.trim();
-    const label = args.slice(1).join(" ").trim();
+    const nickname = args.slice(1).join(" ").trim();
 
     if (!wallet) {
-      return "Send <code>/watch wallet-address optional-label</code> to monitor a wallet.";
+      return "Send <code>/watch wallet-address optional-nickname</code> to monitor a wallet.";
     }
 
     if (!isValidSolanaAddress(wallet)) {
       return "That does not look like a Solana wallet address.";
     }
 
-    const updated = await subscribers?.watchWallet(chatId, wallet, label);
+    const nicknameError = validateNickname(nickname);
+
+    if (nicknameError) {
+      return nicknameError;
+    }
+
+    const updated = await subscribers?.watchWallet(chatId, wallet, nickname);
 
     if (!updated) {
       return verificationPrompt();
     }
 
     const syncWarning = await onWalletWatchlistChange?.();
-    const success = label
-      ? `<b>Watching wallet:</b> ${escapeWalletLabel(label)}\n<code>${wallet}</code>`
+    const success = nickname
+      ? `<b>Watching wallet:</b> ${escapeWalletLabel(nickname)}\n<code>${wallet}</code>`
       : `<b>Watching wallet:</b>\n<code>${wallet}</code>`;
 
     return syncWarning ? `${success}\n\n${syncWarning}` : success;
+  }
+
+  async function renameWallet(chatId: TelegramChatId, args: string[]): Promise<string> {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return gate;
+    }
+
+    const wallet = args[0]?.trim();
+    const nickname = args.slice(1).join(" ").trim();
+
+    if (!wallet || !nickname) {
+      return "Send <code>/renamewallet wallet-address nickname</code> to rename, or <code>/renamewallet wallet-address -</code> to clear.";
+    }
+
+    if (!isValidSolanaAddress(wallet)) {
+      return "That does not look like a Solana wallet address.";
+    }
+
+    const nextNickname = nickname === "-" ? null : nickname;
+    const nicknameError = nextNickname === null ? null : validateNickname(nextNickname);
+
+    if (nicknameError) {
+      return nicknameError;
+    }
+
+    const updated = await subscribers?.renameWallet(chatId, wallet, nextNickname);
+
+    if (!updated) {
+      return "That wallet is not being watched in this chat.";
+    }
+
+    if (nextNickname === null) {
+      return `<b>Cleared wallet nickname:</b>\n<code>${wallet}</code>`;
+    }
+
+    return `<b>Renamed wallet:</b> ${escapeWalletLabel(nextNickname)}\n<code>${wallet}</code>`;
   }
 
   async function unwatchWallet(chatId: TelegramChatId, args: string[]): Promise<string> {
@@ -329,7 +380,7 @@ export function createTelegramCommandPoller({
     const wallets = subscribers?.listWatchedWallets(chatId) || [];
 
     if (wallets.length === 0) {
-      return "No watched wallets for this chat. Add one with <code>/watch wallet-address optional-label</code>.";
+      return "No watched wallets for this chat. Add one with <code>/watch wallet-address optional-nickname</code>.";
     }
 
     return [
@@ -342,6 +393,14 @@ export function createTelegramCommandPoller({
 
   function escapeWalletLabel(value: string): string {
     return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+  }
+
+  function validateNickname(value: string): string | null {
+    if (value.length > MAX_WALLET_NICKNAME_LENGTH) {
+      return `Wallet nickname must be ${MAX_WALLET_NICKNAME_LENGTH} characters or fewer.`;
+    }
+
+    return null;
   }
 
   async function pollOnce(): Promise<void> {
@@ -368,7 +427,7 @@ export function createTelegramCommandPoller({
       await clearTelegramWebhook({ token: config.telegramToken });
       await setTelegramCommands({ token: config.telegramToken, commands: telegramCommands });
       console.log(`Telegram bot ready: @${bot.username}`);
-      console.log("Polling for /start, /help, /verify, /stop, /migrations, /newtokens, /both, /watch, /unwatch, and /wallets");
+      console.log("Polling for /start, /help, /verify, /stop, /migrations, /newtokens, /both, /watch, /renamewallet, /unwatch, and /wallets");
 
       while (shouldPoll) {
         try {

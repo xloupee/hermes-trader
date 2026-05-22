@@ -50,7 +50,7 @@ npm start
 6. In Telegram, open your bot and send `/start`.
 7. Send `/verify your-code` using the value from `TELEGRAM_VERIFY_CODE`.
 8. Choose your alert mode with `/migrations`, `/newtokens`, or `/both`.
-9. To monitor wallet swaps, send `/watch wallet-address optional-label`. Wallet swap alerts require the Helius webhook env vars.
+9. To monitor wallet swaps, send `/watch wallet-address optional-nickname`. Wallet swap alerts require the Helius webhook env vars.
 10. Restart the bot if you changed `.env`:
 
 ```bash
@@ -68,9 +68,10 @@ Verified subscribers and their alert modes are stored in `TELEGRAM_SUBSCRIBERS_P
 - `/migrations` - Watch migrated coins only for this chat.
 - `/newtokens` - Watch newly created tokens only for this chat.
 - `/both` - Watch new tokens and migrated coins for this chat.
-- `/watch <wallet> [label]` - Watch a wallet's swaps for this chat.
+- `/watch <wallet> [nickname]` - Watch a wallet's swaps for this chat.
+- `/renamewallet <wallet> <nickname|->` - Rename or clear a watched wallet nickname.
 - `/unwatch <wallet>` - Stop watching a wallet for this chat.
-- `/wallets` - List watched wallets for this chat.
+- `/wallets` - List watched wallets and nicknames for this chat.
 
 ## Notes
 

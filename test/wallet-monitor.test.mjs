@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { commandFromMessage, helpText } from "../dist/commands.js";
 import { buildHeliusWebhookPayload, createHeliusWebhookServer, syncHeliusWebhook } from "../dist/helius.js";
 import { heliusEventMentionsWatchedWallet, normalizeHeliusSwapData } from "../dist/helius-swaps.js";
 import { createSubscriberStore } from "../dist/subscribers.js";
@@ -21,6 +22,18 @@ const config = {
   solscanBaseUrl: "https://solscan.io"
 };
 
+test("telegram help exposes wallet nickname commands", () => {
+  const help = helpText("chat-1");
+
+  assert.match(help, /\/watch &lt;wallet&gt; \[nickname\]/);
+  assert.match(help, /\/renamewallet &lt;wallet&gt; &lt;nickname\|-\&gt;/);
+  assert.match(help, /\/wallets - List watched wallets and nicknames/);
+  assert.deepEqual(commandFromMessage({ text: "/renamewallet wallet Alpha Wallet" }), {
+    command: "/renamewallet",
+    args: ["wallet", "Alpha", "Wallet"]
+  });
+});
+
 test("subscriber store persists per-chat watched wallets with labels", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pumpfunnoti-"));
   const path = join(dir, "subscribers.json");
@@ -37,6 +50,24 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
       store.listWatchedWallets("chat-1").map((entry) => [entry.address, entry.label]),
       [[wallet, "Alpha <Wallet>"]]
     );
+    assert.equal(await store.watchWallet("chat-1", wallet), true);
+    assert.deepEqual(
+      store.listWatchedWallets("chat-1").map((entry) => [entry.address, entry.label]),
+      [[wallet, "Alpha <Wallet>"]]
+    );
+    assert.equal(await store.renameWallet("chat-1", wallet, "Beta Wallet"), true);
+    assert.deepEqual(
+      store.listWatchedWallets("chat-1").map((entry) => [entry.address, entry.label]),
+      [[wallet, "Beta Wallet"]]
+    );
+    assert.equal(await store.renameWallet("chat-1", wallet, null), true);
+    assert.deepEqual(
+      store.listWatchedWallets("chat-1").map((entry) => [entry.address, entry.label]),
+      [[wallet, null]]
+    );
+    assert.equal(await store.renameWallet("chat-1", otherWallet, "Missing"), false);
+    assert.equal(await store.renameWallet("chat-2", wallet, "Unverified"), false);
+    assert.equal(await store.renameWallet("chat-1", wallet, "Alpha <Wallet>"), true);
 
     const reloaded = createSubscriberStore({ path });
     await reloaded.init();
@@ -50,6 +81,20 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
 
     const body = JSON.parse(await readFile(path, "utf8"));
     assert.equal(body.subscribers[0].chatId, "chat-1");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("subscriber store init does not create a file from seeded chat ids", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pumpfunnoti-init-"));
+  const path = join(dir, "subscribers.json");
+
+  try {
+    const store = createSubscriberStore({ path, initialChatIds: ["seed-chat"] });
+    await store.init();
+    assert.equal(store.has("seed-chat"), true);
+    await assert.rejects(stat(path), { code: "ENOENT" });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

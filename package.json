@@ -11,6 +11,7 @@
     "past-migrations": "npm run build && node dist/past-migrations.js",
     "check": "tsc --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
+    "stop-local": "bash scripts/stop-local.sh",
     "deploy": "bash scripts/deploy.sh"
   },
   "dependencies": {

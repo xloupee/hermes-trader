@@ -58,7 +58,8 @@ const subscribers =
   config.supabaseUrl && config.supabaseServiceRoleKey
     ? createSupabaseSubscriberStoreFromEnv({
         url: config.supabaseUrl,
-        serviceRoleKey: config.supabaseServiceRoleKey
+        serviceRoleKey: config.supabaseServiceRoleKey,
+        initialChatIds: [config.telegramChatId]
       })
     : createSubscriberStore({
         path: config.telegramSubscribersPath,

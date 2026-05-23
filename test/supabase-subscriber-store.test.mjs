@@ -189,6 +189,8 @@ test("Supabase subscriber store can load stored rows plus explicit seeded chat i
     [[wallet, "Alpha"]]
   );
   assert.equal(store.get("seed-chat")?.mode, "migrations");
+  const stored = await repository.listSubscribers();
+  assert.equal(stored.some((entry) => entry.chatId === "seed-chat"), true);
 });
 
 test("Supabase subscriber store mirrors JSON store mutations", async () => {

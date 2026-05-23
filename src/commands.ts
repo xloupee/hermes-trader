@@ -105,6 +105,75 @@ export function setupStatus(config: LegacyBotConfig): string {
   ].join("\n");
 }
 
+function escapeHtml(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
+function formatSolAmount(value: number): string {
+  return new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: 9
+  }).format(value);
+}
+
+function shortWallet(value: string): string {
+  return value.length > 12 ? `${value.slice(0, 6)}...${value.slice(-6)}` : value;
+}
+
+function formatCopyTradeWalletSummary(wallet: WatchedWallet): string {
+  return wallet.label ? escapeHtml(wallet.label) : shortWallet(wallet.address);
+}
+
+export function formatCopyTradeDashboardText({
+  tradingWalletPublicKey,
+  copyAmountSol,
+  copyTradeWallets,
+  now = new Date()
+}: {
+  tradingWalletPublicKey: string | null;
+  copyAmountSol: number | null;
+  copyTradeWallets: WatchedWallet[];
+  now?: Date;
+}): string {
+  const ready = Boolean(tradingWalletPublicKey && copyAmountSol && copyTradeWallets.length > 0);
+  const trailingSellStatus = copyTradeWallets.length === 0
+    ? "Add wallets first"
+    : copyTradeWallets.some((wallet) => wallet.trailingSellConfig)
+      ? "Configured per wallet"
+      : "Not configured";
+  const walletLines = copyTradeWallets.length === 0
+    ? ["No Copytrade Wallets yet."]
+    : copyTradeWallets.map((wallet) => `└ ${formatCopyTradeWalletSummary(wallet)}`);
+
+  return [
+    "<b>🔎 Copy Trading</b>",
+    "",
+    "Automatically mirror trades from selected wallets in real time.",
+    "",
+    "<b>👛 Trading Wallet:</b>",
+    tradingWalletPublicKey ? `└ ${shortWallet(tradingWalletPublicKey)}` : "└ Not created",
+    "",
+    `<b>💰 Copy Amount:</b> ${copyAmountSol ? `${formatSolAmount(copyAmountSol)} SOL` : "Not set"}`,
+    "",
+    `<b>🎯 Copytrade Wallets:</b> ${copyTradeWallets.length}`,
+    ...walletLines,
+    "",
+    ready ? "🟢 Setup is <b>active</b>" : "🔴 Setup is <b>inactive</b>",
+    "",
+    `<b>📉 Trailing Sells:</b> ${trailingSellStatus}`,
+    "",
+    `🕒 Last updated: ${formatDashboardTime(now)}`
+  ].join("\n");
+}
+
+function formatDashboardTime(value: Date): string {
+  return value.toLocaleTimeString("en-US", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+}
+
 function modeLabel(mode: AlertModeValue): string {
   if (mode === "migrations") {
     return "Migrated coins only";
@@ -1263,14 +1332,6 @@ export function createTelegramCommandPoller({
     return wallet.label ? `${escapeWalletLabel(wallet.label)} - <code>${wallet.address}</code>` : `<code>${wallet.address}</code>`;
   }
 
-  function formatCopyTradeWalletSummary(wallet: WatchedWallet): string {
-    return wallet.label ? escapeWalletLabel(wallet.label) : shortWallet(wallet.address);
-  }
-
-  function shortWallet(value: string): string {
-    return value.length > 12 ? `${value.slice(0, 6)}...${value.slice(-6)}` : value;
-  }
-
   function last4(value: string): string {
     return value.length <= 4 ? value : value.slice(-4);
   }
@@ -1390,18 +1451,11 @@ export function createTelegramCommandPoller({
     const subscriber = subscribers?.get(chatId) || null;
     const copyTradeWallets = subscribers?.listCopyTradeWallets(chatId) || [];
     const tradingWallet = subscribers?.getTradingWallet(chatId) || null;
-    const ready = Boolean(tradingWallet && subscriber?.copyAmountSol && copyTradeWallets.length > 0);
-    const text = [
-      "<b>Copy trade</b>",
-      `<b>Status:</b> ${ready ? "Ready" : "Not ready"}`,
-      `<b>Trading wallet:</b> ${tradingWallet ? shortWallet(tradingWallet.publicKey) : "Missing"}`,
-      `<b>Amount:</b> ${subscriber?.copyAmountSol ? `${formatSolAmount(subscriber.copyAmountSol)} SOL` : "Not set"}`,
-      `<b>Copytrade wallets:</b> ${copyTradeWallets.length}`,
-      copyTradeWallets.length === 0 ? "" : copyTradeWallets.map((wallet) => formatCopyTradeWalletSummary(wallet)).join("\n"),
-      `<b>Trailing sells:</b> ${copyTradeWallets.length === 0 ? "Add wallets first" : "Per wallet"}`
-    ]
-      .filter(Boolean)
-      .join("\n");
+    const text = formatCopyTradeDashboardText({
+      tradingWalletPublicKey: tradingWallet?.publicKey || null,
+      copyAmountSol: subscriber?.copyAmountSol || null,
+      copyTradeWallets
+    });
 
     return {
       text,
@@ -1563,13 +1617,7 @@ export function createTelegramCommandPoller({
   }
 
   function escapeWalletLabel(value: string): string {
-    return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
-  }
-
-  function formatSolAmount(value: number): string {
-    return new Intl.NumberFormat("en-US", {
-      maximumFractionDigits: 9
-    }).format(value);
+    return escapeHtml(value);
   }
 
   function validateNickname(value: string): string | null {

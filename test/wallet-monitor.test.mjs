@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   commandFromMessage,
+  formatCopyTradeDashboardText,
   helpText,
   parseTrailingSellFormulaInput,
   parseTrailingSellStepInput,
@@ -120,6 +121,51 @@ test("trailing sell inputs parse custom steps and formula presets", () => {
   ]);
   assert.equal(parseTrailingSellFormulaInput("20% 10s 20% 0s 2m"), null);
   assert.equal(parseTrailingSellFormulaInput("20% 10s 20% 30s 5s"), null);
+});
+
+test("copytrade dashboard text uses clean Bloom-style status card", () => {
+  const dashboard = formatCopyTradeDashboardText({
+    tradingWalletPublicKey: otherWallet,
+    copyAmountSol: 0.5,
+    copyTradeWallets: [
+      {
+        address: wallet,
+        label: "cented",
+        addedAt: "2026-05-23T00:00:00.000Z",
+        updatedAt: "2026-05-23T00:00:00.000Z"
+      }
+    ],
+    now: new Date("2026-05-23T14:48:25.107Z")
+  });
+
+  assert.match(dashboard, /🔎 Copy Trading/);
+  assert.match(dashboard, /Automatically mirror trades from selected wallets in real time\./);
+  assert.match(dashboard, /👛 Trading Wallet:/);
+  assert.match(dashboard, /62qc2C\.\.\.fafNgV/);
+  assert.match(dashboard, /💰 Copy Amount:<\/b> 0.5 SOL/);
+  assert.match(dashboard, /🎯 Copytrade Wallets:<\/b> 1/);
+  assert.match(dashboard, /└ cented/);
+  assert.doesNotMatch(dashboard, new RegExp(wallet));
+  assert.match(dashboard, /🟢 Setup is <b>active<\/b>/);
+  assert.match(dashboard, /📉 Trailing Sells:<\/b> Not configured/);
+  assert.match(dashboard, /🕒 Last updated: 10:48:25/);
+
+  const missing = formatCopyTradeDashboardText({
+    tradingWalletPublicKey: null,
+    copyAmountSol: null,
+    copyTradeWallets: [
+      {
+        address: wallet,
+        label: null,
+        addedAt: "2026-05-23T00:00:00.000Z",
+        updatedAt: "2026-05-23T00:00:00.000Z"
+      }
+    ],
+    now: new Date("2026-05-23T14:48:25.107Z")
+  });
+
+  assert.match(missing, /└ 39azUY\.\.\.5jUJjg/);
+  assert.match(missing, /🔴 Setup is <b>inactive<\/b>/);
 });
 
 test("PumpPortal Lightning wallet helpers parse, encrypt, and execute requests", async () => {

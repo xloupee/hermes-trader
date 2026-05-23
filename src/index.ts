@@ -101,7 +101,7 @@ function watchedWalletAddresses(): string[] {
     ...new Set(
       subscribers
         .list()
-        .flatMap((subscriber) => subscriber.watchedWallets || [])
+        .flatMap((subscriber) => [...(subscriber.watchedWallets || []), ...(subscriber.copyTradeWallets || [])])
         .map((wallet) => wallet.address)
         .filter(Boolean)
     )
@@ -203,6 +203,7 @@ async function handleHeliusWebhookEvents(events: LooseRecord[]): Promise<void> {
 
 async function handleHeliusSwap(event: LooseRecord): Promise<boolean> {
   const subscribersByWallet = new Map<string, Array<{ subscriber: SubscriberRecord; label: string | null }>>();
+  const copyTradeSubscribersByWallet = new Map<string, Array<{ subscriber: SubscriberRecord; label: string | null }>>();
 
   for (const subscriber of subscribers.list()) {
     for (const wallet of subscriber.watchedWallets || []) {
@@ -214,13 +215,25 @@ async function handleHeliusSwap(event: LooseRecord): Promise<boolean> {
       entries.push({ subscriber, label: wallet.label });
       subscribersByWallet.set(wallet.address, entries);
     }
+
+    for (const wallet of subscriber.copyTradeWallets || []) {
+      if (!heliusEventMentionsWatchedWallet(event, wallet.address)) {
+        continue;
+      }
+
+      const entries = copyTradeSubscribersByWallet.get(wallet.address) || [];
+      entries.push({ subscriber, label: wallet.label });
+      copyTradeSubscribersByWallet.set(wallet.address, entries);
+    }
   }
 
-  if (subscribersByWallet.size === 0) {
+  const targetWallets = [...new Set([...subscribersByWallet.keys(), ...copyTradeSubscribersByWallet.keys()])].sort();
+
+  if (targetWallets.length === 0) {
     return false;
   }
 
-  for (const [targetWallet, entries] of subscribersByWallet) {
+  for (const targetWallet of targetWallets) {
     const loggedTrade = normalizeHeliusSwapData({
       event,
       targetWallet,
@@ -236,8 +249,17 @@ async function handleHeliusSwap(event: LooseRecord): Promise<boolean> {
     await writeWalletTradeLog(loggedTrade);
     console.log(`Wallet trade event: ${JSON.stringify(loggedTrade)}`);
 
+    const entries = subscribersByWallet.get(targetWallet) || [];
     for (const entry of entries) {
       await sendWalletTradeAlert(entry.subscriber, {
+        ...loggedTrade,
+        label: entry.label
+      });
+    }
+
+    const copyTradeEntries = copyTradeSubscribersByWallet.get(targetWallet) || [];
+    for (const entry of copyTradeEntries) {
+      await sendCopyTradeSimulationAlert(entry.subscriber, {
         ...loggedTrade,
         label: entry.label
       });
@@ -248,63 +270,68 @@ async function handleHeliusSwap(event: LooseRecord): Promise<boolean> {
 }
 
 async function sendWalletTradeAlert(subscriber: SubscriberRecord, trade: WalletTradeData): Promise<void> {
+  try {
+    await sendTelegramMessage({
+      token: config.telegramToken,
+      chatId: subscriber.chatId,
+      text: formatWalletTradeMessageWithCopySettings(trade, null),
+      replyMarkup: buildWalletTradeReplyMarkup(trade)
+    });
+  } catch (error) {
+    console.warn(`Could not send wallet trade alert to ${subscriber.chatId}: ${errorMessage(error)}`);
+  }
+}
+
+async function sendCopyTradeSimulationAlert(subscriber: SubscriberRecord, trade: WalletTradeData): Promise<void> {
   const copyWalletAddresses = subscriber.copyWalletAddresses.length > 0
     ? subscriber.copyWalletAddresses
     : subscriber.copyWalletAddress
       ? [subscriber.copyWalletAddress]
       : [];
-  const copySettings =
-    subscriber.copyTargetWalletAddress && subscriber.copyTargetWalletAddress === trade.targetWallet
-      ? {
-          copyWalletAddress: copyWalletAddresses[0] || null,
-          copyWalletAddresses,
-          copyAmountSol: subscriber.copyAmountSol,
-          copyTargetWalletAddress: subscriber.copyTargetWalletAddress
-        }
-      : null;
+  const copySettings = {
+    copyWalletAddress: copyWalletAddresses[0] || null,
+    copyWalletAddresses,
+    copyAmountSol: subscriber.copyAmountSol,
+    copyTargetWalletAddress: trade.targetWallet
+  };
+
+  if (!isCopyableSolToTokenBuy(trade) || copyWalletAddresses.length === 0 || !subscriber.copyAmountSol) {
+    return;
+  }
 
   try {
-    await sendTelegramMessage({
-      token: config.telegramToken,
-      chatId: subscriber.chatId,
-      text: formatWalletTradeMessageWithCopySettings(trade, copySettings),
-      replyMarkup: buildWalletTradeReplyMarkup(trade)
-    });
+    for (const copyWalletAddress of copyWalletAddresses) {
+      const perWalletCopySettings = {
+        ...copySettings,
+        copyWalletAddress,
+        copyWalletAddresses: [copyWalletAddress]
+      };
+      const pumpPortalRequest = buildPumpPortalLocalTradeRequest({
+        trade,
+        copySettings: perWalletCopySettings,
+        slippage: config.copyTradeSlippage,
+        priorityFee: config.copyTradePriorityFee,
+        pool: config.copyTradePool
+      });
+      const pumpPortalBuild = pumpPortalRequest
+        ? await buildPumpPortalLocalTrade({
+            url: config.pumpPortalTradeLocalUrl,
+            request: pumpPortalRequest
+          })
+        : null;
+      const copyTradeSimulationMessage = formatCopyTradeSimulationMessage(trade, perWalletCopySettings, pumpPortalBuild);
 
-    if (copySettings && isCopyableSolToTokenBuy(trade)) {
-      for (const copyWalletAddress of copyWalletAddresses) {
-        const perWalletCopySettings = {
-          ...copySettings,
-          copyWalletAddress,
-          copyWalletAddresses: [copyWalletAddress]
-        };
-        const pumpPortalRequest = buildPumpPortalLocalTradeRequest({
-          trade,
-          copySettings: perWalletCopySettings,
-          slippage: config.copyTradeSlippage,
-          priorityFee: config.copyTradePriorityFee,
-          pool: config.copyTradePool
+      if (copyTradeSimulationMessage) {
+        await sendTelegramMessage({
+          token: config.telegramToken,
+          chatId: subscriber.chatId,
+          text: copyTradeSimulationMessage,
+          replyMarkup: buildWalletTradeReplyMarkup(trade)
         });
-        const pumpPortalBuild = pumpPortalRequest
-          ? await buildPumpPortalLocalTrade({
-              url: config.pumpPortalTradeLocalUrl,
-              request: pumpPortalRequest
-            })
-          : null;
-        const copyTradeSimulationMessage = formatCopyTradeSimulationMessage(trade, perWalletCopySettings, pumpPortalBuild);
-
-        if (copyTradeSimulationMessage) {
-          await sendTelegramMessage({
-            token: config.telegramToken,
-            chatId: subscriber.chatId,
-            text: copyTradeSimulationMessage,
-            replyMarkup: buildWalletTradeReplyMarkup(trade)
-          });
-        }
       }
     }
   } catch (error) {
-    console.warn(`Could not send wallet trade alert to ${subscriber.chatId}: ${errorMessage(error)}`);
+    console.warn(`Could not send copy trade simulation alert to ${subscriber.chatId}: ${errorMessage(error)}`);
   }
 }
 

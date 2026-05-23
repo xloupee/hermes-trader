@@ -110,16 +110,25 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(await store.setCopyWallet("chat-1", otherWallet), true);
     assert.equal(await store.setCopyWallet("chat-1", wallet), true);
     assert.equal(await store.setCopyAmountSol("chat-1", 0.25), true);
-    assert.equal(await store.setCopyTargetWallet("chat-1", otherWallet), false);
-    assert.equal(await store.setCopyTargetWallet("chat-1", wallet), true);
+    assert.equal(await store.watchCopyTradeWallet("chat-1", otherWallet, "Copy Alpha"), true);
+    assert.equal(await store.watchCopyTradeWallet("chat-1", wallet, "Copy Beta"), true);
+    assert.equal(await store.renameCopyTradeWallet("chat-1", wallet, "Copy Gamma"), true);
+    assert.equal(await store.renameCopyTradeWallet("chat-1", wallet, null), true);
+    assert.equal(await store.renameCopyTradeWallet("chat-1", "missing", "Nope"), false);
+    assert.equal(await store.watchCopyTradeWallet("chat-2", wallet, "Unverified"), false);
     assert.equal(await store.setCopyWallet("chat-2", otherWallet), false);
     assert.equal(await store.setCopyAmountSol("chat-2", 0.25), false);
-    assert.equal(await store.setCopyTargetWallet("chat-2", wallet), false);
     assert.equal(store.get("chat-1")?.copyWalletAddress, otherWallet);
     assert.deepEqual(store.get("chat-1")?.copyWalletAddresses, [otherWallet, wallet]);
     assert.deepEqual(store.listCopyWallets("chat-1"), [otherWallet, wallet]);
     assert.equal(store.get("chat-1")?.copyAmountSol, 0.25);
-    assert.equal(store.get("chat-1")?.copyTargetWalletAddress, wallet);
+    assert.deepEqual(
+      store.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label]),
+      [
+        [wallet, null],
+        [otherWallet, "Copy Alpha"]
+      ]
+    );
 
     const reloaded = createSubscriberStore({ path });
     await reloaded.init();
@@ -130,17 +139,72 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(reloaded.get("chat-1")?.copyWalletAddress, otherWallet);
     assert.deepEqual(reloaded.get("chat-1")?.copyWalletAddresses, [otherWallet, wallet]);
     assert.equal(reloaded.get("chat-1")?.copyAmountSol, 0.25);
-    assert.equal(reloaded.get("chat-1")?.copyTargetWalletAddress, wallet);
+    assert.deepEqual(
+      reloaded.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label]),
+      [
+        [wallet, null],
+        [otherWallet, "Copy Alpha"]
+      ]
+    );
     assert.equal(reloaded.get("chat-1")?.mode, null);
 
     assert.equal(await reloaded.unwatchWallet("chat-1", wallet), true);
     assert.deepEqual(reloaded.listWatchedWallets("chat-1"), []);
-    assert.equal(reloaded.get("chat-1")?.copyTargetWalletAddress, null);
+    assert.deepEqual(
+      reloaded.listCopyTradeWallets("chat-1").map((entry) => entry.address),
+      [wallet, otherWallet]
+    );
+    assert.equal(await reloaded.unwatchCopyTradeWallet("chat-1", wallet), true);
+    assert.deepEqual(reloaded.listCopyTradeWallets("chat-1").map((entry) => entry.address), [otherWallet]);
     assert.equal(await reloaded.removeCopyWallet("chat-1", wallet), true);
     assert.deepEqual(reloaded.listCopyWallets("chat-1"), [otherWallet]);
 
     const body = JSON.parse(await readFile(path, "utf8"));
     assert.equal(body.subscribers[0].chatId, "chat-1");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("subscriber store migrates legacy copy target out of watched wallets", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pumpfunnoti-legacy-copytrade-"));
+  const path = join(dir, "subscribers.json");
+
+  try {
+    await writeFile(
+      path,
+      JSON.stringify({
+        subscribers: [
+          {
+            chatId: "chat-1",
+            mode: "both",
+            watchedWallets: [
+              {
+                address: wallet,
+                label: "Legacy Copy",
+                addedAt: "2026-05-22T00:00:00.000Z",
+                updatedAt: "2026-05-22T00:00:00.000Z"
+              },
+              {
+                address: otherWallet,
+                label: "Normal Watch",
+                addedAt: "2026-05-22T00:00:00.000Z",
+                updatedAt: "2026-05-22T00:00:00.000Z"
+              }
+            ],
+            copyTargetWalletAddress: wallet,
+            verifiedAt: "2026-05-22T00:00:00.000Z",
+            updatedAt: "2026-05-22T00:00:00.000Z"
+          }
+        ]
+      })
+    );
+
+    const store = createSubscriberStore({ path });
+    await store.init();
+
+    assert.deepEqual(store.listWatchedWallets("chat-1").map((entry) => [entry.address, entry.label]), [[otherWallet, "Normal Watch"]]);
+    assert.deepEqual(store.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label]), [[wallet, "Legacy Copy"]]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

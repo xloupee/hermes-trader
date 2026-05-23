@@ -11,7 +11,6 @@ import { isValidSolanaAddress } from "./wallet-monitor.js";
 import type {
   AlertModeValue,
   LegacyBotConfig,
-  SubscriberRecord,
   SubscriberStore,
   TelegramCallbackQuery,
   TelegramChatId,
@@ -35,7 +34,13 @@ const MAX_WALLET_NICKNAME_LENGTH = 48;
 const PENDING_COPY_INPUT_TTL_MS = 10 * 60 * 1000;
 
 type PendingCopyInputAction = "copy_wallet" | "remove_copy_wallet" | "copy_amount";
-type PendingWalletInputAction = "watch_wallet" | "rename_wallet" | "unwatch_wallet" | "copy_target_wallet";
+type PendingWalletInputAction =
+  | "watch_wallet"
+  | "rename_wallet"
+  | "unwatch_wallet"
+  | "copytrade_wallet"
+  | "rename_copytrade_wallet"
+  | "remove_copytrade_wallet";
 type ToggleAlertType = Exclude<AlertModeValue, "both">;
 
 interface PendingCopyInput {
@@ -362,48 +367,37 @@ export function createTelegramCommandPoller({
       return;
     }
 
-    if (data === "copytrade:choose_target") {
-      const targetPicker = copyTargetPicker(chatId);
-      await reply(chatId, targetPicker.text, targetPicker.replyMarkup);
-      return;
-    }
-
-    if (data === "copytrade:wallets") {
-      const dashboard = walletDashboard(chatId);
-      await reply(chatId, dashboard.text, dashboard.replyMarkup);
-      return;
-    }
-
-    if (data === "copytrade:target:add") {
-      setPendingWalletInput(chatId, "copy_target_wallet");
+    if (data === "copytrade:choose_target" || data === "copytrade:target:add") {
+      setPendingWalletInput(chatId, "copytrade_wallet");
       await reply(chatId, "Send the wallet address you want to copytrade. You can include a nickname after it.");
       return;
     }
 
     if (data === "copytrade:target:clear") {
-      const updated = await subscribers?.setCopyTargetWallet(chatId, null);
-
-      if (!updated) {
-        await reply(chatId, verificationPrompt());
-        return;
-      }
-
-      const dashboard = copyTradeDashboard(chatId);
-      await reply(chatId, `<b>Copytrade wallet cleared.</b>\n\n${dashboard.text}`, dashboard.replyMarkup);
+      await reply(chatId, "Copytrade Wallets are now managed individually. Send /copytrade and tap Remove Copytrade.");
       return;
     }
 
-    if (data.startsWith("copytrade:target:")) {
-      const targetWallet = data.slice("copytrade:target:".length);
-      const updated = await subscribers?.setCopyTargetWallet(chatId, targetWallet);
+    if (data === "copytrade:wallets") {
+      await reply(chatId, listCopyTradeWallets(chatId));
+      return;
+    }
 
-      if (!updated) {
-        await reply(chatId, "That wallet is not being watched in this chat.");
-        return;
-      }
+    if (data === "copytrade:add_wallet") {
+      setPendingWalletInput(chatId, "copytrade_wallet");
+      await reply(chatId, "Send the wallet address you want to copytrade. You can include a nickname after it.");
+      return;
+    }
 
-      const dashboard = copyTradeDashboard(chatId);
-      await reply(chatId, `<b>Copytrade wallet saved.</b>\n\n${dashboard.text}`, dashboard.replyMarkup);
+    if (data === "copytrade:rename_wallet") {
+      setPendingWalletInput(chatId, "rename_copytrade_wallet");
+      await reply(chatId, "Send <code>wallet-address nickname</code> to rename a Copytrade Wallet, or <code>wallet-address -</code> to clear.");
+      return;
+    }
+
+    if (data === "copytrade:remove_trade_wallet") {
+      setPendingWalletInput(chatId, "remove_copytrade_wallet");
+      await reply(chatId, "Send the Copytrade Wallet address you want to remove.");
       return;
     }
 
@@ -718,7 +712,7 @@ export function createTelegramCommandPoller({
       };
     }
 
-    if (pending.action === "copy_target_wallet") {
+    if (pending.action === "copytrade_wallet") {
       const nicknameError = validateNickname(label);
 
       if (nicknameError) {
@@ -726,22 +720,60 @@ export function createTelegramCommandPoller({
       }
 
       pendingWalletInputs.delete(String(chatId));
-      const updated = await subscribers?.watchWallet(chatId, wallet, label);
+      const updated = await subscribers?.watchCopyTradeWallet(chatId, wallet, label);
 
       if (!updated) {
         return { text: verificationPrompt() };
-      }
-
-      const targetUpdated = await subscribers?.setCopyTargetWallet(chatId, wallet);
-
-      if (!targetUpdated) {
-        return { text: "That wallet could not be saved as your copytrade wallet." };
       }
 
       const syncWarning = await onWalletWatchlistChange?.();
       const dashboard = copyTradeDashboard(chatId);
       return {
         text: `${label ? `<b>Copytrade wallet saved:</b> ${escapeWalletLabel(label)}\n` : "<b>Copytrade wallet saved:</b>\n"}<code>${wallet}</code>${syncWarning ? `\n\n${syncWarning}` : ""}\n\n${dashboard.text}`,
+        replyMarkup: dashboard.replyMarkup
+      };
+    }
+
+    if (pending.action === "rename_copytrade_wallet") {
+      if (!label) {
+        return {
+          text: "Send <code>wallet-address nickname</code> to rename a Copytrade Wallet, or <code>wallet-address -</code> to clear."
+        };
+      }
+
+      const nextLabel = label === "-" ? null : label;
+      const nicknameError = nextLabel === null ? null : validateNickname(nextLabel);
+
+      if (nicknameError) {
+        return { text: nicknameError };
+      }
+
+      pendingWalletInputs.delete(String(chatId));
+      const updated = await subscribers?.renameCopyTradeWallet(chatId, wallet, nextLabel);
+
+      if (!updated) {
+        return { text: "That Copytrade Wallet is not configured in this chat." };
+      }
+
+      const dashboard = copyTradeDashboard(chatId);
+      return {
+        text: `${nextLabel === null ? "<b>Cleared Copytrade Wallet nickname:</b>" : `<b>Renamed Copytrade Wallet:</b> ${escapeWalletLabel(nextLabel)}`}\n<code>${wallet}</code>\n\n${dashboard.text}`,
+        replyMarkup: dashboard.replyMarkup
+      };
+    }
+
+    if (pending.action === "remove_copytrade_wallet") {
+      pendingWalletInputs.delete(String(chatId));
+      const removed = await subscribers?.unwatchCopyTradeWallet(chatId, wallet);
+
+      if (!removed) {
+        return { text: "That Copytrade Wallet is not configured in this chat." };
+      }
+
+      const syncWarning = await onWalletWatchlistChange?.();
+      const dashboard = copyTradeDashboard(chatId);
+      return {
+        text: `<b>Removed Copytrade Wallet:</b>\n<code>${wallet}</code>${syncWarning ? `\n\n${syncWarning}` : ""}\n\n${dashboard.text}`,
         replyMarkup: dashboard.replyMarkup
       };
     }
@@ -936,15 +968,15 @@ export function createTelegramCommandPoller({
     }
 
     const subscriber = subscribers?.get(chatId) || null;
-    const watchedWalletCount = subscriber?.watchedWallets.length || 0;
+    const copyTradeWallets = subscribers?.listCopyTradeWallets(chatId) || [];
     const copyWallets = subscribers?.listCopyWallets(chatId) || [];
     const text = [
       "<b>Copy trade</b>",
       `<b>Copy wallets:</b> ${copyWallets.length}`,
       ...copyWallets.map((wallet) => `<code>${wallet}</code>`),
       `<b>Copy amount:</b> ${subscriber?.copyAmountSol ? `${formatSolAmount(subscriber.copyAmountSol)} SOL` : "Not set"}`,
-      `<b>Copytrade wallet:</b> ${formatCopyTarget(subscriber)}`,
-      `<b>Watched wallets:</b> ${watchedWalletCount}`,
+      `<b>Copytrade wallets:</b> ${copyTradeWallets.length}`,
+      copyTradeWallets.length === 0 ? "No Copytrade Wallets yet." : copyTradeWallets.map((wallet) => formatWalletSummary(wallet)).join("\n"),
       "",
       "Use the buttons below to manage copy trade settings."
     ].join("\n");
@@ -965,74 +997,36 @@ export function createTelegramCommandPoller({
         [{ text: "Remove Wallet", callback_data: "copytrade:remove_wallet" }],
         [
           { text: "Set Amount", callback_data: "copytrade:set_amount" },
-          { text: "Copytrade Wallet", callback_data: "copytrade:choose_target" }
+          { text: "Add Copytrade Wallet", callback_data: "copytrade:add_wallet" }
         ],
-        [{ text: "Watched Wallets", callback_data: "copytrade:wallets" }]
+        [
+          { text: "Rename Copytrade", callback_data: "copytrade:rename_wallet" },
+          { text: "Remove Copytrade", callback_data: "copytrade:remove_trade_wallet" }
+        ],
+        [{ text: "List Copytrade Wallets", callback_data: "copytrade:wallets" }]
       ]
     };
   }
 
-  function copyTargetPicker(chatId: TelegramChatId): { text: string; replyMarkup?: TelegramReplyMarkup } {
+  function listCopyTradeWallets(chatId: TelegramChatId): string {
     const gate = requireVerified(chatId);
 
     if (gate) {
-      return { text: gate };
+      return gate;
     }
 
-    const wallets = subscribers?.listWatchedWallets(chatId) || [];
+    const wallets = subscribers?.listCopyTradeWallets(chatId) || [];
 
     if (wallets.length === 0) {
-      return {
-        text: "<b>Copytrade wallet</b>\n\nNo watched wallets yet. Tap Set Copytrade Wallet and send the wallet you want to copy.",
-        replyMarkup: {
-          inline_keyboard: [
-            [{ text: "Set Copytrade Wallet", callback_data: "copytrade:target:add" }],
-            [{ text: "Back", callback_data: "copytrade:dashboard" }]
-          ]
-        }
-      };
+      return "No Copytrade Wallets for this chat. Send /copytrade and tap Add Copytrade Wallet.";
     }
 
-    return {
-      text: "<b>Copytrade wallet</b>\n\nPick an existing watched wallet, or set a new one directly.",
-      replyMarkup: {
-        inline_keyboard: [
-          ...wallets.map((wallet) => [
-            {
-              text: walletButtonLabel(wallet),
-              callback_data: `copytrade:target:${wallet.address}`
-            }
-          ]),
-          [{ text: "Set Copytrade Wallet", callback_data: "copytrade:target:add" }],
-          [{ text: "Clear Copytrade Wallet", callback_data: "copytrade:target:clear" }],
-          [{ text: "Back", callback_data: "copytrade:dashboard" }]
-        ]
-      }
-    };
-  }
-
-  function formatCopyTarget(subscriber: SubscriberRecord | null): string {
-    const target = subscriber?.copyTargetWalletAddress;
-
-    if (!target) {
-      return "Not set";
-    }
-
-    const wallet = subscriber?.watchedWallets.find((entry) => entry.address === target);
-
-    if (wallet?.label) {
-      return `${escapeWalletLabel(wallet.label)} <code>${target}</code>`;
-    }
-
-    return `<code>${target}</code>`;
-  }
-
-  function walletButtonLabel(wallet: WatchedWallet): string {
-    return wallet.label || shortenAddress(wallet.address);
-  }
-
-  function shortenAddress(value: string): string {
-    return value.length <= 16 ? value : `${value.slice(0, 6)}...${value.slice(-6)}`;
+    return [
+      "<b>Copytrade Wallets</b>",
+      ...wallets.map((wallet) =>
+        wallet.label ? `${escapeWalletLabel(wallet.label)}\n<code>${wallet.address}</code>` : `<code>${wallet.address}</code>`
+      )
+    ].join("\n\n");
   }
 
   function escapeWalletLabel(value: string): string {

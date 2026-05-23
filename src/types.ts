@@ -119,11 +119,15 @@ export interface SubscriberStore {
   watchWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
   renameWallet: (chatId: TelegramChatId, address: string, label: string | null) => Promise<boolean>;
   unwatchWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
+  watchCopyTradeWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
+  renameCopyTradeWallet: (chatId: TelegramChatId, address: string, label: string | null) => Promise<boolean>;
+  unwatchCopyTradeWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   setCopyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   removeCopyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   setCopyAmountSol: (chatId: TelegramChatId, amountSol: number) => Promise<boolean>;
   setCopyTargetWallet: (chatId: TelegramChatId, address: string | null) => Promise<boolean>;
   listWatchedWallets: (chatId: TelegramChatId) => WatchedWallet[];
+  listCopyTradeWallets: (chatId: TelegramChatId) => WatchedWallet[];
   listCopyWallets: (chatId: TelegramChatId) => string[];
   list: () => SubscriberRecord[];
   count: () => number;
@@ -133,6 +137,7 @@ export interface SubscriberRecord {
   chatId: string;
   mode: AlertModeValue | null;
   watchedWallets: WatchedWallet[];
+  copyTradeWallets: WatchedWallet[];
   copyWalletAddress: string | null;
   copyWalletAddresses: string[];
   copyAmountSol: number | null;

@@ -530,9 +530,17 @@ export function createTelegramCommandPoller({
     return {
       inline_keyboard: [
         [
-          { text: `${alertEnabled(mode, "migrations") ? "ON" : "OFF"} - Migrated Coins`, callback_data: "alerts:toggle:migrations" }
+          {
+            text: `${alertEnabled(mode, "migrations") ? "🟢 ON" : "⚪ OFF"} - Migrated Coins`,
+            callback_data: "alerts:toggle:migrations"
+          }
         ],
-        [{ text: `${alertEnabled(mode, "newtokens") ? "ON" : "OFF"} - New Tokens`, callback_data: "alerts:toggle:newtokens" }]
+        [
+          {
+            text: `${alertEnabled(mode, "newtokens") ? "🟢 ON" : "⚪ OFF"} - New Tokens`,
+            callback_data: "alerts:toggle:newtokens"
+          }
+        ]
       ]
     };
   }
@@ -860,12 +868,12 @@ export function createTelegramCommandPoller({
     return {
       inline_keyboard: [
         [
-          { text: "Add Wallet", callback_data: "trackwallets:add" },
-          { text: "Rename", callback_data: "trackwallets:rename" }
+          { text: "➕ Add Wallet", callback_data: "trackwallets:add" },
+          { text: "✏️ Rename", callback_data: "trackwallets:rename" }
         ],
         [
-          { text: "Remove", callback_data: "trackwallets:remove" },
-          { text: "List", callback_data: "trackwallets:list" }
+          { text: "🗑️ Remove", callback_data: "trackwallets:remove" },
+          { text: "📋 List", callback_data: "trackwallets:list" }
         ]
       ]
     };
@@ -906,7 +914,7 @@ export function createTelegramCommandPoller({
   function myWalletDashboardReplyMarkup(publicKey: string | null): TelegramReplyMarkup {
     if (!publicKey) {
       return {
-        inline_keyboard: [[{ text: "Create Trading Wallet", callback_data: "mywallets:create" }]]
+        inline_keyboard: [[{ text: "🌸 Create Trading Wallet", callback_data: "mywallets:create" }]]
       };
     }
 
@@ -914,13 +922,13 @@ export function createTelegramCommandPoller({
       inline_keyboard: [
         [
           {
-            text: "Copy Deposit Address",
+            text: "📋 Copy Deposit Address",
             copy_text: {
               text: publicKey
             }
           }
         ],
-        [{ text: "Status", callback_data: "mywallets:dashboard" }]
+        [{ text: "📊 Status", callback_data: "mywallets:dashboard" }]
       ]
     };
   }
@@ -1074,18 +1082,18 @@ export function createTelegramCommandPoller({
     return {
       inline_keyboard: [
         [
-          { text: "Status", callback_data: "copytrade:status" },
-          { text: "Trading Wallet", callback_data: "copytrade:mywallets" }
+          { text: "📊 Status", callback_data: "copytrade:status" },
+          { text: "👛 Trading Wallet", callback_data: "copytrade:mywallets" }
         ],
         [
-          { text: "Set Amount", callback_data: "copytrade:set_amount" },
-          { text: "Add Copytrade Wallet", callback_data: "copytrade:add_wallet" }
+          { text: "💰 Set Amount", callback_data: "copytrade:set_amount" },
+          { text: "➕ Add Copytrade Wallet", callback_data: "copytrade:add_wallet" }
         ],
         [
-          { text: "Rename Copytrade", callback_data: "copytrade:rename_wallet" },
-          { text: "Remove Copytrade", callback_data: "copytrade:remove_trade_wallet" }
+          { text: "✏️ Rename Copytrade", callback_data: "copytrade:rename_wallet" },
+          { text: "🗑️ Remove Copytrade", callback_data: "copytrade:remove_trade_wallet" }
         ],
-        [{ text: "List Copytrade Wallets", callback_data: "copytrade:wallets" }]
+        [{ text: "📋 List Copytrade Wallets", callback_data: "copytrade:wallets" }]
       ]
     };
   }

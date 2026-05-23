@@ -385,7 +385,7 @@ export function buildWalletTradeReplyMarkup(trade: WalletTradeData): TelegramRep
     inline_keyboard: [
       [
         {
-          text: "Copy CA",
+          text: "📋 Copy CA",
           copy_text: {
             text: trade.mint
           }

@@ -407,7 +407,7 @@ export function buildMigrationReplyMarkup(event: LooseRecord, config: MigrationF
     inline_keyboard: [
       [
         {
-          text: "Copy CA",
+          text: "📋 Copy CA",
           copy_text: {
             text: migration.coinAddress
           }

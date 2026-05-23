@@ -8,6 +8,7 @@ import { heliusEventMentionsWatchedWallet, isHeliusSwapEvent, normalizeHeliusSwa
 import {
   buildPumpPortalLocalTrade,
   buildPumpPortalLocalTradeRequest,
+  buildPumpPortalLocalSellRequest,
   createPumpPortalMigrationListener,
   PUMPPORTAL_TRADE_LOCAL_URL
 } from "./pumpportal.js";
@@ -19,15 +20,41 @@ import { asRecord, errorMessage, isRecord, stringValue } from "./types.js";
 import {
   buildWalletTradeReplyMarkup,
   formatCopyTradeSimulationMessage,
+  formatCopyTradeTrailingSellBuildMessage,
+  formatCopyTradeTrailingSellScheduledMessage,
   formatWalletTradeMessageWithCopySettings,
   getWalletTradeEventId,
   isCopyableSolToTokenBuy
 } from "./wallet-monitor.js";
-import type { AlertModeValue, BotConfig, LooseRecord, MigrationData, PumpPortalTradePool, SubscriberRecord, TransactionAnalysis, WalletTradeData } from "./types.js";
+import type {
+  AlertModeValue,
+  BotConfig,
+  LooseRecord,
+  MigrationData,
+  PumpPortalLocalTradeRequest,
+  PumpPortalTradePool,
+  SubscriberRecord,
+  TransactionAnalysis,
+  WalletTradeData
+} from "./types.js";
 
 function numberFromEnv(value: string | undefined, fallback: number): number {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function positiveNumberFromEnv(value: string | undefined, fallback: number): number {
+  const number = numberFromEnv(value, fallback);
+  return number > 0 ? number : fallback;
+}
+
+function positiveIntegerFromEnv(value: string | undefined, fallback: number): number {
+  return Math.max(1, Math.floor(positiveNumberFromEnv(value, fallback)));
+}
+
+function percentFromEnv(value: string | undefined, fallback: number): number {
+  const number = positiveNumberFromEnv(value, fallback);
+  return Math.min(100, number);
 }
 
 function pumpPortalPoolFromEnv(value: string | undefined): PumpPortalTradePool {
@@ -71,7 +98,13 @@ const config: BotConfig = {
   shutdownReason: process.env.BOT_SHUTDOWN_REASON,
   copyTradeSlippage: numberFromEnv(process.env.COPY_TRADE_SLIPPAGE, 10),
   copyTradePriorityFee: numberFromEnv(process.env.COPY_TRADE_PRIORITY_FEE, 0.00005),
-  copyTradePool: pumpPortalPoolFromEnv(process.env.COPY_TRADE_POOL)
+  copyTradePool: pumpPortalPoolFromEnv(process.env.COPY_TRADE_POOL),
+  copyTradeTrailingSellEnabled: process.env.COPY_TRADE_TRAILING_SELL_ENABLED === "true",
+  copyTradeTrailingSellHoldMs: positiveIntegerFromEnv(process.env.COPY_TRADE_TRAILING_SELL_HOLD_MS, 2000),
+  copyTradeTrailingSellFirstPercent: percentFromEnv(process.env.COPY_TRADE_TRAILING_SELL_FIRST_PERCENT, 20),
+  copyTradeTrailingSellTrailPercent: percentFromEnv(process.env.COPY_TRADE_TRAILING_SELL_TRAIL_PERCENT, 20),
+  copyTradeTrailingSellIntervalMs: positiveIntegerFromEnv(process.env.COPY_TRADE_TRAILING_SELL_INTERVAL_MS, 2000),
+  copyTradeTrailingSellMaxBuilds: positiveIntegerFromEnv(process.env.COPY_TRADE_TRAILING_SELL_MAX_BUILDS, 5)
 };
 
 const seenEvents = new Set<string>();
@@ -79,6 +112,7 @@ let cachedSolUsdPrice: number | undefined;
 let cachedSolUsdPriceAt = 0;
 const metadataCache = new Map<string, LooseRecord | null>();
 const tokenInfoCache = new Map<string, LooseRecord | null>();
+const trailingSellTimers = new Set<NodeJS.Timeout>();
 let isShuttingDown = false;
 const pumpFunCoinInfoRetryDelaysMs = [0, 750, 1500, 3000, 6000];
 const subscribers =
@@ -325,10 +359,159 @@ async function sendCopyTradeSimulationAlert(subscriber: SubscriberRecord, trade:
           replyMarkup: buildWalletTradeReplyMarkup(trade)
         });
       }
+
+      if (pumpPortalBuild?.ok) {
+        await scheduleCopyTradeTrailingSells({
+          subscriber,
+          trade,
+          copyWalletAddress
+        });
+      }
     }
   } catch (error) {
     console.warn(`Could not send copy trade simulation alert to ${subscriber.chatId}: ${errorMessage(error)}`);
   }
+}
+
+function buildTrailingSellSchedule({
+  trade,
+  copyWalletAddress
+}: {
+  trade: WalletTradeData;
+  copyWalletAddress: string;
+}): Array<{ delayMs: number; request: PumpPortalLocalTradeRequest }> {
+  if (!config.copyTradeTrailingSellEnabled || !trade.mint) {
+    return [];
+  }
+
+  const sellPercents = trailingSellPercents({
+    firstPercent: config.copyTradeTrailingSellFirstPercent,
+    trailPercent: config.copyTradeTrailingSellTrailPercent,
+    maxBuilds: config.copyTradeTrailingSellMaxBuilds
+  });
+
+  return sellPercents
+    .map((amountPercent, index) => {
+      const request = buildPumpPortalLocalSellRequest({
+        publicKey: copyWalletAddress,
+        mint: trade.mint || "",
+        amountPercent,
+        slippage: config.copyTradeSlippage,
+        priorityFee: config.copyTradePriorityFee,
+        pool: config.copyTradePool
+      });
+
+      if (!request) {
+        return null;
+      }
+
+      return {
+        delayMs: config.copyTradeTrailingSellHoldMs + config.copyTradeTrailingSellIntervalMs * index,
+        request
+      };
+    })
+    .filter((step): step is { delayMs: number; request: PumpPortalLocalTradeRequest } => Boolean(step));
+}
+
+function trailingSellPercents({
+  firstPercent,
+  trailPercent,
+  maxBuilds
+}: {
+  firstPercent: number;
+  trailPercent: number;
+  maxBuilds: number;
+}): number[] {
+  if (maxBuilds <= 1) {
+    return [100];
+  }
+
+  const middleBuilds = Math.max(0, maxBuilds - 2);
+  return [firstPercent, ...Array.from({ length: middleBuilds }, () => trailPercent), 100];
+}
+
+async function scheduleCopyTradeTrailingSells({
+  subscriber,
+  trade,
+  copyWalletAddress
+}: {
+  subscriber: SubscriberRecord;
+  trade: WalletTradeData;
+  copyWalletAddress: string;
+}): Promise<void> {
+  const steps = buildTrailingSellSchedule({ trade, copyWalletAddress });
+
+  if (steps.length === 0) {
+    return;
+  }
+
+  const scheduledMessage = formatCopyTradeTrailingSellScheduledMessage({
+    trade,
+    copyWalletAddress,
+    steps
+  });
+
+  if (scheduledMessage) {
+    await sendTelegramMessage({
+      token: config.telegramToken,
+      chatId: subscriber.chatId,
+      text: scheduledMessage,
+      replyMarkup: buildWalletTradeReplyMarkup(trade)
+    });
+  }
+
+  steps.forEach((step, stepIndex) => {
+    const timer = setTimeout(() => {
+      trailingSellTimers.delete(timer);
+      buildAndNotifyTrailingSell({
+        subscriber,
+        trade,
+        copyWalletAddress,
+        request: step.request,
+        stepIndex,
+        totalSteps: steps.length
+      }).catch((error) => {
+        console.warn(`Could not build trailing sell for ${subscriber.chatId}: ${errorMessage(error)}`);
+      });
+    }, step.delayMs);
+
+    trailingSellTimers.add(timer);
+  });
+}
+
+async function buildAndNotifyTrailingSell({
+  subscriber,
+  trade,
+  copyWalletAddress,
+  request,
+  stepIndex,
+  totalSteps
+}: {
+  subscriber: SubscriberRecord;
+  trade: WalletTradeData;
+  copyWalletAddress: string;
+  request: PumpPortalLocalTradeRequest;
+  stepIndex: number;
+  totalSteps: number;
+}): Promise<void> {
+  const pumpPortalBuild = await buildPumpPortalLocalTrade({
+    url: config.pumpPortalTradeLocalUrl,
+    request
+  });
+
+  await sendTelegramMessage({
+    token: config.telegramToken,
+    chatId: subscriber.chatId,
+    text: formatCopyTradeTrailingSellBuildMessage({
+      trade,
+      copyWalletAddress,
+      stepIndex,
+      totalSteps,
+      request,
+      pumpPortalBuild
+    }),
+    replyMarkup: buildWalletTradeReplyMarkup(trade)
+  });
 }
 
 function classifyEventMode(event: LooseRecord): Exclude<AlertModeValue, "both"> | null {
@@ -747,6 +930,10 @@ async function shutdown(): Promise<void> {
   console.log("Shutting down");
   commandPoller.stop();
   migrationListener.stop();
+  for (const timer of trailingSellTimers) {
+    clearTimeout(timer);
+  }
+  trailingSellTimers.clear();
   await heliusWebhookServer.stop();
 
   if (config.telegramToken && subscribers.count() > 0) {

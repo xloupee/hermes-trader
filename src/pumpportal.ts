@@ -77,6 +77,39 @@ export function buildPumpPortalLocalTradeRequest({
   };
 }
 
+export function buildPumpPortalLocalSellRequest({
+  publicKey,
+  mint,
+  amountPercent,
+  slippage,
+  priorityFee,
+  pool
+}: {
+  publicKey: string;
+  mint: string;
+  amountPercent: number;
+  slippage: number;
+  priorityFee: number;
+  pool: PumpPortalTradePool;
+}): PumpPortalLocalTradeRequest | null {
+  if (!publicKey || !mint || !Number.isFinite(amountPercent) || amountPercent <= 0) {
+    return null;
+  }
+
+  const boundedPercent = Math.min(100, amountPercent);
+
+  return {
+    publicKey,
+    action: "sell",
+    mint,
+    amount: `${boundedPercent}%`,
+    denominatedInSol: "false",
+    slippage,
+    priorityFee,
+    pool
+  };
+}
+
 export async function buildPumpPortalLocalTrade({
   url,
   request

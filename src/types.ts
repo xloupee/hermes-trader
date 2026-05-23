@@ -53,6 +53,12 @@ export interface BotConfig extends MigrationFormatConfig {
   copyTradeSlippage: number;
   copyTradePriorityFee: number;
   copyTradePool: PumpPortalTradePool;
+  copyTradeTrailingSellEnabled: boolean;
+  copyTradeTrailingSellHoldMs: number;
+  copyTradeTrailingSellFirstPercent: number;
+  copyTradeTrailingSellTrailPercent: number;
+  copyTradeTrailingSellIntervalMs: number;
+  copyTradeTrailingSellMaxBuilds: number;
 }
 
 export interface LegacyBotConfig extends MigrationFormatConfig {
@@ -193,10 +199,10 @@ export type PumpPortalTradePool = "auto" | "pump" | "pump-amm" | "raydium" | "ra
 
 export interface PumpPortalLocalTradeRequest {
   publicKey: string;
-  action: "buy";
+  action: "buy" | "sell";
   mint: string;
-  amount: number;
-  denominatedInSol: "true";
+  amount: number | `${number}%`;
+  denominatedInSol: "true" | "false";
   slippage: number;
   priorityFee: number;
   pool: PumpPortalTradePool;

@@ -6,10 +6,12 @@ import test from "node:test";
 import { commandFromMessage, helpText, toggleAlertMode } from "../dist/commands.js";
 import { buildHeliusWebhookPayload, createHeliusWebhookServer, syncHeliusWebhook } from "../dist/helius.js";
 import { heliusEventMentionsWatchedWallet, normalizeHeliusSwapData } from "../dist/helius-swaps.js";
-import { buildPumpPortalLocalTradeRequest } from "../dist/pumpportal.js";
+import { buildPumpPortalLocalSellRequest, buildPumpPortalLocalTradeRequest } from "../dist/pumpportal.js";
 import { createSubscriberStore } from "../dist/subscribers.js";
 import {
   buildWalletTradeReplyMarkup,
+  formatCopyTradeTrailingSellBuildMessage,
+  formatCopyTradeTrailingSellScheduledMessage,
   formatCopyTradeSimulationMessage,
   formatWalletTradeMessage,
   formatWalletTradeMessageWithCopySettings,
@@ -380,6 +382,69 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
       pool: "auto"
     }
   );
+
+  const sellRequest = buildPumpPortalLocalSellRequest({
+    publicKey: otherWallet,
+    mint,
+    amountPercent: 20,
+    slippage: 15,
+    priorityFee: 0.00009,
+    pool: "auto"
+  });
+
+  assert.deepEqual(sellRequest, {
+    publicKey: otherWallet,
+    action: "sell",
+    mint,
+    amount: "20%",
+    denominatedInSol: "false",
+    slippage: 15,
+    priorityFee: 0.00009,
+    pool: "auto"
+  });
+
+  const trailingScheduledMessage = formatCopyTradeTrailingSellScheduledMessage({
+    trade,
+    copyWalletAddress: otherWallet,
+    steps: [
+      {
+        delayMs: 2000,
+        request: sellRequest
+      },
+      {
+        delayMs: 4000,
+        request: {
+          ...sellRequest,
+          amount: "100%"
+        }
+      }
+    ]
+  });
+  assert.match(trailingScheduledMessage || "", /Trailing sell scheduled/);
+  assert.match(trailingScheduledMessage || "", /Sell 20% after 2s/);
+  assert.match(trailingScheduledMessage || "", /Sell 100% after 4s/);
+  assert.match(trailingScheduledMessage || "", /Build-only: not signed, not sent/);
+
+  const trailingBuildMessage = formatCopyTradeTrailingSellBuildMessage({
+    trade,
+    copyWalletAddress: otherWallet,
+    stepIndex: 1,
+    totalSteps: 2,
+    request: {
+      ...sellRequest,
+      amount: "100%"
+    },
+    pumpPortalBuild: {
+      ok: true,
+      status: 200,
+      bodyLength: 555,
+      errorText: null
+    }
+  });
+  assert.match(trailingBuildMessage, /Trailing sell build/);
+  assert.match(trailingBuildMessage, /Step:<\/b> 2\/2/);
+  assert.match(trailingBuildMessage, /Sell amount:<\/b> 100%/);
+  assert.match(trailingBuildMessage, /Local transaction built \(555 bytes\)/);
 });
 
 test("Helius swap normalization handles token to SOL and token to token swaps", () => {

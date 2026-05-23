@@ -2,6 +2,7 @@ import { escapeHtml } from "./format.js";
 import type {
   CopyTradeSettings,
   PumpPortalLocalTradeBuildResult,
+  PumpPortalLocalTradeRequest,
   TelegramReplyMarkup,
   WalletTradeAction,
   WalletTradeAsset,
@@ -247,6 +248,76 @@ function formatPumpPortalBuildStatus(result?: PumpPortalLocalTradeBuildResult | 
   const status = result.status === null ? "request failed" : `HTTP ${result.status}`;
   const detail = result.errorText?.trim();
   return detail ? `Local transaction build failed: ${escapeHtml(status)} - ${escapeHtml(detail)}` : `Local transaction build failed: ${escapeHtml(status)}`;
+}
+
+export function formatCopyTradeTrailingSellScheduledMessage({
+  trade,
+  copyWalletAddress,
+  steps
+}: {
+  trade: WalletTradeData;
+  copyWalletAddress: string;
+  steps: Array<{ delayMs: number; request: PumpPortalLocalTradeRequest }>;
+}): string | null {
+  if (steps.length === 0 || !trade.mint) {
+    return null;
+  }
+
+  const walletName = trade.label || shortenAddress(trade.targetWallet);
+  const lines = [
+    "<b>Trailing sell scheduled</b>",
+    `<b>Target:</b> ${escapeHtml(walletName)}`,
+    `<b>My wallet:</b> <code>${escapeHtml(copyWalletAddress)}</code>`,
+    "",
+    "<b>Contract address</b>",
+    `<code>${escapeHtml(trade.mint)}</code>`,
+    "",
+    "<b>Sell builds:</b>"
+  ];
+
+  lines.push(
+    ...steps.map((step, index) => {
+      const seconds = formatNumber(step.delayMs / 1000);
+      return `${index + 1}. Sell ${escapeHtml(String(step.request.amount))} after ${seconds}s`;
+    })
+  );
+  lines.push("");
+  lines.push("<i>Build-only: not signed, not sent.</i>");
+
+  return lines.join("\n");
+}
+
+export function formatCopyTradeTrailingSellBuildMessage({
+  trade,
+  copyWalletAddress,
+  stepIndex,
+  totalSteps,
+  request,
+  pumpPortalBuild
+}: {
+  trade: WalletTradeData;
+  copyWalletAddress: string;
+  stepIndex: number;
+  totalSteps: number;
+  request: PumpPortalLocalTradeRequest;
+  pumpPortalBuild: PumpPortalLocalTradeBuildResult;
+}): string {
+  const walletName = trade.label || shortenAddress(trade.targetWallet);
+
+  return [
+    "<b>Trailing sell build</b>",
+    `<b>Step:</b> ${stepIndex + 1}/${totalSteps}`,
+    `<b>Target:</b> ${escapeHtml(walletName)}`,
+    `<b>My wallet:</b> <code>${escapeHtml(copyWalletAddress)}</code>`,
+    "",
+    "<b>Contract address</b>",
+    `<code>${escapeHtml(request.mint)}</code>`,
+    "",
+    `<b>Sell amount:</b> ${escapeHtml(String(request.amount))}`,
+    `<b>PumpPortal:</b> ${formatPumpPortalBuildStatus(pumpPortalBuild)}`,
+    "",
+    "<i>Build-only: not signed, not sent.</i>"
+  ].join("\n");
 }
 
 function formatAsset({ amount, symbol, mint }: WalletTradeAsset): string | null {

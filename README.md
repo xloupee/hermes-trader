@@ -50,7 +50,7 @@ npm start
 6. In Telegram, open your bot and send `/start`.
 7. Send `/verify your-code` using the value from `TELEGRAM_VERIFY_CODE`.
 8. Choose your alert types with `/alerts`; tap a button again to turn that alert type on or off.
-9. To monitor wallet swaps, send `/wallets`, then use the dashboard buttons to add, rename, remove, or list watched wallets. Wallet swap alerts require the Helius webhook env vars.
+9. To monitor wallet swaps, send `/trackwallets`, then use the dashboard buttons to add, rename, remove, or list tracked wallets. Wallet swap alerts require the Helius webhook env vars.
 10. Restart the bot if you changed `.env`:
 
 ```bash
@@ -78,7 +78,8 @@ npm run import-subscribers -- data/telegram-subscribers.json
 - `/stop` - Stop notifications for this chat.
 - `/help` - Show the command list.
 - `/alerts` - Open the alert mode dashboard.
-- `/wallets` - Open the watched-wallet dashboard.
+- `/trackwallets` - Open the tracked-wallet dashboard.
+- `/mywallets` - Open the My Wallets dashboard.
 - `/copytrade` - Open the copy trade setup dashboard.
 
 ## Notes
@@ -89,7 +90,7 @@ npm run import-subscribers -- data/telegram-subscribers.json
 - To inspect recent on-chain migrations without waiting for a live event, run `npm run past-migrations -- 10`.
 - Set `SOLANA_RPC_URL` in `.env` if public Solana RPC rate limits you.
 - Wallet swap monitor events are stored in `WALLET_TRADE_LOG_PATH`.
-- Wallet swap alerts include copy-trade details when copy wallet(s), amount, and target are configured through `/copytrade`. For copyable SOL-to-token buys, the bot asks PumpPortal `trade-local` to build one unsigned local transaction per configured copy wallet and reports whether each build worked. This is alert output only; it does not sign or execute trades.
+- Copytrade simulation alerts require My Wallets from `/mywallets`, a copy amount, and Copytrade Wallets from `/copytrade`. For copyable SOL-to-token buys, the bot asks PumpPortal `trade-local` to build one unsigned local transaction per configured My Wallet and reports whether each build worked. This is alert output only; it does not sign or execute trades.
 - Expose `WEBHOOK_PORT` through your reverse proxy at the exact `HELIUS_WEBHOOK_PUBLIC_URL`, and forward the `Authorization` header unchanged.
 
 ## Research

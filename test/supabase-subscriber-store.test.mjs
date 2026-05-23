@@ -10,12 +10,14 @@ class MemorySubscriberRepository {
     this.subscribers = new Map();
     this.wallets = new Map();
     this.copyTradeWallets = new Map();
+    this.myWallets = new Map();
 
     for (const record of records) {
       this.subscribers.set(record.chatId, {
         ...record,
         watchedWallets: [],
-        copyTradeWallets: []
+        copyTradeWallets: [],
+        myWallets: []
       });
 
       for (const walletRecord of record.watchedWallets || []) {
@@ -27,6 +29,13 @@ class MemorySubscriberRepository {
 
       for (const walletRecord of record.copyTradeWallets || []) {
         this.copyTradeWallets.set(`${record.chatId}:${walletRecord.address}`, {
+          chatId: record.chatId,
+          ...walletRecord
+        });
+      }
+
+      for (const walletRecord of record.myWallets || []) {
+        this.myWallets.set(`${record.chatId}:${walletRecord.address}`, {
           chatId: record.chatId,
           ...walletRecord
         });
@@ -43,6 +52,9 @@ class MemorySubscriberRepository {
           .map(({ chatId: _chatId, ...walletRecord }) => ({ ...walletRecord })),
         copyTradeWallets: [...this.copyTradeWallets.values()]
           .filter((walletRecord) => walletRecord.chatId === subscriber.chatId)
+          .map(({ chatId: _chatId, ...walletRecord }) => ({ ...walletRecord })),
+        myWallets: [...this.myWallets.values()]
+          .filter((walletRecord) => walletRecord.chatId === subscriber.chatId)
           .map(({ chatId: _chatId, ...walletRecord }) => ({ ...walletRecord }))
       }))
       .sort((left, right) => left.chatId.localeCompare(right.chatId));
@@ -53,7 +65,8 @@ class MemorySubscriberRepository {
     this.subscribers.set(subscriber.chatId, {
       ...subscriber,
       watchedWallets: existing?.watchedWallets || [],
-      copyTradeWallets: existing?.copyTradeWallets || []
+      copyTradeWallets: existing?.copyTradeWallets || [],
+      myWallets: existing?.myWallets || []
     });
   }
 
@@ -69,6 +82,12 @@ class MemorySubscriberRepository {
     for (const key of this.copyTradeWallets.keys()) {
       if (key.startsWith(`${chatId}:`)) {
         this.copyTradeWallets.delete(key);
+      }
+    }
+
+    for (const key of this.myWallets.keys()) {
+      if (key.startsWith(`${chatId}:`)) {
+        this.myWallets.delete(key);
       }
     }
   }
@@ -94,6 +113,17 @@ class MemorySubscriberRepository {
   async deleteCopyTradeWallet(chatId, address) {
     this.copyTradeWallets.delete(`${chatId}:${address}`);
   }
+
+  async upsertMyWallet(chatId, walletRecord) {
+    this.myWallets.set(`${chatId}:${walletRecord.address}`, {
+      chatId,
+      ...walletRecord
+    });
+  }
+
+  async deleteMyWallet(chatId, address) {
+    this.myWallets.delete(`${chatId}:${address}`);
+  }
 }
 
 function subscriber(overrides = {}) {
@@ -109,6 +139,7 @@ function subscriber(overrides = {}) {
       }
     ],
     copyTradeWallets: [],
+    myWallets: [],
     copyWalletAddress: null,
     copyWalletAddresses: [],
     copyAmountSol: null,
@@ -170,18 +201,31 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
   assert.equal(await store.setMode("chat-1", "newtokens"), true);
   assert.equal(await store.setCopyWallet("chat-1", otherWallet), true);
   assert.equal(await store.setCopyWallet("chat-1", wallet), true);
+  assert.deepEqual(store.listCopyWallets("chat-1"), [otherWallet, wallet]);
   assert.equal(await store.setCopyAmountSol("chat-1", 0.25), true);
+  assert.equal(await store.addMyWallet("chat-1", otherWallet, "My Alpha"), true);
+  assert.equal(await store.addMyWallet("chat-1", wallet, "My Beta"), true);
+  assert.equal(await store.renameMyWallet("chat-1", wallet, null), true);
+  assert.equal(await store.renameMyWallet("chat-1", "missing", "Nope"), false);
   assert.equal(await store.watchCopyTradeWallet("chat-1", otherWallet, "Copy Alpha"), true);
   assert.equal(await store.watchCopyTradeWallet("chat-1", wallet, "Copy Beta"), true);
   assert.equal(await store.renameCopyTradeWallet("chat-1", wallet, null), true);
   assert.equal(await store.renameCopyTradeWallet("chat-1", "missing", "Nope"), false);
   assert.equal(await store.setCopyWallet("chat-2", otherWallet), false);
   assert.equal(await store.setCopyAmountSol("chat-2", 0.25), false);
+  assert.equal(await store.addMyWallet("chat-2", wallet, "Unverified"), false);
   assert.equal(await store.watchCopyTradeWallet("chat-2", wallet, "Unverified"), false);
   assert.equal(store.get("chat-1")?.mode, "newtokens");
-  assert.equal(store.get("chat-1")?.copyWalletAddress, otherWallet);
-  assert.deepEqual(store.get("chat-1")?.copyWalletAddresses, [otherWallet, wallet]);
-  assert.deepEqual(store.listCopyWallets("chat-1"), [otherWallet, wallet]);
+  assert.equal(store.get("chat-1")?.copyWalletAddress, null);
+  assert.deepEqual(store.get("chat-1")?.copyWalletAddresses, []);
+  assert.deepEqual(store.listCopyWallets("chat-1"), []);
+  assert.deepEqual(
+    store.listMyWallets("chat-1").map((entry) => [entry.address, entry.label]),
+    [
+      [otherWallet, "My Alpha"],
+      [wallet, null]
+    ]
+  );
   assert.equal(store.get("chat-1")?.copyAmountSol, 0.25);
   assert.deepEqual(
     store.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label]),
@@ -197,8 +241,15 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
     reloaded.listWatchedWallets("chat-1").map((entry) => [entry.address, entry.label]),
     [[wallet, null]]
   );
-  assert.equal(reloaded.get("chat-1")?.copyWalletAddress, otherWallet);
-  assert.deepEqual(reloaded.get("chat-1")?.copyWalletAddresses, [otherWallet, wallet]);
+  assert.equal(reloaded.get("chat-1")?.copyWalletAddress, null);
+  assert.deepEqual(reloaded.get("chat-1")?.copyWalletAddresses, []);
+  assert.deepEqual(
+    reloaded.listMyWallets("chat-1").map((entry) => [entry.address, entry.label]),
+    [
+      [otherWallet, "My Alpha"],
+      [wallet, null]
+    ]
+  );
   assert.equal(reloaded.get("chat-1")?.copyAmountSol, 0.25);
   assert.deepEqual(
     reloaded.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label]),
@@ -213,8 +264,8 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
   assert.deepEqual(reloaded.listCopyTradeWallets("chat-1").map((entry) => entry.address), [otherWallet, wallet]);
   assert.equal(await reloaded.unwatchCopyTradeWallet("chat-1", wallet), true);
   assert.deepEqual(reloaded.listCopyTradeWallets("chat-1").map((entry) => entry.address), [otherWallet]);
-  assert.equal(await reloaded.removeCopyWallet("chat-1", wallet), true);
-  assert.deepEqual(reloaded.listCopyWallets("chat-1"), [otherWallet]);
+  assert.equal(await reloaded.removeMyWallet("chat-1", wallet), true);
+  assert.deepEqual(reloaded.listMyWallets("chat-1").map((entry) => entry.address), [otherWallet]);
   await reloaded.remove("chat-1");
   assert.equal(reloaded.has("chat-1"), false);
 });

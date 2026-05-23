@@ -283,11 +283,7 @@ async function sendWalletTradeAlert(subscriber: SubscriberRecord, trade: WalletT
 }
 
 async function sendCopyTradeSimulationAlert(subscriber: SubscriberRecord, trade: WalletTradeData): Promise<void> {
-  const copyWalletAddresses = subscriber.copyWalletAddresses.length > 0
-    ? subscriber.copyWalletAddresses
-    : subscriber.copyWalletAddress
-      ? [subscriber.copyWalletAddress]
-      : [];
+  const copyWalletAddresses = (subscriber.myWallets || []).map((wallet) => wallet.address).filter(Boolean);
   const copySettings = {
     copyWalletAddress: copyWalletAddresses[0] || null,
     copyWalletAddresses,

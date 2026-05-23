@@ -25,7 +25,8 @@ const telegramCommands = [
   { command: "verify", description: "Verify this chat" },
   { command: "stop", description: "Stop notifications" },
   { command: "alerts", description: "Open alert mode dashboard" },
-  { command: "wallets", description: "Open wallet dashboard" },
+  { command: "trackwallets", description: "Open track wallet dashboard" },
+  { command: "mywallets", description: "Open my wallets dashboard" },
   { command: "copytrade", description: "Open copy trade menu" },
   { command: "help", description: "Show commands" }
 ];
@@ -33,11 +34,14 @@ const telegramCommands = [
 const MAX_WALLET_NICKNAME_LENGTH = 48;
 const PENDING_COPY_INPUT_TTL_MS = 10 * 60 * 1000;
 
-type PendingCopyInputAction = "copy_wallet" | "remove_copy_wallet" | "copy_amount";
+type PendingCopyInputAction = "copy_amount";
 type PendingWalletInputAction =
   | "watch_wallet"
   | "rename_wallet"
   | "unwatch_wallet"
+  | "my_wallet"
+  | "rename_my_wallet"
+  | "remove_my_wallet"
   | "copytrade_wallet"
   | "rename_copytrade_wallet"
   | "remove_copytrade_wallet";
@@ -136,7 +140,8 @@ function chooseModeText(): string {
   return [
     "Open a dashboard:",
     "/alerts - Toggle token alerts",
-    "/wallets - Manage watched wallets",
+    "/trackwallets - Manage tracked wallets",
+    "/mywallets - Manage my wallets",
     "/copytrade - Manage copy trade settings",
     "/help - Show all commands"
   ].join("\n");
@@ -155,7 +160,8 @@ export function helpText(_chatId?: TelegramChatId): string {
     "/verify &lt;code&gt; - Verify this chat",
     "/stop - Stop notifications",
     "/alerts - Open alert mode dashboard",
-    "/wallets - Open wallet dashboard",
+    "/trackwallets - Open track wallet dashboard",
+    "/mywallets - Open my wallets dashboard",
     "/copytrade - Open copy trade setup menu",
     "/help - Show commands"
   ].join("\n");
@@ -252,9 +258,15 @@ export function createTelegramCommandPoller({
       case "/unwatch":
         await reply(chatId, await unwatchWallet(chatId, parsed.args));
         break;
-      case "/wallets":
+      case "/trackwallets":
         {
-          const dashboard = walletDashboard(chatId);
+          const dashboard = trackWalletDashboard(chatId);
+          await reply(chatId, dashboard.text, dashboard.replyMarkup);
+        }
+        break;
+      case "/mywallets":
+        {
+          const dashboard = myWalletDashboard(chatId);
           await reply(chatId, dashboard.text, dashboard.replyMarkup);
         }
         break;
@@ -320,44 +332,61 @@ export function createTelegramCommandPoller({
       return;
     }
 
-    if (data === "wallets:dashboard") {
-      const dashboard = walletDashboard(chatId);
+    if (data === "trackwallets:dashboard") {
+      const dashboard = trackWalletDashboard(chatId);
       await reply(chatId, dashboard.text, dashboard.replyMarkup);
       return;
     }
 
-    if (data === "wallets:list") {
-      await reply(chatId, listWallets(chatId));
+    if (data === "trackwallets:list") {
+      await reply(chatId, listTrackWallets(chatId));
       return;
     }
 
-    if (data === "wallets:add") {
+    if (data === "trackwallets:add") {
       setPendingWalletInput(chatId, "watch_wallet");
-      await reply(chatId, "Send the wallet address you want to watch. You can include a nickname after it.");
+      await reply(chatId, "Send the wallet address you want to track. You can include a nickname after it.");
       return;
     }
 
-    if (data === "wallets:rename") {
+    if (data === "trackwallets:rename") {
       setPendingWalletInput(chatId, "rename_wallet");
-      await reply(chatId, "Send <code>wallet-address nickname</code> to rename, or <code>wallet-address -</code> to clear.");
+      await reply(chatId, "Send <code>wallet-address nickname</code> to rename a tracked wallet, or <code>wallet-address -</code> to clear.");
       return;
     }
 
-    if (data === "wallets:remove") {
+    if (data === "trackwallets:remove") {
       setPendingWalletInput(chatId, "unwatch_wallet");
-      await reply(chatId, "Send the wallet address you want to stop watching.");
+      await reply(chatId, "Send the wallet address you want to stop tracking.");
       return;
     }
 
-    if (data === "copytrade:set_wallet") {
-      setPendingCopyInput(chatId, "copy_wallet");
-      await reply(chatId, "Send the public wallet address you want to add as a copy wallet.");
+    if (data === "mywallets:dashboard" || data === "copytrade:mywallets") {
+      const dashboard = myWalletDashboard(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
       return;
     }
 
-    if (data === "copytrade:remove_wallet") {
-      setPendingCopyInput(chatId, "remove_copy_wallet");
-      await reply(chatId, "Send the public copy wallet address you want to remove.");
+    if (data === "mywallets:list") {
+      await reply(chatId, listMyWallets(chatId));
+      return;
+    }
+
+    if (data === "mywallets:add") {
+      setPendingWalletInput(chatId, "my_wallet");
+      await reply(chatId, "Send your public wallet address. You can include a nickname after it.");
+      return;
+    }
+
+    if (data === "mywallets:rename") {
+      setPendingWalletInput(chatId, "rename_my_wallet");
+      await reply(chatId, "Send <code>wallet-address nickname</code> to rename a My Wallet, or <code>wallet-address -</code> to clear.");
+      return;
+    }
+
+    if (data === "mywallets:remove") {
+      setPendingWalletInput(chatId, "remove_my_wallet");
+      await reply(chatId, "Send the My Wallet address you want to remove.");
       return;
     }
 
@@ -542,7 +571,7 @@ export function createTelegramCommandPoller({
     const nickname = args.slice(1).join(" ").trim();
 
     if (!wallet) {
-      return "Send /wallets to open the wallet dashboard.";
+      return "Send /trackwallets to open the track wallet dashboard.";
     }
 
     if (!isValidSolanaAddress(wallet)) {
@@ -580,7 +609,7 @@ export function createTelegramCommandPoller({
     const nickname = args.slice(1).join(" ").trim();
 
     if (!wallet || !nickname) {
-      return "Send /wallets to open the wallet dashboard and rename a watched wallet.";
+      return "Send /trackwallets to open the track wallet dashboard and rename a tracked wallet.";
     }
 
     if (!isValidSolanaAddress(wallet)) {
@@ -617,7 +646,7 @@ export function createTelegramCommandPoller({
     const wallet = args[0]?.trim();
 
     if (!wallet) {
-      return "Send /wallets to open the wallet dashboard and remove a watched wallet.";
+      return "Send /trackwallets to open the track wallet dashboard and remove a tracked wallet.";
     }
 
     if (!isValidSolanaAddress(wallet)) {
@@ -627,15 +656,15 @@ export function createTelegramCommandPoller({
     const removed = await subscribers?.unwatchWallet(chatId, wallet);
 
     if (!removed) {
-      return "That wallet was not being watched in this chat.";
+      return "That wallet was not being tracked in this chat.";
     }
 
     const syncWarning = await onWalletWatchlistChange?.();
-    const success = `<b>Stopped watching wallet:</b>\n<code>${wallet}</code>`;
+    const success = `<b>Stopped tracking wallet:</b>\n<code>${wallet}</code>`;
     return syncWarning ? `${success}\n\n${syncWarning}` : success;
   }
 
-  function listWallets(chatId: TelegramChatId): string {
+  function listTrackWallets(chatId: TelegramChatId): string {
     const gate = requireVerified(chatId);
 
     if (gate) {
@@ -645,11 +674,11 @@ export function createTelegramCommandPoller({
     const wallets = subscribers?.listWatchedWallets(chatId) || [];
 
     if (wallets.length === 0) {
-      return "No watched wallets for this chat. Send /wallets and tap Add Wallet.";
+      return "No tracked wallets for this chat. Send /trackwallets and tap Add Wallet.";
     }
 
     return [
-      "<b>Watched wallets</b>",
+      "<b>Tracked wallets</b>",
       ...wallets.map((wallet) =>
         wallet.label ? `${escapeWalletLabel(wallet.label)}\n<code>${wallet.address}</code>` : `<code>${wallet.address}</code>`
       )
@@ -676,7 +705,7 @@ export function createTelegramCommandPoller({
     if (pending.expiresAt < Date.now()) {
       pendingWalletInputs.delete(String(chatId));
       return {
-        text: "That wallet setup step expired. Send /wallets to start again."
+        text: "That wallet setup step expired. Send /trackwallets, /mywallets, or /copytrade to start again."
       };
     }
 
@@ -686,7 +715,7 @@ export function createTelegramCommandPoller({
 
     if (!wallet || !isValidSolanaAddress(wallet)) {
       return {
-        text: "That does not look like a Solana wallet address. Send a wallet address, or send /wallets to restart."
+        text: "That does not look like a Solana wallet address. Send a wallet address, or send /trackwallets, /mywallets, or /copytrade to restart."
       };
     }
 
@@ -705,9 +734,73 @@ export function createTelegramCommandPoller({
       }
 
       const syncWarning = await onWalletWatchlistChange?.();
-      const dashboard = walletDashboard(chatId);
+      const dashboard = trackWalletDashboard(chatId);
       return {
-        text: `${label ? `<b>Watching wallet:</b> ${escapeWalletLabel(label)}\n` : "<b>Watching wallet:</b>\n"}<code>${wallet}</code>${syncWarning ? `\n\n${syncWarning}` : ""}\n\n${dashboard.text}`,
+        text: `${label ? `<b>Tracking wallet:</b> ${escapeWalletLabel(label)}\n` : "<b>Tracking wallet:</b>\n"}<code>${wallet}</code>${syncWarning ? `\n\n${syncWarning}` : ""}\n\n${dashboard.text}`,
+        replyMarkup: dashboard.replyMarkup
+      };
+    }
+
+    if (pending.action === "my_wallet") {
+      const nicknameError = validateNickname(label);
+
+      if (nicknameError) {
+        return { text: nicknameError };
+      }
+
+      pendingWalletInputs.delete(String(chatId));
+      const updated = await subscribers?.addMyWallet(chatId, wallet, label);
+
+      if (!updated) {
+        return { text: verificationPrompt() };
+      }
+
+      const dashboard = myWalletDashboard(chatId);
+      return {
+        text: `${label ? `<b>My Wallet saved:</b> ${escapeWalletLabel(label)}\n` : "<b>My Wallet saved:</b>\n"}<code>${wallet}</code>\n\n${dashboard.text}`,
+        replyMarkup: dashboard.replyMarkup
+      };
+    }
+
+    if (pending.action === "rename_my_wallet") {
+      if (!label) {
+        return {
+          text: "Send <code>wallet-address nickname</code> to rename a My Wallet, or <code>wallet-address -</code> to clear."
+        };
+      }
+
+      const nextLabel = label === "-" ? null : label;
+      const nicknameError = nextLabel === null ? null : validateNickname(nextLabel);
+
+      if (nicknameError) {
+        return { text: nicknameError };
+      }
+
+      pendingWalletInputs.delete(String(chatId));
+      const updated = await subscribers?.renameMyWallet(chatId, wallet, nextLabel);
+
+      if (!updated) {
+        return { text: "That My Wallet is not configured in this chat." };
+      }
+
+      const dashboard = myWalletDashboard(chatId);
+      return {
+        text: `${nextLabel === null ? "<b>Cleared My Wallet nickname:</b>" : `<b>Renamed My Wallet:</b> ${escapeWalletLabel(nextLabel)}`}\n<code>${wallet}</code>\n\n${dashboard.text}`,
+        replyMarkup: dashboard.replyMarkup
+      };
+    }
+
+    if (pending.action === "remove_my_wallet") {
+      pendingWalletInputs.delete(String(chatId));
+      const removed = await subscribers?.removeMyWallet(chatId, wallet);
+
+      if (!removed) {
+        return { text: "That My Wallet is not configured in this chat." };
+      }
+
+      const dashboard = myWalletDashboard(chatId);
+      return {
+        text: `<b>Removed My Wallet:</b>\n<code>${wallet}</code>\n\n${dashboard.text}`,
         replyMarkup: dashboard.replyMarkup
       };
     }
@@ -799,7 +892,7 @@ export function createTelegramCommandPoller({
         return { text: "That wallet is not being watched in this chat." };
       }
 
-      const dashboard = walletDashboard(chatId);
+      const dashboard = trackWalletDashboard(chatId);
       return {
         text: `${nextLabel === null ? "<b>Cleared wallet nickname:</b>" : `<b>Renamed wallet:</b> ${escapeWalletLabel(nextLabel)}`}\n<code>${wallet}</code>\n\n${dashboard.text}`,
         replyMarkup: dashboard.replyMarkup
@@ -814,48 +907,88 @@ export function createTelegramCommandPoller({
     }
 
     const syncWarning = await onWalletWatchlistChange?.();
-    const dashboard = walletDashboard(chatId);
+    const dashboard = trackWalletDashboard(chatId);
     return {
-      text: `<b>Stopped watching wallet:</b>\n<code>${wallet}</code>${syncWarning ? `\n\n${syncWarning}` : ""}\n\n${dashboard.text}`,
+      text: `<b>Stopped tracking wallet:</b>\n<code>${wallet}</code>${syncWarning ? `\n\n${syncWarning}` : ""}\n\n${dashboard.text}`,
       replyMarkup: dashboard.replyMarkup
     };
   }
 
-  function walletDashboard(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
+  function trackWalletDashboard(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
     const gate = requireVerified(chatId);
 
     if (gate) {
       return {
         text: gate,
-        replyMarkup: walletDashboardReplyMarkup()
+        replyMarkup: trackWalletDashboardReplyMarkup()
       };
     }
 
     const wallets = subscribers?.listWatchedWallets(chatId) || [];
     const text = [
       "<b>Wallets</b>",
-      `<b>Watched wallets:</b> ${wallets.length}`,
-      wallets.length === 0 ? "No watched wallets yet." : wallets.map((wallet) => formatWalletSummary(wallet)).join("\n"),
+      `<b>Tracked wallets:</b> ${wallets.length}`,
+      wallets.length === 0 ? "No tracked wallets yet." : wallets.map((wallet) => formatWalletSummary(wallet)).join("\n"),
       "",
-      "Use the buttons below to manage watched wallets."
+      "Use the buttons below to manage tracked wallets."
     ].join("\n");
 
     return {
       text,
-      replyMarkup: walletDashboardReplyMarkup()
+      replyMarkup: trackWalletDashboardReplyMarkup()
     };
   }
 
-  function walletDashboardReplyMarkup(): TelegramReplyMarkup {
+  function trackWalletDashboardReplyMarkup(): TelegramReplyMarkup {
     return {
       inline_keyboard: [
         [
-          { text: "Add Wallet", callback_data: "wallets:add" },
-          { text: "Rename", callback_data: "wallets:rename" }
+          { text: "Add Wallet", callback_data: "trackwallets:add" },
+          { text: "Rename", callback_data: "trackwallets:rename" }
         ],
         [
-          { text: "Remove", callback_data: "wallets:remove" },
-          { text: "List", callback_data: "wallets:list" }
+          { text: "Remove", callback_data: "trackwallets:remove" },
+          { text: "List", callback_data: "trackwallets:list" }
+        ]
+      ]
+    };
+  }
+
+  function myWalletDashboard(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return {
+        text: gate,
+        replyMarkup: myWalletDashboardReplyMarkup()
+      };
+    }
+
+    const wallets = subscribers?.listMyWallets(chatId) || [];
+    const text = [
+      "<b>My wallets</b>",
+      `<b>My wallets:</b> ${wallets.length}`,
+      wallets.length === 0 ? "No My Wallets yet." : wallets.map((wallet) => formatWalletSummary(wallet)).join("\n"),
+      "",
+      "Use the buttons below to manage your public wallets."
+    ].join("\n");
+
+    return {
+      text,
+      replyMarkup: myWalletDashboardReplyMarkup()
+    };
+  }
+
+  function myWalletDashboardReplyMarkup(): TelegramReplyMarkup {
+    return {
+      inline_keyboard: [
+        [
+          { text: "Add Wallet", callback_data: "mywallets:add" },
+          { text: "Rename", callback_data: "mywallets:rename" }
+        ],
+        [
+          { text: "Remove", callback_data: "mywallets:remove" },
+          { text: "List", callback_data: "mywallets:list" }
         ]
       ]
     };
@@ -891,50 +1024,6 @@ export function createTelegramCommandPoller({
 
     const value = message.text?.trim() || "";
 
-    if (pending.action === "copy_wallet") {
-      if (!isValidSolanaAddress(value)) {
-        return {
-          text: "That does not look like a Solana wallet address. Send a public wallet address, or send /copytrade to restart."
-        };
-      }
-
-      pendingCopyInputs.delete(String(chatId));
-      const updated = await subscribers?.setCopyWallet(chatId, value);
-
-      if (!updated) {
-        return { text: verificationPrompt() };
-      }
-
-      const dashboard = copyTradeDashboard(chatId);
-      return {
-        text: `<b>Copy wallet added:</b>\n<code>${value}</code>\n\n${dashboard.text}`,
-        replyMarkup: dashboard.replyMarkup
-      };
-    }
-
-    if (pending.action === "remove_copy_wallet") {
-      if (!isValidSolanaAddress(value)) {
-        return {
-          text: "That does not look like a Solana wallet address. Send a public wallet address, or send /copytrade to restart."
-        };
-      }
-
-      pendingCopyInputs.delete(String(chatId));
-      const removed = await subscribers?.removeCopyWallet(chatId, value);
-
-      if (!removed) {
-        return {
-          text: "That copy wallet was not configured for this chat. Send /copytrade to reopen the menu."
-        };
-      }
-
-      const dashboard = copyTradeDashboard(chatId);
-      return {
-        text: `<b>Copy wallet removed:</b>\n<code>${value}</code>\n\n${dashboard.text}`,
-        replyMarkup: dashboard.replyMarkup
-      };
-    }
-
     const amount = Number(value);
 
     if (!Number.isFinite(amount) || amount <= 0) {
@@ -969,11 +1058,11 @@ export function createTelegramCommandPoller({
 
     const subscriber = subscribers?.get(chatId) || null;
     const copyTradeWallets = subscribers?.listCopyTradeWallets(chatId) || [];
-    const copyWallets = subscribers?.listCopyWallets(chatId) || [];
+    const myWallets = subscribers?.listMyWallets(chatId) || [];
     const text = [
       "<b>Copy trade</b>",
-      `<b>Copy wallets:</b> ${copyWallets.length}`,
-      ...copyWallets.map((wallet) => `<code>${wallet}</code>`),
+      `<b>My wallets:</b> ${myWallets.length}`,
+      myWallets.length === 0 ? "No My Wallets yet. Add one in /mywallets before copytrade simulations can run." : myWallets.map((wallet) => formatWalletSummary(wallet)).join("\n"),
       `<b>Copy amount:</b> ${subscriber?.copyAmountSol ? `${formatSolAmount(subscriber.copyAmountSol)} SOL` : "Not set"}`,
       `<b>Copytrade wallets:</b> ${copyTradeWallets.length}`,
       copyTradeWallets.length === 0 ? "No Copytrade Wallets yet." : copyTradeWallets.map((wallet) => formatWalletSummary(wallet)).join("\n"),
@@ -992,9 +1081,8 @@ export function createTelegramCommandPoller({
       inline_keyboard: [
         [
           { text: "Status", callback_data: "copytrade:status" },
-          { text: "Add Wallet", callback_data: "copytrade:set_wallet" }
+          { text: "My Wallets", callback_data: "copytrade:mywallets" }
         ],
-        [{ text: "Remove Wallet", callback_data: "copytrade:remove_wallet" }],
         [
           { text: "Set Amount", callback_data: "copytrade:set_amount" },
           { text: "Add Copytrade Wallet", callback_data: "copytrade:add_wallet" }
@@ -1023,6 +1111,27 @@ export function createTelegramCommandPoller({
 
     return [
       "<b>Copytrade Wallets</b>",
+      ...wallets.map((wallet) =>
+        wallet.label ? `${escapeWalletLabel(wallet.label)}\n<code>${wallet.address}</code>` : `<code>${wallet.address}</code>`
+      )
+    ].join("\n\n");
+  }
+
+  function listMyWallets(chatId: TelegramChatId): string {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return gate;
+    }
+
+    const wallets = subscribers?.listMyWallets(chatId) || [];
+
+    if (wallets.length === 0) {
+      return "No My Wallets for this chat. Send /mywallets and tap Add Wallet.";
+    }
+
+    return [
+      "<b>My Wallets</b>",
       ...wallets.map((wallet) =>
         wallet.label ? `${escapeWalletLabel(wallet.label)}\n<code>${wallet.address}</code>` : `<code>${wallet.address}</code>`
       )
@@ -1071,7 +1180,7 @@ export function createTelegramCommandPoller({
       await clearTelegramWebhook({ token: config.telegramToken });
       await setTelegramCommands({ token: config.telegramToken, commands: telegramCommands });
       console.log(`Telegram bot ready: @${bot.username}`);
-      console.log("Polling for /start, /help, /verify, /stop, /alerts, /wallets, and /copytrade");
+      console.log("Polling for /start, /help, /verify, /stop, /alerts, /trackwallets, /mywallets, and /copytrade");
 
       while (shouldPoll) {
         try {

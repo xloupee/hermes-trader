@@ -29,8 +29,11 @@ export interface BotConfig extends MigrationFormatConfig {
   telegramChatId?: string;
   telegramVerifyCode?: string;
   telegramSubscribersPath?: string;
+  supabaseUrl?: string;
+  supabaseServiceRoleKey?: string;
   pumpPortalApiKey?: string;
   pumpPortalWsUrl: string;
+  pumpPortalTradeLocalUrl: string;
   migrationLogPath: string;
   walletTradeLogPath: string;
   heliusApiKey?: string;
@@ -45,14 +48,11 @@ export interface BotConfig extends MigrationFormatConfig {
   solanaRpcUrl: string;
   transactionFlowEnabled: boolean;
   transactionAccountLabels?: string;
-  copyDefaultSolAmount: number;
-  pumpPortalLocalTradeUrl: string;
-  pumpPortalLocalSlippage: number;
-  pumpPortalLocalPriorityFee: number;
-  pumpPortalLocalPool: string;
-  copyTestLimit: number;
   alertModeLabel?: string;
   shutdownReason?: string;
+  copyTradeSlippage: number;
+  copyTradePriorityFee: number;
+  copyTradePool: PumpPortalTradePool;
 }
 
 export interface LegacyBotConfig extends MigrationFormatConfig {
@@ -62,12 +62,6 @@ export interface LegacyBotConfig extends MigrationFormatConfig {
   telegramSubscribersPath?: string;
   pumpPortalApiKey?: string;
   pumpPortalWsUrl: string;
-  copyDefaultSolAmount?: number;
-  pumpPortalLocalTradeUrl?: string;
-  pumpPortalLocalSlippage?: number;
-  pumpPortalLocalPriorityFee?: number;
-  pumpPortalLocalPool?: string;
-  copyTestLimit?: number;
   getModeLabel?: () => string;
   pumpPortalSubscriptionMethod?: string;
 }
@@ -90,6 +84,13 @@ export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
   channel_post?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
+}
+
+export interface TelegramCallbackQuery {
+  id: string;
+  data?: string;
+  message?: TelegramMessage;
 }
 
 export interface TelegramBotInfo {
@@ -102,7 +103,7 @@ export interface TelegramReplyMarkup {
 
 export interface TelegramInlineKeyboardButton {
   text: string;
-  url?: string;
+  callback_data?: string;
   copy_text?: {
     text: string;
   };
@@ -114,12 +115,14 @@ export interface SubscriberStore {
   add: (chatId: TelegramChatId) => Promise<void>;
   remove: (chatId: TelegramChatId) => Promise<void>;
   get: (chatId: TelegramChatId) => SubscriberRecord | null;
-  setMode: (chatId: TelegramChatId, mode: AlertModeValue) => Promise<boolean>;
+  setMode: (chatId: TelegramChatId, mode: AlertModeValue | null) => Promise<boolean>;
   watchWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
+  renameWallet: (chatId: TelegramChatId, address: string, label: string | null) => Promise<boolean>;
   unwatchWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   setCopyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   removeCopyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
-  setCopySolAmount: (chatId: TelegramChatId, amount: number) => Promise<boolean>;
+  setCopyAmountSol: (chatId: TelegramChatId, amountSol: number) => Promise<boolean>;
+  setCopyTargetWallet: (chatId: TelegramChatId, address: string | null) => Promise<boolean>;
   listWatchedWallets: (chatId: TelegramChatId) => WatchedWallet[];
   listCopyWallets: (chatId: TelegramChatId) => string[];
   list: () => SubscriberRecord[];
@@ -130,10 +133,10 @@ export interface SubscriberRecord {
   chatId: string;
   mode: AlertModeValue | null;
   watchedWallets: WatchedWallet[];
-  copyWallet: string | null;
-  copyWallets: string[];
-  copySolAmount: number | null;
-  copySettingsUpdatedAt: string | null;
+  copyWalletAddress: string | null;
+  copyWalletAddresses: string[];
+  copyAmountSol: number | null;
+  copyTargetWalletAddress: string | null;
   verifiedAt: string;
   updatedAt: string;
 }
@@ -167,6 +170,33 @@ export interface WalletTradeData {
   solscanTokenUrl: string | null;
   solscanTxUrl: string | null;
   raw: LooseRecord;
+}
+
+export interface CopyTradeSettings {
+  copyWalletAddress: string | null;
+  copyWalletAddresses?: string[];
+  copyAmountSol: number | null;
+  copyTargetWalletAddress?: string | null;
+}
+
+export type PumpPortalTradePool = "auto" | "pump" | "pump-amm" | "raydium" | "raydium-cpmm" | "launchlab" | "bonk";
+
+export interface PumpPortalLocalTradeRequest {
+  publicKey: string;
+  action: "buy";
+  mint: string;
+  amount: number;
+  denominatedInSol: "true";
+  slippage: number;
+  priorityFee: number;
+  pool: PumpPortalTradePool;
+}
+
+export interface PumpPortalLocalTradeBuildResult {
+  ok: boolean;
+  status: number | null;
+  bodyLength: number | null;
+  errorText: string | null;
 }
 
 export interface TransactionAccountChange {

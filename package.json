@@ -9,11 +9,14 @@
     "bot": "npm run build && node dist/bot.js",
     "chat-id": "npm run build && node dist/get-chat-id.js",
     "past-migrations": "npm run build && node dist/past-migrations.js",
+    "import-subscribers": "npm run build && node dist/import-subscribers.js",
     "check": "tsc --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
+    "stop-local": "bash scripts/stop-local.sh",
     "deploy": "bash scripts/deploy.sh"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.106.1",
     "dotenv": "^16.4.7",
     "ws": "^8.18.0"
   },

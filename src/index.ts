@@ -3,36 +3,42 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { buildMigrationReplyMarkup, extractMigrationData, formatMigrationMessage, getEventId } from "./format.js";
 import { createTelegramCommandPoller } from "./commands.js";
-import {
-  buildCopyCandidateReplyMarkup,
-  buildPumpPortalLocalTransactions,
-  formatCopyCandidateMessage,
-  isCopyCandidateTrade
-} from "./copy-trade.js";
 import { createHeliusWebhookServer, missingHeliusConfigWarning, syncHeliusWebhook } from "./helius.js";
 import { heliusEventMentionsWatchedWallet, isHeliusSwapEvent, normalizeHeliusSwapData } from "./helius-swaps.js";
-import { createPumpPortalMigrationListener } from "./pumpportal.js";
+import {
+  buildPumpPortalLocalTrade,
+  buildPumpPortalLocalTradeRequest,
+  createPumpPortalMigrationListener,
+  PUMPPORTAL_TRADE_LOCAL_URL
+} from "./pumpportal.js";
 import { analyzeSolanaTransaction } from "./solana.js";
 import { createSubscriberStore } from "./subscribers.js";
+import { createSupabaseSubscriberStoreFromEnv } from "./subscribers-supabase.js";
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
 import { asRecord, errorMessage, isRecord, stringValue } from "./types.js";
 import {
-  getWalletTradeEventId
+  buildWalletTradeReplyMarkup,
+  formatCopyTradeSimulationMessage,
+  formatWalletTradeMessageWithCopySettings,
+  getWalletTradeEventId,
+  isCopyableSolToTokenBuy
 } from "./wallet-monitor.js";
-import type { AlertModeValue, BotConfig, LooseRecord, MigrationData, SubscriberRecord, TransactionAnalysis, WalletTradeData } from "./types.js";
+import type { AlertModeValue, BotConfig, LooseRecord, MigrationData, PumpPortalTradePool, SubscriberRecord, TransactionAnalysis, WalletTradeData } from "./types.js";
 
 function numberFromEnv(value: string | undefined, fallback: number): number {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
 }
 
-function integerFromEnv(value: string | undefined, fallback: number): number {
-  const number = Number(value);
-  return Number.isInteger(number) ? number : fallback;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
+function pumpPortalPoolFromEnv(value: string | undefined): PumpPortalTradePool {
+  return value === "pump" ||
+    value === "pump-amm" ||
+    value === "raydium" ||
+    value === "raydium-cpmm" ||
+    value === "launchlab" ||
+    value === "bonk"
+    ? value
+    : "auto";
 }
 
 const config: BotConfig = {
@@ -40,8 +46,11 @@ const config: BotConfig = {
   telegramChatId: process.env.TELEGRAM_CHAT_ID,
   telegramVerifyCode: process.env.TELEGRAM_VERIFY_CODE,
   telegramSubscribersPath: process.env.TELEGRAM_SUBSCRIBERS_PATH || "data/telegram-subscribers.json",
+  supabaseUrl: process.env.SUPABASE_URL,
+  supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE,
   pumpPortalApiKey: process.env.PUMPPORTAL_API_KEY,
   pumpPortalWsUrl: process.env.PUMPPORTAL_WS_URL || "wss://pumpportal.fun/api/data",
+  pumpPortalTradeLocalUrl: process.env.PUMPPORTAL_TRADE_LOCAL_URL || PUMPPORTAL_TRADE_LOCAL_URL,
   alertMode: process.env.ALERT_MODE || process.env.PUMPPORTAL_ALERT_MODE || "migrations",
   solscanBaseUrl: process.env.SOLSCAN_BASE_URL || "https://solscan.io",
   pumpFunBaseUrl: process.env.PUMPFUN_BASE_URL || "https://pump.fun",
@@ -59,13 +68,10 @@ const config: BotConfig = {
   solanaRpcUrl: process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
   transactionFlowEnabled: process.env.TRANSACTION_FLOW_ENABLED === "true",
   transactionAccountLabels: process.env.TRANSACTION_ACCOUNT_LABELS,
-  copyDefaultSolAmount: numberFromEnv(process.env.COPY_DEFAULT_SOL_AMOUNT, 0.01),
-  pumpPortalLocalTradeUrl: process.env.PUMPPORTAL_LOCAL_TRADE_URL || "https://pumpportal.fun/api/trade-local",
-  pumpPortalLocalSlippage: numberFromEnv(process.env.PUMPPORTAL_LOCAL_SLIPPAGE, 10),
-  pumpPortalLocalPriorityFee: numberFromEnv(process.env.PUMPPORTAL_LOCAL_PRIORITY_FEE, 0.00005),
-  pumpPortalLocalPool: process.env.PUMPPORTAL_LOCAL_POOL || "auto",
-  copyTestLimit: clamp(integerFromEnv(process.env.COPY_TEST_LIMIT, 20), 1, 100),
-  shutdownReason: process.env.BOT_SHUTDOWN_REASON
+  shutdownReason: process.env.BOT_SHUTDOWN_REASON,
+  copyTradeSlippage: numberFromEnv(process.env.COPY_TRADE_SLIPPAGE, 10),
+  copyTradePriorityFee: numberFromEnv(process.env.COPY_TRADE_PRIORITY_FEE, 0.00005),
+  copyTradePool: pumpPortalPoolFromEnv(process.env.COPY_TRADE_POOL)
 };
 
 const seenEvents = new Set<string>();
@@ -75,10 +81,18 @@ const metadataCache = new Map<string, LooseRecord | null>();
 const tokenInfoCache = new Map<string, LooseRecord | null>();
 let isShuttingDown = false;
 const pumpFunCoinInfoRetryDelaysMs = [0, 750, 1500, 3000, 6000];
-const subscribers = createSubscriberStore({
-  path: config.telegramSubscribersPath,
-  initialChatIds: [config.telegramChatId]
-});
+const subscribers =
+  config.supabaseUrl && config.supabaseServiceRoleKey
+    ? createSupabaseSubscriberStoreFromEnv({
+        url: config.supabaseUrl,
+        serviceRoleKey: config.supabaseServiceRoleKey,
+        initialChatIds: [config.telegramChatId]
+      })
+    : createSubscriberStore({
+        path: config.telegramSubscribersPath,
+        initialChatIds: [config.telegramChatId]
+      });
+const subscriberStoreLabel = config.supabaseUrl && config.supabaseServiceRoleKey ? "Supabase" : "JSON";
 
 const baseSubscriptionMethods = ["subscribeNewToken", "subscribeMigration"];
 
@@ -223,158 +237,75 @@ async function handleHeliusSwap(event: LooseRecord): Promise<boolean> {
     console.log(`Wallet trade event: ${JSON.stringify(loggedTrade)}`);
 
     for (const entry of entries) {
-      const trade = {
+      await sendWalletTradeAlert(entry.subscriber, {
         ...loggedTrade,
         label: entry.label
-      };
-
-      if (!isCopyCandidateTrade(trade)) {
-        continue;
-      }
-
-      await sendCopyCandidateAlert(entry.subscriber, trade);
+      });
     }
   }
 
   return true;
 }
 
-async function sendCopyCandidateAlert(subscriber: SubscriberRecord, trade: WalletTradeData): Promise<void> {
-  const builds = await buildPumpPortalLocalTransactions({
-    trade,
-    subscriber,
-    config
-  });
-
-  console.log(
-    `Copy candidate: ${JSON.stringify({
-      chatId: subscriber.chatId,
-      targetWallet: trade.targetWallet,
-      mint: trade.mint,
-      signature: trade.signature,
-      builds: builds.map((entry) => ({
-        copyWallet: entry.copyWallet,
-        copySolAmount: entry.copySolAmount,
-        pumpPortal: {
-          status: entry.build.status,
-          message: entry.build.message,
-          responseStatus: entry.build.responseStatus,
-          responseBytes: entry.build.responseBytes
+async function sendWalletTradeAlert(subscriber: SubscriberRecord, trade: WalletTradeData): Promise<void> {
+  const copyWalletAddresses = subscriber.copyWalletAddresses.length > 0
+    ? subscriber.copyWalletAddresses
+    : subscriber.copyWalletAddress
+      ? [subscriber.copyWalletAddress]
+      : [];
+  const copySettings =
+    subscriber.copyTargetWalletAddress && subscriber.copyTargetWalletAddress === trade.targetWallet
+      ? {
+          copyWalletAddress: copyWalletAddresses[0] || null,
+          copyWalletAddresses,
+          copyAmountSol: subscriber.copyAmountSol,
+          copyTargetWalletAddress: subscriber.copyTargetWalletAddress
         }
-      }))
-    })}`
-  );
+      : null;
 
   try {
     await sendTelegramMessage({
       token: config.telegramToken,
       chatId: subscriber.chatId,
-      text: formatCopyCandidateMessage({
-        trade,
-        builds
-      }),
-      replyMarkup: buildCopyCandidateReplyMarkup(trade)
+      text: formatWalletTradeMessageWithCopySettings(trade, copySettings),
+      replyMarkup: buildWalletTradeReplyMarkup(trade)
     });
+
+    if (copySettings && isCopyableSolToTokenBuy(trade)) {
+      for (const copyWalletAddress of copyWalletAddresses) {
+        const perWalletCopySettings = {
+          ...copySettings,
+          copyWalletAddress,
+          copyWalletAddresses: [copyWalletAddress]
+        };
+        const pumpPortalRequest = buildPumpPortalLocalTradeRequest({
+          trade,
+          copySettings: perWalletCopySettings,
+          slippage: config.copyTradeSlippage,
+          priorityFee: config.copyTradePriorityFee,
+          pool: config.copyTradePool
+        });
+        const pumpPortalBuild = pumpPortalRequest
+          ? await buildPumpPortalLocalTrade({
+              url: config.pumpPortalTradeLocalUrl,
+              request: pumpPortalRequest
+            })
+          : null;
+        const copyTradeSimulationMessage = formatCopyTradeSimulationMessage(trade, perWalletCopySettings, pumpPortalBuild);
+
+        if (copyTradeSimulationMessage) {
+          await sendTelegramMessage({
+            token: config.telegramToken,
+            chatId: subscriber.chatId,
+            text: copyTradeSimulationMessage,
+            replyMarkup: buildWalletTradeReplyMarkup(trade)
+          });
+        }
+      }
+    }
   } catch (error) {
-    console.warn(`Could not send copy candidate alert to ${subscriber.chatId}: ${errorMessage(error)}`);
+    console.warn(`Could not send wallet trade alert to ${subscriber.chatId}: ${errorMessage(error)}`);
   }
-}
-
-async function runCopyTest(chatId: string | number): Promise<string> {
-  const subscriber = subscribers.get(chatId);
-
-  if (!subscriber) {
-    return "<b>Verification required.</b>\n\nSend:\n<code>/verify your-code</code>";
-  }
-
-  if (!config.heliusApiKey) {
-    return "Copy test is disabled. Set HELIUS_API_KEY, then restart the bot.";
-  }
-
-  const wallets = subscribers.listWatchedWallets(chatId);
-
-  if (wallets.length === 0) {
-    return "No watched wallets for this chat. Add one with <code>/watch wallet-address optional-label</code>.";
-  }
-
-  let sent = 0;
-  let scannedEvents = 0;
-  const failures: string[] = [];
-
-  for (const wallet of wallets) {
-    let events: LooseRecord[];
-
-    try {
-      events = await fetchRecentHeliusSwaps(wallet.address);
-    } catch (error) {
-      failures.push(`${wallet.label || wallet.address}: ${errorMessage(error)}`);
-      continue;
-    }
-
-    scannedEvents += events.length;
-
-    for (const event of events) {
-      if (!isHeliusSwapEvent(event) || !heliusEventMentionsWatchedWallet(event, wallet.address)) {
-        continue;
-      }
-
-      const trade = normalizeHeliusSwapData({
-        event,
-        targetWallet: wallet.address,
-        label: wallet.label,
-        config
-      });
-
-      if (!isCopyCandidateTrade(trade)) {
-        continue;
-      }
-
-      const eventId = getWalletTradeEventId(trade);
-
-      if (rememberEvent(eventId)) {
-        continue;
-      }
-
-      await writeWalletTradeLog(trade);
-      console.log(`Copy test wallet trade event: ${JSON.stringify(trade)}`);
-      await sendCopyCandidateAlert(subscriber, trade);
-      sent += 1;
-      break;
-    }
-  }
-
-  const summary = [`Copy test scanned ${wallets.length} wallet(s), ${scannedEvents} recent swap(s), sent ${sent} candidate alert(s).`];
-
-  if (failures.length > 0) {
-    summary.push("");
-    summary.push("Some wallets could not be scanned:");
-    summary.push(...failures.slice(0, 5).map((failure) => `- ${failure}`));
-  }
-
-  return summary.join("\n");
-}
-
-async function fetchRecentHeliusSwaps(walletAddress: string): Promise<LooseRecord[]> {
-  if (!config.heliusApiKey) {
-    return [];
-  }
-
-  const baseUrl = config.heliusApiBaseUrl.replace(/\/$/, "");
-  const url = new URL(`${baseUrl}/v0/addresses/${encodeURIComponent(walletAddress)}/transactions`);
-  url.searchParams.set("api-key", config.heliusApiKey);
-  url.searchParams.set("type", "SWAP");
-  url.searchParams.set("limit", String(config.copyTestLimit));
-
-  const response = await fetch(url);
-  const body = await response.text();
-
-  if (!response.ok) {
-    throw new Error(body.trim() || `Helius recent swap fetch failed with ${response.status}`);
-  }
-
-  const parsed = JSON.parse(body) as unknown;
-
-  return Array.isArray(parsed) ? parsed.filter(isRecord) : [];
 }
 
 function classifyEventMode(event: LooseRecord): Exclude<AlertModeValue, "both"> | null {
@@ -716,6 +647,14 @@ function assertConfig(): void {
   if (missing.length > 0) {
     throw new Error(`Missing required env vars: ${missing.join(", ")}`);
   }
+
+  if (config.supabaseUrl && !config.supabaseServiceRoleKey) {
+    console.warn("SUPABASE_URL is set but no service role key was found; using JSON subscriber storage.");
+  }
+
+  if (!config.supabaseUrl && config.supabaseServiceRoleKey) {
+    console.warn("A Supabase service role key is set but SUPABASE_URL is missing; using JSON subscriber storage.");
+  }
 }
 
 const commandPoller = createTelegramCommandPoller({
@@ -724,9 +663,6 @@ const commandPoller = createTelegramCommandPoller({
   subscribers,
   onWalletWatchlistChange: () => {
     return syncHeliusWalletWebhook();
-  },
-  onCopyTest: (chatId) => {
-    return runCopyTest(chatId);
   }
 });
 const migrationListener = createPumpPortalMigrationListener({
@@ -772,11 +708,6 @@ async function syncHeliusWalletWebhook(): Promise<string | undefined> {
     return result.warning;
   }
 
-  if (result.skipped) {
-    console.log(result.message || "Helius webhook sync skipped.");
-    return undefined;
-  }
-
   if (result.webhookId) {
     console.log(`Helius webhook synced: ${result.webhookId}`);
   }
@@ -817,6 +748,7 @@ process.on("SIGTERM", () => {
 
 assertConfig();
 await subscribers.init();
+console.log(`Using ${subscriberStoreLabel} subscriber storage`);
 console.log(`Loaded ${subscribers.count()} verified Telegram subscriber(s)`);
 if (watchedWalletAddresses().length > 0) {
   await syncHeliusWalletWebhook();

@@ -1,24 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import {
-  buildPumpPortalLocalTradeRequest,
-  buildPumpPortalLocalTransaction,
-  buildPumpPortalLocalTransactions,
-  copySolAmountForSubscriber,
-  formatCopyCandidateMessage,
-  isCopyCandidateTrade
-} from "../dist/copy-trade.js";
-import { createTelegramCommandPoller } from "../dist/commands.js";
+import { commandFromMessage, helpText, toggleAlertMode } from "../dist/commands.js";
 import { buildHeliusWebhookPayload, createHeliusWebhookServer, syncHeliusWebhook } from "../dist/helius.js";
 import { heliusEventMentionsWatchedWallet, normalizeHeliusSwapData } from "../dist/helius-swaps.js";
+import { buildPumpPortalLocalTradeRequest } from "../dist/pumpportal.js";
 import { createSubscriberStore } from "../dist/subscribers.js";
 import {
   buildWalletTradeReplyMarkup,
+  formatCopyTradeSimulationMessage,
   formatWalletTradeMessage,
+  formatWalletTradeMessageWithCopySettings,
   getWalletTradeEventId,
+  isCopyableSolToTokenBuy,
   isValidSolanaAddress
 } from "../dist/wallet-monitor.js";
 
@@ -27,13 +23,50 @@ const otherWallet = "62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV";
 const mint = "DezXAZ8z7PnrnRJjz3n26VsZdrmRwNny4nBj9JkzjW7B";
 const config = {
   pumpFunBaseUrl: "https://pump.fun",
-  solscanBaseUrl: "https://solscan.io",
-  copyDefaultSolAmount: 0.01,
-  pumpPortalLocalTradeUrl: "https://pumpportal.test/api/trade-local",
-  pumpPortalLocalSlippage: 10,
-  pumpPortalLocalPriorityFee: 0.00005,
-  pumpPortalLocalPool: "auto"
+  solscanBaseUrl: "https://solscan.io"
 };
+
+test("telegram help exposes wallet and copy trade dashboards", () => {
+  const help = helpText("chat-1");
+
+  assert.match(help, /\/alerts - Open alert mode dashboard/);
+  assert.match(help, /\/wallets - Open wallet dashboard/);
+  assert.match(help, /\/copytrade - Open copy trade setup menu/);
+  assert.doesNotMatch(help, /\/migrations/);
+  assert.doesNotMatch(help, /\/newtokens/);
+  assert.doesNotMatch(help, /\/both/);
+  assert.doesNotMatch(help, /\/watch/);
+  assert.doesNotMatch(help, /\/renamewallet/);
+  assert.doesNotMatch(help, /\/unwatch/);
+  assert.doesNotMatch(help, /\/copywallet/);
+  assert.doesNotMatch(help, /\/copyamount/);
+  assert.doesNotMatch(help, /\/copystatus/);
+  assert.deepEqual(commandFromMessage({ text: "/wallets" }), {
+    command: "/wallets",
+    args: []
+  });
+  assert.deepEqual(commandFromMessage({ text: "/alerts" }), {
+    command: "/alerts",
+    args: []
+  });
+  assert.deepEqual(commandFromMessage({ text: "/migrations" }), {
+    command: "/migrations",
+    args: []
+  });
+  assert.deepEqual(commandFromMessage({ text: "/copytrade" }), {
+    command: "/copytrade",
+    args: []
+  });
+});
+
+test("alert mode toggles individual token alert types", () => {
+  assert.equal(toggleAlertMode("both", "migrations"), "newtokens");
+  assert.equal(toggleAlertMode("both", "newtokens"), "migrations");
+  assert.equal(toggleAlertMode("migrations", "migrations"), null);
+  assert.equal(toggleAlertMode("newtokens", "migrations"), "both");
+  assert.equal(toggleAlertMode(null, "migrations"), "migrations");
+  assert.equal(toggleAlertMode(null, "newtokens"), "newtokens");
+});
 
 test("subscriber store persists per-chat watched wallets with labels", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pumpfunnoti-"));
@@ -47,18 +80,46 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
 
     await store.add("chat-1");
     assert.equal(await store.watchWallet("chat-1", wallet, "Alpha <Wallet>"), true);
-    assert.equal(await store.setCopyWallet("chat-1", otherWallet), true);
-    assert.equal(await store.setCopyWallet("chat-1", wallet), true);
-    assert.equal(await store.setCopySolAmount("chat-1", 0.025), true);
     assert.deepEqual(
       store.listWatchedWallets("chat-1").map((entry) => [entry.address, entry.label]),
       [[wallet, "Alpha <Wallet>"]]
     );
-    assert.equal(store.get("chat-1").copyWallet, otherWallet);
-    assert.deepEqual(store.get("chat-1").copyWallets, [otherWallet, wallet]);
+    assert.equal(await store.watchWallet("chat-1", wallet), true);
+    assert.deepEqual(
+      store.listWatchedWallets("chat-1").map((entry) => [entry.address, entry.label]),
+      [[wallet, "Alpha <Wallet>"]]
+    );
+    assert.equal(await store.renameWallet("chat-1", wallet, "Beta Wallet"), true);
+    assert.deepEqual(
+      store.listWatchedWallets("chat-1").map((entry) => [entry.address, entry.label]),
+      [[wallet, "Beta Wallet"]]
+    );
+    assert.equal(await store.renameWallet("chat-1", wallet, null), true);
+    assert.deepEqual(
+      store.listWatchedWallets("chat-1").map((entry) => [entry.address, entry.label]),
+      [[wallet, null]]
+    );
+    assert.equal(await store.renameWallet("chat-1", otherWallet, "Missing"), false);
+    assert.equal(await store.renameWallet("chat-2", wallet, "Unverified"), false);
+    assert.equal(await store.renameWallet("chat-1", wallet, "Alpha <Wallet>"), true);
+    assert.equal(await store.setMode("chat-1", "newtokens"), true);
+    assert.equal(store.get("chat-1")?.mode, "newtokens");
+    assert.equal(await store.setMode("chat-1", null), true);
+    assert.equal(store.get("chat-1")?.mode, null);
+    assert.equal(await store.setMode("chat-2", "both"), false);
+    assert.equal(await store.setCopyWallet("chat-1", otherWallet), true);
+    assert.equal(await store.setCopyWallet("chat-1", wallet), true);
+    assert.equal(await store.setCopyAmountSol("chat-1", 0.25), true);
+    assert.equal(await store.setCopyTargetWallet("chat-1", otherWallet), false);
+    assert.equal(await store.setCopyTargetWallet("chat-1", wallet), true);
+    assert.equal(await store.setCopyWallet("chat-2", otherWallet), false);
+    assert.equal(await store.setCopyAmountSol("chat-2", 0.25), false);
+    assert.equal(await store.setCopyTargetWallet("chat-2", wallet), false);
+    assert.equal(store.get("chat-1")?.copyWalletAddress, otherWallet);
+    assert.deepEqual(store.get("chat-1")?.copyWalletAddresses, [otherWallet, wallet]);
     assert.deepEqual(store.listCopyWallets("chat-1"), [otherWallet, wallet]);
-    assert.equal(store.get("chat-1").copySolAmount, 0.025);
-    assert.match(store.get("chat-1").copySettingsUpdatedAt, /^\d{4}-/);
+    assert.equal(store.get("chat-1")?.copyAmountSol, 0.25);
+    assert.equal(store.get("chat-1")?.copyTargetWalletAddress, wallet);
 
     const reloaded = createSubscriberStore({ path });
     await reloaded.init();
@@ -66,17 +127,34 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
       reloaded.listWatchedWallets("chat-1").map((entry) => [entry.address, entry.label]),
       [[wallet, "Alpha <Wallet>"]]
     );
-    assert.equal(reloaded.get("chat-1").copyWallet, otherWallet);
-    assert.deepEqual(reloaded.get("chat-1").copyWallets, [otherWallet, wallet]);
-    assert.equal(reloaded.get("chat-1").copySolAmount, 0.025);
-    assert.equal(await reloaded.removeCopyWallet("chat-1", wallet), true);
-    assert.deepEqual(reloaded.listCopyWallets("chat-1"), [otherWallet]);
+    assert.equal(reloaded.get("chat-1")?.copyWalletAddress, otherWallet);
+    assert.deepEqual(reloaded.get("chat-1")?.copyWalletAddresses, [otherWallet, wallet]);
+    assert.equal(reloaded.get("chat-1")?.copyAmountSol, 0.25);
+    assert.equal(reloaded.get("chat-1")?.copyTargetWalletAddress, wallet);
+    assert.equal(reloaded.get("chat-1")?.mode, null);
 
     assert.equal(await reloaded.unwatchWallet("chat-1", wallet), true);
     assert.deepEqual(reloaded.listWatchedWallets("chat-1"), []);
+    assert.equal(reloaded.get("chat-1")?.copyTargetWalletAddress, null);
+    assert.equal(await reloaded.removeCopyWallet("chat-1", wallet), true);
+    assert.deepEqual(reloaded.listCopyWallets("chat-1"), [otherWallet]);
 
     const body = JSON.parse(await readFile(path, "utf8"));
     assert.equal(body.subscribers[0].chatId, "chat-1");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("subscriber store init does not create a file from seeded chat ids", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pumpfunnoti-init-"));
+  const path = join(dir, "subscribers.json");
+
+  try {
+    const store = createSubscriberStore({ path, initialChatIds: ["seed-chat"] });
+    await store.init();
+    assert.equal(store.has("seed-chat"), true);
+    await assert.rejects(stat(path), { code: "ENOENT" });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -149,340 +227,70 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
   assert.match(message, /0.125 SOL -> 250,000 BONK/);
   assert.match(message, /0.125 SOL/);
   assert.match(message, /Source:<\/b> JUPITER/);
-});
 
-test("copy candidate formatting and missing wallet build skip", () => {
-  const trade = normalizeHeliusSwapData({
-    event: heliusSwapEvent(),
-    targetWallet: wallet,
-    label: "Alpha <Wallet>",
-    config
+  const copyMessage = formatWalletTradeMessageWithCopySettings(trade, {
+    copyWalletAddress: otherWallet,
+    copyWalletAddresses: [otherWallet, wallet],
+    copyAmountSol: 0.25
   });
-  const subscriber = {
-    chatId: "chat-1",
-    mode: "both",
-    watchedWallets: [],
-    copyWallet: null,
-    copyWallets: [],
-    copySolAmount: null,
-    copySettingsUpdatedAt: null,
-    verifiedAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  };
-  const build = buildPumpPortalLocalTradeRequest({ trade, subscriber, config });
-  const message = formatCopyCandidateMessage({
+  assert.match(copyMessage, /Copy trade/);
+  assert.match(copyMessage, new RegExp(otherWallet));
+  assert.match(copyMessage, new RegExp(wallet));
+  assert.match(copyMessage, /Copy wallets:<\/b> 2/);
+  assert.match(copyMessage, /Copy amount:<\/b> 0.25 SOL/);
+  assert.match(copyMessage, /Status:<\/b> Ready to copy 0.25 SOL into this token from 2 wallet/);
+
+  assert.equal(isCopyableSolToTokenBuy(trade), true);
+  const simulationMessage = formatCopyTradeSimulationMessage(trade, {
+    copyWalletAddress: otherWallet,
+    copyAmountSol: 0.25
+  });
+  assert.match(simulationMessage || "", /Would copy trade/);
+  assert.match(simulationMessage || "", /Alpha &lt;Wallet&gt;/);
+  assert.match(simulationMessage || "", new RegExp(otherWallet));
+  assert.match(simulationMessage || "", new RegExp(mint));
+  assert.match(simulationMessage || "", /Would buy this token with 0.25 SOL/);
+  assert.match(simulationMessage || "", /PumpPortal:<\/b> Local transaction build not requested/);
+  assert.doesNotMatch(simulationMessage || "", /500,000/);
+
+  const builtSimulationMessage = formatCopyTradeSimulationMessage(
     trade,
-    copySolAmount: copySolAmountForSubscriber(subscriber, config),
-    build
-  });
-
-  assert.equal(isCopyCandidateTrade(trade), true);
-  assert.equal(build.status, "skipped");
-  assert.equal(build.message, "PumpPortal build skipped: set /copywallet");
-  assert.match(message, /Copy candidate/);
-  assert.match(message, /Alpha &lt;Wallet&gt;/);
-  assert.match(message, /Target spent:<\/b> 0.125 SOL/);
-  assert.match(message, /Your copy amount:<\/b> 0.01 SOL/);
-  assert.match(message, /Build-only: not signed, not sent/);
-});
-
-test("PumpPortal Local request and build result stay unsigned", async () => {
-  const trade = normalizeHeliusSwapData({
-    event: heliusSwapEvent(),
-    targetWallet: wallet,
-    config
-  });
-  const subscriber = {
-    chatId: "chat-1",
-    mode: "both",
-    watchedWallets: [],
-    copyWallet: otherWallet,
-    copyWallets: [otherWallet],
-    copySolAmount: 0.02,
-    copySettingsUpdatedAt: new Date().toISOString(),
-    verifiedAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  };
-  const planned = buildPumpPortalLocalTradeRequest({ trade, subscriber, config });
-
-  assert.deepEqual(planned.request, {
-    publicKey: otherWallet,
-    action: "buy",
-    mint,
-    amount: 0.02,
-    denominatedInSol: "true",
-    slippage: 10,
-    priorityFee: 0.00005,
-    pool: "auto"
-  });
-
-  const calls = [];
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
-    calls.push({
-      url: String(url),
-      body: JSON.parse(String(init.body))
-    });
-    return new Response(new Uint8Array([1, 2, 3, 4]), {
+    {
+      copyWalletAddress: otherWallet,
+      copyAmountSol: 0.25
+    },
+    {
+      ok: true,
       status: 200,
-      headers: {
-        "content-type": "application/octet-stream"
-      }
-    });
-  };
-
-  try {
-    const built = await buildPumpPortalLocalTransaction({ trade, subscriber, config });
-
-    assert.equal(built.status, "built");
-    assert.equal(built.responseBytes, 4);
-    assert.equal(built.responseStatus, 200);
-    assert.equal(calls[0].url, config.pumpPortalLocalTradeUrl);
-    assert.deepEqual(calls[0].body, planned.request);
-    assert.equal("encodedTransactionBase64" in built, false);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("PumpPortal Local 400 response is surfaced clearly", async () => {
-  const trade = normalizeHeliusSwapData({
-    event: heliusSwapEvent(),
-    targetWallet: wallet,
-    config
-  });
-  const subscriber = {
-    chatId: "chat-1",
-    mode: "both",
-    watchedWallets: [],
-    copyWallet: otherWallet,
-    copyWallets: [otherWallet],
-    copySolAmount: 0.02,
-    copySettingsUpdatedAt: new Date().toISOString(),
-    verifiedAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  };
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () =>
-    new Response("Bad Request", {
-      status: 400,
-      headers: {
-        "content-type": "text/plain"
-      }
-    });
-
-  try {
-    const built = await buildPumpPortalLocalTransaction({ trade, subscriber, config });
-
-    assert.equal(built.status, "failed");
-    assert.equal(built.responseStatus, 400);
-    assert.match(built.message, /HTTP 400 Bad Request/);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("PumpPortal Local builds one unsigned transaction per copy wallet", async () => {
-  const trade = normalizeHeliusSwapData({
-    event: heliusSwapEvent(),
-    targetWallet: wallet,
-    config
-  });
-  const subscriber = {
-    chatId: "chat-1",
-    mode: "both",
-    watchedWallets: [],
-    copyWallet: otherWallet,
-    copyWallets: [otherWallet, wallet],
-    copySolAmount: 0.02,
-    copySettingsUpdatedAt: new Date().toISOString(),
-    verifiedAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  };
-  const calls = [];
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
-    calls.push({
-      url: String(url),
-      body: JSON.parse(String(init.body))
-    });
-    return new Response(new Uint8Array([1, 2]), {
-      status: 200,
-      headers: {
-        "content-type": "application/octet-stream"
-      }
-    });
-  };
-
-  try {
-    const built = await buildPumpPortalLocalTransactions({ trade, subscriber, config });
-
-    assert.equal(built.length, 2);
-    assert.deepEqual(
-      calls.map((call) => call.body.publicKey),
-      [otherWallet, wallet]
-    );
-    assert.deepEqual(
-      built.map((entry) => entry.build.status),
-      ["built", "built"]
-    );
-    assert.match(formatCopyCandidateMessage({ trade, builds: built }), /Copy wallets:<\/b> 2/);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("Telegram copy commands require verification and save copy amount", async () => {
-  const store = createSubscriberStore({});
-  await store.init();
-
-  const unverified = await runOneTelegramCommand(store, "/copywallet 62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV");
-  assert.match(unverified, /Verification required/);
-
-  await store.add("chat-1");
-  const amountReply = await runOneTelegramCommand(store, "/copyamount 0.02");
-  assert.match(amountReply, /Copy amount set/);
-  assert.equal(store.get("chat-1").copySolAmount, 0.02);
-
-  const walletReply = await runOneTelegramCommand(store, `/copywallet ${otherWallet}`);
-  assert.match(walletReply, /Copy wallet added/);
-  assert.equal(store.get("chat-1").copyWallet, otherWallet);
-  assert.deepEqual(store.get("chat-1").copyWallets, [otherWallet]);
-
-  const statusReply = await runOneTelegramCommand(store, "/copystatus");
-  assert.match(statusReply, /Copy dry-run status/);
-  assert.match(statusReply, /Copy wallets:<\/b> 1/);
-  assert.match(statusReply, /0.02 SOL/);
-});
-
-test("Telegram copy wallet commands list and remove multiple copy wallets", async () => {
-  const store = createSubscriberStore({});
-  await store.init();
-  await store.add("chat-1");
-
-  await runOneTelegramCommand(store, `/copywallet ${otherWallet}`);
-  await runOneTelegramCommand(store, `/copywallet ${wallet}`);
-  assert.deepEqual(store.listCopyWallets("chat-1"), [otherWallet, wallet]);
-
-  const listReply = await runOneTelegramCommand(store, "/copywallets");
-  assert.match(listReply, /Copy wallets/);
-  assert.match(listReply, new RegExp(otherWallet));
-  assert.match(listReply, new RegExp(wallet));
-
-  const removeReply = await runOneTelegramCommand(store, `/uncopywallet ${wallet}`);
-  assert.match(removeReply, /Copy wallet removed/);
-  assert.deepEqual(store.listCopyWallets("chat-1"), [otherWallet]);
-});
-
-test("Telegram copytest requires verification and watched wallets", async () => {
-  const store = createSubscriberStore({});
-  await store.init();
-
-  const unverified = await runOneTelegramCommand(store, "/copytest");
-  assert.match(unverified, /Verification required/);
-
-  await store.add("chat-1");
-  const noWallets = await runOneTelegramCommand(store, "/copytest");
-  assert.match(noWallets, /No watched wallets/);
-  assert.match(noWallets, /\/watch wallet-address optional-label/);
-});
-
-test("Telegram copytest calls scanner for watched wallets", async () => {
-  const store = createSubscriberStore({});
-  await store.init();
-  await store.add("chat-1");
-  await store.watchWallet("chat-1", wallet, "Alpha");
-
-  const calls = [];
-  const reply = await runOneTelegramCommand(store, "/copytest", {
-    onCopyTest: (chatId) => {
-      calls.push(chatId);
-      return "Copy test scanned 1 wallet(s), 20 recent swap(s), sent 1 candidate alert(s).";
+      bodyLength: 1234,
+      errorText: null
     }
-  });
+  );
+  assert.match(builtSimulationMessage || "", /PumpPortal:<\/b> Local transaction built \(1,234 bytes\)/);
 
-  assert.deepEqual(calls, ["chat-1"]);
-  assert.match(reply, /Copy test scanned 1 wallet/);
-  assert.match(reply, /sent 1 candidate alert/);
-});
-
-async function runOneTelegramCommand(store, text, options = {}) {
-  const originalFetch = globalThis.fetch;
-  const sent = [];
-  let servedUpdates = false;
-  let poller;
-
-  globalThis.fetch = async (url, init) => {
-    const urlText = String(url);
-
-    if (urlText.includes("/getMe")) {
-      return telegramJson({ username: "copy_bot" });
-    }
-
-    if (urlText.includes("/deleteWebhook") || urlText.includes("/setMyCommands")) {
-      return telegramJson(true);
-    }
-
-    if (urlText.includes("/getUpdates")) {
-      if (servedUpdates) {
-        poller?.stop();
-        return telegramJson([]);
-      }
-
-      servedUpdates = true;
-      return telegramJson([
-        {
-          update_id: 1,
-          message: {
-            text,
-            chat: {
-              id: "chat-1"
-            }
-          }
-        }
-      ]);
-    }
-
-    if (urlText.includes("/sendMessage")) {
-      const body = JSON.parse(String(init.body));
-      sent.push(body.text);
-      poller?.stop();
-      return telegramJson({});
-    }
-
-    throw new Error(`Unexpected Telegram API call: ${urlText}`);
-  };
-
-  try {
-    poller = createTelegramCommandPoller({
-      config: {
-        telegramToken: "telegram-token",
-        telegramVerifyCode: "secret",
-        pumpPortalWsUrl: "wss://pumpportal.test",
-        copyDefaultSolAmount: 0.01,
-        pumpFunBaseUrl: "https://pump.fun",
-        solscanBaseUrl: "https://solscan.io"
+  assert.deepEqual(
+    buildPumpPortalLocalTradeRequest({
+      trade,
+      copySettings: {
+        copyWalletAddress: otherWallet,
+        copyAmountSol: 0.25
       },
-      testMessage: () => "",
-      subscribers: store,
-      onCopyTest: options.onCopyTest
-    });
-    await poller.start();
-    return sent[0] || "";
-  } finally {
-    poller?.stop();
-    globalThis.fetch = originalFetch;
-  }
-}
-
-function telegramJson(result) {
-  return new Response(JSON.stringify({ ok: true, result }), {
-    status: 200,
-    headers: {
-      "content-type": "application/json"
+      slippage: 15,
+      priorityFee: 0.00009,
+      pool: "auto"
+    }),
+    {
+      publicKey: otherWallet,
+      action: "buy",
+      mint,
+      amount: 0.25,
+      denominatedInSol: "true",
+      slippage: 15,
+      priorityFee: 0.00009,
+      pool: "auto"
     }
-  });
-}
+  );
+});
 
 test("Helius swap normalization handles token to SOL and token to token swaps", () => {
   const tokenToSol = normalizeHeliusSwapData({
@@ -543,8 +351,36 @@ test("Helius swap normalization handles token to SOL and token to token swaps", 
     symbol: "USDT",
     amount: 12.5
   });
-  assert.equal(isCopyCandidateTrade(tokenToSol), false);
-  assert.equal(isCopyCandidateTrade(tokenToToken), false);
+  assert.equal(isCopyableSolToTokenBuy(tokenToSol), false);
+  assert.equal(isCopyableSolToTokenBuy(tokenToToken), false);
+  assert.equal(
+    formatCopyTradeSimulationMessage(tokenToSol, {
+      copyWalletAddress: otherWallet,
+      copyAmountSol: 0.1
+    }),
+    null
+  );
+  assert.equal(
+    formatCopyTradeSimulationMessage(tokenToToken, {
+      copyWalletAddress: otherWallet,
+      copyAmountSol: 0.1
+    }),
+    null
+  );
+  assert.equal(
+    formatCopyTradeSimulationMessage(tokenToToken, {
+      copyWalletAddress: null,
+      copyAmountSol: 0.1
+    }),
+    null
+  );
+  assert.match(
+    formatWalletTradeMessageWithCopySettings(tokenToSol, {
+      copyWalletAddress: otherWallet,
+      copyAmountSol: 0.1
+    }),
+    /Status:<\/b> Not a copyable SOL-to-token buy/
+  );
 });
 
 test("Helius webhook payload uses enhanced SWAP config", () => {

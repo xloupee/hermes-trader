@@ -127,7 +127,7 @@ export async function getTelegramUpdates({ token, offset, timeout = 0 }: GetTele
 
   const search = new URLSearchParams({
     timeout: String(timeout),
-    allowed_updates: JSON.stringify(["message", "channel_post"])
+    allowed_updates: JSON.stringify(["message", "channel_post", "callback_query"])
   });
 
   if (offset) {
@@ -140,6 +140,25 @@ export async function getTelegramUpdates({ token, offset, timeout = 0 }: GetTele
   });
 
   return Array.isArray(body.result) ? (body.result as TelegramUpdate[]) : [];
+}
+
+export async function answerTelegramCallbackQuery({
+  token,
+  callbackQueryId,
+  text
+}: {
+  token?: string;
+  callbackQueryId: string;
+  text?: string;
+}): Promise<TelegramApiResponse<unknown>> {
+  return callTelegramApi({
+    token,
+    method: "answerCallbackQuery",
+    payload: {
+      callback_query_id: callbackQueryId,
+      text
+    }
+  });
 }
 
 export async function getTelegramBotInfo({ token }: { token?: string }): Promise<TelegramBotInfo> {

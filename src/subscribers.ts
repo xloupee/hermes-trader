@@ -3,31 +3,40 @@ import { dirname } from "node:path";
 import { asRecord, stringValue } from "./types.js";
 import type { AlertModeValue, SubscriberRecord, SubscriberStore, TelegramChatId, WatchedWallet } from "./types.js";
 
-const LEGACY_MODE: AlertModeValue = "migrations";
+export const LEGACY_MODE: AlertModeValue = "migrations";
 
-function normalizeChatId(chatId: TelegramChatId | undefined | null): string | null {
+export function normalizeChatId(chatId: TelegramChatId | undefined | null): string | null {
   return chatId === undefined || chatId === null ? null : String(chatId);
 }
 
-function normalizeMode(value: unknown): AlertModeValue | null {
+export function normalizeMode(value: unknown): AlertModeValue | null {
   return value === "migrations" || value === "newtokens" || value === "both" ? value : null;
 }
 
-function makeSubscriber(chatId: string, mode: AlertModeValue | null, now = new Date().toISOString()): SubscriberRecord {
+export function makeSubscriber(chatId: string, mode: AlertModeValue | null, now = new Date().toISOString()): SubscriberRecord {
   return {
     chatId,
     mode,
     watchedWallets: [],
-    copyWallet: null,
-    copyWallets: [],
-    copySolAmount: null,
-    copySettingsUpdatedAt: null,
+    copyWalletAddress: null,
+    copyWalletAddresses: [],
+    copyAmountSol: null,
+    copyTargetWalletAddress: null,
     verifiedAt: now,
     updatedAt: now
   };
 }
 
-function normalizeWatchedWallet(value: unknown, fallbackNow = new Date().toISOString()): WatchedWallet | null {
+export function finiteNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+export function normalizeWatchedWallet(value: unknown, fallbackNow = new Date().toISOString()): WatchedWallet | null {
   const record = asRecord(value);
   const address = stringValue(record.address || record.wallet || record.publicKey)?.trim();
 
@@ -45,21 +54,21 @@ function normalizeWatchedWallet(value: unknown, fallbackNow = new Date().toISOSt
   };
 }
 
-function normalizeCopyWallet(value: unknown): string | null {
+export function normalizeCopyWallet(value: unknown): string | null {
   const record = asRecord(value);
   const address =
     typeof value === "string"
       ? value.trim()
-      : stringValue(record.address || record.wallet || record.publicKey || record.copyWallet)?.trim();
+      : stringValue(record.address || record.wallet || record.publicKey || record.copyWallet || record.copyWalletAddress)?.trim();
 
   return address || null;
 }
 
-function dedupeCopyWallets(copyWallets: string[]): string[] {
+export function dedupeCopyWallets(copyWallets: string[]): string[] {
   return [...new Set(copyWallets.map((wallet) => wallet.trim()).filter(Boolean))];
 }
 
-function normalizeCopyWallets(copyWallets: unknown, legacyCopyWallet?: unknown): string[] {
+export function normalizeCopyWallets(copyWallets: unknown, legacyCopyWallet?: unknown): string[] {
   const normalized = Array.isArray(copyWallets)
     ? copyWallets.map((wallet) => normalizeCopyWallet(wallet)).filter((wallet): wallet is string => Boolean(wallet))
     : [];
@@ -68,36 +77,139 @@ function normalizeCopyWallets(copyWallets: unknown, legacyCopyWallet?: unknown):
   return dedupeCopyWallets(legacy ? [...normalized, legacy] : normalized);
 }
 
-function mergeSubscriber(
+export function mergeSubscriber(
   subscribers: Map<string, SubscriberRecord>,
   chatId: string,
   mode: AlertModeValue | null,
   verifiedAt?: unknown,
-  updatedAt?: unknown,
-  copyWallet?: unknown,
-  copyWallets?: unknown,
-  copySolAmount?: unknown,
-  copySettingsUpdatedAt?: unknown
+  updatedAt?: unknown
 ): void {
   const now = new Date().toISOString();
   const existing = subscribers.get(chatId);
-  const normalizedCopySolAmount = typeof copySolAmount === "number" && Number.isFinite(copySolAmount) && copySolAmount > 0 ? copySolAmount : null;
-  const normalizedCopyWallets = dedupeCopyWallets([
-    ...(existing?.copyWallets || []),
-    ...normalizeCopyWallets(copyWallets, copyWallet)
-  ]);
 
   subscribers.set(chatId, {
     chatId,
     mode,
     watchedWallets: existing?.watchedWallets || [],
-    copyWallet: normalizedCopyWallets[0] || existing?.copyWallet || null,
-    copyWallets: normalizedCopyWallets,
-    copySolAmount: normalizedCopySolAmount ?? existing?.copySolAmount ?? null,
-    copySettingsUpdatedAt: typeof copySettingsUpdatedAt === "string" ? copySettingsUpdatedAt : existing?.copySettingsUpdatedAt || null,
+    copyWalletAddress: stringValue(existing?.copyWalletAddress) || null,
+    copyWalletAddresses: existing?.copyWalletAddresses || [],
+    copyAmountSol: finiteNumber(existing?.copyAmountSol),
+    copyTargetWalletAddress: stringValue(existing?.copyTargetWalletAddress) || null,
     verifiedAt: typeof verifiedAt === "string" ? verifiedAt : existing?.verifiedAt || now,
     updatedAt: typeof updatedAt === "string" ? updatedAt : existing?.updatedAt || now
   });
+}
+
+export function dedupeWatchedWallets(watchedWallets: WatchedWallet[]): WatchedWallet[] {
+  const byAddress = new Map<string, WatchedWallet>();
+
+  for (const wallet of watchedWallets) {
+    byAddress.set(wallet.address, wallet);
+  }
+
+  return [...byAddress.values()].sort((left, right) => left.address.localeCompare(right.address));
+}
+
+function loadLegacyChatIdsInto(subscribers: Map<string, SubscriberRecord>, chatIds: unknown[]): void {
+  for (const chatId of chatIds) {
+    const normalized = normalizeChatId(chatId as TelegramChatId);
+
+    if (normalized) {
+      mergeSubscriber(subscribers, normalized, LEGACY_MODE);
+    }
+  }
+}
+
+function loadSubscriberRecordInto(subscribers: Map<string, SubscriberRecord>, value: unknown): void {
+  const record = asRecord(value);
+  const chatId = normalizeChatId(record.chatId as TelegramChatId);
+
+  if (!chatId) {
+    return;
+  }
+
+  mergeSubscriber(subscribers, chatId, normalizeMode(record.mode), record.verifiedAt, record.updatedAt);
+  const existing = subscribers.get(chatId);
+  const watchedWallets = Array.isArray(record.watchedWallets)
+    ? record.watchedWallets.map((wallet) => normalizeWatchedWallet(wallet)).filter((wallet): wallet is WatchedWallet => Boolean(wallet))
+    : [];
+
+  if (existing) {
+    const copyWalletAddresses = normalizeCopyWallets(
+      record.copyWalletAddresses || record.copyWallets,
+      record.copyWalletAddress || record.copyWallet || record.copyPublicKey
+    );
+
+    subscribers.set(chatId, {
+      ...existing,
+      watchedWallets: watchedWallets.length > 0 ? dedupeWatchedWallets(watchedWallets) : existing.watchedWallets,
+      copyWalletAddresses,
+      copyWalletAddress: copyWalletAddresses[0] || existing.copyWalletAddress,
+      copyAmountSol: finiteNumber(record.copyAmountSol ?? record.copyAmount) ?? existing.copyAmountSol,
+      copyTargetWalletAddress: stringValue(record.copyTargetWalletAddress || record.copyTargetWallet)?.trim() || existing.copyTargetWalletAddress
+    });
+  }
+}
+
+export function loadSubscriberDataInto(subscribers: Map<string, SubscriberRecord>, data: unknown): void {
+  const record = asRecord(data);
+
+  if (Array.isArray(data)) {
+    loadLegacyChatIdsInto(subscribers, data);
+    return;
+  }
+
+  if (Array.isArray(record.chatIds)) {
+    loadLegacyChatIdsInto(subscribers, record.chatIds);
+  }
+
+  if (Array.isArray(record.subscribers)) {
+    for (const entry of record.subscribers) {
+      loadSubscriberRecordInto(subscribers, entry);
+    }
+  }
+}
+
+export function seedSubscriberMap(initialChatIds: Array<TelegramChatId | undefined> = []): Map<string, SubscriberRecord> {
+  const subscribers = new Map<string, SubscriberRecord>();
+
+  for (const chatId of initialChatIds) {
+    const normalized = normalizeChatId(chatId);
+
+    if (normalized) {
+      mergeSubscriber(subscribers, normalized, LEGACY_MODE);
+    }
+  }
+
+  return subscribers;
+}
+
+export async function readSubscriberRecords({
+  path,
+  initialChatIds = []
+}: {
+  path?: string;
+  initialChatIds?: Array<TelegramChatId | undefined>;
+}): Promise<SubscriberRecord[]> {
+  const subscribers = seedSubscriberMap(initialChatIds);
+
+  if (!path) {
+    return [...subscribers.values()];
+  }
+
+  try {
+    const body = await readFile(path, "utf8");
+    loadSubscriberDataInto(subscribers, JSON.parse(body) as unknown);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return [...subscribers.values()];
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`Could not load Telegram subscribers: ${message}`);
+  }
+
+  return [...subscribers.values()];
 }
 
 export function createSubscriberStore({
@@ -107,16 +219,8 @@ export function createSubscriberStore({
   path?: string;
   initialChatIds?: Array<TelegramChatId | undefined>;
 }): SubscriberStore {
-  const subscribers = new Map<string, SubscriberRecord>();
+  const subscribers = seedSubscriberMap(initialChatIds);
   let loaded = false;
-
-  for (const chatId of initialChatIds) {
-    const normalized = normalizeChatId(chatId);
-
-    if (normalized) {
-      mergeSubscriber(subscribers, normalized, LEGACY_MODE);
-    }
-  }
 
   async function load(): Promise<void> {
     if (loaded) {
@@ -131,23 +235,7 @@ export function createSubscriberStore({
 
     try {
       const body = await readFile(path, "utf8");
-      const data = JSON.parse(body) as unknown;
-      const record = asRecord(data);
-
-      if (Array.isArray(data)) {
-        loadLegacyChatIds(data);
-        return;
-      }
-
-      if (Array.isArray(record.chatIds)) {
-        loadLegacyChatIds(record.chatIds);
-      }
-
-      if (Array.isArray(record.subscribers)) {
-        for (const entry of record.subscribers) {
-          loadSubscriberRecord(entry);
-        }
-      }
+      loadSubscriberDataInto(subscribers, JSON.parse(body) as unknown);
     } catch (error) {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") {
         return;
@@ -156,58 +244,6 @@ export function createSubscriberStore({
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`Could not load Telegram subscribers: ${message}`);
     }
-  }
-
-  function loadLegacyChatIds(chatIds: unknown[]): void {
-    for (const chatId of chatIds) {
-      const normalized = normalizeChatId(chatId as TelegramChatId);
-
-      if (normalized) {
-        mergeSubscriber(subscribers, normalized, LEGACY_MODE);
-      }
-    }
-  }
-
-  function loadSubscriberRecord(value: unknown): void {
-    const record = asRecord(value);
-    const chatId = normalizeChatId(record.chatId as TelegramChatId);
-
-    if (!chatId) {
-      return;
-    }
-
-    mergeSubscriber(
-      subscribers,
-      chatId,
-      normalizeMode(record.mode),
-      record.verifiedAt,
-      record.updatedAt,
-      record.copyWallet,
-      record.copyWallets,
-      record.copySolAmount,
-      record.copySettingsUpdatedAt
-    );
-    const existing = subscribers.get(chatId);
-    const watchedWallets = Array.isArray(record.watchedWallets)
-      ? record.watchedWallets.map((wallet) => normalizeWatchedWallet(wallet)).filter((wallet): wallet is WatchedWallet => Boolean(wallet))
-      : [];
-
-    if (existing && watchedWallets.length > 0) {
-      subscribers.set(chatId, {
-        ...existing,
-        watchedWallets: dedupeWatchedWallets(watchedWallets)
-      });
-    }
-  }
-
-  function dedupeWatchedWallets(watchedWallets: WatchedWallet[]): WatchedWallet[] {
-    const byAddress = new Map<string, WatchedWallet>();
-
-    for (const wallet of watchedWallets) {
-      byAddress.set(wallet.address, wallet);
-    }
-
-    return [...byAddress.values()].sort((left, right) => left.address.localeCompare(right.address));
   }
 
   async function save(): Promise<void> {
@@ -232,7 +268,6 @@ export function createSubscriberStore({
   return {
     async init() {
       await load();
-      await save();
     },
     has(chatId) {
       return subscribers.has(String(chatId));
@@ -295,13 +330,48 @@ export function createSubscriberStore({
       const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
       const watchedWallets = existing.watchedWallets.filter((wallet) => wallet.address !== address);
       const previous = existing.watchedWallets.find((wallet) => wallet.address === address);
+      const nextLabel = label?.trim() || previous?.label || null;
 
       watchedWallets.push({
         address,
-        label: label?.trim() || null,
+        label: nextLabel,
         addedAt: previous?.addedAt || now,
         updatedAt: now
       });
+
+      subscribers.set(normalized, {
+        ...existing,
+        watchedWallets: dedupeWatchedWallets(watchedWallets),
+        updatedAt: now
+      });
+      await save();
+      return true;
+    },
+    async renameWallet(chatId, address, label) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const walletIndex = existing.watchedWallets.findIndex((wallet) => wallet.address === address);
+
+      if (walletIndex === -1) {
+        return false;
+      }
+
+      const now = new Date().toISOString();
+      const watchedWallets = existing.watchedWallets.map((wallet, index) =>
+        index === walletIndex
+          ? {
+              ...wallet,
+              label: label?.trim() || null,
+              updatedAt: now
+            }
+          : wallet
+      );
 
       subscribers.set(normalized, {
         ...existing,
@@ -325,6 +395,7 @@ export function createSubscriberStore({
       subscribers.set(normalized, {
         ...existing,
         watchedWallets,
+        copyTargetWalletAddress: existing.copyTargetWalletAddress === address ? null : existing.copyTargetWalletAddress,
         updatedAt: new Date().toISOString()
       });
       await save();
@@ -338,16 +409,14 @@ export function createSubscriberStore({
         return false;
       }
 
-      const now = new Date().toISOString();
       const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
-      const copyWallets = dedupeCopyWallets([...(existing.copyWallets || []), address]);
+      const copyWalletAddresses = dedupeCopyWallets([...(existing.copyWalletAddresses || []), existing.copyWalletAddress || "", address]);
 
       subscribers.set(normalized, {
         ...existing,
-        copyWallet: copyWallets[0] || null,
-        copyWallets,
-        copySettingsUpdatedAt: now,
-        updatedAt: now
+        copyWalletAddress: copyWalletAddresses[0] || null,
+        copyWalletAddresses,
+        updatedAt: new Date().toISOString()
       });
       await save();
       return true;
@@ -360,21 +429,24 @@ export function createSubscriberStore({
         return false;
       }
 
-      const now = new Date().toISOString();
       const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
-      const copyWallets = (existing.copyWallets || []).filter((wallet) => wallet !== address);
+      const currentCopyWallets = existing.copyWalletAddresses.length > 0
+        ? existing.copyWalletAddresses
+        : existing.copyWalletAddress
+          ? [existing.copyWalletAddress]
+          : [];
+      const copyWalletAddresses = currentCopyWallets.filter((wallet) => wallet !== address);
 
       subscribers.set(normalized, {
         ...existing,
-        copyWallet: copyWallets[0] || null,
-        copyWallets,
-        copySettingsUpdatedAt: now,
-        updatedAt: now
+        copyWalletAddress: copyWalletAddresses[0] || null,
+        copyWalletAddresses,
+        updatedAt: new Date().toISOString()
       });
       await save();
-      return copyWallets.length !== (existing.copyWallets || []).length;
+      return copyWalletAddresses.length !== currentCopyWallets.length;
     },
-    async setCopySolAmount(chatId, amount) {
+    async setCopyAmountSol(chatId, amountSol) {
       await load();
       const normalized = normalizeChatId(chatId);
 
@@ -382,14 +454,33 @@ export function createSubscriberStore({
         return false;
       }
 
-      const now = new Date().toISOString();
       const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      subscribers.set(normalized, {
+        ...existing,
+        copyAmountSol: amountSol,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return true;
+    },
+    async setCopyTargetWallet(chatId, address) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+
+      if (address && !existing.watchedWallets.some((wallet) => wallet.address === address)) {
+        return false;
+      }
 
       subscribers.set(normalized, {
         ...existing,
-        copySolAmount: amount,
-        copySettingsUpdatedAt: now,
-        updatedAt: now
+        copyTargetWalletAddress: address,
+        updatedAt: new Date().toISOString()
       });
       await save();
       return true;
@@ -404,7 +495,11 @@ export function createSubscriberStore({
         return [];
       }
 
-      return subscriber.copyWallets.length > 0 ? subscriber.copyWallets : subscriber.copyWallet ? [subscriber.copyWallet] : [];
+      return subscriber.copyWalletAddresses.length > 0
+        ? subscriber.copyWalletAddresses
+        : subscriber.copyWalletAddress
+          ? [subscriber.copyWalletAddress]
+          : [];
     },
     list() {
       return [...subscribers.values()];

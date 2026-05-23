@@ -1,5 +1,12 @@
 import { escapeHtml } from "./format.js";
-import type { TelegramReplyMarkup, WalletTradeAction, WalletTradeAsset, WalletTradeData } from "./types.js";
+import type {
+  CopyTradeSettings,
+  PumpPortalLocalTradeBuildResult,
+  TelegramReplyMarkup,
+  WalletTradeAction,
+  WalletTradeAsset,
+  WalletTradeData
+} from "./types.js";
 
 const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -161,6 +168,85 @@ export function formatWalletTradeMessage(trade: WalletTradeData): string {
   }
 
   return lines.join("\n");
+}
+
+export function formatWalletTradeMessageWithCopySettings(trade: WalletTradeData, copySettings?: CopyTradeSettings | null): string {
+  const message = formatWalletTradeMessage(trade);
+  const copyWalletAddresses = copySettings?.copyWalletAddresses?.length
+    ? copySettings.copyWalletAddresses
+    : copySettings?.copyWalletAddress
+      ? [copySettings.copyWalletAddress]
+      : [];
+  const copyAmountSol = copySettings?.copyAmountSol || null;
+
+  if (copyWalletAddresses.length === 0 && !copyAmountSol) {
+    return message;
+  }
+
+  const lines = [message, "", "<b>Copy trade</b>"];
+
+  lines.push(`<b>Copy wallets:</b> ${copyWalletAddresses.length || "Not set"}`);
+  lines.push(...copyWalletAddresses.map((wallet) => `<code>${escapeHtml(wallet)}</code>`));
+  lines.push(`<b>Copy amount:</b> ${copyAmountSol ? `${formatNumber(copyAmountSol)} SOL` : "Not set"}`);
+
+  if (copyWalletAddresses.length === 0 || !copyAmountSol) {
+    lines.push("<b>Status:</b> Incomplete setup");
+    return lines.join("\n");
+  }
+
+  if (isCopyableSolToTokenBuy(trade)) {
+    lines.push(`<b>Status:</b> Ready to copy ${formatNumber(copyAmountSol)} SOL into this token from ${copyWalletAddresses.length} wallet(s)`);
+  } else {
+    lines.push("<b>Status:</b> Not a copyable SOL-to-token buy");
+  }
+
+  return lines.join("\n");
+}
+
+export function isCopyableSolToTokenBuy(trade: WalletTradeData): boolean {
+  return trade.input?.symbol === "SOL" && Boolean(trade.output?.mint) && trade.output?.symbol !== "SOL";
+}
+
+export function formatCopyTradeSimulationMessage(
+  trade: WalletTradeData,
+  copySettings?: CopyTradeSettings | null,
+  pumpPortalBuild?: PumpPortalLocalTradeBuildResult | null
+): string | null {
+  const copyWalletAddress = copySettings?.copyWalletAddress || copySettings?.copyWalletAddresses?.[0] || null;
+
+  if (!copyWalletAddress || !copySettings?.copyAmountSol || !isCopyableSolToTokenBuy(trade) || !trade.mint) {
+    return null;
+  }
+
+  const walletName = trade.label || shortenAddress(trade.targetWallet);
+  return [
+    "<b>Would copy trade</b>",
+    `<b>Target:</b> ${escapeHtml(walletName)}`,
+    `<code>${escapeHtml(trade.targetWallet)}</code>`,
+    "",
+    `<b>Copy wallet:</b> <code>${escapeHtml(copyWalletAddress)}</code>`,
+    `<b>Copy amount:</b> ${formatNumber(copySettings.copyAmountSol)} SOL`,
+    "",
+    "<b>Contract address</b>",
+    `<code>${escapeHtml(trade.mint)}</code>`,
+    "",
+    `<b>Status:</b> Would buy this token with ${formatNumber(copySettings.copyAmountSol)} SOL`,
+    `<b>PumpPortal:</b> ${formatPumpPortalBuildStatus(pumpPortalBuild)}`
+  ].join("\n");
+}
+
+function formatPumpPortalBuildStatus(result?: PumpPortalLocalTradeBuildResult | null): string {
+  if (!result) {
+    return "Local transaction build not requested";
+  }
+
+  if (result.ok) {
+    return `Local transaction built${result.bodyLength === null ? "" : ` (${formatNumber(result.bodyLength)} bytes)`}`;
+  }
+
+  const status = result.status === null ? "request failed" : `HTTP ${result.status}`;
+  const detail = result.errorText?.trim();
+  return detail ? `Local transaction build failed: ${escapeHtml(status)} - ${escapeHtml(detail)}` : `Local transaction build failed: ${escapeHtml(status)}`;
 }
 
 function formatAsset({ amount, symbol, mint }: WalletTradeAsset): string | null {

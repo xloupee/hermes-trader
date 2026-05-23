@@ -9,6 +9,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cd "$ROOT_DIR"
 
+echo "Stopping any local bot runner to avoid Telegram polling conflicts..."
+bash scripts/stop-local.sh
+
 echo "Checking source..."
 npm run check
 

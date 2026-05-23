@@ -34,7 +34,7 @@ The bot keeps one PumpPortal websocket connection open for token events and filt
 cp .env.example .env
 ```
 
-3. Fill in `TELEGRAM_BOT_TOKEN`. Set `TELEGRAM_VERIFY_CODE` to a private invite code people must send before receiving alerts. `PUMPPORTAL_API_KEY` is optional for migrations, but supported if you have one. For `/watch` swap alerts, set `HELIUS_API_KEY`, `HELIUS_WEBHOOK_PUBLIC_URL`, and `HELIUS_WEBHOOK_AUTH_HEADER`. For copy-trade dry-run alerts, optionally set `COPY_DEFAULT_SOL_AMOUNT` and the `PUMPPORTAL_LOCAL_*` values.
+3. Fill in `TELEGRAM_BOT_TOKEN`. Set `TELEGRAM_VERIFY_CODE` to a private invite code people must send before receiving alerts. Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` to store subscribers in Supabase; `SUPABASE_SERVICE_KEY` and `SUPABASE_SERVICE_ROLE` are also accepted as service-role aliases. Omit the Supabase values to keep using the local JSON fallback. `PUMPPORTAL_API_KEY` is optional for migrations, but supported if you have one. For wallet swap alerts, set `HELIUS_API_KEY`, `HELIUS_WEBHOOK_PUBLIC_URL`, and `HELIUS_WEBHOOK_AUTH_HEADER`.
 4. Install dependencies:
 
 ```bash
@@ -49,16 +49,27 @@ npm start
 
 6. In Telegram, open your bot and send `/start`.
 7. Send `/verify your-code` using the value from `TELEGRAM_VERIFY_CODE`.
-8. Choose your alert mode with `/migrations`, `/newtokens`, or `/both`.
-9. To monitor wallet swaps, send `/watch wallet-address optional-label`. Wallet swap alerts require the Helius webhook env vars.
-10. To enable copy-trade dry-run builds for that chat, send `/copywallet your-public-wallet` for each wallet you want to build copies for, and `/copyamount 0.01`.
-11. Restart the bot if you changed `.env`:
+8. Choose your alert types with `/alerts`; tap a button again to turn that alert type on or off.
+9. To monitor wallet swaps, send `/wallets`, then use the dashboard buttons to add, rename, remove, or list watched wallets. Wallet swap alerts require the Helius webhook env vars.
+10. Restart the bot if you changed `.env`:
 
 ```bash
 npm start
 ```
 
-Verified subscribers and their alert modes are stored in `TELEGRAM_SUBSCRIBERS_PATH`. `TELEGRAM_CHAT_ID` is optional, but when present it seeds that chat as an existing verified subscriber in migration-only mode.
+Verified subscribers and their alert modes are stored in Supabase when `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set. The service role key is server-only and must not be exposed in browser code. If either Supabase value is missing, subscribers are stored in `TELEGRAM_SUBSCRIBERS_PATH`. `TELEGRAM_CHAT_ID` is optional for the JSON fallback, but Supabase mode uses the database as the source of truth.
+
+To import an existing JSON subscriber file into Supabase after applying the database migration, run:
+
+```bash
+npm run import-subscribers
+```
+
+You can also pass a custom JSON path:
+
+```bash
+npm run import-subscribers -- data/telegram-subscribers.json
+```
 
 ## Bot commands
 
@@ -66,18 +77,9 @@ Verified subscribers and their alert modes are stored in `TELEGRAM_SUBSCRIBERS_P
 - `/verify <code>` - Verify this chat for notifications.
 - `/stop` - Stop notifications for this chat.
 - `/help` - Show the command list.
-- `/migrations` - Watch migrated coins only for this chat.
-- `/newtokens` - Watch newly created tokens only for this chat.
-- `/both` - Watch new tokens and migrated coins for this chat.
-- `/watch <wallet> [label]` - Watch a wallet's swaps for this chat.
-- `/unwatch <wallet>` - Stop watching a wallet for this chat.
-- `/wallets` - List watched wallets for this chat.
-- `/copywallet <public-wallet>` - Add a copy wallet public address for unsigned PumpPortal builds.
-- `/uncopywallet <public-wallet>` - Remove a copy wallet from this chat.
-- `/copywallets` - List copy wallets for this chat.
-- `/copyamount <sol>` - Set your fixed copy buy size for this chat.
-- `/copystatus` - Show watched wallets and copy dry-run settings.
-- `/copytest` - Scan recent buys for this chat's watched wallets and send copy candidate alerts.
+- `/alerts` - Open the alert mode dashboard.
+- `/wallets` - Open the watched-wallet dashboard.
+- `/copytrade` - Open the copy trade setup dashboard.
 
 ## Notes
 
@@ -87,9 +89,8 @@ Verified subscribers and their alert modes are stored in `TELEGRAM_SUBSCRIBERS_P
 - To inspect recent on-chain migrations without waiting for a live event, run `npm run past-migrations -- 10`.
 - Set `SOLANA_RPC_URL` in `.env` if public Solana RPC rate limits you.
 - Wallet swap monitor events are stored in `WALLET_TRADE_LOG_PATH`.
+- Wallet swap alerts include copy-trade details when copy wallet(s), amount, and target are configured through `/copytrade`. For copyable SOL-to-token buys, the bot asks PumpPortal `trade-local` to build one unsigned local transaction per configured copy wallet and reports whether each build worked. This is alert output only; it does not sign or execute trades.
 - Expose `WEBHOOK_PORT` through your reverse proxy at the exact `HELIUS_WEBHOOK_PUBLIC_URL`, and forward the `Authorization` header unchanged.
-- Copy-trade Telegram alerts are build-only. The bot can build one unsigned PumpPortal local transaction per configured copy wallet, but it never stores private keys, signs transactions, sends transactions, or uses PumpPortal Lightning API.
-- Copy candidate alerts are only sent for watched-wallet SOL -> token buys. Sells and token rotations are logged but not sent as copy alerts.
 
 ## Research
 

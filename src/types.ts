@@ -74,6 +74,12 @@ export interface LegacyBotConfig extends MigrationFormatConfig {
   pumpPortalCreateWalletUrl?: string;
   pumpPortalLightningTradeUrl?: string;
   pumpPortalWalletKeyEncryptionSecret?: string;
+  copyTradeTrailingSellEnabled?: boolean;
+  copyTradeTrailingSellHoldMs?: number;
+  copyTradeTrailingSellFirstPercent?: number;
+  copyTradeTrailingSellTrailPercent?: number;
+  copyTradeTrailingSellIntervalMs?: number;
+  copyTradeTrailingSellMaxBuilds?: number;
   getModeLabel?: () => string;
   pumpPortalSubscriptionMethod?: string;
 }

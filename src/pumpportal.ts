@@ -249,6 +249,34 @@ export function buildPumpPortalLightningBuyRequest({
   };
 }
 
+export function buildPumpPortalLightningSellRequest({
+  mint,
+  amountPercent,
+  slippage,
+  priorityFee,
+  pool
+}: {
+  mint: string;
+  amountPercent: number;
+  slippage: number;
+  priorityFee: number;
+  pool: PumpPortalTradePool;
+}): PumpPortalLightningTradeRequest | null {
+  if (!mint || !Number.isFinite(amountPercent) || amountPercent <= 0) {
+    return null;
+  }
+
+  return {
+    action: "sell",
+    mint,
+    amount: `${Math.min(100, amountPercent)}%`,
+    denominatedInSol: "false",
+    slippage,
+    priorityFee,
+    pool
+  };
+}
+
 export async function executePumpPortalLightningTrade({
   url,
   apiKey,

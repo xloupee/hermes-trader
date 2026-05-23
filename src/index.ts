@@ -6,10 +6,8 @@ import { createTelegramCommandPoller } from "./commands.js";
 import { createHeliusWebhookServer, missingHeliusConfigWarning, syncHeliusWebhook } from "./helius.js";
 import { heliusEventMentionsWatchedWallet, isHeliusSwapEvent, normalizeHeliusSwapData } from "./helius-swaps.js";
 import {
-  buildPumpPortalLocalTrade,
-  buildPumpPortalLocalTradeRequest,
-  buildPumpPortalLocalSellRequest,
   buildPumpPortalLightningBuyRequest,
+  buildPumpPortalLightningSellRequest,
   createPumpPortalMigrationListener,
   executePumpPortalLightningTrade,
   PUMPPORTAL_CREATE_WALLET_URL,
@@ -25,8 +23,7 @@ import { asRecord, errorMessage, isRecord, stringValue } from "./types.js";
 import {
   buildWalletTradeReplyMarkup,
   formatAutoCopyBuyMessage,
-  formatCopyTradeSimulationMessage,
-  formatCopyTradeTrailingSellBuildMessage,
+  formatCopyTradeTrailingSellResultMessage,
   formatCopyTradeTrailingSellScheduledMessage,
   formatWalletTradeMessageWithCopySettings,
   getWalletTradeEventId,
@@ -37,7 +34,7 @@ import type {
   BotConfig,
   LooseRecord,
   MigrationData,
-  PumpPortalLocalTradeRequest,
+  PumpPortalLightningTradeRequest,
   PumpPortalTradePool,
   SubscriberRecord,
   TransactionAnalysis,
@@ -369,18 +366,24 @@ async function sendCopyTradeSimulationAlert(subscriber: SubscriberRecord, trade:
         replyMarkup: buildWalletTradeReplyMarkup(trade)
       });
     }
+
+    if (result.ok) {
+      await scheduleCopyTradeTrailingSells({
+        subscriber,
+        trade,
+        apiKey
+      });
+    }
   } catch (error) {
     console.warn(`Could not execute auto copy buy for ${subscriber.chatId}: ${errorMessage(error)}`);
   }
 }
 
 function buildTrailingSellSchedule({
-  trade,
-  copyWalletAddress
+  trade
 }: {
   trade: WalletTradeData;
-  copyWalletAddress: string;
-}): Array<{ delayMs: number; request: PumpPortalLocalTradeRequest }> {
+}): Array<{ delayMs: number; request: PumpPortalLightningTradeRequest }> {
   if (!config.copyTradeTrailingSellEnabled || !trade.mint) {
     return [];
   }
@@ -393,8 +396,7 @@ function buildTrailingSellSchedule({
 
   return sellPercents
     .map((amountPercent, index) => {
-      const request = buildPumpPortalLocalSellRequest({
-        publicKey: copyWalletAddress,
+      const request = buildPumpPortalLightningSellRequest({
         mint: trade.mint || "",
         amountPercent,
         slippage: config.copyTradeSlippage,
@@ -411,7 +413,7 @@ function buildTrailingSellSchedule({
         request
       };
     })
-    .filter((step): step is { delayMs: number; request: PumpPortalLocalTradeRequest } => Boolean(step));
+    .filter((step): step is { delayMs: number; request: PumpPortalLightningTradeRequest } => Boolean(step));
 }
 
 function trailingSellPercents({
@@ -434,13 +436,13 @@ function trailingSellPercents({
 async function scheduleCopyTradeTrailingSells({
   subscriber,
   trade,
-  copyWalletAddress
+  apiKey
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
-  copyWalletAddress: string;
+  apiKey: string;
 }): Promise<void> {
-  const steps = buildTrailingSellSchedule({ trade, copyWalletAddress });
+  const steps = buildTrailingSellSchedule({ trade });
 
   if (steps.length === 0) {
     return;
@@ -448,7 +450,6 @@ async function scheduleCopyTradeTrailingSells({
 
   const scheduledMessage = formatCopyTradeTrailingSellScheduledMessage({
     trade,
-    copyWalletAddress,
     steps
   });
 
@@ -467,12 +468,12 @@ async function scheduleCopyTradeTrailingSells({
       buildAndNotifyTrailingSell({
         subscriber,
         trade,
-        copyWalletAddress,
+        apiKey,
         request: step.request,
         stepIndex,
         totalSteps: steps.length
       }).catch((error) => {
-        console.warn(`Could not build trailing sell for ${subscriber.chatId}: ${errorMessage(error)}`);
+        console.warn(`Could not submit trailing sell for ${subscriber.chatId}: ${errorMessage(error)}`);
       });
     }, step.delayMs);
 
@@ -483,33 +484,33 @@ async function scheduleCopyTradeTrailingSells({
 async function buildAndNotifyTrailingSell({
   subscriber,
   trade,
-  copyWalletAddress,
+  apiKey,
   request,
   stepIndex,
   totalSteps
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
-  copyWalletAddress: string;
-  request: PumpPortalLocalTradeRequest;
+  apiKey: string;
+  request: PumpPortalLightningTradeRequest;
   stepIndex: number;
   totalSteps: number;
 }): Promise<void> {
-  const pumpPortalBuild = await buildPumpPortalLocalTrade({
-    url: config.pumpPortalTradeLocalUrl,
+  const result = await executePumpPortalLightningTrade({
+    url: config.pumpPortalLightningTradeUrl,
+    apiKey,
     request
   });
 
   await sendTelegramMessage({
     token: config.telegramToken,
     chatId: subscriber.chatId,
-    text: formatCopyTradeTrailingSellBuildMessage({
+    text: formatCopyTradeTrailingSellResultMessage({
       trade,
-      copyWalletAddress,
       stepIndex,
       totalSteps,
       request,
-      pumpPortalBuild
+      result
     }),
     replyMarkup: buildWalletTradeReplyMarkup(trade)
   });

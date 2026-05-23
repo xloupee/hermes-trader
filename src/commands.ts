@@ -116,6 +116,28 @@ function alertEnabled(mode: AlertModeValue | null, alertType: ToggleAlertType): 
   return mode === "both" || mode === alertType;
 }
 
+function formatTrailingSellDashboardStatus(config: LegacyBotConfig): string[] {
+  if (!config.copyTradeTrailingSellEnabled) {
+    return ["<b>Trailing sells:</b> Off"];
+  }
+
+  const holdMs = config.copyTradeTrailingSellHoldMs || 2000;
+  const intervalMs = config.copyTradeTrailingSellIntervalMs || 2000;
+  const firstPercent = config.copyTradeTrailingSellFirstPercent || 20;
+  const trailPercent = config.copyTradeTrailingSellTrailPercent || 20;
+  const maxBuilds = Math.max(1, Math.floor(config.copyTradeTrailingSellMaxBuilds || 5));
+  const percents = maxBuilds <= 1
+    ? [100]
+    : [firstPercent, ...Array.from({ length: Math.max(0, maxBuilds - 2) }, () => trailPercent), 100];
+
+  return [
+    "<b>Trailing sells:</b> On",
+    `<b>Trailing schedule:</b> ${percents
+      .map((percent, index) => `${percent}% after ${(holdMs + intervalMs * index) / 1000}s`)
+      .join(" | ")}`
+  ];
+}
+
 export function toggleAlertMode(currentMode: AlertModeValue | null, alertType: ToggleAlertType): AlertModeValue | null {
   const migrationsEnabled = alertType === "migrations" ? !alertEnabled(currentMode, "migrations") : alertEnabled(currentMode, "migrations");
   const newtokensEnabled = alertType === "newtokens" ? !alertEnabled(currentMode, "newtokens") : alertEnabled(currentMode, "newtokens");
@@ -1068,6 +1090,7 @@ export function createTelegramCommandPoller({
       `<b>Copytrade wallets:</b> ${copyTradeWallets.length}`,
       copyTradeWallets.length === 0 ? "No Copytrade Wallets yet." : copyTradeWallets.map((wallet) => formatWalletSummary(wallet)).join("\n"),
       `<b>Auto buys:</b> ${ready ? "Ready" : "Not ready"}`,
+      ...formatTrailingSellDashboardStatus(config),
       "",
       ready ? "Auto copy buys are enabled for matching SOL-to-token buys." : "Create a trading wallet, set amount, and add Copytrade Wallets to enable auto buys."
     ].join("\n");

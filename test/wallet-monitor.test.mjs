@@ -8,7 +8,7 @@ import { buildHeliusWebhookPayload, createHeliusWebhookServer, syncHeliusWebhook
 import { heliusEventMentionsWatchedWallet, normalizeHeliusSwapData } from "../dist/helius-swaps.js";
 import {
   buildPumpPortalLightningBuyRequest,
-  buildPumpPortalLocalSellRequest,
+  buildPumpPortalLightningSellRequest,
   buildPumpPortalLocalTradeRequest,
   createPumpPortalLightningWallet,
   executePumpPortalLightningTrade
@@ -18,7 +18,7 @@ import { createSubscriberStore } from "../dist/subscribers.js";
 import {
   buildWalletTradeReplyMarkup,
   formatAutoCopyBuyMessage,
-  formatCopyTradeTrailingSellBuildMessage,
+  formatCopyTradeTrailingSellResultMessage,
   formatCopyTradeTrailingSellScheduledMessage,
   formatCopyTradeSimulationMessage,
   formatWalletTradeMessage,
@@ -473,11 +473,45 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
     }
   });
   assert.match(autoBuyMessage || "", /Auto copy buy submitted/);
-  assert.match(autoBuyMessage || "", /Submitted: <code>tx-alpha<\/code>/);
+  assert.match(autoBuyMessage || "", /Tx:<\/b> <code>tx-alpha<\/code>/);
+  assert.doesNotMatch(autoBuyMessage || "", /PumpPortal:/);
   assert.match(autoBuyMessage || "", new RegExp(otherWallet));
 
-  const sellRequest = buildPumpPortalLocalSellRequest({
-    publicKey: otherWallet,
+  const nicknamedAutoBuyMessage = formatAutoCopyBuyMessage({
+    trade: {
+      ...trade,
+      label: "cented"
+    },
+    tradingWalletPublicKey: otherWallet,
+    copyAmountSol: 0.25,
+    result: {
+      ok: true,
+      status: 200,
+      signature: "tx-alpha",
+      errorText: null,
+      raw: { signature: "tx-alpha" }
+    }
+  });
+  assert.match(nicknamedAutoBuyMessage || "", /Target:<\/b> cented/);
+  assert.doesNotMatch(nicknamedAutoBuyMessage || "", new RegExp(wallet));
+
+  const failedAutoBuyMessage = formatAutoCopyBuyMessage({
+    trade,
+    tradingWalletPublicKey: otherWallet,
+    copyAmountSol: 0.25,
+    result: {
+      ok: false,
+      status: 429,
+      signature: null,
+      errorText: "rate limited",
+      raw: "rate limited"
+    }
+  });
+  assert.match(failedAutoBuyMessage || "", /Auto copy buy failed/);
+  assert.match(failedAutoBuyMessage || "", /Trade failed:<\/b> HTTP 429 - rate limited/);
+  assert.doesNotMatch(failedAutoBuyMessage || "", /PumpPortal:/);
+
+  const sellRequest = buildPumpPortalLightningSellRequest({
     mint,
     amountPercent: 20,
     slippage: 15,
@@ -486,7 +520,6 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
   });
 
   assert.deepEqual(sellRequest, {
-    publicKey: otherWallet,
     action: "sell",
     mint,
     amount: "20%",
@@ -498,7 +531,6 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
 
   const trailingScheduledMessage = formatCopyTradeTrailingSellScheduledMessage({
     trade,
-    copyWalletAddress: otherWallet,
     steps: [
       {
         delayMs: 2000,
@@ -513,31 +545,48 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
       }
     ]
   });
-  assert.match(trailingScheduledMessage || "", /Trailing sell scheduled/);
+  assert.match(trailingScheduledMessage || "", /Trailing sells scheduled/);
   assert.match(trailingScheduledMessage || "", /Sell 20% after 2s/);
   assert.match(trailingScheduledMessage || "", /Sell 100% after 4s/);
-  assert.match(trailingScheduledMessage || "", /Build-only: not signed, not sent/);
+  assert.doesNotMatch(trailingScheduledMessage || "", /Build-only/);
 
-  const trailingBuildMessage = formatCopyTradeTrailingSellBuildMessage({
+  const trailingResultMessage = formatCopyTradeTrailingSellResultMessage({
     trade,
-    copyWalletAddress: otherWallet,
     stepIndex: 1,
     totalSteps: 2,
     request: {
       ...sellRequest,
       amount: "100%"
     },
-    pumpPortalBuild: {
+    result: {
       ok: true,
       status: 200,
-      bodyLength: 555,
-      errorText: null
+      signature: "sell-tx-beta",
+      errorText: null,
+      raw: { signature: "sell-tx-beta" }
     }
   });
-  assert.match(trailingBuildMessage, /Trailing sell build/);
-  assert.match(trailingBuildMessage, /Step:<\/b> 2\/2/);
-  assert.match(trailingBuildMessage, /Sell amount:<\/b> 100%/);
-  assert.match(trailingBuildMessage, /Local transaction built \(555 bytes\)/);
+  assert.match(trailingResultMessage, /Trailing sell submitted/);
+  assert.match(trailingResultMessage, /Step:<\/b> 2\/2/);
+  assert.match(trailingResultMessage, /Sell amount:<\/b> 100%/);
+  assert.match(trailingResultMessage, /Tx:<\/b> <code>sell-tx-beta<\/code>/);
+
+  const trailingFailureMessage = formatCopyTradeTrailingSellResultMessage({
+    trade,
+    stepIndex: 0,
+    totalSteps: 2,
+    request: sellRequest,
+    result: {
+      ok: false,
+      status: 500,
+      signature: null,
+      errorText: "sell failed",
+      raw: "sell failed"
+    }
+  });
+  assert.match(trailingFailureMessage, /Trailing sell failed/);
+  assert.match(trailingFailureMessage, /Trade failed:<\/b> HTTP 500 - sell failed/);
+  assert.doesNotMatch(trailingFailureMessage, /PumpPortal:/);
 });
 
 test("Helius swap normalization handles token to SOL and token to token swaps", () => {

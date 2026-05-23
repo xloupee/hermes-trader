@@ -2,12 +2,28 @@ export type LooseRecord = Record<string, unknown>;
 
 export type TelegramChatId = string | number;
 export type AlertModeValue = "migrations" | "newtokens" | "both";
+export type TrailingSellMode = "custom_steps" | "formula";
+export type TrailingSellPercentBasis = "remaining_balance" | "original_position";
+
+export interface TrailingSellStep {
+  delayMs: number;
+  percent: number;
+}
+
+export interface TrailingSellConfig {
+  enabled: boolean;
+  mode: TrailingSellMode;
+  percentBasis: TrailingSellPercentBasis;
+  steps: TrailingSellStep[];
+  updatedAt: string;
+}
 
 export interface WatchedWallet {
   address: string;
   label: string | null;
   addedAt: string;
   updatedAt: string;
+  trailingSellConfig?: TrailingSellConfig | null;
 }
 
 export interface ExplorerConfig {
@@ -140,6 +156,11 @@ export interface SubscriberStore {
   watchCopyTradeWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
   renameCopyTradeWallet: (chatId: TelegramChatId, address: string, label: string | null) => Promise<boolean>;
   unwatchCopyTradeWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
+  setCopyTradeWalletTrailingSellConfig: (
+    chatId: TelegramChatId,
+    address: string,
+    config: TrailingSellConfig | null
+  ) => Promise<boolean>;
   setTradingWallet: (chatId: TelegramChatId, wallet: TradingWallet) => Promise<boolean>;
   getTradingWallet: (chatId: TelegramChatId) => TradingWallet | null;
   setCopyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
@@ -255,6 +276,30 @@ export interface PumpPortalLightningTradeResult {
   signature: string | null;
   errorText: string | null;
   raw: unknown;
+}
+
+export type CopyTradeExecutionAction = "buy" | "sell";
+export type CopyTradeExecutionStatus = "submitted" | "failed";
+
+export interface CopyTradeExecutionRecord {
+  chatId: string;
+  sourceWalletAddress: string;
+  sourceWalletLabel: string | null;
+  tradingWalletPublicKey: string;
+  mint: string;
+  action: CopyTradeExecutionAction;
+  amount: number | `${number}%`;
+  denominatedInSol: "true" | "false";
+  status: CopyTradeExecutionStatus;
+  signature: string | null;
+  errorText: string | null;
+  httpStatus: number | null;
+  observedTrade: WalletTradeData;
+  request: PumpPortalLightningTradeRequest;
+  response: unknown;
+  trailingSellStepIndex?: number | null;
+  trailingSellTotalSteps?: number | null;
+  createdAt?: string;
 }
 
 export interface TransactionAccountChange {

@@ -17,7 +17,7 @@ import {
 import { decryptSecret, encryptionSecretReady } from "./secrets.js";
 import { analyzeSolanaTransaction } from "./solana.js";
 import { createSubscriberStore } from "./subscribers.js";
-import { createSupabaseSubscriberStoreFromEnv } from "./subscribers-supabase.js";
+import { createSupabaseCopyTradeRecorderFromEnv, createSupabaseSubscriberStoreFromEnv } from "./subscribers-supabase.js";
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
 import { asRecord, errorMessage, isRecord, stringValue } from "./types.js";
 import {
@@ -32,13 +32,18 @@ import {
 import type {
   AlertModeValue,
   BotConfig,
+  CopyTradeExecutionRecord,
   LooseRecord,
   MigrationData,
   PumpPortalLightningTradeRequest,
+  PumpPortalLightningTradeResult,
   PumpPortalTradePool,
   SubscriberRecord,
+  TrailingSellConfig,
+  TrailingSellStep,
   TransactionAnalysis,
-  WalletTradeData
+  WalletTradeData,
+  WatchedWallet
 } from "./types.js";
 
 function numberFromEnv(value: string | undefined, fallback: number): number {
@@ -133,6 +138,13 @@ const subscribers =
         initialChatIds: [config.telegramChatId]
       });
 const subscriberStoreLabel = config.supabaseUrl && config.supabaseServiceRoleKey ? "Supabase" : "JSON";
+const copyTradeRecorder =
+  config.supabaseUrl && config.supabaseServiceRoleKey
+    ? createSupabaseCopyTradeRecorderFromEnv({
+        url: config.supabaseUrl,
+        serviceRoleKey: config.supabaseServiceRoleKey
+      })
+    : null;
 
 const baseSubscriptionMethods = ["subscribeNewToken", "subscribeMigration"];
 
@@ -243,7 +255,7 @@ async function handleHeliusWebhookEvents(events: LooseRecord[]): Promise<void> {
 
 async function handleHeliusSwap(event: LooseRecord): Promise<boolean> {
   const subscribersByWallet = new Map<string, Array<{ subscriber: SubscriberRecord; label: string | null }>>();
-  const copyTradeSubscribersByWallet = new Map<string, Array<{ subscriber: SubscriberRecord; label: string | null }>>();
+  const copyTradeSubscribersByWallet = new Map<string, Array<{ subscriber: SubscriberRecord; wallet: WatchedWallet; label: string | null }>>();
 
   for (const subscriber of subscribers.list()) {
     for (const wallet of subscriber.watchedWallets || []) {
@@ -262,7 +274,7 @@ async function handleHeliusSwap(event: LooseRecord): Promise<boolean> {
       }
 
       const entries = copyTradeSubscribersByWallet.get(wallet.address) || [];
-      entries.push({ subscriber, label: wallet.label });
+      entries.push({ subscriber, wallet, label: wallet.label });
       copyTradeSubscribersByWallet.set(wallet.address, entries);
     }
   }
@@ -299,10 +311,14 @@ async function handleHeliusSwap(event: LooseRecord): Promise<boolean> {
 
     const copyTradeEntries = copyTradeSubscribersByWallet.get(targetWallet) || [];
     for (const entry of copyTradeEntries) {
-      await sendCopyTradeSimulationAlert(entry.subscriber, {
-        ...loggedTrade,
-        label: entry.label
-      });
+      await sendCopyTradeSimulationAlert(
+        entry.subscriber,
+        {
+          ...loggedTrade,
+          label: entry.label
+        },
+        entry.wallet
+      );
     }
   }
 
@@ -322,7 +338,11 @@ async function sendWalletTradeAlert(subscriber: SubscriberRecord, trade: WalletT
   }
 }
 
-async function sendCopyTradeSimulationAlert(subscriber: SubscriberRecord, trade: WalletTradeData): Promise<void> {
+async function sendCopyTradeSimulationAlert(
+  subscriber: SubscriberRecord,
+  trade: WalletTradeData,
+  copyTradeWallet: WatchedWallet
+): Promise<void> {
   if (!isCopyableSolToTokenBuy(trade) || !subscriber.copyAmountSol || !subscriber.tradingWallet) {
     return;
   }
@@ -351,6 +371,16 @@ async function sendCopyTradeSimulationAlert(subscriber: SubscriberRecord, trade:
       apiKey,
       request
     });
+
+    await recordCopyTradeExecution({
+      subscriber,
+      trade,
+      copyTradeWallet,
+      tradingWalletPublicKey: subscriber.tradingWallet.publicKey,
+      request,
+      result
+    });
+
     const message = formatAutoCopyBuyMessage({
       trade,
       tradingWalletPublicKey: subscriber.tradingWallet.publicKey,
@@ -371,7 +401,8 @@ async function sendCopyTradeSimulationAlert(subscriber: SubscriberRecord, trade:
       await scheduleCopyTradeTrailingSells({
         subscriber,
         trade,
-        apiKey
+        apiKey,
+        copyTradeWallet
       });
     }
   } catch (error) {
@@ -380,25 +411,25 @@ async function sendCopyTradeSimulationAlert(subscriber: SubscriberRecord, trade:
 }
 
 function buildTrailingSellSchedule({
-  trade
+  trade,
+  trailingSellConfig
 }: {
   trade: WalletTradeData;
+  trailingSellConfig: TrailingSellConfig | null;
 }): Array<{ delayMs: number; request: PumpPortalLightningTradeRequest }> {
-  if (!config.copyTradeTrailingSellEnabled || !trade.mint) {
+  if (!trailingSellConfig?.enabled || !trade.mint) {
     return [];
   }
 
-  const sellPercents = trailingSellPercents({
-    firstPercent: config.copyTradeTrailingSellFirstPercent,
-    trailPercent: config.copyTradeTrailingSellTrailPercent,
-    maxBuilds: config.copyTradeTrailingSellMaxBuilds
-  });
+  const sellPercents = trailingSellConfig.percentBasis === "original_position"
+    ? originalPositionPercentsToRemainingBalancePercents(trailingSellConfig.steps)
+    : trailingSellConfig.steps;
 
   return sellPercents
-    .map((amountPercent, index) => {
+    .map((step) => {
       const request = buildPumpPortalLightningSellRequest({
         mint: trade.mint || "",
-        amountPercent,
+        amountPercent: step.percent,
         slippage: config.copyTradeSlippage,
         priorityFee: config.copyTradePriorityFee,
         pool: config.copyTradePool
@@ -409,11 +440,36 @@ function buildTrailingSellSchedule({
       }
 
       return {
-        delayMs: config.copyTradeTrailingSellHoldMs + config.copyTradeTrailingSellIntervalMs * index,
+        delayMs: step.delayMs,
         request
       };
     })
     .filter((step): step is { delayMs: number; request: PumpPortalLightningTradeRequest } => Boolean(step));
+}
+
+function inheritedTrailingSellConfig(): TrailingSellConfig | null {
+  if (!config.copyTradeTrailingSellEnabled) {
+    return null;
+  }
+
+  return {
+    enabled: true,
+    mode: "formula",
+    percentBasis: "remaining_balance",
+    steps: trailingSellPercents({
+      firstPercent: config.copyTradeTrailingSellFirstPercent,
+      trailPercent: config.copyTradeTrailingSellTrailPercent,
+      maxBuilds: config.copyTradeTrailingSellMaxBuilds
+    }).map((percent, index) => ({
+      percent,
+      delayMs: config.copyTradeTrailingSellHoldMs + config.copyTradeTrailingSellIntervalMs * index
+    })),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function resolveTrailingSellConfig(copyTradeWallet: WatchedWallet): TrailingSellConfig | null {
+  return copyTradeWallet.trailingSellConfig || inheritedTrailingSellConfig();
 }
 
 function trailingSellPercents({
@@ -433,16 +489,40 @@ function trailingSellPercents({
   return [firstPercent, ...Array.from({ length: middleBuilds }, () => trailPercent), 100];
 }
 
+function originalPositionPercentsToRemainingBalancePercents(steps: TrailingSellStep[]): TrailingSellStep[] {
+  let remainingOriginalPercent = 100;
+
+  return steps
+    .map((step) => {
+      if (remainingOriginalPercent <= 0) {
+        return null;
+      }
+
+      const originalPercentToSell = Math.min(step.percent, remainingOriginalPercent);
+      const remainingBalancePercent = Math.min(100, (originalPercentToSell / remainingOriginalPercent) * 100);
+      remainingOriginalPercent -= originalPercentToSell;
+
+      return {
+        delayMs: step.delayMs,
+        percent: Number(remainingBalancePercent.toFixed(6))
+      };
+    })
+    .filter((step): step is TrailingSellStep => step !== null && step.percent > 0);
+}
+
 async function scheduleCopyTradeTrailingSells({
   subscriber,
   trade,
-  apiKey
+  apiKey,
+  copyTradeWallet
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
   apiKey: string;
+  copyTradeWallet: WatchedWallet;
 }): Promise<void> {
-  const steps = buildTrailingSellSchedule({ trade });
+  const trailingSellConfig = resolveTrailingSellConfig(copyTradeWallet);
+  const steps = buildTrailingSellSchedule({ trade, trailingSellConfig });
 
   if (steps.length === 0) {
     return;
@@ -471,7 +551,8 @@ async function scheduleCopyTradeTrailingSells({
         apiKey,
         request: step.request,
         stepIndex,
-        totalSteps: steps.length
+        totalSteps: steps.length,
+        copyTradeWallet
       }).catch((error) => {
         console.warn(`Could not submit trailing sell for ${subscriber.chatId}: ${errorMessage(error)}`);
       });
@@ -487,7 +568,8 @@ async function buildAndNotifyTrailingSell({
   apiKey,
   request,
   stepIndex,
-  totalSteps
+  totalSteps,
+  copyTradeWallet
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
@@ -495,11 +577,23 @@ async function buildAndNotifyTrailingSell({
   request: PumpPortalLightningTradeRequest;
   stepIndex: number;
   totalSteps: number;
+  copyTradeWallet: WatchedWallet;
 }): Promise<void> {
   const result = await executePumpPortalLightningTrade({
     url: config.pumpPortalLightningTradeUrl,
     apiKey,
     request
+  });
+
+  await recordCopyTradeExecution({
+    subscriber,
+    trade,
+    copyTradeWallet,
+    tradingWalletPublicKey: subscriber.tradingWallet?.publicKey || "",
+    request,
+    result,
+    trailingSellStepIndex: stepIndex,
+    trailingSellTotalSteps: totalSteps
   });
 
   await sendTelegramMessage({
@@ -514,6 +608,56 @@ async function buildAndNotifyTrailingSell({
     }),
     replyMarkup: buildWalletTradeReplyMarkup(trade)
   });
+}
+
+async function recordCopyTradeExecution({
+  subscriber,
+  trade,
+  copyTradeWallet,
+  tradingWalletPublicKey,
+  request,
+  result,
+  trailingSellStepIndex = null,
+  trailingSellTotalSteps = null
+}: {
+  subscriber: SubscriberRecord;
+  trade: WalletTradeData;
+  copyTradeWallet: WatchedWallet;
+  tradingWalletPublicKey: string;
+  request: PumpPortalLightningTradeRequest;
+  result: PumpPortalLightningTradeResult;
+  trailingSellStepIndex?: number | null;
+  trailingSellTotalSteps?: number | null;
+}): Promise<void> {
+  if (!copyTradeRecorder || !trade.mint || !tradingWalletPublicKey) {
+    return;
+  }
+
+  const record: CopyTradeExecutionRecord = {
+    chatId: subscriber.chatId,
+    sourceWalletAddress: copyTradeWallet.address,
+    sourceWalletLabel: copyTradeWallet.label,
+    tradingWalletPublicKey,
+    mint: trade.mint,
+    action: request.action,
+    amount: request.amount,
+    denominatedInSol: request.denominatedInSol,
+    status: result.ok ? "submitted" : "failed",
+    signature: result.signature,
+    errorText: result.errorText,
+    httpStatus: result.status,
+    observedTrade: trade,
+    request,
+    response: result.raw,
+    trailingSellStepIndex,
+    trailingSellTotalSteps
+  };
+
+  try {
+    await copyTradeRecorder.recordCopyTradeExecution(record);
+  } catch (error) {
+    console.warn(`Could not record copy trade execution for ${subscriber.chatId}: ${errorMessage(error)}`);
+  }
 }
 
 function classifyEventMode(event: LooseRecord): Exclude<AlertModeValue, "both"> | null {

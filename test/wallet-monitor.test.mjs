@@ -3,7 +3,14 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { commandFromMessage, helpText, toggleAlertMode } from "../dist/commands.js";
+import {
+  commandFromMessage,
+  helpText,
+  parseTrailingSellFormulaInput,
+  parseTrailingSellStepInput,
+  parseTrailingSellStepsInput,
+  toggleAlertMode
+} from "../dist/commands.js";
 import { buildHeliusWebhookPayload, createHeliusWebhookServer, syncHeliusWebhook } from "../dist/helius.js";
 import { heliusEventMentionsWatchedWallet, normalizeHeliusSwapData } from "../dist/helius-swaps.js";
 import {
@@ -83,6 +90,36 @@ test("alert mode toggles individual token alert types", () => {
   assert.equal(toggleAlertMode("newtokens", "migrations"), "both");
   assert.equal(toggleAlertMode(null, "migrations"), "migrations");
   assert.equal(toggleAlertMode(null, "newtokens"), "newtokens");
+});
+
+test("trailing sell inputs parse custom steps and formula presets", () => {
+  assert.deepEqual(parseTrailingSellStepInput("20% 10s"), {
+    percent: 20,
+    delayMs: 10_000
+  });
+  assert.deepEqual(parseTrailingSellStepInput("50 after 2m"), {
+    percent: 50,
+    delayMs: 120_000
+  });
+  assert.deepEqual(parseTrailingSellStepInput("100% 1h"), {
+    percent: 100,
+    delayMs: 3_600_000
+  });
+  assert.equal(parseTrailingSellStepInput("101% 10s"), null);
+  assert.equal(parseTrailingSellStepInput("20% forever"), null);
+  assert.deepEqual(parseTrailingSellStepsInput("30% 2m, 20% 10s"), [
+    { percent: 20, delayMs: 10_000 },
+    { percent: 30, delayMs: 120_000 }
+  ]);
+  assert.deepEqual(parseTrailingSellFormulaInput("20% 10s 20% 30s 2m"), [
+    { percent: 20, delayMs: 10_000 },
+    { percent: 20, delayMs: 40_000 },
+    { percent: 20, delayMs: 70_000 },
+    { percent: 20, delayMs: 100_000 },
+    { percent: 100, delayMs: 120_000 }
+  ]);
+  assert.equal(parseTrailingSellFormulaInput("20% 10s 20% 0s 2m"), null);
+  assert.equal(parseTrailingSellFormulaInput("20% 10s 20% 30s 5s"), null);
 });
 
 test("PumpPortal Lightning wallet helpers parse, encrypt, and execute requests", async () => {
@@ -197,6 +234,20 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(await store.setTradingWallet("chat-2", store.getTradingWallet("chat-1")), false);
     assert.equal(await store.watchCopyTradeWallet("chat-1", otherWallet, "Copy Alpha"), true);
     assert.equal(await store.watchCopyTradeWallet("chat-1", wallet, "Copy Beta"), true);
+    assert.equal(
+      await store.setCopyTradeWalletTrailingSellConfig("chat-1", otherWallet, {
+        enabled: true,
+        mode: "custom_steps",
+        percentBasis: "original_position",
+        steps: [
+          { percent: 25, delayMs: 15_000 },
+          { percent: 100, delayMs: 60_000 }
+        ],
+        updatedAt: "2026-05-23T01:00:00.000Z"
+      }),
+      true
+    );
+    assert.equal(await store.setCopyTradeWalletTrailingSellConfig("chat-1", "missing", null), false);
     assert.equal(await store.renameCopyTradeWallet("chat-1", wallet, "Copy Gamma"), true);
     assert.equal(await store.renameCopyTradeWallet("chat-1", wallet, null), true);
     assert.equal(await store.renameCopyTradeWallet("chat-1", "missing", "Nope"), false);
@@ -210,10 +261,10 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(store.getTradingWallet("chat-1")?.publicKey, otherWallet);
     assert.equal(decryptSecret(store.getTradingWallet("chat-1")?.encryptedApiKey || "", encryptionSecret), "pump-key-alpha");
     assert.deepEqual(
-      store.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label]),
+      store.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label, entry.trailingSellConfig?.percentBasis || null]),
       [
-        [wallet, null],
-        [otherWallet, "Copy Alpha"]
+        [wallet, null, null],
+        [otherWallet, "Copy Alpha", "original_position"]
       ]
     );
 
@@ -228,10 +279,10 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(reloaded.get("chat-1")?.copyAmountSol, 0.25);
     assert.equal(reloaded.getTradingWallet("chat-1")?.publicKey, otherWallet);
     assert.deepEqual(
-      reloaded.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label]),
+      reloaded.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label, entry.trailingSellConfig?.steps.length || 0]),
       [
-        [wallet, null],
-        [otherWallet, "Copy Alpha"]
+        [wallet, null, 0],
+        [otherWallet, "Copy Alpha", 2]
       ]
     );
     assert.equal(reloaded.get("chat-1")?.mode, null);

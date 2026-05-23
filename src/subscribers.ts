@@ -1,7 +1,16 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { asRecord, stringValue } from "./types.js";
-import type { AlertModeValue, SubscriberRecord, SubscriberStore, TelegramChatId, TradingWallet, WatchedWallet } from "./types.js";
+import type {
+  AlertModeValue,
+  SubscriberRecord,
+  SubscriberStore,
+  TelegramChatId,
+  TradingWallet,
+  TrailingSellConfig,
+  TrailingSellPercentBasis,
+  WatchedWallet
+} from "./types.js";
 
 export const LEGACY_MODE: AlertModeValue = "migrations";
 
@@ -11,6 +20,49 @@ export function normalizeChatId(chatId: TelegramChatId | undefined | null): stri
 
 export function normalizeMode(value: unknown): AlertModeValue | null {
   return value === "migrations" || value === "newtokens" || value === "both" ? value : null;
+}
+
+function normalizeTrailingSellPercentBasis(value: unknown): TrailingSellPercentBasis {
+  return value === "original_position" ? "original_position" : "remaining_balance";
+}
+
+export function normalizeTrailingSellConfig(value: unknown, fallbackNow = new Date().toISOString()): TrailingSellConfig | null {
+  const record = asRecord(value);
+  const rawSteps = Array.isArray(record.steps) ? record.steps : [];
+  const steps = rawSteps
+    .map((step) => {
+      const stepRecord = asRecord(step);
+      const delayMs = Number(stepRecord.delayMs ?? stepRecord.delay_ms);
+      const percent = Number(stepRecord.percent);
+
+      if (!Number.isFinite(delayMs) || delayMs < 0 || !Number.isFinite(percent) || percent <= 0 || percent > 100) {
+        return null;
+      }
+
+      return {
+        delayMs: Math.floor(delayMs),
+        percent
+      };
+    })
+    .filter((step): step is { delayMs: number; percent: number } => Boolean(step))
+    .slice(0, 20)
+    .sort((left, right) => left.delayMs - right.delayMs);
+
+  if (steps.length === 0 && value !== null && value !== undefined) {
+    return null;
+  }
+
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  return {
+    enabled: record.enabled !== false,
+    mode: record.mode === "formula" ? "formula" : "custom_steps",
+    percentBasis: normalizeTrailingSellPercentBasis(record.percentBasis ?? record.percent_basis),
+    steps,
+    updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : typeof record.updated_at === "string" ? record.updated_at : fallbackNow
+  };
 }
 
 export function makeSubscriber(chatId: string, mode: AlertModeValue | null, now = new Date().toISOString()): SubscriberRecord {
@@ -52,7 +104,8 @@ export function normalizeWatchedWallet(value: unknown, fallbackNow = new Date().
     address,
     label,
     addedAt: typeof record.addedAt === "string" ? record.addedAt : fallbackNow,
-    updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : fallbackNow
+    updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : fallbackNow,
+    trailingSellConfig: normalizeTrailingSellConfig(record.trailingSellConfig ?? record.trailing_sell_config, fallbackNow)
   };
 }
 
@@ -457,7 +510,8 @@ export function createSubscriberStore({
         address,
         label: nextLabel,
         addedAt: previous?.addedAt || now,
-        updatedAt: now
+        updatedAt: now,
+        trailingSellConfig: previous?.trailingSellConfig || null
       });
 
       subscribers.set(normalized, {
@@ -522,6 +576,41 @@ export function createSubscriberStore({
       });
       await save();
       return copyTradeWallets.length !== existing.copyTradeWallets.length;
+    },
+    async setCopyTradeWalletTrailingSellConfig(chatId, address, trailingSellConfig) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const walletIndex = existing.copyTradeWallets.findIndex((wallet) => wallet.address === address);
+
+      if (walletIndex === -1) {
+        return false;
+      }
+
+      const now = new Date().toISOString();
+      const nextConfig = trailingSellConfig ? normalizeTrailingSellConfig({ ...trailingSellConfig, updatedAt: now }, now) : null;
+      const copyTradeWallets = existing.copyTradeWallets.map((wallet, index) =>
+        index === walletIndex
+          ? {
+              ...wallet,
+              trailingSellConfig: nextConfig,
+              updatedAt: now
+            }
+          : wallet
+      );
+
+      subscribers.set(normalized, {
+        ...existing,
+        copyTradeWallets: dedupeWatchedWallets(copyTradeWallets),
+        updatedAt: now
+      });
+      await save();
+      return true;
     },
     async setTradingWallet(chatId, wallet) {
       await load();
@@ -628,7 +717,8 @@ export function createSubscriberStore({
                   address,
                   label: existing.watchedWallets.find((wallet) => wallet.address === address)?.label || null,
                   addedAt: now,
-                  updatedAt: now
+                  updatedAt: now,
+                  trailingSellConfig: null
                 }
               ]),
           copyTargetWalletAddress: address,

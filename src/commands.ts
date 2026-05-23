@@ -19,6 +19,9 @@ import type {
   TelegramMessage,
   TelegramReplyMarkup,
   TelegramUpdate,
+  TrailingSellConfig,
+  TrailingSellPercentBasis,
+  TrailingSellStep,
   WatchedWallet
 } from "./types.js";
 
@@ -35,8 +38,9 @@ const telegramCommands = [
 
 const MAX_WALLET_NICKNAME_LENGTH = 48;
 const PENDING_COPY_INPUT_TTL_MS = 10 * 60 * 1000;
+const MAX_TRAILING_SELL_STEPS = 20;
 
-type PendingCopyInputAction = "copy_amount";
+type PendingCopyInputAction = "copy_amount" | "trailing_step" | "trailing_steps" | "trailing_formula";
 type PendingWalletInputAction =
   | "watch_wallet"
   | "rename_wallet"
@@ -49,6 +53,7 @@ type ToggleAlertType = Exclude<AlertModeValue, "both">;
 interface PendingCopyInput {
   action: PendingCopyInputAction;
   expiresAt: number;
+  walletAddress?: string;
 }
 
 interface PendingWalletInput {
@@ -117,25 +122,178 @@ function alertEnabled(mode: AlertModeValue | null, alertType: ToggleAlertType): 
 }
 
 function formatTrailingSellDashboardStatus(config: LegacyBotConfig): string[] {
-  if (!config.copyTradeTrailingSellEnabled) {
-    return ["<b>Trailing sells:</b> Off"];
+  const inherited = inheritedTrailingSellConfig(config);
+
+  if (!inherited?.enabled) {
+    return ["<b>Trailing sells:</b> Inherited off"];
   }
 
-  const holdMs = config.copyTradeTrailingSellHoldMs || 2000;
-  const intervalMs = config.copyTradeTrailingSellIntervalMs || 2000;
-  const firstPercent = config.copyTradeTrailingSellFirstPercent || 20;
-  const trailPercent = config.copyTradeTrailingSellTrailPercent || 20;
-  const maxBuilds = Math.max(1, Math.floor(config.copyTradeTrailingSellMaxBuilds || 5));
+  return [
+    "<b>Trailing sells:</b> Inherited on",
+    `<b>Trailing schedule:</b> ${formatTrailingSellSteps(inherited.steps)}`
+  ];
+}
+
+export function inheritedTrailingSellConfig(config: LegacyBotConfig, now = new Date().toISOString()): TrailingSellConfig | null {
+  if (!config.copyTradeTrailingSellEnabled) {
+    return null;
+  }
+
+  return defaultTrailingSellConfig(config, true, now);
+}
+
+function defaultTrailingSellConfig(config: LegacyBotConfig, enabled = true, now = new Date().toISOString()): TrailingSellConfig {
+  const holdMs = Math.max(0, Math.floor(config.copyTradeTrailingSellHoldMs || 2000));
+  const intervalMs = Math.max(1, Math.floor(config.copyTradeTrailingSellIntervalMs || 2000));
+  const firstPercent = clampPercent(config.copyTradeTrailingSellFirstPercent || 20);
+  const trailPercent = clampPercent(config.copyTradeTrailingSellTrailPercent || 20);
+  const maxBuilds = Math.min(MAX_TRAILING_SELL_STEPS, Math.max(1, Math.floor(config.copyTradeTrailingSellMaxBuilds || 5)));
   const percents = maxBuilds <= 1
     ? [100]
     : [firstPercent, ...Array.from({ length: Math.max(0, maxBuilds - 2) }, () => trailPercent), 100];
 
-  return [
-    "<b>Trailing sells:</b> On",
-    `<b>Trailing schedule:</b> ${percents
-      .map((percent, index) => `${percent}% after ${(holdMs + intervalMs * index) / 1000}s`)
-      .join(" | ")}`
-  ];
+  return {
+    enabled,
+    mode: "formula",
+    percentBasis: "remaining_balance",
+    steps: percents.map((percent, index) => ({
+      delayMs: holdMs + intervalMs * index,
+      percent
+    })),
+    updatedAt: now
+  };
+}
+
+function clampPercent(value: number): number {
+  return Math.min(100, Math.max(0.000001, value));
+}
+
+function formatDuration(ms: number): string {
+  if (ms === 0) {
+    return "0s";
+  }
+
+  if (ms % 3_600_000 === 0) {
+    return `${ms / 3_600_000}h`;
+  }
+
+  if (ms % 60_000 === 0) {
+    return `${ms / 60_000}m`;
+  }
+
+  if (ms % 1000 === 0) {
+    return `${ms / 1000}s`;
+  }
+
+  return `${ms}ms`;
+}
+
+function formatTrailingSellSteps(steps: TrailingSellStep[]): string {
+  return steps.length === 0
+    ? "No steps"
+    : steps.map((step) => `${formatTrailingPercent(step.percent)}% after ${formatDuration(step.delayMs)}`).join(" | ");
+}
+
+function formatTrailingPercent(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function parseDurationMs(value: string): number | null {
+  const match = value.trim().toLowerCase().match(/^(\d+(?:\.\d+)?)(s|m|h)?$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const amount = Number(match[1]);
+  const unit = match[2] || "s";
+
+  if (!Number.isFinite(amount) || amount < 0) {
+    return null;
+  }
+
+  const multiplier = unit === "h" ? 3_600_000 : unit === "m" ? 60_000 : 1000;
+  return Math.floor(amount * multiplier);
+}
+
+function parsePercentToken(value: string): number | null {
+  const number = Number(value.trim().replace(/%$/, ""));
+
+  if (!Number.isFinite(number) || number <= 0 || number > 100) {
+    return null;
+  }
+
+  return number;
+}
+
+export function parseTrailingSellStepInput(value: string): TrailingSellStep | null {
+  const parts = value.trim().replace(/\s+after\s+/i, " ").split(/\s+/).filter(Boolean);
+
+  if (parts.length !== 2) {
+    return null;
+  }
+
+  const percent = parsePercentToken(parts[0]);
+  const delayMs = parseDurationMs(parts[1]);
+
+  if (percent === null || delayMs === null) {
+    return null;
+  }
+
+  return { percent, delayMs };
+}
+
+export function parseTrailingSellStepsInput(value: string): TrailingSellStep[] | null {
+  const steps = value
+    .split(/[\n,;]+/)
+    .map((entry) => parseTrailingSellStepInput(entry))
+    .filter((step): step is TrailingSellStep => Boolean(step))
+    .sort((left, right) => left.delayMs - right.delayMs);
+
+  const rawEntries = value.split(/[\n,;]+/).map((entry) => entry.trim()).filter(Boolean);
+
+  if (rawEntries.length === 0 || rawEntries.length !== steps.length || steps.length > MAX_TRAILING_SELL_STEPS) {
+    return null;
+  }
+
+  return steps;
+}
+
+export function parseTrailingSellFormulaInput(value: string): TrailingSellStep[] | null {
+  const parts = value.trim().split(/\s+/).filter(Boolean);
+
+  if (parts.length !== 5) {
+    return null;
+  }
+
+  const firstPercent = parsePercentToken(parts[0]);
+  const firstDelayMs = parseDurationMs(parts[1]);
+  const repeatPercent = parsePercentToken(parts[2]);
+  const intervalMs = parseDurationMs(parts[3]);
+  const finalDelayMs = parseDurationMs(parts[4]);
+
+  if (
+    firstPercent === null ||
+    firstDelayMs === null ||
+    repeatPercent === null ||
+    intervalMs === null ||
+    finalDelayMs === null ||
+    intervalMs <= 0 ||
+    finalDelayMs <= firstDelayMs
+  ) {
+    return null;
+  }
+
+  const steps: TrailingSellStep[] = [{ percent: firstPercent, delayMs: firstDelayMs }];
+  let nextDelayMs = firstDelayMs + intervalMs;
+
+  while (nextDelayMs < finalDelayMs && steps.length < MAX_TRAILING_SELL_STEPS - 1) {
+    steps.push({ percent: repeatPercent, delayMs: nextDelayMs });
+    nextDelayMs += intervalMs;
+  }
+
+  steps.push({ percent: 100, delayMs: finalDelayMs });
+  return steps;
 }
 
 export function toggleAlertMode(currentMode: AlertModeValue | null, alertType: ToggleAlertType): AlertModeValue | null {
@@ -433,7 +591,96 @@ export function createTelegramCommandPoller({
       return;
     }
 
+    if (data === "copytrade:trailing") {
+      const dashboard = copyTradeTrailingWalletPicker(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data.startsWith("copytrade:trail:")) {
+      await handleTrailingSellCallback(chatId, data);
+      return;
+    }
+
     await reply(chatId, "That copy trade action is no longer available. Send /copytrade to reopen the menu.");
+  }
+
+  async function handleTrailingSellCallback(chatId: TelegramChatId, data: string): Promise<void> {
+    const parts = data.split(":");
+    const action = parts[2] || "";
+    const walletIndex = Number(parts[3]);
+    const wallet = copyTradeWalletByIndex(chatId, walletIndex);
+
+    if (!wallet) {
+      await reply(chatId, "That Copytrade Wallet is no longer available. Send /copytrade to reopen the menu.");
+      return;
+    }
+
+    if (action === "open") {
+      const dashboard = trailingSellWalletDashboard(chatId, walletIndex);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (action === "toggle") {
+      const nextConfig = {
+        ...effectiveTrailingSellConfig(wallet),
+        enabled: !effectiveTrailingSellConfig(wallet).enabled,
+        updatedAt: new Date().toISOString()
+      };
+      await subscribers?.setCopyTradeWalletTrailingSellConfig(chatId, wallet.address, nextConfig);
+      const dashboard = trailingSellWalletDashboard(chatId, walletIndex);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (action === "reset") {
+      await subscribers?.setCopyTradeWalletTrailingSellConfig(chatId, wallet.address, null);
+      const dashboard = trailingSellWalletDashboard(chatId, walletIndex);
+      await reply(chatId, `<b>Trailing sells reset to inherited defaults.</b>\n\n${dashboard.text}`, dashboard.replyMarkup);
+      return;
+    }
+
+    if (action === "basis") {
+      const nextBasis: TrailingSellPercentBasis = effectiveTrailingSellConfig(wallet).percentBasis === "remaining_balance"
+        ? "original_position"
+        : "remaining_balance";
+      const nextConfig = {
+        ...effectiveTrailingSellConfig(wallet),
+        percentBasis: nextBasis,
+        updatedAt: new Date().toISOString()
+      };
+      await subscribers?.setCopyTradeWalletTrailingSellConfig(chatId, wallet.address, nextConfig);
+      const dashboard = trailingSellWalletDashboard(chatId, walletIndex);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (action === "add") {
+      setPendingCopyInput(chatId, "trailing_step", wallet.address);
+      await reply(chatId, "Send one trailing sell step like <code>20% 10s</code>, <code>50 2m</code>, or <code>100% 1h</code>.");
+      return;
+    }
+
+    if (action === "edit") {
+      setPendingCopyInput(chatId, "trailing_steps", wallet.address);
+      await reply(
+        chatId,
+        "Send all trailing sell steps, separated by commas or new lines.\nExample: <code>20% 10s, 30% 2m, 100% 10m</code>."
+      );
+      return;
+    }
+
+    if (action === "preset") {
+      setPendingCopyInput(chatId, "trailing_formula", wallet.address);
+      await reply(
+        chatId,
+        "Send a formula as <code>first% firstDelay repeat% interval finalDelay</code>.\nExample: <code>20% 10s 20% 30s 5m</code>."
+      );
+      return;
+    }
+
+    await reply(chatId, "That trailing sell action is no longer available. Send /copytrade to reopen the menu.");
   }
 
   function isToggleAlertType(value: string): value is ToggleAlertType {
@@ -1016,14 +1263,23 @@ export function createTelegramCommandPoller({
     return wallet.label ? `${escapeWalletLabel(wallet.label)} - <code>${wallet.address}</code>` : `<code>${wallet.address}</code>`;
   }
 
+  function formatCopyTradeWalletSummary(wallet: WatchedWallet): string {
+    return wallet.label ? escapeWalletLabel(wallet.label) : shortWallet(wallet.address);
+  }
+
+  function shortWallet(value: string): string {
+    return value.length > 12 ? `${value.slice(0, 6)}...${value.slice(-6)}` : value;
+  }
+
   function last4(value: string): string {
     return value.length <= 4 ? value : value.slice(-4);
   }
 
-  function setPendingCopyInput(chatId: TelegramChatId, action: PendingCopyInputAction): void {
+  function setPendingCopyInput(chatId: TelegramChatId, action: PendingCopyInputAction, walletAddress?: string): void {
     pendingCopyInputs.set(String(chatId), {
       action,
-      expiresAt: Date.now() + PENDING_COPY_INPUT_TTL_MS
+      expiresAt: Date.now() + PENDING_COPY_INPUT_TTL_MS,
+      walletAddress
     });
   }
 
@@ -1045,6 +1301,59 @@ export function createTelegramCommandPoller({
     }
 
     const value = message.text?.trim() || "";
+
+    if (pending.action === "trailing_step" || pending.action === "trailing_steps" || pending.action === "trailing_formula") {
+      const walletAddress = pending.walletAddress;
+      const wallet = walletAddress
+        ? (subscribers?.listCopyTradeWallets(chatId) || []).find((entry) => entry.address === walletAddress) || null
+        : null;
+
+      if (!wallet) {
+        pendingCopyInputs.delete(String(chatId));
+        return { text: "That Copytrade Wallet is no longer available. Send /copytrade to reopen the menu." };
+      }
+
+      const current = effectiveTrailingSellConfig(wallet);
+      const parsedSteps =
+        pending.action === "trailing_formula"
+          ? parseTrailingSellFormulaInput(value)
+          : pending.action === "trailing_steps"
+            ? parseTrailingSellStepsInput(value)
+            : (() => {
+                const step = parseTrailingSellStepInput(value);
+                return step ? [...current.steps, step].sort((left, right) => left.delayMs - right.delayMs) : null;
+              })();
+
+      if (!parsedSteps || parsedSteps.length === 0 || parsedSteps.length > MAX_TRAILING_SELL_STEPS) {
+        return {
+          text:
+            pending.action === "trailing_formula"
+              ? "That formula is not valid. Use <code>20% 10s 20% 30s 5m</code>."
+              : "That step list is not valid. Use entries like <code>20% 10s</code>, up to 20 steps."
+        };
+      }
+
+      pendingCopyInputs.delete(String(chatId));
+      const nextConfig: TrailingSellConfig = {
+        enabled: true,
+        mode: pending.action === "trailing_formula" ? "formula" : "custom_steps",
+        percentBasis: current.percentBasis,
+        steps: parsedSteps,
+        updatedAt: new Date().toISOString()
+      };
+      const updated = await subscribers?.setCopyTradeWalletTrailingSellConfig(chatId, wallet.address, nextConfig);
+
+      if (!updated) {
+        return { text: verificationPrompt() };
+      }
+
+      const walletIndex = (subscribers?.listCopyTradeWallets(chatId) || []).findIndex((entry) => entry.address === wallet.address);
+      const dashboard = trailingSellWalletDashboard(chatId, walletIndex);
+      return {
+        text: `<b>Trailing sell schedule saved.</b>\n\n${dashboard.text}`,
+        replyMarkup: dashboard.replyMarkup
+      };
+    }
 
     const amount = Number(value);
 
@@ -1084,16 +1393,15 @@ export function createTelegramCommandPoller({
     const ready = Boolean(tradingWallet && subscriber?.copyAmountSol && copyTradeWallets.length > 0);
     const text = [
       "<b>Copy trade</b>",
-      `<b>Trading wallet:</b> ${tradingWallet ? "Created" : "Missing"}`,
-      tradingWallet ? `<code>${tradingWallet.publicKey}</code>` : "Create one in /mywallets.",
-      `<b>Copy amount:</b> ${subscriber?.copyAmountSol ? `${formatSolAmount(subscriber.copyAmountSol)} SOL` : "Not set"}`,
+      `<b>Status:</b> ${ready ? "Ready" : "Not ready"}`,
+      `<b>Trading wallet:</b> ${tradingWallet ? shortWallet(tradingWallet.publicKey) : "Missing"}`,
+      `<b>Amount:</b> ${subscriber?.copyAmountSol ? `${formatSolAmount(subscriber.copyAmountSol)} SOL` : "Not set"}`,
       `<b>Copytrade wallets:</b> ${copyTradeWallets.length}`,
-      copyTradeWallets.length === 0 ? "No Copytrade Wallets yet." : copyTradeWallets.map((wallet) => formatWalletSummary(wallet)).join("\n"),
-      `<b>Auto buys:</b> ${ready ? "Ready" : "Not ready"}`,
-      ...formatTrailingSellDashboardStatus(config),
-      "",
-      ready ? "Auto copy buys are enabled for matching SOL-to-token buys." : "Create a trading wallet, set amount, and add Copytrade Wallets to enable auto buys."
-    ].join("\n");
+      copyTradeWallets.length === 0 ? "" : copyTradeWallets.map((wallet) => formatCopyTradeWalletSummary(wallet)).join("\n"),
+      `<b>Trailing sells:</b> ${copyTradeWallets.length === 0 ? "Add wallets first" : "Per wallet"}`
+    ]
+      .filter(Boolean)
+      .join("\n");
 
     return {
       text,
@@ -1105,10 +1413,6 @@ export function createTelegramCommandPoller({
     return {
       inline_keyboard: [
         [
-          { text: "📊 Status", callback_data: "copytrade:status" },
-          { text: "👛 Wallet", callback_data: "copytrade:mywallets" }
-        ],
-        [
           { text: "💰 Amount", callback_data: "copytrade:set_amount" },
           { text: "➕ Add Wallet", callback_data: "copytrade:add_wallet" }
         ],
@@ -1116,7 +1420,123 @@ export function createTelegramCommandPoller({
           { text: "✏️ Rename", callback_data: "copytrade:rename_wallet" },
           { text: "🗑️ Remove", callback_data: "copytrade:remove_trade_wallet" }
         ],
-        [{ text: "📋 List Wallets", callback_data: "copytrade:wallets" }]
+        [
+          { text: "📉 Trailing Sells", callback_data: "copytrade:trailing" },
+          { text: "📋 List Wallets", callback_data: "copytrade:wallets" }
+        ]
+      ]
+    };
+  }
+
+  function copyTradeWalletByIndex(chatId: TelegramChatId, walletIndex: number): WatchedWallet | null {
+    if (!Number.isInteger(walletIndex) || walletIndex < 0) {
+      return null;
+    }
+
+    return (subscribers?.listCopyTradeWallets(chatId) || [])[walletIndex] || null;
+  }
+
+  function effectiveTrailingSellConfig(wallet: WatchedWallet): TrailingSellConfig {
+    return wallet.trailingSellConfig || defaultTrailingSellConfig(config, Boolean(config.copyTradeTrailingSellEnabled));
+  }
+
+  function trailingSellStatusLabel(wallet: WatchedWallet): string {
+    const effective = effectiveTrailingSellConfig(wallet);
+
+    if (!wallet.trailingSellConfig) {
+      return effective.enabled ? "Inherited on" : "Inherited off";
+    }
+
+    return effective.enabled ? "Custom on" : "Custom off";
+  }
+
+  function copyTradeTrailingWalletPicker(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return {
+        text: gate,
+        replyMarkup: copyTradeDashboardReplyMarkup()
+      };
+    }
+
+    const wallets = subscribers?.listCopyTradeWallets(chatId) || [];
+
+    if (wallets.length === 0) {
+      return {
+        text: "No Copytrade Wallets yet. Add one from /copytrade first.",
+        replyMarkup: copyTradeDashboardReplyMarkup()
+      };
+    }
+
+    return {
+      text: ["<b>Trailing sells</b>", "Choose a Copytrade Wallet to configure."].join("\n"),
+      replyMarkup: {
+        inline_keyboard: [
+          ...wallets.map((wallet, index) => [
+            {
+              text: `📉 ${wallet.label ? wallet.label : shortWallet(wallet.address)}`,
+              callback_data: `copytrade:trail:open:${index}`
+            }
+          ]),
+          [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]
+        ]
+      }
+    };
+  }
+
+  function trailingSellWalletDashboard(chatId: TelegramChatId, walletIndex: number): { text: string; replyMarkup: TelegramReplyMarkup } {
+    const wallet = copyTradeWalletByIndex(chatId, walletIndex);
+
+    if (!wallet) {
+      return {
+        text: "That Copytrade Wallet is no longer available. Send /copytrade to reopen the menu.",
+        replyMarkup: copyTradeDashboardReplyMarkup()
+      };
+    }
+
+    const effective = effectiveTrailingSellConfig(wallet);
+    const text = [
+      "<b>Trailing sells</b>",
+      `<b>Wallet:</b> ${wallet.label ? escapeWalletLabel(wallet.label) : shortWallet(wallet.address)}`,
+      wallet.label ? `<code>${wallet.address}</code>` : "",
+      `<b>Status:</b> ${trailingSellStatusLabel(wallet)}`,
+      `<b>Percent basis:</b> ${effective.percentBasis === "remaining_balance" ? "Remaining balance" : "Original position"}`,
+      `<b>Mode:</b> ${effective.mode === "formula" ? "Formula preset" : "Custom steps"}`,
+      `<b>Steps:</b> ${formatTrailingSellSteps(effective.steps)}`,
+      "",
+      wallet.trailingSellConfig
+        ? "Reset returns this wallet to inherited env defaults."
+        : "This wallet is using inherited env defaults until you customize it."
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    return {
+      text,
+      replyMarkup: trailingSellWalletDashboardReplyMarkup(walletIndex, effective.enabled)
+    };
+  }
+
+  function trailingSellWalletDashboardReplyMarkup(walletIndex: number, enabled: boolean): TelegramReplyMarkup {
+    return {
+      inline_keyboard: [
+        [
+          {
+            text: enabled ? "⚪ Disable" : "🟢 Enable",
+            callback_data: `copytrade:trail:toggle:${walletIndex}`
+          },
+          { text: "♻️ Reset", callback_data: `copytrade:trail:reset:${walletIndex}` }
+        ],
+        [
+          { text: "⚙️ Preset", callback_data: `copytrade:trail:preset:${walletIndex}` },
+          { text: "➕ Add Step", callback_data: `copytrade:trail:add:${walletIndex}` }
+        ],
+        [
+          { text: "✏️ Edit Steps", callback_data: `copytrade:trail:edit:${walletIndex}` },
+          { text: "🔁 Basis", callback_data: `copytrade:trail:basis:${walletIndex}` }
+        ],
+        [{ text: "↩️ Back", callback_data: "copytrade:trailing" }]
       ]
     };
   }

@@ -212,6 +212,20 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
   assert.equal(await store.setTradingWallet("chat-2", store.getTradingWallet("chat-1")), false);
   assert.equal(await store.watchCopyTradeWallet("chat-1", otherWallet, "Copy Alpha"), true);
   assert.equal(await store.watchCopyTradeWallet("chat-1", wallet, "Copy Beta"), true);
+  assert.equal(
+    await store.setCopyTradeWalletTrailingSellConfig("chat-1", otherWallet, {
+      enabled: true,
+      mode: "custom_steps",
+      percentBasis: "original_position",
+      steps: [
+        { percent: 25, delayMs: 15000 },
+        { percent: 100, delayMs: 60000 }
+      ],
+      updatedAt: "2026-05-23T01:00:00.000Z"
+    }),
+    true
+  );
+  assert.equal(await store.setCopyTradeWalletTrailingSellConfig("chat-1", "missing", null), false);
   assert.equal(await store.renameCopyTradeWallet("chat-1", wallet, null), true);
   assert.equal(await store.renameCopyTradeWallet("chat-1", "missing", "Nope"), false);
   assert.equal(await store.setCopyWallet("chat-2", otherWallet), false);
@@ -225,10 +239,10 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
   assert.equal(store.getTradingWallet("chat-1")?.publicKey, otherWallet);
   assert.equal(store.getTradingWallet("chat-1")?.apiKeyLast4, "ikey");
   assert.deepEqual(
-    store.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label]),
+    store.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label, entry.trailingSellConfig?.percentBasis || null]),
     [
-      [otherWallet, "Copy Alpha"],
-      [wallet, null]
+      [otherWallet, "Copy Alpha", "original_position"],
+      [wallet, null, null]
     ]
   );
 
@@ -243,10 +257,10 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
   assert.equal(reloaded.get("chat-1")?.copyAmountSol, 0.25);
   assert.equal(reloaded.getTradingWallet("chat-1")?.publicKey, otherWallet);
   assert.deepEqual(
-    reloaded.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label]),
+    reloaded.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label, entry.trailingSellConfig?.steps.length || 0]),
     [
-      [otherWallet, "Copy Alpha"],
-      [wallet, null]
+      [otherWallet, "Copy Alpha", 2],
+      [wallet, null, 0]
     ]
   );
 

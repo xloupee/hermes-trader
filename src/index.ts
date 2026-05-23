@@ -8,6 +8,7 @@ import { heliusEventMentionsWatchedWallet, isHeliusSwapEvent, normalizeHeliusSwa
 import { createPumpPortalMigrationListener } from "./pumpportal.js";
 import { analyzeSolanaTransaction } from "./solana.js";
 import { createSubscriberStore } from "./subscribers.js";
+import { createSupabaseSubscriberStoreFromEnv } from "./subscribers-supabase.js";
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
 import { asRecord, errorMessage, isRecord, stringValue } from "./types.js";
 import {
@@ -22,6 +23,8 @@ const config: BotConfig = {
   telegramChatId: process.env.TELEGRAM_CHAT_ID,
   telegramVerifyCode: process.env.TELEGRAM_VERIFY_CODE,
   telegramSubscribersPath: process.env.TELEGRAM_SUBSCRIBERS_PATH || "data/telegram-subscribers.json",
+  supabaseUrl: process.env.SUPABASE_URL,
+  supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE,
   pumpPortalApiKey: process.env.PUMPPORTAL_API_KEY,
   pumpPortalWsUrl: process.env.PUMPPORTAL_WS_URL || "wss://pumpportal.fun/api/data",
   alertMode: process.env.ALERT_MODE || process.env.PUMPPORTAL_ALERT_MODE || "migrations",
@@ -51,10 +54,17 @@ const metadataCache = new Map<string, LooseRecord | null>();
 const tokenInfoCache = new Map<string, LooseRecord | null>();
 let isShuttingDown = false;
 const pumpFunCoinInfoRetryDelaysMs = [0, 750, 1500, 3000, 6000];
-const subscribers = createSubscriberStore({
-  path: config.telegramSubscribersPath,
-  initialChatIds: [config.telegramChatId]
-});
+const subscribers =
+  config.supabaseUrl && config.supabaseServiceRoleKey
+    ? createSupabaseSubscriberStoreFromEnv({
+        url: config.supabaseUrl,
+        serviceRoleKey: config.supabaseServiceRoleKey
+      })
+    : createSubscriberStore({
+        path: config.telegramSubscribersPath,
+        initialChatIds: [config.telegramChatId]
+      });
+const subscriberStoreLabel = config.supabaseUrl && config.supabaseServiceRoleKey ? "Supabase" : "JSON";
 
 const baseSubscriptionMethods = ["subscribeNewToken", "subscribeMigration"];
 
@@ -210,14 +220,20 @@ async function handleHeliusSwap(event: LooseRecord): Promise<boolean> {
 }
 
 async function sendWalletTradeAlert(subscriber: SubscriberRecord, trade: WalletTradeData): Promise<void> {
+  const copySettings =
+    subscriber.copyTargetWalletAddress && subscriber.copyTargetWalletAddress === trade.targetWallet
+      ? {
+          copyWalletAddress: subscriber.copyWalletAddress,
+          copyAmountSol: subscriber.copyAmountSol,
+          copyTargetWalletAddress: subscriber.copyTargetWalletAddress
+        }
+      : null;
+
   try {
     await sendTelegramMessage({
       token: config.telegramToken,
       chatId: subscriber.chatId,
-      text: formatWalletTradeMessageWithCopySettings(trade, {
-        copyWalletAddress: subscriber.copyWalletAddress,
-        copyAmountSol: subscriber.copyAmountSol
-      }),
+      text: formatWalletTradeMessageWithCopySettings(trade, copySettings),
       replyMarkup: buildWalletTradeReplyMarkup(trade)
     });
   } catch (error) {
@@ -564,6 +580,14 @@ function assertConfig(): void {
   if (missing.length > 0) {
     throw new Error(`Missing required env vars: ${missing.join(", ")}`);
   }
+
+  if (config.supabaseUrl && !config.supabaseServiceRoleKey) {
+    console.warn("SUPABASE_URL is set but no service role key was found; using JSON subscriber storage.");
+  }
+
+  if (!config.supabaseUrl && config.supabaseServiceRoleKey) {
+    console.warn("A Supabase service role key is set but SUPABASE_URL is missing; using JSON subscriber storage.");
+  }
 }
 
 const commandPoller = createTelegramCommandPoller({
@@ -657,6 +681,7 @@ process.on("SIGTERM", () => {
 
 assertConfig();
 await subscribers.init();
+console.log(`Using ${subscriberStoreLabel} subscriber storage`);
 console.log(`Loaded ${subscribers.count()} verified Telegram subscriber(s)`);
 if (watchedWalletAddresses().length > 0) {
   await syncHeliusWalletWebhook();

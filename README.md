@@ -34,7 +34,7 @@ The bot keeps one PumpPortal websocket connection open for token events and filt
 cp .env.example .env
 ```
 
-3. Fill in `TELEGRAM_BOT_TOKEN`. Set `TELEGRAM_VERIFY_CODE` to a private invite code people must send before receiving alerts. `PUMPPORTAL_API_KEY` is optional for migrations, but supported if you have one. For `/watch` swap alerts, set `HELIUS_API_KEY`, `HELIUS_WEBHOOK_PUBLIC_URL`, and `HELIUS_WEBHOOK_AUTH_HEADER`.
+3. Fill in `TELEGRAM_BOT_TOKEN`. Set `TELEGRAM_VERIFY_CODE` to a private invite code people must send before receiving alerts. Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` to store subscribers in Supabase; `SUPABASE_SERVICE_KEY` and `SUPABASE_SERVICE_ROLE` are also accepted as service-role aliases. Omit the Supabase values to keep using the local JSON fallback. `PUMPPORTAL_API_KEY` is optional for migrations, but supported if you have one. For `/watch` swap alerts, set `HELIUS_API_KEY`, `HELIUS_WEBHOOK_PUBLIC_URL`, and `HELIUS_WEBHOOK_AUTH_HEADER`.
 4. Install dependencies:
 
 ```bash
@@ -57,7 +57,19 @@ npm start
 npm start
 ```
 
-Verified subscribers and their alert modes are stored in `TELEGRAM_SUBSCRIBERS_PATH`. `TELEGRAM_CHAT_ID` is optional, but when present it seeds that chat as an existing verified subscriber in migration-only mode.
+Verified subscribers and their alert modes are stored in Supabase when `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set. The service role key is server-only and must not be exposed in browser code. If either Supabase value is missing, subscribers are stored in `TELEGRAM_SUBSCRIBERS_PATH`. `TELEGRAM_CHAT_ID` is optional for the JSON fallback, but Supabase mode uses the database as the source of truth.
+
+To import an existing JSON subscriber file into Supabase after applying the database migration, run:
+
+```bash
+npm run import-subscribers
+```
+
+You can also pass a custom JSON path:
+
+```bash
+npm run import-subscribers -- data/telegram-subscribers.json
+```
 
 ## Bot commands
 
@@ -74,6 +86,7 @@ Verified subscribers and their alert modes are stored in `TELEGRAM_SUBSCRIBERS_P
 - `/wallets` - List watched wallets and nicknames for this chat.
 - `/copywallet <public-wallet>` - Save this chat's copy wallet public address.
 - `/copyamount <sol>` - Save this chat's fixed copy size in SOL.
+- `/copytrade` - Open the copy trade setup dashboard.
 - `/copystatus` - Show copy settings and watched wallets.
 
 ## Notes
@@ -84,7 +97,7 @@ Verified subscribers and their alert modes are stored in `TELEGRAM_SUBSCRIBERS_P
 - To inspect recent on-chain migrations without waiting for a live event, run `npm run past-migrations -- 10`.
 - Set `SOLANA_RPC_URL` in `.env` if public Solana RPC rate limits you.
 - Wallet swap monitor events are stored in `WALLET_TRADE_LOG_PATH`.
-- Wallet swap alerts include copy-trade details when `/copywallet` or `/copyamount` is configured. This is alert output only; it does not execute trades.
+- Wallet swap alerts include copy-trade details when `/copywallet`, `/copyamount`, and a `/copytrade` target are configured. This is alert output only; it does not execute trades.
 - Expose `WEBHOOK_PORT` through your reverse proxy at the exact `HELIUS_WEBHOOK_PUBLIC_URL`, and forward the `Authorization` header unchanged.
 
 ## Research

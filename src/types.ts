@@ -134,9 +134,6 @@ export interface SubscriberStore {
   watchCopyTradeWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
   renameCopyTradeWallet: (chatId: TelegramChatId, address: string, label: string | null) => Promise<boolean>;
   unwatchCopyTradeWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
-  addMyWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
-  renameMyWallet: (chatId: TelegramChatId, address: string, label: string | null) => Promise<boolean>;
-  removeMyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   setTradingWallet: (chatId: TelegramChatId, wallet: TradingWallet) => Promise<boolean>;
   getTradingWallet: (chatId: TelegramChatId) => TradingWallet | null;
   setCopyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
@@ -145,7 +142,6 @@ export interface SubscriberStore {
   setCopyTargetWallet: (chatId: TelegramChatId, address: string | null) => Promise<boolean>;
   listWatchedWallets: (chatId: TelegramChatId) => WatchedWallet[];
   listCopyTradeWallets: (chatId: TelegramChatId) => WatchedWallet[];
-  listMyWallets: (chatId: TelegramChatId) => WatchedWallet[];
   listCopyWallets: (chatId: TelegramChatId) => string[];
   list: () => SubscriberRecord[];
   count: () => number;
@@ -156,7 +152,6 @@ export interface SubscriberRecord {
   mode: AlertModeValue | null;
   watchedWallets: WatchedWallet[];
   copyTradeWallets: WatchedWallet[];
-  myWallets: WatchedWallet[];
   tradingWallet: TradingWallet | null;
   copyWalletAddress: string | null;
   copyWalletAddresses: string[];

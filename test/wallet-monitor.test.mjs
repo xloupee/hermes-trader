@@ -184,11 +184,6 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(await store.setCopyWallet("chat-1", wallet), true);
     assert.deepEqual(store.listCopyWallets("chat-1"), [otherWallet, wallet]);
     assert.equal(await store.setCopyAmountSol("chat-1", 0.25), true);
-    assert.equal(await store.addMyWallet("chat-1", otherWallet, "My Alpha"), true);
-    assert.equal(await store.addMyWallet("chat-1", wallet, "My Beta"), true);
-    assert.equal(await store.renameMyWallet("chat-1", wallet, null), true);
-    assert.equal(await store.renameMyWallet("chat-1", "missing", "Nope"), false);
-    assert.equal(await store.addMyWallet("chat-2", wallet, "Unverified"), false);
     assert.equal(
       await store.setTradingWallet("chat-1", {
         publicKey: otherWallet,
@@ -208,16 +203,9 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(await store.watchCopyTradeWallet("chat-2", wallet, "Unverified"), false);
     assert.equal(await store.setCopyWallet("chat-2", otherWallet), false);
     assert.equal(await store.setCopyAmountSol("chat-2", 0.25), false);
-    assert.equal(store.get("chat-1")?.copyWalletAddress, null);
-    assert.deepEqual(store.get("chat-1")?.copyWalletAddresses, []);
-    assert.deepEqual(store.listCopyWallets("chat-1"), []);
-    assert.deepEqual(
-      store.listMyWallets("chat-1").map((entry) => [entry.address, entry.label]),
-      [
-        [wallet, null],
-        [otherWallet, "My Alpha"]
-      ]
-    );
+    assert.equal(store.get("chat-1")?.copyWalletAddress, otherWallet);
+    assert.deepEqual(store.get("chat-1")?.copyWalletAddresses, [otherWallet, wallet]);
+    assert.deepEqual(store.listCopyWallets("chat-1"), [otherWallet, wallet]);
     assert.equal(store.get("chat-1")?.copyAmountSol, 0.25);
     assert.equal(store.getTradingWallet("chat-1")?.publicKey, otherWallet);
     assert.equal(decryptSecret(store.getTradingWallet("chat-1")?.encryptedApiKey || "", encryptionSecret), "pump-key-alpha");
@@ -237,13 +225,6 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     );
     assert.equal(reloaded.get("chat-1")?.copyWalletAddress, null);
     assert.deepEqual(reloaded.get("chat-1")?.copyWalletAddresses, []);
-    assert.deepEqual(
-      reloaded.listMyWallets("chat-1").map((entry) => [entry.address, entry.label]),
-      [
-        [wallet, null],
-        [otherWallet, "My Alpha"]
-      ]
-    );
     assert.equal(reloaded.get("chat-1")?.copyAmountSol, 0.25);
     assert.equal(reloaded.getTradingWallet("chat-1")?.publicKey, otherWallet);
     assert.deepEqual(
@@ -263,8 +244,6 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     );
     assert.equal(await reloaded.unwatchCopyTradeWallet("chat-1", wallet), true);
     assert.deepEqual(reloaded.listCopyTradeWallets("chat-1").map((entry) => entry.address), [otherWallet]);
-    assert.equal(await reloaded.removeMyWallet("chat-1", wallet), true);
-    assert.deepEqual(reloaded.listMyWallets("chat-1").map((entry) => entry.address), [otherWallet]);
 
     const body = JSON.parse(await readFile(path, "utf8"));
     assert.equal(body.subscribers[0].chatId, "chat-1");

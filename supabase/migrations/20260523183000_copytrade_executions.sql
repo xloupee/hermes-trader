@@ -29,8 +29,14 @@ create index if not exists telegram_copytrade_executions_source_wallet_idx
 create index if not exists telegram_copytrade_executions_mint_idx
   on public.telegram_copytrade_executions(mint);
 
-create unique index if not exists telegram_copytrade_executions_signature_action_idx
-  on public.telegram_copytrade_executions(signature, action)
+create unique index if not exists telegram_copytrade_executions_signature_step_idx
+  on public.telegram_copytrade_executions(
+    chat_id,
+    action,
+    signature,
+    coalesce(trailing_sell_step_index, -1),
+    coalesce(trailing_sell_total_steps, -1)
+  )
   where signature is not null;
 
 alter table public.telegram_copytrade_executions enable row level security;

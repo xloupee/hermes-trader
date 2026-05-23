@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { commandFromMessage, helpText } from "../dist/commands.js";
+import { commandFromMessage, helpText, toggleAlertMode } from "../dist/commands.js";
 import { buildHeliusWebhookPayload, createHeliusWebhookServer, syncHeliusWebhook } from "../dist/helius.js";
 import { heliusEventMentionsWatchedWallet, normalizeHeliusSwapData } from "../dist/helius-swaps.js";
 import { createSubscriberStore } from "../dist/subscribers.js";
@@ -23,28 +23,46 @@ const config = {
   solscanBaseUrl: "https://solscan.io"
 };
 
-test("telegram help exposes wallet nickname commands", () => {
+test("telegram help exposes wallet and copy trade dashboards", () => {
   const help = helpText("chat-1");
 
-  assert.match(help, /\/watch &lt;wallet&gt; \[nickname\]/);
-  assert.match(help, /\/renamewallet &lt;wallet&gt; &lt;nickname\|-\&gt;/);
-  assert.match(help, /\/wallets - List watched wallets and nicknames/);
-  assert.match(help, /\/copywallet &lt;public-wallet&gt;/);
-  assert.match(help, /\/copyamount &lt;sol&gt;/);
+  assert.match(help, /\/alerts - Open alert mode dashboard/);
+  assert.match(help, /\/wallets - Open wallet dashboard/);
   assert.match(help, /\/copytrade - Open copy trade setup menu/);
-  assert.match(help, /\/copystatus - Show copy settings and watched wallets/);
-  assert.deepEqual(commandFromMessage({ text: "/renamewallet wallet Alpha Wallet" }), {
-    command: "/renamewallet",
-    args: ["wallet", "Alpha", "Wallet"]
+  assert.doesNotMatch(help, /\/migrations/);
+  assert.doesNotMatch(help, /\/newtokens/);
+  assert.doesNotMatch(help, /\/both/);
+  assert.doesNotMatch(help, /\/watch/);
+  assert.doesNotMatch(help, /\/renamewallet/);
+  assert.doesNotMatch(help, /\/unwatch/);
+  assert.doesNotMatch(help, /\/copywallet/);
+  assert.doesNotMatch(help, /\/copyamount/);
+  assert.doesNotMatch(help, /\/copystatus/);
+  assert.deepEqual(commandFromMessage({ text: "/wallets" }), {
+    command: "/wallets",
+    args: []
   });
-  assert.deepEqual(commandFromMessage({ text: "/copyamount 0.25" }), {
-    command: "/copyamount",
-    args: ["0.25"]
+  assert.deepEqual(commandFromMessage({ text: "/alerts" }), {
+    command: "/alerts",
+    args: []
+  });
+  assert.deepEqual(commandFromMessage({ text: "/migrations" }), {
+    command: "/migrations",
+    args: []
   });
   assert.deepEqual(commandFromMessage({ text: "/copytrade" }), {
     command: "/copytrade",
     args: []
   });
+});
+
+test("alert mode toggles individual token alert types", () => {
+  assert.equal(toggleAlertMode("both", "migrations"), "newtokens");
+  assert.equal(toggleAlertMode("both", "newtokens"), "migrations");
+  assert.equal(toggleAlertMode("migrations", "migrations"), null);
+  assert.equal(toggleAlertMode("newtokens", "migrations"), "both");
+  assert.equal(toggleAlertMode(null, "migrations"), "migrations");
+  assert.equal(toggleAlertMode(null, "newtokens"), "newtokens");
 });
 
 test("subscriber store persists per-chat watched wallets with labels", async () => {
@@ -81,6 +99,11 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(await store.renameWallet("chat-1", otherWallet, "Missing"), false);
     assert.equal(await store.renameWallet("chat-2", wallet, "Unverified"), false);
     assert.equal(await store.renameWallet("chat-1", wallet, "Alpha <Wallet>"), true);
+    assert.equal(await store.setMode("chat-1", "newtokens"), true);
+    assert.equal(store.get("chat-1")?.mode, "newtokens");
+    assert.equal(await store.setMode("chat-1", null), true);
+    assert.equal(store.get("chat-1")?.mode, null);
+    assert.equal(await store.setMode("chat-2", "both"), false);
     assert.equal(await store.setCopyWallet("chat-1", otherWallet), true);
     assert.equal(await store.setCopyAmountSol("chat-1", 0.25), true);
     assert.equal(await store.setCopyTargetWallet("chat-1", otherWallet), false);
@@ -101,6 +124,7 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(reloaded.get("chat-1")?.copyWalletAddress, otherWallet);
     assert.equal(reloaded.get("chat-1")?.copyAmountSol, 0.25);
     assert.equal(reloaded.get("chat-1")?.copyTargetWalletAddress, wallet);
+    assert.equal(reloaded.get("chat-1")?.mode, null);
 
     assert.equal(await reloaded.unwatchWallet("chat-1", wallet), true);
     assert.deepEqual(reloaded.listWatchedWallets("chat-1"), []);

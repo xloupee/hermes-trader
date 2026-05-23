@@ -38,7 +38,7 @@ export interface HeliusWebhookSyncResult {
 }
 
 export function missingHeliusConfigWarning(): string {
-  return "Helius wallet swap monitoring is not fully configured. Set HELIUS_API_KEY, HELIUS_WEBHOOK_PUBLIC_URL, and HELIUS_WEBHOOK_AUTH_HEADER, then retry /watch or restart the bot.";
+  return "Helius wallet swap monitoring is not fully configured. Set HELIUS_API_KEY, HELIUS_WEBHOOK_PUBLIC_URL, and HELIUS_WEBHOOK_AUTH_HEADER, then retry from /wallets or restart the bot.";
 }
 
 export async function syncHeliusWebhook(options: HeliusWebhookSyncOptions): Promise<HeliusWebhookSyncResult> {

@@ -111,7 +111,7 @@ export interface SubscriberStore {
   add: (chatId: TelegramChatId) => Promise<void>;
   remove: (chatId: TelegramChatId) => Promise<void>;
   get: (chatId: TelegramChatId) => SubscriberRecord | null;
-  setMode: (chatId: TelegramChatId, mode: AlertModeValue) => Promise<boolean>;
+  setMode: (chatId: TelegramChatId, mode: AlertModeValue | null) => Promise<boolean>;
   watchWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
   renameWallet: (chatId: TelegramChatId, address: string, label: string | null) => Promise<boolean>;
   unwatchWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;

@@ -231,7 +231,7 @@ export function createSupabaseSubscriberStore({
     get(chatId) {
       return subscribers.get(String(chatId)) || null;
     },
-    async setMode(chatId, mode: AlertModeValue) {
+    async setMode(chatId, mode: AlertModeValue | null) {
       await load();
       const normalized = normalizeChatId(chatId);
 

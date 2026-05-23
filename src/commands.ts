@@ -25,17 +25,9 @@ const telegramCommands = [
   { command: "start", description: "Start notifications" },
   { command: "verify", description: "Verify this chat" },
   { command: "stop", description: "Stop notifications" },
-  { command: "migrations", description: "Watch migrated coins only" },
-  { command: "newtokens", description: "Watch newly created tokens only" },
-  { command: "both", description: "Watch new tokens and migrated coins" },
-  { command: "watch", description: "Watch a wallet" },
-  { command: "renamewallet", description: "Rename a watched wallet" },
-  { command: "unwatch", description: "Stop watching a wallet" },
-  { command: "wallets", description: "List watched wallets" },
-  { command: "copywallet", description: "Set copy wallet" },
-  { command: "copyamount", description: "Set copy amount" },
+  { command: "alerts", description: "Open alert mode dashboard" },
+  { command: "wallets", description: "Open wallet dashboard" },
   { command: "copytrade", description: "Open copy trade menu" },
-  { command: "copystatus", description: "Show copy settings" },
   { command: "help", description: "Show commands" }
 ];
 
@@ -43,9 +35,16 @@ const MAX_WALLET_NICKNAME_LENGTH = 48;
 const PENDING_COPY_INPUT_TTL_MS = 10 * 60 * 1000;
 
 type PendingCopyInputAction = "copy_wallet" | "copy_amount";
+type PendingWalletInputAction = "watch_wallet" | "rename_wallet" | "unwatch_wallet";
+type ToggleAlertType = Exclude<AlertModeValue, "both">;
 
 interface PendingCopyInput {
   action: PendingCopyInputAction;
+  expiresAt: number;
+}
+
+interface PendingWalletInput {
+  action: PendingWalletInputAction;
   expiresAt: number;
 }
 
@@ -105,12 +104,36 @@ function modeLabel(mode: AlertModeValue): string {
   return "New tokens and migrated coins";
 }
 
+function alertEnabled(mode: AlertModeValue | null, alertType: ToggleAlertType): boolean {
+  return mode === "both" || mode === alertType;
+}
+
+export function toggleAlertMode(currentMode: AlertModeValue | null, alertType: ToggleAlertType): AlertModeValue | null {
+  const migrationsEnabled = alertType === "migrations" ? !alertEnabled(currentMode, "migrations") : alertEnabled(currentMode, "migrations");
+  const newtokensEnabled = alertType === "newtokens" ? !alertEnabled(currentMode, "newtokens") : alertEnabled(currentMode, "newtokens");
+
+  if (migrationsEnabled && newtokensEnabled) {
+    return "both";
+  }
+
+  if (migrationsEnabled) {
+    return "migrations";
+  }
+
+  if (newtokensEnabled) {
+    return "newtokens";
+  }
+
+  return null;
+}
+
 function chooseModeText(): string {
   return [
-    "Choose what you want to watch:",
-    "/migrations - Migrated coins only",
-    "/newtokens - Newly created tokens only",
-    "/both - New tokens and migrated coins"
+    "Open a dashboard:",
+    "/alerts - Toggle token alerts",
+    "/wallets - Manage watched wallets",
+    "/copytrade - Manage copy trade settings",
+    "/help - Show all commands"
   ].join("\n");
 }
 
@@ -126,17 +149,9 @@ export function helpText(_chatId?: TelegramChatId): string {
     "/start - Start notifications",
     "/verify &lt;code&gt; - Verify this chat",
     "/stop - Stop notifications",
-    "/migrations - Watch migrated coins only",
-    "/newtokens - Watch newly created tokens only",
-    "/both - Watch new tokens and migrated coins",
-    "/watch &lt;wallet&gt; [nickname] - Watch a wallet's swaps",
-    "/renamewallet &lt;wallet&gt; &lt;nickname|-&gt; - Rename or clear a wallet nickname",
-    "/unwatch &lt;wallet&gt; - Stop watching a wallet",
-    "/wallets - List watched wallets and nicknames",
-    "/copywallet &lt;public-wallet&gt; - Save your copy wallet public address",
-    "/copyamount &lt;sol&gt; - Save your fixed copy size",
+    "/alerts - Open alert mode dashboard",
+    "/wallets - Open wallet dashboard",
     "/copytrade - Open copy trade setup menu",
-    "/copystatus - Show copy settings and watched wallets",
     "/help - Show commands"
   ].join("\n");
 }
@@ -150,6 +165,7 @@ export function createTelegramCommandPoller({
   let nextOffset: number | undefined;
   let shouldPoll = true;
   const pendingCopyInputs = new Map<string, PendingCopyInput>();
+  const pendingWalletInputs = new Map<string, PendingWalletInput>();
 
   async function reply(chatId: TelegramChatId, text: string, replyMarkup?: TelegramReplyMarkup): Promise<void> {
     await sendTelegramMessage({
@@ -176,6 +192,13 @@ export function createTelegramCommandPoller({
     const parsed = commandFromMessage(message);
 
     if (!parsed) {
+      const pendingWalletResponse = await handlePendingWalletInput(chatId, message);
+
+      if (pendingWalletResponse) {
+        await reply(chatId, pendingWalletResponse.text, pendingWalletResponse.replyMarkup);
+        return;
+      }
+
       const pendingResponse = await handlePendingCopyInput(chatId, message);
 
       if (pendingResponse) {
@@ -200,6 +223,12 @@ export function createTelegramCommandPoller({
       case "/stop":
         await reply(chatId, await stopNotifications(chatId));
         break;
+      case "/alerts":
+        {
+          const dashboard = alertDashboard(chatId);
+          await reply(chatId, dashboard.text, dashboard.replyMarkup);
+        }
+        break;
       case "/migrations":
         await reply(chatId, await changeMode(chatId, "migrations"));
         break;
@@ -219,22 +248,16 @@ export function createTelegramCommandPoller({
         await reply(chatId, await unwatchWallet(chatId, parsed.args));
         break;
       case "/wallets":
-        await reply(chatId, listWallets(chatId));
-        break;
-      case "/copywallet":
-        await reply(chatId, await setCopyWallet(chatId, parsed.args));
-        break;
-      case "/copyamount":
-        await reply(chatId, await setCopyAmount(chatId, parsed.args));
+        {
+          const dashboard = walletDashboard(chatId);
+          await reply(chatId, dashboard.text, dashboard.replyMarkup);
+        }
         break;
       case "/copytrade": {
         const dashboard = copyTradeDashboard(chatId);
         await reply(chatId, dashboard.text, dashboard.replyMarkup);
         break;
       }
-      case "/copystatus":
-        await reply(chatId, copyStatus(chatId));
-        break;
       default:
         await reply(chatId, "Unknown command. Send /help to see the bot commands.");
     }
@@ -259,9 +282,65 @@ export function createTelegramCommandPoller({
       return;
     }
 
+    if (data === "alerts:dashboard") {
+      const dashboard = alertDashboard(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data.startsWith("alerts:toggle:")) {
+      const alertType = data.slice("alerts:toggle:".length) as ToggleAlertType;
+
+      if (!isToggleAlertType(alertType)) {
+        await reply(chatId, "That alert toggle is no longer available. Send /alerts to reopen the menu.");
+        return;
+      }
+
+      const nextMode = toggleAlertMode(subscribers?.get(chatId)?.mode || null, alertType);
+      const updated = await subscribers?.setMode(chatId, nextMode);
+
+      if (!updated) {
+        await reply(chatId, verificationPrompt());
+        return;
+      }
+
+      const dashboard = alertDashboard(chatId);
+      await reply(chatId, `${formatAlertStatusLine(nextMode)}\n\n${dashboard.text}`, dashboard.replyMarkup);
+      return;
+    }
+
     if (data === "copytrade:status" || data === "copytrade:dashboard") {
       const dashboard = copyTradeDashboard(chatId);
       await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data === "wallets:dashboard") {
+      const dashboard = walletDashboard(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data === "wallets:list") {
+      await reply(chatId, listWallets(chatId));
+      return;
+    }
+
+    if (data === "wallets:add") {
+      setPendingWalletInput(chatId, "watch_wallet");
+      await reply(chatId, "Send the wallet address you want to watch. You can include a nickname after it.");
+      return;
+    }
+
+    if (data === "wallets:rename") {
+      setPendingWalletInput(chatId, "rename_wallet");
+      await reply(chatId, "Send <code>wallet-address nickname</code> to rename, or <code>wallet-address -</code> to clear.");
+      return;
+    }
+
+    if (data === "wallets:remove") {
+      setPendingWalletInput(chatId, "unwatch_wallet");
+      await reply(chatId, "Send the wallet address you want to stop watching.");
       return;
     }
 
@@ -284,7 +363,8 @@ export function createTelegramCommandPoller({
     }
 
     if (data === "copytrade:wallets") {
-      await reply(chatId, listWallets(chatId));
+      const dashboard = walletDashboard(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
       return;
     }
 
@@ -316,6 +396,10 @@ export function createTelegramCommandPoller({
     }
 
     await reply(chatId, "That copy trade action is no longer available. Send /copytrade to reopen the menu.");
+  }
+
+  function isToggleAlertType(value: string): value is ToggleAlertType {
+    return value === "migrations" || value === "newtokens";
   }
 
   async function startNotifications(chatId: TelegramChatId, args: string[]): Promise<string> {
@@ -400,6 +484,47 @@ export function createTelegramCommandPoller({
     return `<b>Now watching:</b> ${modeLabel(requestedMode)}`;
   }
 
+  function alertDashboard(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return {
+        text: gate,
+        replyMarkup: alertDashboardReplyMarkup()
+      };
+    }
+
+    const mode = subscribers?.get(chatId)?.mode || null;
+    const text = [
+      "<b>Alerts</b>",
+      `<b>Migrated coins:</b> ${alertEnabled(mode, "migrations") ? "On" : "Off"}`,
+      `<b>New tokens:</b> ${alertEnabled(mode, "newtokens") ? "On" : "Off"}`,
+      `<b>Status:</b> ${mode ? "Token alerts active" : "Token alerts paused"}`,
+      "",
+      "Tap a button to turn that alert type on or off."
+    ].join("\n");
+
+    return {
+      text,
+      replyMarkup: alertDashboardReplyMarkup(mode)
+    };
+  }
+
+  function alertDashboardReplyMarkup(mode: AlertModeValue | null = null): TelegramReplyMarkup {
+    return {
+      inline_keyboard: [
+        [
+          { text: `${alertEnabled(mode, "migrations") ? "ON" : "OFF"} - Migrated Coins`, callback_data: "alerts:toggle:migrations" }
+        ],
+        [{ text: `${alertEnabled(mode, "newtokens") ? "ON" : "OFF"} - New Tokens`, callback_data: "alerts:toggle:newtokens" }]
+      ]
+    };
+  }
+
+  function formatAlertStatusLine(mode: AlertModeValue | null): string {
+    return mode ? `<b>Now watching:</b> ${modeLabel(mode)}` : "<b>Token alerts paused.</b>";
+  }
+
   async function watchWallet(chatId: TelegramChatId, args: string[]): Promise<string> {
     const gate = requireVerified(chatId);
 
@@ -411,7 +536,7 @@ export function createTelegramCommandPoller({
     const nickname = args.slice(1).join(" ").trim();
 
     if (!wallet) {
-      return "Send <code>/watch wallet-address optional-nickname</code> to monitor a wallet.";
+      return "Send /wallets to open the wallet dashboard.";
     }
 
     if (!isValidSolanaAddress(wallet)) {
@@ -449,7 +574,7 @@ export function createTelegramCommandPoller({
     const nickname = args.slice(1).join(" ").trim();
 
     if (!wallet || !nickname) {
-      return "Send <code>/renamewallet wallet-address nickname</code> to rename, or <code>/renamewallet wallet-address -</code> to clear.";
+      return "Send /wallets to open the wallet dashboard and rename a watched wallet.";
     }
 
     if (!isValidSolanaAddress(wallet)) {
@@ -486,7 +611,7 @@ export function createTelegramCommandPoller({
     const wallet = args[0]?.trim();
 
     if (!wallet) {
-      return "Send <code>/unwatch wallet-address</code> to stop monitoring a wallet.";
+      return "Send /wallets to open the wallet dashboard and remove a watched wallet.";
     }
 
     if (!isValidSolanaAddress(wallet)) {
@@ -514,7 +639,7 @@ export function createTelegramCommandPoller({
     const wallets = subscribers?.listWatchedWallets(chatId) || [];
 
     if (wallets.length === 0) {
-      return "No watched wallets for this chat. Add one with <code>/watch wallet-address optional-nickname</code>.";
+      return "No watched wallets for this chat. Send /wallets and tap Add Wallet.";
     }
 
     return [
@@ -525,53 +650,147 @@ export function createTelegramCommandPoller({
     ].join("\n\n");
   }
 
-  async function setCopyWallet(chatId: TelegramChatId, args: string[]): Promise<string> {
-    const gate = requireVerified(chatId);
-
-    if (gate) {
-      return gate;
-    }
-
-    const wallet = args[0]?.trim();
-
-    if (!wallet) {
-      return "Send <code>/copywallet public-wallet-address</code> to save your copy wallet.";
-    }
-
-    if (!isValidSolanaAddress(wallet)) {
-      return "That does not look like a Solana wallet address.";
-    }
-
-    const updated = await subscribers?.setCopyWallet(chatId, wallet);
-
-    if (!updated) {
-      return verificationPrompt();
-    }
-
-    return `<b>Copy wallet saved:</b>\n<code>${wallet}</code>`;
+  function setPendingWalletInput(chatId: TelegramChatId, action: PendingWalletInputAction): void {
+    pendingWalletInputs.set(String(chatId), {
+      action,
+      expiresAt: Date.now() + PENDING_COPY_INPUT_TTL_MS
+    });
   }
 
-  async function setCopyAmount(chatId: TelegramChatId, args: string[]): Promise<string> {
+  async function handlePendingWalletInput(
+    chatId: TelegramChatId,
+    message: TelegramMessage
+  ): Promise<{ text: string; replyMarkup?: TelegramReplyMarkup } | null> {
+    const pending = pendingWalletInputs.get(String(chatId));
+
+    if (!pending) {
+      return null;
+    }
+
+    if (pending.expiresAt < Date.now()) {
+      pendingWalletInputs.delete(String(chatId));
+      return {
+        text: "That wallet setup step expired. Send /wallets to start again."
+      };
+    }
+
+    const value = message.text?.trim() || "";
+    const [wallet, ...rest] = value.split(/\s+/);
+    const label = rest.join(" ").trim();
+
+    if (!wallet || !isValidSolanaAddress(wallet)) {
+      return {
+        text: "That does not look like a Solana wallet address. Send a wallet address, or send /wallets to restart."
+      };
+    }
+
+    if (pending.action === "watch_wallet") {
+      const nicknameError = validateNickname(label);
+
+      if (nicknameError) {
+        return { text: nicknameError };
+      }
+
+      pendingWalletInputs.delete(String(chatId));
+      const updated = await subscribers?.watchWallet(chatId, wallet, label);
+
+      if (!updated) {
+        return { text: verificationPrompt() };
+      }
+
+      const syncWarning = await onWalletWatchlistChange?.();
+      const dashboard = walletDashboard(chatId);
+      return {
+        text: `${label ? `<b>Watching wallet:</b> ${escapeWalletLabel(label)}\n` : "<b>Watching wallet:</b>\n"}<code>${wallet}</code>${syncWarning ? `\n\n${syncWarning}` : ""}\n\n${dashboard.text}`,
+        replyMarkup: dashboard.replyMarkup
+      };
+    }
+
+    if (pending.action === "rename_wallet") {
+      if (!label) {
+        return {
+          text: "Send <code>wallet-address nickname</code> to rename, or <code>wallet-address -</code> to clear."
+        };
+      }
+
+      const nextLabel = label === "-" ? null : label;
+      const nicknameError = nextLabel === null ? null : validateNickname(nextLabel);
+
+      if (nicknameError) {
+        return { text: nicknameError };
+      }
+
+      pendingWalletInputs.delete(String(chatId));
+      const updated = await subscribers?.renameWallet(chatId, wallet, nextLabel);
+
+      if (!updated) {
+        return { text: "That wallet is not being watched in this chat." };
+      }
+
+      const dashboard = walletDashboard(chatId);
+      return {
+        text: `${nextLabel === null ? "<b>Cleared wallet nickname:</b>" : `<b>Renamed wallet:</b> ${escapeWalletLabel(nextLabel)}`}\n<code>${wallet}</code>\n\n${dashboard.text}`,
+        replyMarkup: dashboard.replyMarkup
+      };
+    }
+
+    pendingWalletInputs.delete(String(chatId));
+    const removed = await subscribers?.unwatchWallet(chatId, wallet);
+
+    if (!removed) {
+      return { text: "That wallet was not being watched in this chat." };
+    }
+
+    const syncWarning = await onWalletWatchlistChange?.();
+    const dashboard = walletDashboard(chatId);
+    return {
+      text: `<b>Stopped watching wallet:</b>\n<code>${wallet}</code>${syncWarning ? `\n\n${syncWarning}` : ""}\n\n${dashboard.text}`,
+      replyMarkup: dashboard.replyMarkup
+    };
+  }
+
+  function walletDashboard(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
     const gate = requireVerified(chatId);
 
     if (gate) {
-      return gate;
+      return {
+        text: gate,
+        replyMarkup: walletDashboardReplyMarkup()
+      };
     }
 
-    const rawAmount = args[0]?.trim();
-    const amount = Number(rawAmount);
+    const wallets = subscribers?.listWatchedWallets(chatId) || [];
+    const text = [
+      "<b>Wallets</b>",
+      `<b>Watched wallets:</b> ${wallets.length}`,
+      wallets.length === 0 ? "No watched wallets yet." : wallets.map((wallet) => formatWalletSummary(wallet)).join("\n"),
+      "",
+      "Use the buttons below to manage watched wallets."
+    ].join("\n");
 
-    if (!rawAmount || !Number.isFinite(amount) || amount <= 0) {
-      return "Send <code>/copyamount 0.1</code> to save a fixed copy size in SOL.";
-    }
+    return {
+      text,
+      replyMarkup: walletDashboardReplyMarkup()
+    };
+  }
 
-    const updated = await subscribers?.setCopyAmountSol(chatId, amount);
+  function walletDashboardReplyMarkup(): TelegramReplyMarkup {
+    return {
+      inline_keyboard: [
+        [
+          { text: "Add Wallet", callback_data: "wallets:add" },
+          { text: "Rename", callback_data: "wallets:rename" }
+        ],
+        [
+          { text: "Remove", callback_data: "wallets:remove" },
+          { text: "List", callback_data: "wallets:list" }
+        ]
+      ]
+    };
+  }
 
-    if (!updated) {
-      return verificationPrompt();
-    }
-
-    return `<b>Copy amount saved:</b> ${formatSolAmount(amount)} SOL`;
+  function formatWalletSummary(wallet: WatchedWallet): string {
+    return wallet.label ? `${escapeWalletLabel(wallet.label)} - <code>${wallet.address}</code>` : `<code>${wallet.address}</code>`;
   }
 
   function setPendingCopyInput(chatId: TelegramChatId, action: PendingCopyInputAction): void {
@@ -643,33 +862,6 @@ export function createTelegramCommandPoller({
     };
   }
 
-  function copyStatus(chatId: TelegramChatId): string {
-    const gate = requireVerified(chatId);
-
-    if (gate) {
-      return gate;
-    }
-
-    const subscriber = subscribers?.get(chatId);
-    const wallets = subscriber?.watchedWallets || [];
-    const watchedWalletLines =
-      wallets.length === 0
-        ? ["No watched wallets."]
-        : wallets.map((wallet) =>
-            wallet.label ? `${escapeWalletLabel(wallet.label)}\n<code>${wallet.address}</code>` : `<code>${wallet.address}</code>`
-          );
-
-    return [
-      "<b>Copy settings</b>",
-      `<b>Copy wallet:</b> ${subscriber?.copyWalletAddress ? `<code>${subscriber.copyWalletAddress}</code>` : "Not set"}`,
-      `<b>Copy amount:</b> ${subscriber?.copyAmountSol ? `${formatSolAmount(subscriber.copyAmountSol)} SOL` : "Not set"}`,
-      `<b>Copy target:</b> ${formatCopyTarget(subscriber || null)}`,
-      "",
-      "<b>Watched wallets</b>",
-      ...watchedWalletLines
-    ].join("\n");
-  }
-
   function copyTradeDashboard(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
     const gate = requireVerified(chatId);
 
@@ -725,7 +917,7 @@ export function createTelegramCommandPoller({
 
     if (wallets.length === 0) {
       return {
-        text: "No watched wallets yet. Add one with <code>/watch wallet-address optional-nickname</code>."
+        text: "No watched wallets yet. Send /wallets and tap Add Wallet."
       };
     }
 
@@ -812,9 +1004,7 @@ export function createTelegramCommandPoller({
       await clearTelegramWebhook({ token: config.telegramToken });
       await setTelegramCommands({ token: config.telegramToken, commands: telegramCommands });
       console.log(`Telegram bot ready: @${bot.username}`);
-      console.log(
-        "Polling for /start, /help, /verify, /stop, /migrations, /newtokens, /both, /watch, /renamewallet, /unwatch, /wallets, /copywallet, /copyamount, /copytrade, and /copystatus"
-      );
+      console.log("Polling for /start, /help, /verify, /stop, /alerts, /wallets, and /copytrade");
 
       while (shouldPoll) {
         try {

@@ -341,6 +341,10 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     );
     assert.equal(await reloaded.unwatchCopyTradeWallet("chat-1", wallet), true);
     assert.deepEqual(reloaded.listCopyTradeWallets("chat-1").map((entry) => entry.address), [otherWallet]);
+    assert.equal(await reloaded.unwatchAllCopyTradeWallets("chat-1"), 1);
+    assert.deepEqual(reloaded.listCopyTradeWallets("chat-1"), []);
+    assert.equal(reloaded.getTradingWallet("chat-1")?.publicKey, otherWallet);
+    assert.equal(await reloaded.unwatchAllCopyTradeWallets("chat-1"), 0);
 
     const body = JSON.parse(await readFile(path, "utf8"));
     assert.equal(body.subscribers[0].chatId, "chat-1");

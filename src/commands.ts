@@ -654,9 +654,33 @@ export function createTelegramCommandPoller({
       return;
     }
 
-    if (data === "copytrade:remove_trade_wallet") {
-      setPendingWalletInput(chatId, "remove_copytrade_wallet");
-      await reply(chatId, "Send the Copytrade Wallet address you want to remove.");
+    if (data === "copytrade:remove_trade_wallet" || data === "copytrade:remove_picker") {
+      const dashboard = copyTradeRemovePicker(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data.startsWith("copytrade:remove_one:")) {
+      const walletIndex = Number(data.slice("copytrade:remove_one:".length));
+      const dashboard = copyTradeRemoveConfirm(chatId, walletIndex);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data.startsWith("copytrade:remove_confirm:")) {
+      const walletIndex = Number(data.slice("copytrade:remove_confirm:".length));
+      await removeCopyTradeWalletByIndex(chatId, walletIndex);
+      return;
+    }
+
+    if (data === "copytrade:remove_all") {
+      const dashboard = copyTradeRemoveAllConfirm(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data === "copytrade:remove_all_confirm") {
+      await removeAllCopyTradeWallets(chatId);
       return;
     }
 
@@ -1480,6 +1504,129 @@ export function createTelegramCommandPoller({
         ]
       ]
     };
+  }
+
+  function copyTradeRemovePicker(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
+    const wallets = subscribers?.listCopyTradeWallets(chatId) || [];
+
+    if (wallets.length === 0) {
+      return {
+        text: "No Copytrade Wallets to remove yet.",
+        replyMarkup: {
+          inline_keyboard: [[{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]]
+        }
+      };
+    }
+
+    return {
+      text: ["<b>Remove Copytrade Wallet</b>", "Choose a wallet to stop copytrading."].join("\n"),
+      replyMarkup: {
+        inline_keyboard: [
+          ...wallets.map((wallet, index) => [
+            {
+              text: `🗑️ ${formatCopyTradeWalletSummary(wallet)}`,
+              callback_data: `copytrade:remove_one:${index}`
+            }
+          ]),
+          [{ text: "🗑️ Remove All", callback_data: "copytrade:remove_all" }],
+          [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]
+        ]
+      }
+    };
+  }
+
+  function copyTradeRemoveConfirm(chatId: TelegramChatId, walletIndex: number): { text: string; replyMarkup: TelegramReplyMarkup } {
+    const wallet = copyTradeWalletByIndex(chatId, walletIndex);
+
+    if (!wallet) {
+      const picker = copyTradeRemovePicker(chatId);
+      return {
+        text: `That Copytrade Wallet is no longer available.\n\n${picker.text}`,
+        replyMarkup: picker.replyMarkup
+      };
+    }
+
+    return {
+      text: [
+        "<b>Confirm removal</b>",
+        `Stop copytrading ${formatCopyTradeWalletSummary(wallet)}?`,
+        "",
+        "This will remove it from Copytrade Wallets only."
+      ].join("\n"),
+      replyMarkup: {
+        inline_keyboard: [
+          [{ text: "✅ Confirm Remove", callback_data: `copytrade:remove_confirm:${walletIndex}` }],
+          [{ text: "↩️ Back", callback_data: "copytrade:remove_picker" }]
+        ]
+      }
+    };
+  }
+
+  function copyTradeRemoveAllConfirm(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
+    const walletCount = subscribers?.listCopyTradeWallets(chatId).length || 0;
+
+    if (walletCount === 0) {
+      return copyTradeRemovePicker(chatId);
+    }
+
+    return {
+      text: [
+        "<b>Confirm remove all</b>",
+        `Stop copytrading all ${walletCount} Copytrade Wallet${walletCount === 1 ? "" : "s"}?`,
+        "",
+        "This will not delete your trading wallet."
+      ].join("\n"),
+      replyMarkup: {
+        inline_keyboard: [
+          [{ text: "✅ Confirm Remove All", callback_data: "copytrade:remove_all_confirm" }],
+          [{ text: "↩️ Back", callback_data: "copytrade:remove_picker" }]
+        ]
+      }
+    };
+  }
+
+  async function removeCopyTradeWalletByIndex(chatId: TelegramChatId, walletIndex: number): Promise<void> {
+    const wallet = copyTradeWalletByIndex(chatId, walletIndex);
+
+    if (!wallet) {
+      const picker = copyTradeRemovePicker(chatId);
+      await reply(chatId, `That Copytrade Wallet is no longer available.\n\n${picker.text}`, picker.replyMarkup);
+      return;
+    }
+
+    const removed = await subscribers?.unwatchCopyTradeWallet(chatId, wallet.address);
+
+    if (!removed) {
+      const picker = copyTradeRemovePicker(chatId);
+      await reply(chatId, `That Copytrade Wallet is no longer available.\n\n${picker.text}`, picker.replyMarkup);
+      return;
+    }
+
+    const syncWarning = await onWalletWatchlistChange?.();
+    const dashboard = copyTradeDashboard(chatId);
+    await reply(
+      chatId,
+      `<b>Removed Copytrade Wallet:</b> ${formatCopyTradeWalletSummary(wallet)}${syncWarning ? `\n\n${syncWarning}` : ""}\n\n${dashboard.text}`,
+      dashboard.replyMarkup
+    );
+  }
+
+  async function removeAllCopyTradeWallets(chatId: TelegramChatId): Promise<void> {
+    const removedCount = await subscribers?.unwatchAllCopyTradeWallets(chatId);
+
+    if (!removedCount) {
+      const picker = copyTradeRemovePicker(chatId);
+      await reply(chatId, picker.text, picker.replyMarkup);
+      return;
+    }
+
+    const syncWarning = await onWalletWatchlistChange?.();
+    const dashboard = copyTradeDashboard(chatId);
+    await reply(
+      chatId,
+      `<b>Removed ${removedCount} Copytrade Wallet${removedCount === 1 ? "" : "s"}.</b>${syncWarning ? `\n\n${syncWarning}` : ""}\n\n${dashboard.text}`,
+      dashboard.replyMarkup
+    );
   }
 
   function copyTradeWalletByIndex(chatId: TelegramChatId, walletIndex: number): WatchedWallet | null {

@@ -156,6 +156,7 @@ export interface SubscriberStore {
   watchCopyTradeWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
   renameCopyTradeWallet: (chatId: TelegramChatId, address: string, label: string | null) => Promise<boolean>;
   unwatchCopyTradeWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
+  unwatchAllCopyTradeWallets: (chatId: TelegramChatId) => Promise<number>;
   setCopyTradeWalletTrailingSellConfig: (
     chatId: TelegramChatId,
     address: string,

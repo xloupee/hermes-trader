@@ -577,6 +577,30 @@ export function createSubscriberStore({
       await save();
       return copyTradeWallets.length !== existing.copyTradeWallets.length;
     },
+    async unwatchAllCopyTradeWallets(chatId) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return 0;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const removedCount = existing.copyTradeWallets.length;
+
+      if (removedCount === 0) {
+        return 0;
+      }
+
+      subscribers.set(normalized, {
+        ...existing,
+        copyTradeWallets: [],
+        copyTargetWalletAddress: null,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return removedCount;
+    },
     async setCopyTradeWalletTrailingSellConfig(chatId, address, trailingSellConfig) {
       await load();
       const normalized = normalizeChatId(chatId);

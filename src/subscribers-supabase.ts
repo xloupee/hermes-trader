@@ -88,6 +88,7 @@ export interface SupabaseSubscriberRepository {
   deleteWatchedWallet: (chatId: string, address: string) => Promise<void>;
   upsertCopyTradeWallet: (chatId: string, wallet: WatchedWallet) => Promise<void>;
   deleteCopyTradeWallet: (chatId: string, address: string) => Promise<void>;
+  deleteAllCopyTradeWallets: (chatId: string) => Promise<void>;
   upsertTradingWallet: (chatId: string, wallet: TradingWallet) => Promise<void>;
 }
 
@@ -384,6 +385,14 @@ export function createSupabaseSubscriberRepository({
         throw formattedError;
       }
     },
+    async deleteAllCopyTradeWallets(chatId) {
+      const { error } = await client.from("telegram_copytrade_wallets").delete().eq("chat_id", chatId);
+      const formattedError = formatSupabaseError(error);
+
+      if (formattedError) {
+        throw formattedError;
+      }
+    },
     async upsertTradingWallet(chatId, wallet) {
       const { error } = await client
         .from("telegram_trading_wallets")
@@ -674,6 +683,33 @@ export function createSupabaseSubscriberStore({
       await repository.deleteCopyTradeWallet(normalized, address);
       subscribers.set(normalized, next);
       return copyTradeWallets.length !== existing.copyTradeWallets.length;
+    },
+    async unwatchAllCopyTradeWallets(chatId) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return 0;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const removedCount = existing.copyTradeWallets.length;
+
+      if (removedCount === 0) {
+        return 0;
+      }
+
+      const next = {
+        ...existing,
+        copyTradeWallets: [],
+        copyTargetWalletAddress: null,
+        updatedAt: new Date().toISOString()
+      };
+
+      await repository.upsertSubscriber(next);
+      await repository.deleteAllCopyTradeWallets(normalized);
+      subscribers.set(normalized, next);
+      return removedCount;
     },
     async setCopyTradeWalletTrailingSellConfig(chatId, address, trailingSellConfig) {
       await load();

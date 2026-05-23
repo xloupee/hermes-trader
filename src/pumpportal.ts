@@ -3,6 +3,9 @@ import { isRecord } from "./types.js";
 import type {
   CopyTradeSettings,
   LooseRecord,
+  PumpPortalLightningTradeRequest,
+  PumpPortalLightningTradeResult,
+  PumpPortalLightningWallet,
   PumpPortalLocalTradeBuildResult,
   PumpPortalLocalTradeRequest,
   PumpPortalTradePool,
@@ -10,6 +13,8 @@ import type {
 } from "./types.js";
 
 export const PUMPPORTAL_TRADE_LOCAL_URL = "https://pumpportal.fun/api/trade-local";
+export const PUMPPORTAL_CREATE_WALLET_URL = "https://pumpportal.fun/api/create-wallet";
+export const PUMPPORTAL_LIGHTNING_TRADE_URL = "https://pumpportal.fun/api/trade";
 
 export type PumpPortalSubscription =
   | string
@@ -139,6 +144,158 @@ export async function buildPumpPortalLocalTrade({
       status: null,
       bodyLength: null,
       errorText: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function responseString(record: LooseRecord, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = record[key];
+
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return null;
+}
+
+function normalizePumpPortalLightningWallet(body: unknown): PumpPortalLightningWallet | null {
+  const record = isRecord(body) ? body : {};
+  const nested = isRecord(record.wallet) ? record.wallet : {};
+  const merged = {
+    ...record,
+    ...nested
+  };
+  const publicKey = responseString(merged, ["publicKey", "public_key", "walletPublicKey", "wallet_public_key", "wallet", "address"]);
+  const privateKey = responseString(merged, ["privateKey", "private_key", "walletPrivateKey", "wallet_private_key", "secretKey", "secret_key"]);
+  const apiKey = responseString(merged, ["apiKey", "api_key", "key"]);
+
+  return publicKey && privateKey && apiKey
+    ? {
+        publicKey,
+        privateKey,
+        apiKey
+      }
+    : null;
+}
+
+export async function createPumpPortalLightningWallet({
+  url
+}: {
+  url: string;
+}): Promise<{ ok: true; wallet: PumpPortalLightningWallet } | { ok: false; status: number | null; errorText: string }> {
+  try {
+    const response = await fetch(url, {
+      method: "GET"
+    });
+    const text = await response.text();
+    let body: unknown = null;
+
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = null;
+    }
+
+    const wallet = response.ok ? normalizePumpPortalLightningWallet(body) : null;
+
+    if (wallet) {
+      return {
+        ok: true,
+        wallet
+      };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      errorText: text.slice(0, 500) || "PumpPortal did not return wallet keys"
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: null,
+      errorText: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+export function buildPumpPortalLightningBuyRequest({
+  trade,
+  amountSol,
+  slippage,
+  priorityFee,
+  pool
+}: {
+  trade: WalletTradeData;
+  amountSol: number;
+  slippage: number;
+  priorityFee: number;
+  pool: PumpPortalTradePool;
+}): PumpPortalLightningTradeRequest | null {
+  if (!trade.mint || !Number.isFinite(amountSol) || amountSol <= 0) {
+    return null;
+  }
+
+  return {
+    action: "buy",
+    mint: trade.mint,
+    amount: amountSol,
+    denominatedInSol: "true",
+    slippage,
+    priorityFee,
+    pool
+  };
+}
+
+export async function executePumpPortalLightningTrade({
+  url,
+  apiKey,
+  request
+}: {
+  url: string;
+  apiKey: string;
+  request: PumpPortalLightningTradeRequest;
+}): Promise<PumpPortalLightningTradeResult> {
+  try {
+    const endpoint = new URL(url);
+    endpoint.searchParams.set("api-key", apiKey);
+
+    const response = await fetch(endpoint.toString(), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(request)
+    });
+    const text = await response.text();
+    let body: unknown = text;
+
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = text;
+    }
+
+    const record = isRecord(body) ? body : {};
+    const signature = responseString(record, ["signature", "tx", "txid", "txId", "transaction", "transactionSignature"]);
+    const errorText = response.ok ? null : text.slice(0, 500) || `HTTP ${response.status}`;
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      signature,
+      errorText,
+      raw: body
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: null,
+      signature: null,
+      errorText: error instanceof Error ? error.message : String(error),
+      raw: null
     };
   }
 }

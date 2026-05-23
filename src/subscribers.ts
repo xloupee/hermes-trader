@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { asRecord, stringValue } from "./types.js";
-import type { AlertModeValue, SubscriberRecord, SubscriberStore, TelegramChatId, WatchedWallet } from "./types.js";
+import type { AlertModeValue, SubscriberRecord, SubscriberStore, TelegramChatId, TradingWallet, WatchedWallet } from "./types.js";
 
 export const LEGACY_MODE: AlertModeValue = "migrations";
 
@@ -20,6 +20,7 @@ export function makeSubscriber(chatId: string, mode: AlertModeValue | null, now 
     watchedWallets: [],
     copyTradeWallets: [],
     myWallets: [],
+    tradingWallet: null,
     copyWalletAddress: null,
     copyWalletAddresses: [],
     copyAmountSol: null,
@@ -95,6 +96,7 @@ export function mergeSubscriber(
     watchedWallets: existing?.watchedWallets || [],
     copyTradeWallets: existing?.copyTradeWallets || [],
     myWallets: existing?.myWallets || [],
+    tradingWallet: existing?.tradingWallet || null,
     copyWalletAddress: stringValue(existing?.copyWalletAddress) || null,
     copyWalletAddresses: existing?.copyWalletAddresses || [],
     copyAmountSol: finiteNumber(existing?.copyAmountSol),
@@ -102,6 +104,24 @@ export function mergeSubscriber(
     verifiedAt: typeof verifiedAt === "string" ? verifiedAt : existing?.verifiedAt || now,
     updatedAt: typeof updatedAt === "string" ? updatedAt : existing?.updatedAt || now
   });
+}
+
+export function normalizeTradingWallet(value: unknown, fallbackNow = new Date().toISOString()): TradingWallet | null {
+  const record = asRecord(value);
+  const publicKey = stringValue(record.publicKey || record.public_key || record.wallet || record.address)?.trim();
+  const encryptedApiKey = stringValue(record.encryptedApiKey || record.encrypted_api_key)?.trim();
+
+  if (!publicKey || !encryptedApiKey) {
+    return null;
+  }
+
+  return {
+    publicKey,
+    encryptedApiKey,
+    apiKeyLast4: stringValue(record.apiKeyLast4 || record.api_key_last4)?.trim() || "****",
+    createdAt: typeof record.createdAt === "string" ? record.createdAt : fallbackNow,
+    updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : fallbackNow
+  };
 }
 
 export function dedupeWatchedWallets(watchedWallets: WatchedWallet[]): WatchedWallet[] {
@@ -143,6 +163,7 @@ function loadSubscriberRecordInto(subscribers: Map<string, SubscriberRecord>, va
   const myWallets = Array.isArray(record.myWallets)
     ? record.myWallets.map((wallet) => normalizeWatchedWallet(wallet)).filter((wallet): wallet is WatchedWallet => Boolean(wallet))
     : [];
+  const tradingWallet = normalizeTradingWallet(record.tradingWallet || record.pumpPortalTradingWallet);
   const legacyCopyTarget = copyTradeWallets.length === 0
     ? stringValue(record.copyTargetWalletAddress || record.copyTargetWallet)?.trim() || null
     : null;
@@ -165,6 +186,7 @@ function loadSubscriberRecordInto(subscribers: Map<string, SubscriberRecord>, va
       watchedWallets: nextWatchedWallets.length > 0 || watchedWallets.length > 0 ? dedupeWatchedWallets(nextWatchedWallets) : existing.watchedWallets,
       copyTradeWallets: nextCopyTradeWallets.length > 0 ? dedupeWatchedWallets(nextCopyTradeWallets) : existing.copyTradeWallets,
       myWallets: myWallets.length > 0 ? dedupeWatchedWallets(myWallets) : existing.myWallets,
+      tradingWallet: tradingWallet || existing.tradingWallet,
       copyWalletAddresses: [],
       copyWalletAddress: null,
       copyAmountSol: finiteNumber(record.copyAmountSol ?? record.copyAmount) ?? existing.copyAmountSol,
@@ -590,6 +612,26 @@ export function createSubscriberStore({
       });
       await save();
       return myWallets.length !== existing.myWallets.length;
+    },
+    async setTradingWallet(chatId, wallet) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      subscribers.set(normalized, {
+        ...existing,
+        tradingWallet: wallet,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return true;
+    },
+    getTradingWallet(chatId) {
+      return subscribers.get(String(chatId))?.tradingWallet || null;
     },
     async setCopyWallet(chatId, address) {
       await load();

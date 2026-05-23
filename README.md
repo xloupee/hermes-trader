@@ -34,7 +34,7 @@ The bot keeps one PumpPortal websocket connection open for token events and filt
 cp .env.example .env
 ```
 
-3. Fill in `TELEGRAM_BOT_TOKEN`. Set `TELEGRAM_VERIFY_CODE` to a private invite code people must send before receiving alerts. Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` to store subscribers in Supabase; `SUPABASE_SERVICE_KEY` and `SUPABASE_SERVICE_ROLE` are also accepted as service-role aliases. Omit the Supabase values to keep using the local JSON fallback. `PUMPPORTAL_API_KEY` is optional for migrations, but supported if you have one. For wallet swap alerts, set `HELIUS_API_KEY`, `HELIUS_WEBHOOK_PUBLIC_URL`, and `HELIUS_WEBHOOK_AUTH_HEADER`.
+3. Fill in `TELEGRAM_BOT_TOKEN`. Set `TELEGRAM_VERIFY_CODE` to a private invite code people must send before receiving alerts. Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` to store subscribers in Supabase; `SUPABASE_SERVICE_KEY` and `SUPABASE_SERVICE_ROLE` are also accepted as service-role aliases. Omit the Supabase values to keep using the local JSON fallback. `PUMPPORTAL_API_KEY` is optional for migrations, but supported if you have one. For wallet swap alerts, set `HELIUS_API_KEY`, `HELIUS_WEBHOOK_PUBLIC_URL`, and `HELIUS_WEBHOOK_AUTH_HEADER`. For Bloom-style generated trading wallets, set `PUMPPORTAL_WALLET_KEY_ENCRYPTION_SECRET` to a 32+ character random secret before users create wallets.
 4. Install dependencies:
 
 ```bash
@@ -79,7 +79,7 @@ npm run import-subscribers -- data/telegram-subscribers.json
 - `/help` - Show the command list.
 - `/alerts` - Open the alert mode dashboard.
 - `/trackwallets` - Open the tracked-wallet dashboard.
-- `/mywallets` - Open the My Wallets dashboard.
+- `/mywallets` - Open the generated trading wallet dashboard.
 - `/copytrade` - Open the copy trade setup dashboard.
 
 ## Notes
@@ -90,8 +90,10 @@ npm run import-subscribers -- data/telegram-subscribers.json
 - To inspect recent on-chain migrations without waiting for a live event, run `npm run past-migrations -- 10`.
 - Set `SOLANA_RPC_URL` in `.env` if public Solana RPC rate limits you.
 - Wallet swap monitor events are stored in `WALLET_TRADE_LOG_PATH`.
-- Copytrade simulation alerts require My Wallets from `/mywallets`, a copy amount, and Copytrade Wallets from `/copytrade`. For copyable SOL-to-token buys, the bot asks PumpPortal `trade-local` to build one unsigned local buy transaction per configured My Wallet and reports whether each build worked. This is alert output only; it does not sign or execute trades.
-- Set `COPY_TRADE_TRAILING_SELL_ENABLED=true` to build delayed unsigned sell transactions after a successful copy-trade buy build. The example values in `.env.example` build a `20%` sell after 2 seconds, continue with `20%` trailing sell builds every 2 seconds, and make the final build a `100%` sell to exit the remaining wallet balance.
+- `/mywallets` creates one PumpPortal Lightning trading wallet per verified chat. The bot shows the private key once and does not store it. Users must save it themselves and deposit SOL to the public address.
+- Copytrade auto buys require a generated trading wallet from `/mywallets`, a copy amount, and Copytrade Wallets from `/copytrade`. For copyable SOL-to-token buys, the bot submits a PumpPortal Lightning `buy` using the stored encrypted API key.
+- Treat generated trading wallets as hot wallets. Anyone with the private key can withdraw funds, and anyone with the linked API key can trade from the funded wallet.
+- `COPY_TRADE_TRAILING_SELL_ENABLED` remains build-only for local transaction experiments and is not used by Lightning auto buys in v1.
 - Expose `WEBHOOK_PORT` through your reverse proxy at the exact `HELIUS_WEBHOOK_PUBLIC_URL`, and forward the `Authorization` header unchanged.
 
 ## Research

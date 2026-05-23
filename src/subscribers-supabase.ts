@@ -7,7 +7,7 @@ import {
   normalizeMode,
   seedSubscriberMap
 } from "./subscribers.js";
-import type { AlertModeValue, SubscriberRecord, SubscriberStore, TelegramChatId, WatchedWallet } from "./types.js";
+import type { AlertModeValue, SubscriberRecord, SubscriberStore, TelegramChatId, TradingWallet, WatchedWallet } from "./types.js";
 
 interface SupabaseErrorLike {
   message?: string;
@@ -25,6 +25,7 @@ export interface SubscriberRow {
   telegram_watched_wallets?: WatchedWalletRow[] | null;
   telegram_copytrade_wallets?: WatchedWalletRow[] | null;
   telegram_my_wallets?: WatchedWalletRow[] | null;
+  telegram_trading_wallets?: TradingWalletRow[] | null;
 }
 
 export interface WatchedWalletRow {
@@ -32,6 +33,15 @@ export interface WatchedWalletRow {
   address: string;
   label: string | null;
   added_at: string;
+  updated_at: string;
+}
+
+export interface TradingWalletRow {
+  chat_id?: string;
+  public_key: string;
+  encrypted_api_key: string;
+  api_key_last4: string;
+  created_at: string;
   updated_at: string;
 }
 
@@ -45,6 +55,7 @@ export interface SupabaseSubscriberRepository {
   deleteCopyTradeWallet: (chatId: string, address: string) => Promise<void>;
   upsertMyWallet: (chatId: string, wallet: WatchedWallet) => Promise<void>;
   deleteMyWallet: (chatId: string, address: string) => Promise<void>;
+  upsertTradingWallet: (chatId: string, wallet: TradingWallet) => Promise<void>;
 }
 
 function formatSupabaseError(error: SupabaseErrorLike | null): Error | null {
@@ -83,6 +94,17 @@ function watchedWalletRow(chatId: string, wallet: WatchedWallet): WatchedWalletR
   };
 }
 
+function tradingWalletRow(chatId: string, wallet: TradingWallet): TradingWalletRow {
+  return {
+    chat_id: chatId,
+    public_key: wallet.publicKey,
+    encrypted_api_key: wallet.encryptedApiKey,
+    api_key_last4: wallet.apiKeyLast4,
+    created_at: wallet.createdAt,
+    updated_at: wallet.updatedAt
+  };
+}
+
 export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
   const watchedWallets = Array.isArray(row.telegram_watched_wallets)
     ? row.telegram_watched_wallets.map((wallet) => ({
@@ -108,6 +130,7 @@ export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
         updatedAt: wallet.updated_at
       }))
     : [];
+  const tradingWalletRow = Array.isArray(row.telegram_trading_wallets) ? row.telegram_trading_wallets[0] : null;
   const legacyCopyTargetWallet = row.copy_target_wallet_address && copyTradeWallets.length === 0
     ? watchedWallets.find((wallet) => wallet.address === row.copy_target_wallet_address) || {
         address: row.copy_target_wallet_address,
@@ -127,6 +150,15 @@ export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
     watchedWallets: dedupeWatchedWallets(nextWatchedWallets),
     copyTradeWallets: dedupeWatchedWallets(nextCopyTradeWallets),
     myWallets: dedupeWatchedWallets(myWallets),
+    tradingWallet: tradingWalletRow
+      ? {
+          publicKey: tradingWalletRow.public_key,
+          encryptedApiKey: tradingWalletRow.encrypted_api_key,
+          apiKeyLast4: tradingWalletRow.api_key_last4,
+          createdAt: tradingWalletRow.created_at,
+          updatedAt: tradingWalletRow.updated_at
+        }
+      : null,
     copyWalletAddress: null,
     copyWalletAddresses: [],
     copyAmountSol: numericValue(row.copy_amount_sol),
@@ -155,7 +187,7 @@ export function createSupabaseSubscriberRepository({
       const { data, error } = await client
         .from("telegram_subscribers")
         .select(
-          "chat_id,mode,copy_wallet_address,copy_wallet_addresses,copy_amount_sol,copy_target_wallet_address,verified_at,updated_at,telegram_watched_wallets(address,label,added_at,updated_at),telegram_copytrade_wallets(address,label,added_at,updated_at),telegram_my_wallets(address,label,added_at,updated_at)"
+          "chat_id,mode,copy_wallet_address,copy_wallet_addresses,copy_amount_sol,copy_target_wallet_address,verified_at,updated_at,telegram_watched_wallets(address,label,added_at,updated_at),telegram_copytrade_wallets(address,label,added_at,updated_at),telegram_my_wallets(address,label,added_at,updated_at),telegram_trading_wallets(public_key,encrypted_api_key,api_key_last4,created_at,updated_at)"
         )
         .order("chat_id", { ascending: true });
       const formattedError = formatSupabaseError(error);
@@ -237,6 +269,16 @@ export function createSupabaseSubscriberRepository({
       if (formattedError) {
         throw formattedError;
       }
+    },
+    async upsertTradingWallet(chatId, wallet) {
+      const { error } = await client
+        .from("telegram_trading_wallets")
+        .upsert(tradingWalletRow(chatId, wallet), { onConflict: "chat_id" });
+      const formattedError = formatSupabaseError(error);
+
+      if (formattedError) {
+        throw formattedError;
+      }
     }
   };
 }
@@ -279,7 +321,8 @@ export function createSupabaseSubscriberStore({
         copyTradeWallets: dedupeWatchedWallets(
           legacyCopyTargetWallet ? [...storedCopyTradeWallets, legacyCopyTargetWallet] : storedCopyTradeWallets
         ),
-        myWallets: dedupeWatchedWallets(subscriber.myWallets || [])
+        myWallets: dedupeWatchedWallets(subscriber.myWallets || []),
+        tradingWallet: subscriber.tradingWallet || null
       });
     }
   }
@@ -596,6 +639,28 @@ export function createSupabaseSubscriberStore({
       subscribers.set(normalized, next);
       return myWallets.length !== existing.myWallets.length;
     },
+    async setTradingWallet(chatId, wallet) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const next = {
+        ...(subscribers.get(normalized) || makeSubscriber(normalized, null)),
+        tradingWallet: wallet,
+        updatedAt: new Date().toISOString()
+      };
+
+      await repository.upsertSubscriber(next);
+      await repository.upsertTradingWallet(normalized, wallet);
+      subscribers.set(normalized, next);
+      return true;
+    },
+    getTradingWallet(chatId) {
+      return subscribers.get(String(chatId))?.tradingWallet || null;
+    },
     async setCopyWallet(chatId, address) {
       await load();
       const normalized = normalizeChatId(chatId);
@@ -771,6 +836,10 @@ export async function importSubscribersToSupabase({
 
     for (const wallet of subscriber.myWallets) {
       await repository.upsertMyWallet(subscriber.chatId, wallet);
+    }
+
+    if (subscriber.tradingWallet) {
+      await repository.upsertTradingWallet(subscriber.chatId, subscriber.tradingWallet);
     }
   }
 }

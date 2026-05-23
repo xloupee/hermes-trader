@@ -6,6 +6,8 @@ import {
   sendTelegramMessage,
   setTelegramCommands
 } from "./telegram.js";
+import { createPumpPortalLightningWallet } from "./pumpportal.js";
+import { encryptSecret, encryptionSecretReady } from "./secrets.js";
 import { errorMessage } from "./types.js";
 import { isValidSolanaAddress } from "./wallet-monitor.js";
 import type {
@@ -39,9 +41,6 @@ type PendingWalletInputAction =
   | "watch_wallet"
   | "rename_wallet"
   | "unwatch_wallet"
-  | "my_wallet"
-  | "rename_my_wallet"
-  | "remove_my_wallet"
   | "copytrade_wallet"
   | "rename_copytrade_wallet"
   | "remove_copytrade_wallet";
@@ -141,7 +140,7 @@ function chooseModeText(): string {
     "Open a dashboard:",
     "/alerts - Toggle token alerts",
     "/trackwallets - Manage tracked wallets",
-    "/mywallets - Manage my wallets",
+    "/mywallets - Manage trading wallet",
     "/copytrade - Manage copy trade settings",
     "/help - Show all commands"
   ].join("\n");
@@ -161,7 +160,7 @@ export function helpText(_chatId?: TelegramChatId): string {
     "/stop - Stop notifications",
     "/alerts - Open alert mode dashboard",
     "/trackwallets - Open track wallet dashboard",
-    "/mywallets - Open my wallets dashboard",
+    "/mywallets - Open trading wallet dashboard",
     "/copytrade - Open copy trade setup menu",
     "/help - Show commands"
   ].join("\n");
@@ -367,26 +366,8 @@ export function createTelegramCommandPoller({
       return;
     }
 
-    if (data === "mywallets:list") {
-      await reply(chatId, listMyWallets(chatId));
-      return;
-    }
-
-    if (data === "mywallets:add") {
-      setPendingWalletInput(chatId, "my_wallet");
-      await reply(chatId, "Send your public wallet address. You can include a nickname after it.");
-      return;
-    }
-
-    if (data === "mywallets:rename") {
-      setPendingWalletInput(chatId, "rename_my_wallet");
-      await reply(chatId, "Send <code>wallet-address nickname</code> to rename a My Wallet, or <code>wallet-address -</code> to clear.");
-      return;
-    }
-
-    if (data === "mywallets:remove") {
-      setPendingWalletInput(chatId, "remove_my_wallet");
-      await reply(chatId, "Send the My Wallet address you want to remove.");
+    if (data === "mywallets:create") {
+      await createTradingWallet(chatId);
       return;
     }
 
@@ -741,70 +722,6 @@ export function createTelegramCommandPoller({
       };
     }
 
-    if (pending.action === "my_wallet") {
-      const nicknameError = validateNickname(label);
-
-      if (nicknameError) {
-        return { text: nicknameError };
-      }
-
-      pendingWalletInputs.delete(String(chatId));
-      const updated = await subscribers?.addMyWallet(chatId, wallet, label);
-
-      if (!updated) {
-        return { text: verificationPrompt() };
-      }
-
-      const dashboard = myWalletDashboard(chatId);
-      return {
-        text: `${label ? `<b>My Wallet saved:</b> ${escapeWalletLabel(label)}\n` : "<b>My Wallet saved:</b>\n"}<code>${wallet}</code>\n\n${dashboard.text}`,
-        replyMarkup: dashboard.replyMarkup
-      };
-    }
-
-    if (pending.action === "rename_my_wallet") {
-      if (!label) {
-        return {
-          text: "Send <code>wallet-address nickname</code> to rename a My Wallet, or <code>wallet-address -</code> to clear."
-        };
-      }
-
-      const nextLabel = label === "-" ? null : label;
-      const nicknameError = nextLabel === null ? null : validateNickname(nextLabel);
-
-      if (nicknameError) {
-        return { text: nicknameError };
-      }
-
-      pendingWalletInputs.delete(String(chatId));
-      const updated = await subscribers?.renameMyWallet(chatId, wallet, nextLabel);
-
-      if (!updated) {
-        return { text: "That My Wallet is not configured in this chat." };
-      }
-
-      const dashboard = myWalletDashboard(chatId);
-      return {
-        text: `${nextLabel === null ? "<b>Cleared My Wallet nickname:</b>" : `<b>Renamed My Wallet:</b> ${escapeWalletLabel(nextLabel)}`}\n<code>${wallet}</code>\n\n${dashboard.text}`,
-        replyMarkup: dashboard.replyMarkup
-      };
-    }
-
-    if (pending.action === "remove_my_wallet") {
-      pendingWalletInputs.delete(String(chatId));
-      const removed = await subscribers?.removeMyWallet(chatId, wallet);
-
-      if (!removed) {
-        return { text: "That My Wallet is not configured in this chat." };
-      }
-
-      const dashboard = myWalletDashboard(chatId);
-      return {
-        text: `<b>Removed My Wallet:</b>\n<code>${wallet}</code>\n\n${dashboard.text}`,
-        replyMarkup: dashboard.replyMarkup
-      };
-    }
-
     if (pending.action === "copytrade_wallet") {
       const nicknameError = validateNickname(label);
 
@@ -960,42 +877,117 @@ export function createTelegramCommandPoller({
     if (gate) {
       return {
         text: gate,
-        replyMarkup: myWalletDashboardReplyMarkup()
+        replyMarkup: myWalletDashboardReplyMarkup(null)
       };
     }
 
-    const wallets = subscribers?.listMyWallets(chatId) || [];
+    const tradingWallet = subscribers?.getTradingWallet(chatId) || null;
     const text = [
-      "<b>My wallets</b>",
-      `<b>My wallets:</b> ${wallets.length}`,
-      wallets.length === 0 ? "No My Wallets yet." : wallets.map((wallet) => formatWalletSummary(wallet)).join("\n"),
+      "<b>Trading wallet</b>",
+      tradingWallet
+        ? `<b>Deposit address:</b>\n<code>${tradingWallet.publicKey}</code>`
+        : "<b>Status:</b> No trading wallet yet.",
+      tradingWallet ? `<b>API key:</b> saved ending in <code>${tradingWallet.apiKeyLast4}</code>` : "",
+      tradingWallet ? "<b>Private key:</b> shown once when created. The bot cannot recover it." : "",
       "",
-      "Use the buttons below to manage your public wallets."
-    ].join("\n");
+      tradingWallet
+        ? "Deposit SOL to this address before enabling auto copy buys."
+        : "Create a PumpPortal trading wallet to use Bloom-style copytrade."
+    ]
+      .filter(Boolean)
+      .join("\n");
 
     return {
       text,
-      replyMarkup: myWalletDashboardReplyMarkup()
+      replyMarkup: myWalletDashboardReplyMarkup(tradingWallet?.publicKey || null)
     };
   }
 
-  function myWalletDashboardReplyMarkup(): TelegramReplyMarkup {
+  function myWalletDashboardReplyMarkup(publicKey: string | null): TelegramReplyMarkup {
+    if (!publicKey) {
+      return {
+        inline_keyboard: [[{ text: "Create Trading Wallet", callback_data: "mywallets:create" }]]
+      };
+    }
+
     return {
       inline_keyboard: [
         [
-          { text: "Add Wallet", callback_data: "mywallets:add" },
-          { text: "Rename", callback_data: "mywallets:rename" }
+          {
+            text: "Copy Deposit Address",
+            copy_text: {
+              text: publicKey
+            }
+          }
         ],
-        [
-          { text: "Remove", callback_data: "mywallets:remove" },
-          { text: "List", callback_data: "mywallets:list" }
-        ]
+        [{ text: "Status", callback_data: "mywallets:dashboard" }]
       ]
     };
   }
 
+  async function createTradingWallet(chatId: TelegramChatId): Promise<void> {
+    const existing = subscribers?.getTradingWallet(chatId);
+
+    if (existing) {
+      const dashboard = myWalletDashboard(chatId);
+      await reply(chatId, `<b>Trading wallet already exists.</b>\n\n${dashboard.text}`, dashboard.replyMarkup);
+      return;
+    }
+
+    if (!encryptionSecretReady(config.pumpPortalWalletKeyEncryptionSecret)) {
+      await reply(chatId, "Trading wallet creation is not configured yet. Missing <code>PUMPPORTAL_WALLET_KEY_ENCRYPTION_SECRET</code>.");
+      return;
+    }
+
+    const result = await createPumpPortalLightningWallet({
+      url: config.pumpPortalCreateWalletUrl || "https://pumpportal.fun/api/create-wallet"
+    });
+
+    if (!result.ok) {
+      await reply(chatId, `Could not create trading wallet: ${escapeWalletLabel(result.errorText)}`);
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const saved = await subscribers?.setTradingWallet(chatId, {
+      publicKey: result.wallet.publicKey,
+      encryptedApiKey: encryptSecret(result.wallet.apiKey, config.pumpPortalWalletKeyEncryptionSecret || ""),
+      apiKeyLast4: last4(result.wallet.apiKey),
+      createdAt: now,
+      updatedAt: now
+    });
+
+    if (!saved) {
+      await reply(chatId, verificationPrompt());
+      return;
+    }
+
+    await reply(
+      chatId,
+      [
+        "<b>Trading wallet created.</b>",
+        "",
+        "<b>Deposit SOL here:</b>",
+        `<code>${result.wallet.publicKey}</code>`,
+        "",
+        "<b>Save this private key now.</b>",
+        "The bot does not store it and cannot show it again.",
+        "",
+        "<b>Private key</b>",
+        `<code>${escapeWalletLabel(result.wallet.privateKey)}</code>`,
+        "",
+        "Auto copy buys can use this wallet after you deposit SOL and set /copytrade."
+      ].join("\n"),
+      myWalletDashboardReplyMarkup(result.wallet.publicKey)
+    );
+  }
+
   function formatWalletSummary(wallet: WatchedWallet): string {
     return wallet.label ? `${escapeWalletLabel(wallet.label)} - <code>${wallet.address}</code>` : `<code>${wallet.address}</code>`;
+  }
+
+  function last4(value: string): string {
+    return value.length <= 4 ? value : value.slice(-4);
   }
 
   function setPendingCopyInput(chatId: TelegramChatId, action: PendingCopyInputAction): void {
@@ -1058,16 +1050,18 @@ export function createTelegramCommandPoller({
 
     const subscriber = subscribers?.get(chatId) || null;
     const copyTradeWallets = subscribers?.listCopyTradeWallets(chatId) || [];
-    const myWallets = subscribers?.listMyWallets(chatId) || [];
+    const tradingWallet = subscribers?.getTradingWallet(chatId) || null;
+    const ready = Boolean(tradingWallet && subscriber?.copyAmountSol && copyTradeWallets.length > 0);
     const text = [
       "<b>Copy trade</b>",
-      `<b>My wallets:</b> ${myWallets.length}`,
-      myWallets.length === 0 ? "No My Wallets yet. Add one in /mywallets before copytrade simulations can run." : myWallets.map((wallet) => formatWalletSummary(wallet)).join("\n"),
+      `<b>Trading wallet:</b> ${tradingWallet ? "Created" : "Missing"}`,
+      tradingWallet ? `<code>${tradingWallet.publicKey}</code>` : "Create one in /mywallets.",
       `<b>Copy amount:</b> ${subscriber?.copyAmountSol ? `${formatSolAmount(subscriber.copyAmountSol)} SOL` : "Not set"}`,
       `<b>Copytrade wallets:</b> ${copyTradeWallets.length}`,
       copyTradeWallets.length === 0 ? "No Copytrade Wallets yet." : copyTradeWallets.map((wallet) => formatWalletSummary(wallet)).join("\n"),
+      `<b>Auto buys:</b> ${ready ? "Ready" : "Not ready"}`,
       "",
-      "Use the buttons below to manage copy trade settings."
+      ready ? "Auto copy buys are enabled for matching SOL-to-token buys." : "Create a trading wallet, set amount, and add Copytrade Wallets to enable auto buys."
     ].join("\n");
 
     return {
@@ -1081,7 +1075,7 @@ export function createTelegramCommandPoller({
       inline_keyboard: [
         [
           { text: "Status", callback_data: "copytrade:status" },
-          { text: "My Wallets", callback_data: "copytrade:mywallets" }
+          { text: "Trading Wallet", callback_data: "copytrade:mywallets" }
         ],
         [
           { text: "Set Amount", callback_data: "copytrade:set_amount" },
@@ -1111,27 +1105,6 @@ export function createTelegramCommandPoller({
 
     return [
       "<b>Copytrade Wallets</b>",
-      ...wallets.map((wallet) =>
-        wallet.label ? `${escapeWalletLabel(wallet.label)}\n<code>${wallet.address}</code>` : `<code>${wallet.address}</code>`
-      )
-    ].join("\n\n");
-  }
-
-  function listMyWallets(chatId: TelegramChatId): string {
-    const gate = requireVerified(chatId);
-
-    if (gate) {
-      return gate;
-    }
-
-    const wallets = subscribers?.listMyWallets(chatId) || [];
-
-    if (wallets.length === 0) {
-      return "No My Wallets for this chat. Send /mywallets and tap Add Wallet.";
-    }
-
-    return [
-      "<b>My Wallets</b>",
       ...wallets.map((wallet) =>
         wallet.label ? `${escapeWalletLabel(wallet.label)}\n<code>${wallet.address}</code>` : `<code>${wallet.address}</code>`
       )

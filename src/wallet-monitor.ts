@@ -1,6 +1,7 @@
 import { escapeHtml } from "./format.js";
 import type {
   CopyTradeSettings,
+  PumpPortalLightningTradeResult,
   PumpPortalLocalTradeBuildResult,
   PumpPortalLocalTradeRequest,
   TelegramReplyMarkup,
@@ -233,6 +234,47 @@ export function formatCopyTradeSimulationMessage(
     "",
     `<b>Status:</b> Would buy this token with ${formatNumber(copySettings.copyAmountSol)} SOL`,
     `<b>PumpPortal:</b> ${formatPumpPortalBuildStatus(pumpPortalBuild)}`
+  ].join("\n");
+}
+
+function formatPumpPortalLightningTradeStatus(result: PumpPortalLightningTradeResult): string {
+  if (result.ok) {
+    return result.signature ? `Submitted: <code>${escapeHtml(result.signature)}</code>` : "Submitted";
+  }
+
+  const status = result.status === null ? "request failed" : `HTTP ${result.status}`;
+  const detail = result.errorText?.trim();
+  return detail ? `Failed: ${escapeHtml(status)} - ${escapeHtml(detail)}` : `Failed: ${escapeHtml(status)}`;
+}
+
+export function formatAutoCopyBuyMessage({
+  trade,
+  tradingWalletPublicKey,
+  copyAmountSol,
+  result
+}: {
+  trade: WalletTradeData;
+  tradingWalletPublicKey: string;
+  copyAmountSol: number;
+  result: PumpPortalLightningTradeResult;
+}): string | null {
+  if (!trade.mint || !isCopyableSolToTokenBuy(trade)) {
+    return null;
+  }
+
+  const walletName = trade.label || shortenAddress(trade.targetWallet);
+  return [
+    "<b>Auto copy buy submitted</b>",
+    `<b>Target:</b> ${escapeHtml(walletName)}`,
+    `<code>${escapeHtml(trade.targetWallet)}</code>`,
+    "",
+    `<b>Trading wallet:</b> <code>${escapeHtml(tradingWalletPublicKey)}</code>`,
+    `<b>Copy amount:</b> ${formatNumber(copyAmountSol)} SOL`,
+    "",
+    "<b>Contract address</b>",
+    `<code>${escapeHtml(trade.mint)}</code>`,
+    "",
+    `<b>PumpPortal:</b> ${formatPumpPortalLightningTradeStatus(result)}`
   ].join("\n");
 }
 

@@ -6,10 +6,18 @@ import test from "node:test";
 import { commandFromMessage, helpText, toggleAlertMode } from "../dist/commands.js";
 import { buildHeliusWebhookPayload, createHeliusWebhookServer, syncHeliusWebhook } from "../dist/helius.js";
 import { heliusEventMentionsWatchedWallet, normalizeHeliusSwapData } from "../dist/helius-swaps.js";
-import { buildPumpPortalLocalSellRequest, buildPumpPortalLocalTradeRequest } from "../dist/pumpportal.js";
+import {
+  buildPumpPortalLightningBuyRequest,
+  buildPumpPortalLocalSellRequest,
+  buildPumpPortalLocalTradeRequest,
+  createPumpPortalLightningWallet,
+  executePumpPortalLightningTrade
+} from "../dist/pumpportal.js";
+import { decryptSecret, encryptSecret } from "../dist/secrets.js";
 import { createSubscriberStore } from "../dist/subscribers.js";
 import {
   buildWalletTradeReplyMarkup,
+  formatAutoCopyBuyMessage,
   formatCopyTradeTrailingSellBuildMessage,
   formatCopyTradeTrailingSellScheduledMessage,
   formatCopyTradeSimulationMessage,
@@ -27,13 +35,14 @@ const config = {
   pumpFunBaseUrl: "https://pump.fun",
   solscanBaseUrl: "https://solscan.io"
 };
+const encryptionSecret = "abcdefghijklmnopqrstuvwxyz1234567890";
 
 test("telegram help exposes wallet and copy trade dashboards", () => {
   const help = helpText("chat-1");
 
   assert.match(help, /\/alerts - Open alert mode dashboard/);
   assert.match(help, /\/trackwallets - Open track wallet dashboard/);
-  assert.match(help, /\/mywallets - Open my wallets dashboard/);
+  assert.match(help, /\/mywallets - Open trading wallet dashboard/);
   assert.match(help, /\/copytrade - Open copy trade setup menu/);
   assert.doesNotMatch(help, /\/wallets/);
   assert.doesNotMatch(help, /\/migrations/);
@@ -74,6 +83,62 @@ test("alert mode toggles individual token alert types", () => {
   assert.equal(toggleAlertMode("newtokens", "migrations"), "both");
   assert.equal(toggleAlertMode(null, "migrations"), "migrations");
   assert.equal(toggleAlertMode(null, "newtokens"), "newtokens");
+});
+
+test("PumpPortal Lightning wallet helpers parse, encrypt, and execute requests", async () => {
+  const encrypted = encryptSecret("secret-api-key", encryptionSecret);
+  assert.equal(decryptSecret(encrypted, encryptionSecret), "secret-api-key");
+  assert.throws(() => decryptSecret(encrypted, "wrong-secret-wrong-secret-wrong-secret"));
+  assert.throws(() => encryptSecret("secret-api-key", "short"));
+
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+
+    if (String(url).includes("create-wallet")) {
+      return new Response(
+        JSON.stringify({
+          publicKey: wallet,
+          privateKey: "private-key-alpha",
+          apiKey: "api-key-alpha"
+        }),
+        { status: 200 }
+      );
+    }
+
+    return new Response(JSON.stringify({ signature: "tx-alpha" }), { status: 200 });
+  };
+
+  try {
+    const created = await createPumpPortalLightningWallet({ url: "https://pumpportal.fun/api/create-wallet" });
+    assert.equal(created.ok, true);
+    assert.equal(created.wallet.publicKey, wallet);
+    assert.equal(created.wallet.privateKey, "private-key-alpha");
+    assert.equal(created.wallet.apiKey, "api-key-alpha");
+
+    const request = {
+      action: "buy",
+      mint,
+      amount: 0.25,
+      denominatedInSol: "true",
+      slippage: 15,
+      priorityFee: 0.00009,
+      pool: "auto"
+    };
+    const result = await executePumpPortalLightningTrade({
+      url: "https://pumpportal.fun/api/trade",
+      apiKey: "api-key-alpha",
+      request
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.signature, "tx-alpha");
+    assert.match(calls[1].url, /api-key=api-key-alpha/);
+    assert.deepEqual(JSON.parse(calls[1].init.body), request);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("subscriber store persists per-chat watched wallets with labels", async () => {
@@ -124,6 +189,17 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(await store.renameMyWallet("chat-1", wallet, null), true);
     assert.equal(await store.renameMyWallet("chat-1", "missing", "Nope"), false);
     assert.equal(await store.addMyWallet("chat-2", wallet, "Unverified"), false);
+    assert.equal(
+      await store.setTradingWallet("chat-1", {
+        publicKey: otherWallet,
+        encryptedApiKey: encryptSecret("pump-key-alpha", encryptionSecret),
+        apiKeyLast4: "lpha",
+        createdAt: "2026-05-23T00:00:00.000Z",
+        updatedAt: "2026-05-23T00:00:00.000Z"
+      }),
+      true
+    );
+    assert.equal(await store.setTradingWallet("chat-2", store.getTradingWallet("chat-1")), false);
     assert.equal(await store.watchCopyTradeWallet("chat-1", otherWallet, "Copy Alpha"), true);
     assert.equal(await store.watchCopyTradeWallet("chat-1", wallet, "Copy Beta"), true);
     assert.equal(await store.renameCopyTradeWallet("chat-1", wallet, "Copy Gamma"), true);
@@ -143,6 +219,8 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
       ]
     );
     assert.equal(store.get("chat-1")?.copyAmountSol, 0.25);
+    assert.equal(store.getTradingWallet("chat-1")?.publicKey, otherWallet);
+    assert.equal(decryptSecret(store.getTradingWallet("chat-1")?.encryptedApiKey || "", encryptionSecret), "pump-key-alpha");
     assert.deepEqual(
       store.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label]),
       [
@@ -167,6 +245,7 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
       ]
     );
     assert.equal(reloaded.get("chat-1")?.copyAmountSol, 0.25);
+    assert.equal(reloaded.getTradingWallet("chat-1")?.publicKey, otherWallet);
     assert.deepEqual(
       reloaded.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label]),
       [
@@ -382,6 +461,41 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
       pool: "auto"
     }
   );
+
+  assert.deepEqual(
+    buildPumpPortalLightningBuyRequest({
+      trade,
+      amountSol: 0.25,
+      slippage: 15,
+      priorityFee: 0.00009,
+      pool: "auto"
+    }),
+    {
+      action: "buy",
+      mint,
+      amount: 0.25,
+      denominatedInSol: "true",
+      slippage: 15,
+      priorityFee: 0.00009,
+      pool: "auto"
+    }
+  );
+
+  const autoBuyMessage = formatAutoCopyBuyMessage({
+    trade,
+    tradingWalletPublicKey: otherWallet,
+    copyAmountSol: 0.25,
+    result: {
+      ok: true,
+      status: 200,
+      signature: "tx-alpha",
+      errorText: null,
+      raw: { signature: "tx-alpha" }
+    }
+  });
+  assert.match(autoBuyMessage || "", /Auto copy buy submitted/);
+  assert.match(autoBuyMessage || "", /Submitted: <code>tx-alpha<\/code>/);
+  assert.match(autoBuyMessage || "", new RegExp(otherWallet));
 
   const sellRequest = buildPumpPortalLocalSellRequest({
     publicKey: otherWallet,

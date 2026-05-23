@@ -9,9 +9,14 @@ import {
   buildPumpPortalLocalTrade,
   buildPumpPortalLocalTradeRequest,
   buildPumpPortalLocalSellRequest,
+  buildPumpPortalLightningBuyRequest,
   createPumpPortalMigrationListener,
+  executePumpPortalLightningTrade,
+  PUMPPORTAL_CREATE_WALLET_URL,
+  PUMPPORTAL_LIGHTNING_TRADE_URL,
   PUMPPORTAL_TRADE_LOCAL_URL
 } from "./pumpportal.js";
+import { decryptSecret, encryptionSecretReady } from "./secrets.js";
 import { analyzeSolanaTransaction } from "./solana.js";
 import { createSubscriberStore } from "./subscribers.js";
 import { createSupabaseSubscriberStoreFromEnv } from "./subscribers-supabase.js";
@@ -19,6 +24,7 @@ import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
 import { asRecord, errorMessage, isRecord, stringValue } from "./types.js";
 import {
   buildWalletTradeReplyMarkup,
+  formatAutoCopyBuyMessage,
   formatCopyTradeSimulationMessage,
   formatCopyTradeTrailingSellBuildMessage,
   formatCopyTradeTrailingSellScheduledMessage,
@@ -78,6 +84,9 @@ const config: BotConfig = {
   pumpPortalApiKey: process.env.PUMPPORTAL_API_KEY,
   pumpPortalWsUrl: process.env.PUMPPORTAL_WS_URL || "wss://pumpportal.fun/api/data",
   pumpPortalTradeLocalUrl: process.env.PUMPPORTAL_TRADE_LOCAL_URL || PUMPPORTAL_TRADE_LOCAL_URL,
+  pumpPortalCreateWalletUrl: process.env.PUMPPORTAL_CREATE_WALLET_URL || PUMPPORTAL_CREATE_WALLET_URL,
+  pumpPortalLightningTradeUrl: process.env.PUMPPORTAL_LIGHTNING_TRADE_URL || PUMPPORTAL_LIGHTNING_TRADE_URL,
+  pumpPortalWalletKeyEncryptionSecret: process.env.PUMPPORTAL_WALLET_KEY_ENCRYPTION_SECRET,
   alertMode: process.env.ALERT_MODE || process.env.PUMPPORTAL_ALERT_MODE || "migrations",
   solscanBaseUrl: process.env.SOLSCAN_BASE_URL || "https://solscan.io",
   pumpFunBaseUrl: process.env.PUMPFUN_BASE_URL || "https://pump.fun",
@@ -317,59 +326,51 @@ async function sendWalletTradeAlert(subscriber: SubscriberRecord, trade: WalletT
 }
 
 async function sendCopyTradeSimulationAlert(subscriber: SubscriberRecord, trade: WalletTradeData): Promise<void> {
-  const copyWalletAddresses = (subscriber.myWallets || []).map((wallet) => wallet.address).filter(Boolean);
-  const copySettings = {
-    copyWalletAddress: copyWalletAddresses[0] || null,
-    copyWalletAddresses,
-    copyAmountSol: subscriber.copyAmountSol,
-    copyTargetWalletAddress: trade.targetWallet
-  };
+  if (!isCopyableSolToTokenBuy(trade) || !subscriber.copyAmountSol || !subscriber.tradingWallet) {
+    return;
+  }
 
-  if (!isCopyableSolToTokenBuy(trade) || copyWalletAddresses.length === 0 || !subscriber.copyAmountSol) {
+  if (!encryptionSecretReady(config.pumpPortalWalletKeyEncryptionSecret)) {
+    console.warn(`Skipping auto copy buy for ${subscriber.chatId}: missing PUMPPORTAL_WALLET_KEY_ENCRYPTION_SECRET`);
     return;
   }
 
   try {
-    for (const copyWalletAddress of copyWalletAddresses) {
-      const perWalletCopySettings = {
-        ...copySettings,
-        copyWalletAddress,
-        copyWalletAddresses: [copyWalletAddress]
-      };
-      const pumpPortalRequest = buildPumpPortalLocalTradeRequest({
-        trade,
-        copySettings: perWalletCopySettings,
-        slippage: config.copyTradeSlippage,
-        priorityFee: config.copyTradePriorityFee,
-        pool: config.copyTradePool
+    const request = buildPumpPortalLightningBuyRequest({
+      trade,
+      amountSol: subscriber.copyAmountSol,
+      slippage: config.copyTradeSlippage,
+      priorityFee: config.copyTradePriorityFee,
+      pool: config.copyTradePool
+    });
+
+    if (!request) {
+      return;
+    }
+
+    const apiKey = decryptSecret(subscriber.tradingWallet.encryptedApiKey, config.pumpPortalWalletKeyEncryptionSecret || "");
+    const result = await executePumpPortalLightningTrade({
+      url: config.pumpPortalLightningTradeUrl,
+      apiKey,
+      request
+    });
+    const message = formatAutoCopyBuyMessage({
+      trade,
+      tradingWalletPublicKey: subscriber.tradingWallet.publicKey,
+      copyAmountSol: subscriber.copyAmountSol,
+      result
+    });
+
+    if (message) {
+      await sendTelegramMessage({
+        token: config.telegramToken,
+        chatId: subscriber.chatId,
+        text: message,
+        replyMarkup: buildWalletTradeReplyMarkup(trade)
       });
-      const pumpPortalBuild = pumpPortalRequest
-        ? await buildPumpPortalLocalTrade({
-            url: config.pumpPortalTradeLocalUrl,
-            request: pumpPortalRequest
-          })
-        : null;
-      const copyTradeSimulationMessage = formatCopyTradeSimulationMessage(trade, perWalletCopySettings, pumpPortalBuild);
-
-      if (copyTradeSimulationMessage) {
-        await sendTelegramMessage({
-          token: config.telegramToken,
-          chatId: subscriber.chatId,
-          text: copyTradeSimulationMessage,
-          replyMarkup: buildWalletTradeReplyMarkup(trade)
-        });
-      }
-
-      if (pumpPortalBuild?.ok) {
-        await scheduleCopyTradeTrailingSells({
-          subscriber,
-          trade,
-          copyWalletAddress
-        });
-      }
     }
   } catch (error) {
-    console.warn(`Could not send copy trade simulation alert to ${subscriber.chatId}: ${errorMessage(error)}`);
+    console.warn(`Could not execute auto copy buy for ${subscriber.chatId}: ${errorMessage(error)}`);
   }
 }
 

@@ -34,6 +34,9 @@ export interface BotConfig extends MigrationFormatConfig {
   pumpPortalApiKey?: string;
   pumpPortalWsUrl: string;
   pumpPortalTradeLocalUrl: string;
+  pumpPortalCreateWalletUrl: string;
+  pumpPortalLightningTradeUrl: string;
+  pumpPortalWalletKeyEncryptionSecret?: string;
   migrationLogPath: string;
   walletTradeLogPath: string;
   heliusApiKey?: string;
@@ -68,6 +71,9 @@ export interface LegacyBotConfig extends MigrationFormatConfig {
   telegramSubscribersPath?: string;
   pumpPortalApiKey?: string;
   pumpPortalWsUrl: string;
+  pumpPortalCreateWalletUrl?: string;
+  pumpPortalLightningTradeUrl?: string;
+  pumpPortalWalletKeyEncryptionSecret?: string;
   getModeLabel?: () => string;
   pumpPortalSubscriptionMethod?: string;
 }
@@ -131,6 +137,8 @@ export interface SubscriberStore {
   addMyWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
   renameMyWallet: (chatId: TelegramChatId, address: string, label: string | null) => Promise<boolean>;
   removeMyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
+  setTradingWallet: (chatId: TelegramChatId, wallet: TradingWallet) => Promise<boolean>;
+  getTradingWallet: (chatId: TelegramChatId) => TradingWallet | null;
   setCopyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   removeCopyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   setCopyAmountSol: (chatId: TelegramChatId, amountSol: number) => Promise<boolean>;
@@ -149,11 +157,20 @@ export interface SubscriberRecord {
   watchedWallets: WatchedWallet[];
   copyTradeWallets: WatchedWallet[];
   myWallets: WatchedWallet[];
+  tradingWallet: TradingWallet | null;
   copyWalletAddress: string | null;
   copyWalletAddresses: string[];
   copyAmountSol: number | null;
   copyTargetWalletAddress: string | null;
   verifiedAt: string;
+  updatedAt: string;
+}
+
+export interface TradingWallet {
+  publicKey: string;
+  encryptedApiKey: string;
+  apiKeyLast4: string;
+  createdAt: string;
   updatedAt: string;
 }
 
@@ -213,6 +230,30 @@ export interface PumpPortalLocalTradeBuildResult {
   status: number | null;
   bodyLength: number | null;
   errorText: string | null;
+}
+
+export interface PumpPortalLightningWallet {
+  publicKey: string;
+  privateKey: string;
+  apiKey: string;
+}
+
+export interface PumpPortalLightningTradeRequest {
+  action: "buy" | "sell";
+  mint: string;
+  amount: number | `${number}%`;
+  denominatedInSol: "true" | "false";
+  slippage: number;
+  priorityFee: number;
+  pool: PumpPortalTradePool;
+}
+
+export interface PumpPortalLightningTradeResult {
+  ok: boolean;
+  status: number | null;
+  signature: string | null;
+  errorText: string | null;
+  raw: unknown;
 }
 
 export interface TransactionAccountChange {

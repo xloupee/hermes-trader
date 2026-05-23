@@ -3,6 +3,12 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { buildMigrationReplyMarkup, extractMigrationData, formatMigrationMessage, getEventId } from "./format.js";
 import { createTelegramCommandPoller } from "./commands.js";
+import {
+  buildCopyCandidateReplyMarkup,
+  buildPumpPortalLocalTransactions,
+  formatCopyCandidateMessage,
+  isCopyCandidateTrade
+} from "./copy-trade.js";
 import { createHeliusWebhookServer, missingHeliusConfigWarning, syncHeliusWebhook } from "./helius.js";
 import { heliusEventMentionsWatchedWallet, isHeliusSwapEvent, normalizeHeliusSwapData } from "./helius-swaps.js";
 import { createPumpPortalMigrationListener } from "./pumpportal.js";
@@ -11,11 +17,23 @@ import { createSubscriberStore } from "./subscribers.js";
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
 import { asRecord, errorMessage, isRecord, stringValue } from "./types.js";
 import {
-  buildWalletTradeReplyMarkup,
-  formatWalletTradeMessage,
   getWalletTradeEventId
 } from "./wallet-monitor.js";
 import type { AlertModeValue, BotConfig, LooseRecord, MigrationData, SubscriberRecord, TransactionAnalysis, WalletTradeData } from "./types.js";
+
+function numberFromEnv(value: string | undefined, fallback: number): number {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function integerFromEnv(value: string | undefined, fallback: number): number {
+  const number = Number(value);
+  return Number.isInteger(number) ? number : fallback;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
 
 const config: BotConfig = {
   telegramToken: process.env.TELEGRAM_BOT_TOKEN,
@@ -41,6 +59,12 @@ const config: BotConfig = {
   solanaRpcUrl: process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
   transactionFlowEnabled: process.env.TRANSACTION_FLOW_ENABLED === "true",
   transactionAccountLabels: process.env.TRANSACTION_ACCOUNT_LABELS,
+  copyDefaultSolAmount: numberFromEnv(process.env.COPY_DEFAULT_SOL_AMOUNT, 0.01),
+  pumpPortalLocalTradeUrl: process.env.PUMPPORTAL_LOCAL_TRADE_URL || "https://pumpportal.fun/api/trade-local",
+  pumpPortalLocalSlippage: numberFromEnv(process.env.PUMPPORTAL_LOCAL_SLIPPAGE, 10),
+  pumpPortalLocalPriorityFee: numberFromEnv(process.env.PUMPPORTAL_LOCAL_PRIORITY_FEE, 0.00005),
+  pumpPortalLocalPool: process.env.PUMPPORTAL_LOCAL_POOL || "auto",
+  copyTestLimit: clamp(integerFromEnv(process.env.COPY_TEST_LIMIT, 20), 1, 100),
   shutdownReason: process.env.BOT_SHUTDOWN_REASON
 };
 
@@ -199,27 +223,158 @@ async function handleHeliusSwap(event: LooseRecord): Promise<boolean> {
     console.log(`Wallet trade event: ${JSON.stringify(loggedTrade)}`);
 
     for (const entry of entries) {
-      await sendWalletTradeAlert(entry.subscriber, {
+      const trade = {
         ...loggedTrade,
         label: entry.label
-      });
+      };
+
+      if (!isCopyCandidateTrade(trade)) {
+        continue;
+      }
+
+      await sendCopyCandidateAlert(entry.subscriber, trade);
     }
   }
 
   return true;
 }
 
-async function sendWalletTradeAlert(subscriber: SubscriberRecord, trade: WalletTradeData): Promise<void> {
+async function sendCopyCandidateAlert(subscriber: SubscriberRecord, trade: WalletTradeData): Promise<void> {
+  const builds = await buildPumpPortalLocalTransactions({
+    trade,
+    subscriber,
+    config
+  });
+
+  console.log(
+    `Copy candidate: ${JSON.stringify({
+      chatId: subscriber.chatId,
+      targetWallet: trade.targetWallet,
+      mint: trade.mint,
+      signature: trade.signature,
+      builds: builds.map((entry) => ({
+        copyWallet: entry.copyWallet,
+        copySolAmount: entry.copySolAmount,
+        pumpPortal: {
+          status: entry.build.status,
+          message: entry.build.message,
+          responseStatus: entry.build.responseStatus,
+          responseBytes: entry.build.responseBytes
+        }
+      }))
+    })}`
+  );
+
   try {
     await sendTelegramMessage({
       token: config.telegramToken,
       chatId: subscriber.chatId,
-      text: formatWalletTradeMessage(trade),
-      replyMarkup: buildWalletTradeReplyMarkup(trade)
+      text: formatCopyCandidateMessage({
+        trade,
+        builds
+      }),
+      replyMarkup: buildCopyCandidateReplyMarkup(trade)
     });
   } catch (error) {
-    console.warn(`Could not send wallet trade alert to ${subscriber.chatId}: ${errorMessage(error)}`);
+    console.warn(`Could not send copy candidate alert to ${subscriber.chatId}: ${errorMessage(error)}`);
   }
+}
+
+async function runCopyTest(chatId: string | number): Promise<string> {
+  const subscriber = subscribers.get(chatId);
+
+  if (!subscriber) {
+    return "<b>Verification required.</b>\n\nSend:\n<code>/verify your-code</code>";
+  }
+
+  if (!config.heliusApiKey) {
+    return "Copy test is disabled. Set HELIUS_API_KEY, then restart the bot.";
+  }
+
+  const wallets = subscribers.listWatchedWallets(chatId);
+
+  if (wallets.length === 0) {
+    return "No watched wallets for this chat. Add one with <code>/watch wallet-address optional-label</code>.";
+  }
+
+  let sent = 0;
+  let scannedEvents = 0;
+  const failures: string[] = [];
+
+  for (const wallet of wallets) {
+    let events: LooseRecord[];
+
+    try {
+      events = await fetchRecentHeliusSwaps(wallet.address);
+    } catch (error) {
+      failures.push(`${wallet.label || wallet.address}: ${errorMessage(error)}`);
+      continue;
+    }
+
+    scannedEvents += events.length;
+
+    for (const event of events) {
+      if (!isHeliusSwapEvent(event) || !heliusEventMentionsWatchedWallet(event, wallet.address)) {
+        continue;
+      }
+
+      const trade = normalizeHeliusSwapData({
+        event,
+        targetWallet: wallet.address,
+        label: wallet.label,
+        config
+      });
+
+      if (!isCopyCandidateTrade(trade)) {
+        continue;
+      }
+
+      const eventId = getWalletTradeEventId(trade);
+
+      if (rememberEvent(eventId)) {
+        continue;
+      }
+
+      await writeWalletTradeLog(trade);
+      console.log(`Copy test wallet trade event: ${JSON.stringify(trade)}`);
+      await sendCopyCandidateAlert(subscriber, trade);
+      sent += 1;
+      break;
+    }
+  }
+
+  const summary = [`Copy test scanned ${wallets.length} wallet(s), ${scannedEvents} recent swap(s), sent ${sent} candidate alert(s).`];
+
+  if (failures.length > 0) {
+    summary.push("");
+    summary.push("Some wallets could not be scanned:");
+    summary.push(...failures.slice(0, 5).map((failure) => `- ${failure}`));
+  }
+
+  return summary.join("\n");
+}
+
+async function fetchRecentHeliusSwaps(walletAddress: string): Promise<LooseRecord[]> {
+  if (!config.heliusApiKey) {
+    return [];
+  }
+
+  const baseUrl = config.heliusApiBaseUrl.replace(/\/$/, "");
+  const url = new URL(`${baseUrl}/v0/addresses/${encodeURIComponent(walletAddress)}/transactions`);
+  url.searchParams.set("api-key", config.heliusApiKey);
+  url.searchParams.set("type", "SWAP");
+  url.searchParams.set("limit", String(config.copyTestLimit));
+
+  const response = await fetch(url);
+  const body = await response.text();
+
+  if (!response.ok) {
+    throw new Error(body.trim() || `Helius recent swap fetch failed with ${response.status}`);
+  }
+
+  const parsed = JSON.parse(body) as unknown;
+
+  return Array.isArray(parsed) ? parsed.filter(isRecord) : [];
 }
 
 function classifyEventMode(event: LooseRecord): Exclude<AlertModeValue, "both"> | null {
@@ -569,6 +724,9 @@ const commandPoller = createTelegramCommandPoller({
   subscribers,
   onWalletWatchlistChange: () => {
     return syncHeliusWalletWebhook();
+  },
+  onCopyTest: (chatId) => {
+    return runCopyTest(chatId);
   }
 });
 const migrationListener = createPumpPortalMigrationListener({
@@ -612,6 +770,11 @@ async function syncHeliusWalletWebhook(): Promise<string | undefined> {
   if (result.warning) {
     console.warn(result.warning);
     return result.warning;
+  }
+
+  if (result.skipped) {
+    console.log(result.message || "Helius webhook sync skipped.");
+    return undefined;
   }
 
   if (result.webhookId) {

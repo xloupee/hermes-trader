@@ -45,6 +45,12 @@ export interface BotConfig extends MigrationFormatConfig {
   solanaRpcUrl: string;
   transactionFlowEnabled: boolean;
   transactionAccountLabels?: string;
+  copyDefaultSolAmount: number;
+  pumpPortalLocalTradeUrl: string;
+  pumpPortalLocalSlippage: number;
+  pumpPortalLocalPriorityFee: number;
+  pumpPortalLocalPool: string;
+  copyTestLimit: number;
   alertModeLabel?: string;
   shutdownReason?: string;
 }
@@ -56,6 +62,12 @@ export interface LegacyBotConfig extends MigrationFormatConfig {
   telegramSubscribersPath?: string;
   pumpPortalApiKey?: string;
   pumpPortalWsUrl: string;
+  copyDefaultSolAmount?: number;
+  pumpPortalLocalTradeUrl?: string;
+  pumpPortalLocalSlippage?: number;
+  pumpPortalLocalPriorityFee?: number;
+  pumpPortalLocalPool?: string;
+  copyTestLimit?: number;
   getModeLabel?: () => string;
   pumpPortalSubscriptionMethod?: string;
 }
@@ -90,6 +102,7 @@ export interface TelegramReplyMarkup {
 
 export interface TelegramInlineKeyboardButton {
   text: string;
+  url?: string;
   copy_text?: {
     text: string;
   };
@@ -104,7 +117,11 @@ export interface SubscriberStore {
   setMode: (chatId: TelegramChatId, mode: AlertModeValue) => Promise<boolean>;
   watchWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
   unwatchWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
+  setCopyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
+  removeCopyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
+  setCopySolAmount: (chatId: TelegramChatId, amount: number) => Promise<boolean>;
   listWatchedWallets: (chatId: TelegramChatId) => WatchedWallet[];
+  listCopyWallets: (chatId: TelegramChatId) => string[];
   list: () => SubscriberRecord[];
   count: () => number;
 }
@@ -113,6 +130,10 @@ export interface SubscriberRecord {
   chatId: string;
   mode: AlertModeValue | null;
   watchedWallets: WatchedWallet[];
+  copyWallet: string | null;
+  copyWallets: string[];
+  copySolAmount: number | null;
+  copySettingsUpdatedAt: string | null;
   verifiedAt: string;
   updatedAt: string;
 }

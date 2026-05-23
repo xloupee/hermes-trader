@@ -19,6 +19,12 @@ const telegramCommands = [
   { command: "watch", description: "Watch a wallet" },
   { command: "unwatch", description: "Stop watching a wallet" },
   { command: "wallets", description: "List watched wallets" },
+  { command: "copywallet", description: "Add copy wallet" },
+  { command: "uncopywallet", description: "Remove copy wallet" },
+  { command: "copywallets", description: "List copy wallets" },
+  { command: "copyamount", description: "Set copy amount" },
+  { command: "copystatus", description: "Show copy settings" },
+  { command: "copytest", description: "Test recent copy alerts" },
   { command: "help", description: "Show commands" }
 ];
 
@@ -32,6 +38,7 @@ interface CommandPollerOptions {
   testMessage: () => string;
   subscribers?: SubscriberStore;
   onWalletWatchlistChange?: () => string | void | Promise<string | void>;
+  onCopyTest?: (chatId: TelegramChatId) => string | Promise<string>;
 }
 
 interface TelegramCommandPoller {
@@ -105,6 +112,12 @@ export function helpText(_chatId?: TelegramChatId): string {
     "/watch &lt;wallet&gt; [label] - Watch a wallet's swaps",
     "/unwatch &lt;wallet&gt; - Stop watching a wallet",
     "/wallets - List watched wallets",
+    "/copywallet &lt;public-wallet&gt; - Add a copy wallet public address",
+    "/uncopywallet &lt;public-wallet&gt; - Remove a copy wallet",
+    "/copywallets - List copy wallets",
+    "/copyamount &lt;sol&gt; - Set your fixed copy buy amount",
+    "/copystatus - Show copy-trade dry-run settings",
+    "/copytest - Scan recent buys for watched wallets",
     "/help - Show commands"
   ].join("\n");
 }
@@ -113,7 +126,8 @@ export function createTelegramCommandPoller({
   config,
   testMessage: _testMessage,
   subscribers,
-  onWalletWatchlistChange
+  onWalletWatchlistChange,
+  onCopyTest
 }: CommandPollerOptions): TelegramCommandPoller {
   let nextOffset: number | undefined;
   let shouldPoll = true;
@@ -171,6 +185,24 @@ export function createTelegramCommandPoller({
         break;
       case "/wallets":
         await reply(chatId, listWallets(chatId));
+        break;
+      case "/copywallet":
+        await reply(chatId, await addCopyWallet(chatId, parsed.args));
+        break;
+      case "/uncopywallet":
+        await reply(chatId, await removeCopyWallet(chatId, parsed.args));
+        break;
+      case "/copywallets":
+        await reply(chatId, listCopyWallets(chatId));
+        break;
+      case "/copyamount":
+        await reply(chatId, await setCopyAmount(chatId, parsed.args));
+        break;
+      case "/copystatus":
+        await reply(chatId, copyStatus(chatId));
+        break;
+      case "/copytest":
+        await reply(chatId, await copyTest(chatId));
         break;
       default:
         await reply(chatId, "Unknown command. Send /help to see the bot commands.");
@@ -340,8 +372,156 @@ export function createTelegramCommandPoller({
     ].join("\n\n");
   }
 
+  async function addCopyWallet(chatId: TelegramChatId, args: string[]): Promise<string> {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return gate;
+    }
+
+    const wallet = args[0]?.trim();
+
+    if (!wallet) {
+      return "Send <code>/copywallet public-wallet-address</code> to add a copy wallet.";
+    }
+
+    if (!isValidSolanaAddress(wallet)) {
+      return "That does not look like a Solana public wallet address.";
+    }
+
+    const updated = await subscribers?.setCopyWallet(chatId, wallet);
+
+    if (!updated) {
+      return verificationPrompt();
+    }
+
+    const copyWallets = subscribers?.listCopyWallets(chatId) || [];
+
+    return `<b>Copy wallet added:</b>\n<code>${wallet}</code>\n\n<b>Total copy wallets:</b> ${copyWallets.length}\n\nThis is build-only. The bot will not sign or send transactions.`;
+  }
+
+  async function removeCopyWallet(chatId: TelegramChatId, args: string[]): Promise<string> {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return gate;
+    }
+
+    const wallet = args[0]?.trim();
+
+    if (!wallet) {
+      return "Send <code>/uncopywallet public-wallet-address</code> to remove a copy wallet.";
+    }
+
+    if (!isValidSolanaAddress(wallet)) {
+      return "That does not look like a Solana public wallet address.";
+    }
+
+    const removed = await subscribers?.removeCopyWallet(chatId, wallet);
+
+    if (!removed) {
+      return "That copy wallet was not configured for this chat.";
+    }
+
+    return `<b>Copy wallet removed:</b>\n<code>${wallet}</code>`;
+  }
+
+  function listCopyWallets(chatId: TelegramChatId): string {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return gate;
+    }
+
+    const copyWallets = subscribers?.listCopyWallets(chatId) || [];
+
+    if (copyWallets.length === 0) {
+      return "No copy wallets for this chat. Add one with <code>/copywallet public-wallet-address</code>.";
+    }
+
+    return ["<b>Copy wallets</b>", ...copyWallets.map((wallet) => `<code>${wallet}</code>`)].join("\n\n");
+  }
+
+  async function setCopyAmount(chatId: TelegramChatId, args: string[]): Promise<string> {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return gate;
+    }
+
+    const rawAmount = args[0]?.trim();
+    const amount = Number(rawAmount);
+
+    if (!rawAmount) {
+      return "Send <code>/copyamount 0.01</code> to set your fixed copy buy size.";
+    }
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return "Copy amount must be a number greater than 0.";
+    }
+
+    const updated = await subscribers?.setCopySolAmount(chatId, amount);
+
+    if (!updated) {
+      return verificationPrompt();
+    }
+
+    return `<b>Copy amount set:</b> ${formatSolAmount(amount)} SOL`;
+  }
+
+  function copyStatus(chatId: TelegramChatId): string {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return gate;
+    }
+
+    const subscriber = subscribers?.get(chatId);
+    const wallets = subscribers?.listWatchedWallets(chatId) || [];
+    const copyWallets = subscribers?.listCopyWallets(chatId) || [];
+    const copyAmount = subscriber?.copySolAmount ?? config.copyDefaultSolAmount ?? 0.01;
+    const buildReady = copyWallets.length > 0 ? "Ready for PumpPortal unsigned tx builds" : "Set /copywallet to enable PumpPortal unsigned tx builds";
+
+    return [
+      "<b>Copy dry-run status</b>",
+      "",
+      `<b>Copy wallets:</b> ${copyWallets.length}`,
+      ...copyWallets.map((wallet) => `<code>${wallet}</code>`),
+      `<b>Copy amount:</b> ${formatSolAmount(copyAmount)} SOL`,
+      `<b>Build-only:</b> ${buildReady}`,
+      `<b>Watched wallets:</b> ${wallets.length}`,
+      ...wallets.map((wallet) => (wallet.label ? `${escapeWalletLabel(wallet.label)} - <code>${wallet.address}</code>` : `<code>${wallet.address}</code>`))
+    ].join("\n");
+  }
+
+  async function copyTest(chatId: TelegramChatId): Promise<string> {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return gate;
+    }
+
+    const wallets = subscribers?.listWatchedWallets(chatId) || [];
+
+    if (wallets.length === 0) {
+      return "No watched wallets for this chat. Add one with <code>/watch wallet-address optional-label</code>.";
+    }
+
+    if (!onCopyTest) {
+      return "Copy test is not available in this bot process.";
+    }
+
+    return onCopyTest(chatId);
+  }
+
   function escapeWalletLabel(value: string): string {
     return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+  }
+
+  function formatSolAmount(value: number): string {
+    return new Intl.NumberFormat("en-US", {
+      maximumFractionDigits: Math.abs(value) < 0.001 ? 9 : 6
+    }).format(value);
   }
 
   async function pollOnce(): Promise<void> {
@@ -368,7 +548,9 @@ export function createTelegramCommandPoller({
       await clearTelegramWebhook({ token: config.telegramToken });
       await setTelegramCommands({ token: config.telegramToken, commands: telegramCommands });
       console.log(`Telegram bot ready: @${bot.username}`);
-      console.log("Polling for /start, /help, /verify, /stop, /migrations, /newtokens, /both, /watch, /unwatch, and /wallets");
+      console.log(
+        "Polling for /start, /help, /verify, /stop, /migrations, /newtokens, /both, /watch, /unwatch, /wallets, /copywallet, /uncopywallet, /copywallets, /copyamount, /copystatus, and /copytest"
+      );
 
       while (shouldPoll) {
         try {

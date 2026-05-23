@@ -2,6 +2,7 @@ import { escapeHtml } from "./format.js";
 import type { TelegramReplyMarkup, WalletTradeAction, WalletTradeAsset, WalletTradeData } from "./types.js";
 
 const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 function shortenAddress(value: string): string {
   if (!value || value.length <= 16) {
@@ -38,7 +39,48 @@ function formatAction(action: WalletTradeAction): string {
 }
 
 export function isValidSolanaAddress(value: string): boolean {
-  return BASE58_ADDRESS.test(value.trim());
+  const trimmed = value.trim();
+
+  if (!BASE58_ADDRESS.test(trimmed)) {
+    return false;
+  }
+
+  return base58DecodedLength(trimmed) === 32;
+}
+
+function base58DecodedLength(value: string): number | null {
+  const bytes = [0];
+
+  for (const char of value) {
+    const carryStart = BASE58_ALPHABET.indexOf(char);
+
+    if (carryStart === -1) {
+      return null;
+    }
+
+    let carry = carryStart;
+
+    for (let index = 0; index < bytes.length; index += 1) {
+      carry += bytes[index] * 58;
+      bytes[index] = carry & 0xff;
+      carry >>= 8;
+    }
+
+    while (carry > 0) {
+      bytes.push(carry & 0xff);
+      carry >>= 8;
+    }
+  }
+
+  for (const char of value) {
+    if (char !== "1") {
+      break;
+    }
+
+    bytes.push(0);
+  }
+
+  return bytes.length;
 }
 
 export function getWalletTradeEventId(trade: WalletTradeData): string | null {

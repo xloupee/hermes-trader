@@ -34,6 +34,8 @@ interface HeliusWebhookServer {
 export interface HeliusWebhookSyncResult {
   ok: boolean;
   webhookId: string | null;
+  skipped?: boolean;
+  message?: string;
   warning?: string;
 }
 
@@ -54,10 +56,14 @@ export async function syncHeliusWebhook(options: HeliusWebhookSyncOptions): Prom
 
   const webhookId = options.webhookId || (await readHeliusWebhookState(options.statePath)).webhookID || null;
 
-  if (!webhookId && accountAddresses.length === 0) {
+  if (accountAddresses.length === 0) {
     return {
       ok: true,
-      webhookId: null
+      webhookId,
+      skipped: true,
+      message: webhookId
+        ? "No watched wallets; leaving existing Helius webhook unchanged."
+        : "No watched wallets; Helius webhook not created."
     };
   }
 

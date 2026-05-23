@@ -24,7 +24,7 @@ function nativeSolAmount(value: LooseRecord): number | null {
 }
 
 function tokenSymbol(value: LooseRecord, fallback: string | null): string | null {
-  return stringValue(value.symbol || value.tokenSymbol) || fallback;
+  return stringValue(value.symbol || value.tokenSymbol || value.name || value.tokenName) || fallback;
 }
 
 function tokenMint(value: LooseRecord): string | null {
@@ -124,9 +124,66 @@ function pickSwapAssets(event: LooseRecord, targetWallet: string): { input: Wall
       : null;
 
   return {
-    input,
-    output
+    input: input || pickTokenBalanceAsset(event, targetWallet, "negative") || pickNativeBalanceAsset(event, targetWallet, "negative"),
+    output: output || pickTokenBalanceAsset(event, targetWallet, "positive") || pickNativeBalanceAsset(event, targetWallet, "positive")
   };
+}
+
+function pickNativeBalanceAsset(event: LooseRecord, targetWallet: string, direction: "negative" | "positive"): WalletTradeAsset | null {
+  const account = arrayRecords(event.accountData).find((entry) => entry.account === targetWallet);
+  const lamports = numberValue(account?.nativeBalanceChange);
+
+  if (lamports === null) {
+    return null;
+  }
+
+  if (direction === "negative" && lamports < 0) {
+    return makeAsset({ mint: SOL_MINT, symbol: "SOL", amount: Math.abs(lamports) / LAMPORTS_PER_SOL });
+  }
+
+  if (direction === "positive" && lamports > 0) {
+    return makeAsset({ mint: SOL_MINT, symbol: "SOL", amount: lamports / LAMPORTS_PER_SOL });
+  }
+
+  return null;
+}
+
+function pickTokenBalanceAsset(event: LooseRecord, targetWallet: string, direction: "negative" | "positive"): WalletTradeAsset | null {
+  for (const account of arrayRecords(event.accountData)) {
+    for (const change of arrayRecords(account.tokenBalanceChanges)) {
+      if (change.userAccount !== targetWallet) {
+        continue;
+      }
+
+      const rawTokenAmount = asRecord(change.rawTokenAmount);
+      const rawAmount = Number(rawTokenAmount.tokenAmount);
+      const decimals = Number(rawTokenAmount.decimals || 0);
+
+      if (!Number.isFinite(rawAmount) || !Number.isFinite(decimals)) {
+        continue;
+      }
+
+      const signedAmount = rawAmount / 10 ** decimals;
+
+      if (direction === "negative" && signedAmount < 0) {
+        return makeAsset({
+          mint: tokenMint(change),
+          symbol: tokenSymbol(change, null),
+          amount: Math.abs(signedAmount)
+        });
+      }
+
+      if (direction === "positive" && signedAmount > 0) {
+        return makeAsset({
+          mint: tokenMint(change),
+          symbol: tokenSymbol(change, null),
+          amount: signedAmount
+        });
+      }
+    }
+  }
+
+  return null;
 }
 
 export function heliusEventMentionsWatchedWallet(event: LooseRecord, walletAddress: string): boolean {
@@ -135,6 +192,10 @@ export function heliusEventMentionsWatchedWallet(event: LooseRecord, walletAddre
 
 export function isHeliusSwapEvent(event: LooseRecord): boolean {
   return String(event.type || "").toUpperCase() === "SWAP";
+}
+
+export function isSolToTokenBuy(input: WalletTradeAsset | null, output: WalletTradeAsset | null): boolean {
+  return input?.mint === SOL_MINT && Boolean(output?.mint && output.mint !== SOL_MINT);
 }
 
 export function normalizeHeliusSwapData({
@@ -156,13 +217,14 @@ export function normalizeHeliusSwapData({
   const feePayer = stringValue(event.feePayer);
   const nativeAmount = input?.symbol === "SOL" ? input.amount : output?.symbol === "SOL" ? output.amount : null;
   const tokenAmount = output?.symbol !== "SOL" ? (output?.amount ?? null) : input?.symbol !== "SOL" ? (input?.amount ?? null) : null;
+  const action = isSolToTokenBuy(input, output) ? "buy" : output?.mint === SOL_MINT && input?.mint !== SOL_MINT ? "sell" : "swap";
 
   return {
     observedAt: new Date().toISOString(),
     provider: "helius",
     targetWallet,
     label: label || null,
-    action: "swap",
+    action,
     mint: primaryMint,
     signature,
     timestamp,

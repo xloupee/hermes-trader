@@ -145,6 +145,10 @@ function subscriber(overrides = {}) {
     copyWalletAddress: null,
     copyWalletAddresses: [],
     copyAmountSol: null,
+    copyTradeBuySlippagePercent: null,
+    copyTradeBuyPriorityFeeSol: null,
+    copyTradeSellSlippagePercent: null,
+    copyTradeSellPriorityFeeSol: null,
     copyTargetWalletAddress: null,
     verifiedAt: "2026-05-22T00:00:00.000Z",
     updatedAt: "2026-05-22T00:00:00.000Z",
@@ -212,12 +216,15 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
       publicKey: otherWallet,
       encryptedApiKey: "encrypted-api-key",
       apiKeyLast4: "ikey",
+      label: null,
       createdAt: "2026-05-23T00:00:00.000Z",
       updatedAt: "2026-05-23T00:00:00.000Z"
     }),
     true
   );
   assert.equal(await store.setTradingWallet("chat-2", store.getTradingWallet("chat-1")), false);
+  assert.equal(await store.renameTradingWallet("chat-1", "Main Wallet"), true);
+  assert.equal(await store.renameTradingWallet("chat-2", "Missing"), false);
   assert.equal(await store.watchCopyTradeWallet("chat-1", otherWallet, "Copy Alpha"), true);
   assert.equal(await store.watchCopyTradeWallet("chat-1", wallet, "Copy Beta"), true);
   assert.equal(
@@ -238,14 +245,25 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
   assert.equal(await store.renameCopyTradeWallet("chat-1", "missing", "Nope"), false);
   assert.equal(await store.setCopyWallet("chat-2", otherWallet), false);
   assert.equal(await store.setCopyAmountSol("chat-2", 0.25), false);
+  assert.equal(await store.setCopyTradeBuySlippage("chat-1", 12.5), true);
+  assert.equal(await store.setCopyTradeBuyPriorityFee("chat-1", 0.00012), true);
+  assert.equal(await store.setCopyTradeSellSlippage("chat-1", 20), true);
+  assert.equal(await store.setCopyTradeSellPriorityFee("chat-1", 0.0002), true);
+  assert.equal(await store.setCopyTradeBuySlippage("chat-2", 12.5), false);
+  assert.equal(await store.setCopyTradeSellPriorityFee("chat-2", 0.0002), false);
   assert.equal(await store.watchCopyTradeWallet("chat-2", wallet, "Unverified"), false);
   assert.equal(store.get("chat-1")?.mode, "newtokens");
   assert.equal(store.get("chat-1")?.copyWalletAddress, otherWallet);
   assert.deepEqual(store.get("chat-1")?.copyWalletAddresses, [otherWallet, wallet]);
   assert.deepEqual(store.listCopyWallets("chat-1"), [otherWallet, wallet]);
   assert.equal(store.get("chat-1")?.copyAmountSol, 0.25);
+  assert.equal(store.get("chat-1")?.copyTradeBuySlippagePercent, 12.5);
+  assert.equal(store.get("chat-1")?.copyTradeBuyPriorityFeeSol, 0.00012);
+  assert.equal(store.get("chat-1")?.copyTradeSellSlippagePercent, 20);
+  assert.equal(store.get("chat-1")?.copyTradeSellPriorityFeeSol, 0.0002);
   assert.equal(store.getTradingWallet("chat-1")?.publicKey, otherWallet);
   assert.equal(store.getTradingWallet("chat-1")?.apiKeyLast4, "ikey");
+  assert.equal(store.getTradingWallet("chat-1")?.label, "Main Wallet");
   assert.deepEqual(
     store.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label, entry.trailingSellConfig?.percentBasis || null]),
     [
@@ -263,7 +281,14 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
   assert.equal(reloaded.get("chat-1")?.copyWalletAddress, null);
   assert.deepEqual(reloaded.get("chat-1")?.copyWalletAddresses, []);
   assert.equal(reloaded.get("chat-1")?.copyAmountSol, 0.25);
+  assert.equal(reloaded.get("chat-1")?.copyTradeBuySlippagePercent, 12.5);
+  assert.equal(reloaded.get("chat-1")?.copyTradeBuyPriorityFeeSol, 0.00012);
+  assert.equal(reloaded.get("chat-1")?.copyTradeSellSlippagePercent, 20);
+  assert.equal(reloaded.get("chat-1")?.copyTradeSellPriorityFeeSol, 0.0002);
   assert.equal(reloaded.getTradingWallet("chat-1")?.publicKey, otherWallet);
+  assert.equal(reloaded.getTradingWallet("chat-1")?.label, "Main Wallet");
+  assert.equal(await reloaded.renameTradingWallet("chat-1", null), true);
+  assert.equal(reloaded.getTradingWallet("chat-1")?.label, null);
   assert.deepEqual(
     reloaded.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label, entry.trailingSellConfig?.steps.length || 0]),
     [
@@ -271,6 +296,12 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
       [wallet, null, 0]
     ]
   );
+  assert.equal(await reloaded.resetCopyTradeExecutionSettings("chat-1"), true);
+  assert.equal(reloaded.get("chat-1")?.copyTradeBuySlippagePercent, null);
+  assert.equal(reloaded.get("chat-1")?.copyTradeBuyPriorityFeeSol, null);
+  assert.equal(reloaded.get("chat-1")?.copyTradeSellSlippagePercent, null);
+  assert.equal(reloaded.get("chat-1")?.copyTradeSellPriorityFeeSol, null);
+  assert.equal(await reloaded.resetCopyTradeExecutionSettings("chat-2"), false);
 
   assert.equal(await reloaded.unwatchWallet("chat-1", wallet), true);
   assert.deepEqual(reloaded.listWatchedWallets("chat-1"), []);

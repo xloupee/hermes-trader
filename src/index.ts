@@ -3,6 +3,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { buildMigrationReplyMarkup, extractMigrationData, formatMigrationMessage, getEventId } from "./format.js";
 import { createTelegramCommandPoller } from "./commands.js";
+import { copyBuySubmissionKey, createCopyBuySubmissionGuard } from "./copytrade-guard.js";
 import { createHeliusWebhookServer, missingHeliusConfigWarning, syncHeliusWebhook } from "./helius.js";
 import { heliusEventMentionsWatchedWallet, isHeliusSwapEvent, normalizeHeliusSwapData } from "./helius-swaps.js";
 import {
@@ -124,6 +125,8 @@ let cachedSolUsdPriceAt = 0;
 const metadataCache = new Map<string, LooseRecord | null>();
 const tokenInfoCache = new Map<string, LooseRecord | null>();
 const trailingSellTimers = new Set<NodeJS.Timeout>();
+const activeTrailingSellSchedules = new Set<string>();
+const copyBuySubmissionGuard = createCopyBuySubmissionGuard();
 let isShuttingDown = false;
 const pumpFunCoinInfoRetryDelaysMs = [0, 750, 1500, 3000, 6000];
 const subscribers =
@@ -147,6 +150,20 @@ const copyTradeRecorder =
     : null;
 
 const baseSubscriptionMethods = ["subscribeNewToken", "subscribeMigration"];
+
+function copyTradeBuyExecutionSettings(subscriber: SubscriberRecord): { slippage: number; priorityFee: number } {
+  return {
+    slippage: subscriber.copyTradeBuySlippagePercent ?? config.copyTradeSlippage,
+    priorityFee: subscriber.copyTradeBuyPriorityFeeSol ?? config.copyTradePriorityFee
+  };
+}
+
+function copyTradeSellExecutionSettings(subscriber: SubscriberRecord): { slippage: number; priorityFee: number } {
+  return {
+    slippage: subscriber.copyTradeSellSlippagePercent ?? config.copyTradeSlippage,
+    priorityFee: subscriber.copyTradeSellPriorityFeeSol ?? config.copyTradePriorityFee
+  };
+}
 
 function watchedWalletAddresses(): string[] {
   return [
@@ -352,12 +369,22 @@ async function sendCopyTradeSimulationAlert(
     return;
   }
 
+  const copyBuyKey = copyBuySubmissionKey({
+    chatId: subscriber.chatId,
+    tradingWalletPublicKey: subscriber.tradingWallet.publicKey,
+    sourceWalletAddress: copyTradeWallet.address,
+    observedSignature: trade.signature
+  });
+  let copyBuyReserved = false;
+  let result: PumpPortalLightningTradeResult | null = null;
+
   try {
+    const executionSettings = copyTradeBuyExecutionSettings(subscriber);
     const request = buildPumpPortalLightningBuyRequest({
       trade,
       amountSol: subscriber.copyAmountSol,
-      slippage: config.copyTradeSlippage,
-      priorityFee: config.copyTradePriorityFee,
+      slippage: executionSettings.slippage,
+      priorityFee: executionSettings.priorityFee,
       pool: config.copyTradePool
     });
 
@@ -365,8 +392,16 @@ async function sendCopyTradeSimulationAlert(
       return;
     }
 
+    if (!copyBuySubmissionGuard.reserve(copyBuyKey)) {
+      console.warn(
+        `Skipping duplicate auto copy buy for ${subscriber.chatId}:${copyTradeWallet.address}:${trade.signature}: already in flight`
+      );
+      return;
+    }
+    copyBuyReserved = true;
+
     const apiKey = decryptSecret(subscriber.tradingWallet.encryptedApiKey, config.pumpPortalWalletKeyEncryptionSecret || "");
-    const result = await executePumpPortalLightningTrade({
+    result = await executePumpPortalLightningTrade({
       url: config.pumpPortalLightningTradeUrl,
       apiKey,
       request
@@ -398,6 +433,16 @@ async function sendCopyTradeSimulationAlert(
     }
 
     if (result.ok) {
+      if (result.signature) {
+        waitForSignatureConfirmation(result.signature).then((confirmed) => {
+          if (!confirmed) {
+            console.warn(`Auto copy buy signature was not observable before trailing sells started: ${result?.signature}`);
+          }
+        }).catch((error) => {
+          console.warn(`Could not check auto copy buy confirmation: ${errorMessage(error)}`);
+        });
+      }
+
       await scheduleCopyTradeTrailingSells({
         subscriber,
         trade,
@@ -407,13 +452,19 @@ async function sendCopyTradeSimulationAlert(
     }
   } catch (error) {
     console.warn(`Could not execute auto copy buy for ${subscriber.chatId}: ${errorMessage(error)}`);
+  } finally {
+    if (copyBuyReserved) {
+      copyBuySubmissionGuard.release(copyBuyKey);
+    }
   }
 }
 
 function buildTrailingSellSchedule({
+  subscriber,
   trade,
   trailingSellConfig
 }: {
+  subscriber: SubscriberRecord;
   trade: WalletTradeData;
   trailingSellConfig: TrailingSellConfig | null;
 }): Array<{ delayMs: number; request: PumpPortalLightningTradeRequest }> {
@@ -424,14 +475,15 @@ function buildTrailingSellSchedule({
   const sellPercents = trailingSellConfig.percentBasis === "original_position"
     ? originalPositionPercentsToRemainingBalancePercents(trailingSellConfig.steps)
     : trailingSellConfig.steps;
+  const executionSettings = copyTradeSellExecutionSettings(subscriber);
 
   return sellPercents
     .map((step) => {
       const request = buildPumpPortalLightningSellRequest({
         mint: trade.mint || "",
         amountPercent: step.percent,
-        slippage: config.copyTradeSlippage,
-        priorityFee: config.copyTradePriorityFee,
+        slippage: executionSettings.slippage,
+        priorityFee: executionSettings.priorityFee,
         pool: config.copyTradePool
       });
 
@@ -522,9 +574,15 @@ async function scheduleCopyTradeTrailingSells({
   copyTradeWallet: WatchedWallet;
 }): Promise<void> {
   const trailingSellConfig = resolveTrailingSellConfig(copyTradeWallet);
-  const steps = buildTrailingSellSchedule({ trade, trailingSellConfig });
+  const steps = buildTrailingSellSchedule({ subscriber, trade, trailingSellConfig });
 
   if (steps.length === 0) {
+    return;
+  }
+
+  const scheduleKey = trailingSellScheduleKey({ subscriber, trade });
+  if (activeTrailingSellSchedules.has(scheduleKey)) {
+    console.warn(`Skipping overlapping trailing sell schedule for ${subscriber.chatId}:${trade.mint}: schedule already active`);
     return;
   }
 
@@ -542,24 +600,73 @@ async function scheduleCopyTradeTrailingSells({
     });
   }
 
-  steps.forEach((step, stepIndex) => {
-    const timer = setTimeout(() => {
-      trailingSellTimers.delete(timer);
-      buildAndNotifyTrailingSell({
+  activeTrailingSellSchedules.add(scheduleKey);
+  runTrailingSellSchedule({
+    subscriber,
+    trade,
+    apiKey,
+    steps,
+    copyTradeWallet,
+    scheduleKey
+  }).catch((error) => {
+    console.warn(`Trailing sell schedule failed for ${subscriber.chatId}: ${errorMessage(error)}`);
+  });
+}
+
+function trailingSellScheduleKey({ subscriber, trade }: { subscriber: SubscriberRecord; trade: WalletTradeData }): string {
+  return [
+    subscriber.chatId,
+    subscriber.tradingWallet?.publicKey || "unknown-wallet",
+    trade.mint || "unknown-mint",
+    trade.signature || trade.observedAt
+  ].join(":");
+}
+
+async function runTrailingSellSchedule({
+  subscriber,
+  trade,
+  apiKey,
+  steps,
+  copyTradeWallet,
+  scheduleKey
+}: {
+  subscriber: SubscriberRecord;
+  trade: WalletTradeData;
+  apiKey: string;
+  steps: Array<{ delayMs: number; request: PumpPortalLightningTradeRequest }>;
+  copyTradeWallet: WatchedWallet;
+  scheduleKey: string;
+}): Promise<void> {
+  const startedAt = Date.now();
+  const seenSellSignatures = new Set<string>();
+
+  try {
+    for (const [stepIndex, step] of steps.entries()) {
+      if (isShuttingDown) {
+        return;
+      }
+
+      const waitMs = Math.max(0, step.delayMs - (Date.now() - startedAt));
+      await trackedDelay(waitMs);
+
+      const result = await buildAndNotifyTrailingSell({
         subscriber,
         trade,
         apiKey,
         request: step.request,
         stepIndex,
         totalSteps: steps.length,
-        copyTradeWallet
-      }).catch((error) => {
-        console.warn(`Could not submit trailing sell for ${subscriber.chatId}: ${errorMessage(error)}`);
+        copyTradeWallet,
+        seenSellSignatures
       });
-    }, step.delayMs);
 
-    trailingSellTimers.add(timer);
-  });
+      if (result.ok && result.signature) {
+        await waitForSignatureConfirmation(result.signature);
+      }
+    }
+  } finally {
+    activeTrailingSellSchedules.delete(scheduleKey);
+  }
 }
 
 async function buildAndNotifyTrailingSell({
@@ -569,7 +676,8 @@ async function buildAndNotifyTrailingSell({
   request,
   stepIndex,
   totalSteps,
-  copyTradeWallet
+  copyTradeWallet,
+  seenSellSignatures
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
@@ -578,11 +686,12 @@ async function buildAndNotifyTrailingSell({
   stepIndex: number;
   totalSteps: number;
   copyTradeWallet: WatchedWallet;
-}): Promise<void> {
-  const result = await executePumpPortalLightningTrade({
-    url: config.pumpPortalLightningTradeUrl,
+  seenSellSignatures: Set<string>;
+}): Promise<PumpPortalLightningTradeResult> {
+  const { result, duplicateSignature } = await executeTrailingSellWithDuplicateRetry({
     apiKey,
-    request
+    request,
+    seenSellSignatures
   });
 
   await recordCopyTradeExecution({
@@ -604,10 +713,122 @@ async function buildAndNotifyTrailingSell({
       stepIndex,
       totalSteps,
       request,
-      result
+      result,
+      duplicateSignature
     }),
     replyMarkup: buildWalletTradeReplyMarkup(trade)
   });
+
+  if (result.ok && result.signature && !duplicateSignature) {
+    seenSellSignatures.add(result.signature);
+  }
+
+  return result;
+}
+
+async function executeTrailingSellWithDuplicateRetry({
+  apiKey,
+  request,
+  seenSellSignatures
+}: {
+  apiKey: string;
+  request: PumpPortalLightningTradeRequest;
+  seenSellSignatures: Set<string>;
+}): Promise<{ result: PumpPortalLightningTradeResult; duplicateSignature: boolean }> {
+  let duplicateSignature = false;
+  let result: PumpPortalLightningTradeResult | null = null;
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    result = await executePumpPortalLightningTrade({
+      url: config.pumpPortalLightningTradeUrl,
+      apiKey,
+      request
+    });
+    duplicateSignature = Boolean(result.ok && result.signature && seenSellSignatures.has(result.signature));
+
+    if (isTokenAccountNotReadyError(result) && attempt < 11) {
+      console.warn(`PumpPortal could not find token account for trailing sell; retrying after account indexing delay`);
+      await trackedDelay(3000);
+      continue;
+    }
+
+    if (!duplicateSignature || !result.signature || attempt === 2) {
+      break;
+    }
+
+    console.warn(`PumpPortal returned duplicate trailing sell signature ${result.signature}; retrying after confirmation delay`);
+    await waitForSignatureConfirmation(result.signature);
+    await trackedDelay(5000);
+  }
+
+  return {
+    result: result || {
+      ok: false,
+      status: null,
+      signature: null,
+      errorText: "Trailing sell request was not submitted",
+      raw: null
+    },
+    duplicateSignature
+  };
+}
+
+function isTokenAccountNotReadyError(result: PumpPortalLightningTradeResult): boolean {
+  return !result.ok && /could not find account|token account balance/i.test(result.errorText || "");
+}
+
+function trackedDelay(ms: number): Promise<void> {
+  if (ms <= 0) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      trailingSellTimers.delete(timer);
+      resolve();
+    }, ms);
+    trailingSellTimers.add(timer);
+  });
+}
+
+async function waitForSignatureConfirmation(signature: string, timeoutMs = 30000, pollMs = 2000): Promise<boolean> {
+  const startedAt = Date.now();
+
+  while (!isShuttingDown && Date.now() - startedAt < timeoutMs) {
+    try {
+      const response = await fetch(config.solanaRpcUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: signature,
+          method: "getSignatureStatuses",
+          params: [[signature], { searchTransactionHistory: true }]
+        })
+      });
+      const body = await response.json() as { result?: { value?: Array<{ confirmationStatus?: string; err?: unknown } | null> } };
+      const status = body.result?.value?.[0] || null;
+
+      if (status?.err) {
+        console.warn(`Signature ${signature} landed with error: ${JSON.stringify(status.err)}`);
+        return false;
+      }
+
+      if (status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized") {
+        return true;
+      }
+    } catch (error) {
+      console.warn(`Could not check trailing sell confirmation for ${signature}: ${errorMessage(error)}`);
+      return false;
+    }
+
+    await trackedDelay(pollMs);
+  }
+
+  console.warn(`Timed out waiting for trailing sell confirmation: ${signature}`);
+  return false;
 }
 
 async function recordCopyTradeExecution({

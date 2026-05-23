@@ -96,6 +96,8 @@ export interface LegacyBotConfig extends MigrationFormatConfig {
   copyTradeTrailingSellTrailPercent?: number;
   copyTradeTrailingSellIntervalMs?: number;
   copyTradeTrailingSellMaxBuilds?: number;
+  copyTradeSlippage?: number;
+  copyTradePriorityFee?: number;
   getModeLabel?: () => string;
   pumpPortalSubscriptionMethod?: string;
 }
@@ -163,10 +165,16 @@ export interface SubscriberStore {
     config: TrailingSellConfig | null
   ) => Promise<boolean>;
   setTradingWallet: (chatId: TelegramChatId, wallet: TradingWallet) => Promise<boolean>;
+  renameTradingWallet: (chatId: TelegramChatId, label: string | null) => Promise<boolean>;
   getTradingWallet: (chatId: TelegramChatId) => TradingWallet | null;
   setCopyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   removeCopyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   setCopyAmountSol: (chatId: TelegramChatId, amountSol: number) => Promise<boolean>;
+  setCopyTradeBuySlippage: (chatId: TelegramChatId, percent: number) => Promise<boolean>;
+  setCopyTradeBuyPriorityFee: (chatId: TelegramChatId, sol: number) => Promise<boolean>;
+  setCopyTradeSellSlippage: (chatId: TelegramChatId, percent: number) => Promise<boolean>;
+  setCopyTradeSellPriorityFee: (chatId: TelegramChatId, sol: number) => Promise<boolean>;
+  resetCopyTradeExecutionSettings: (chatId: TelegramChatId) => Promise<boolean>;
   setCopyTargetWallet: (chatId: TelegramChatId, address: string | null) => Promise<boolean>;
   listWatchedWallets: (chatId: TelegramChatId) => WatchedWallet[];
   listCopyTradeWallets: (chatId: TelegramChatId) => WatchedWallet[];
@@ -184,6 +192,10 @@ export interface SubscriberRecord {
   copyWalletAddress: string | null;
   copyWalletAddresses: string[];
   copyAmountSol: number | null;
+  copyTradeBuySlippagePercent: number | null;
+  copyTradeBuyPriorityFeeSol: number | null;
+  copyTradeSellSlippagePercent: number | null;
+  copyTradeSellPriorityFeeSol: number | null;
   copyTargetWalletAddress: string | null;
   verifiedAt: string;
   updatedAt: string;
@@ -193,6 +205,7 @@ export interface TradingWallet {
   publicKey: string;
   encryptedApiKey: string;
   apiKeyLast4: string;
+  label: string | null;
   createdAt: string;
   updatedAt: string;
 }

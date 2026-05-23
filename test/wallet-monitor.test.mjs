@@ -6,7 +6,10 @@ import test from "node:test";
 import {
   commandFromMessage,
   formatCopyTradeDashboardText,
+  formatStartDashboardText,
   helpText,
+  parsePriorityFeeInput,
+  parseSlippageInput,
   parseTrailingSellFormulaInput,
   parseTrailingSellStepInput,
   parseTrailingSellStepsInput,
@@ -48,10 +51,14 @@ const encryptionSecret = "abcdefghijklmnopqrstuvwxyz1234567890";
 test("telegram help exposes wallet and copy trade dashboards", () => {
   const help = helpText("chat-1");
 
-  assert.match(help, /\/alerts - Open alert mode dashboard/);
-  assert.match(help, /\/trackwallets - Open track wallet dashboard/);
-  assert.match(help, /\/mywallets - Open trading wallet dashboard/);
-  assert.match(help, /\/copytrade - Open copy trade setup menu/);
+  assert.match(help, /📚 Pump\.fun Notifier Help/);
+  assert.match(help, /🚀 Quick Start/);
+  assert.match(help, /\/alerts - Toggle migrated coins and new tokens/);
+  assert.match(help, /\/trackwallets - Track wallets for normal trade alerts/);
+  assert.match(help, /\/mywallets - Create or view your PumpPortal trading wallet/);
+  assert.match(help, /\/copytrade - Configure copy amount, wallets, and trailing sells/);
+  assert.match(help, /🕒 Last updated:/);
+  assert.doesNotMatch(help, /Commands:/);
   assert.doesNotMatch(help, /\/wallets/);
   assert.doesNotMatch(help, /\/migrations/);
   assert.doesNotMatch(help, /\/newtokens/);
@@ -84,6 +91,42 @@ test("telegram help exposes wallet and copy trade dashboards", () => {
   });
 });
 
+test("start dashboard uses polished status card", () => {
+  const dashboard = formatStartDashboardText({
+    chatId: "chat-1",
+    mode: "both",
+    watchedWallets: [{ address: wallet, label: "Alpha", addedAt: "now", updatedAt: "now" }],
+    copyTradeWallets: [{ address: otherWallet, label: "Cented", addedAt: "now", updatedAt: "now" }],
+    tradingWallet: {
+      publicKey: "9yQC6vxwibseQtcRQGm7z6ymYiBGkRkKg3DnMZzRpy1i",
+      encryptedApiKey: "encrypted",
+      apiKeyLast4: "abcd",
+      createdAt: "now",
+      updatedAt: "now"
+    },
+    copyWalletAddress: null,
+    copyWalletAddresses: [],
+    copyAmountSol: 0.5,
+    copyTradeBuySlippagePercent: null,
+    copyTradeBuyPriorityFeeSol: null,
+    copyTradeSellSlippagePercent: null,
+    copyTradeSellPriorityFeeSol: null,
+    copyTargetWalletAddress: null,
+    verifiedAt: "now",
+    updatedAt: "now"
+  });
+
+  assert.match(dashboard, /🚀 Welcome to Pump\.fun Notifier/);
+  assert.match(dashboard, /🟢 Setup is <b>active<\/b>/);
+  assert.match(dashboard, /🔔 Token Alerts/);
+  assert.match(dashboard, /👀 Tracked Wallets/);
+  assert.match(dashboard, /👛 Trading Wallet/);
+  assert.match(dashboard, /⚡ Copy Trading/);
+  assert.match(dashboard, /Cented/);
+  assert.match(dashboard, /🕒 Last updated:/);
+  assert.doesNotMatch(dashboard, /Commands:/);
+});
+
 test("alert mode toggles individual token alert types", () => {
   assert.equal(toggleAlertMode("both", "migrations"), "newtokens");
   assert.equal(toggleAlertMode("both", "newtokens"), "migrations");
@@ -91,6 +134,22 @@ test("alert mode toggles individual token alert types", () => {
   assert.equal(toggleAlertMode("newtokens", "migrations"), "both");
   assert.equal(toggleAlertMode(null, "migrations"), "migrations");
   assert.equal(toggleAlertMode(null, "newtokens"), "newtokens");
+});
+
+test("copytrade execution setting inputs parse slippage and priority fees", () => {
+  assert.equal(parseSlippageInput("10"), 10);
+  assert.equal(parseSlippageInput("10%"), 10);
+  assert.equal(parseSlippageInput("2.5"), 2.5);
+  assert.equal(parseSlippageInput("0"), null);
+  assert.equal(parseSlippageInput("0.09"), null);
+  assert.equal(parseSlippageInput("100.1"), null);
+  assert.equal(parseSlippageInput("abc"), null);
+
+  assert.equal(parsePriorityFeeInput("0.00005"), 0.00005);
+  assert.equal(parsePriorityFeeInput("1"), 1);
+  assert.equal(parsePriorityFeeInput("0"), null);
+  assert.equal(parsePriorityFeeInput("1.1"), null);
+  assert.equal(parsePriorityFeeInput("abc"), null);
 });
 
 test("trailing sell inputs parse custom steps and formula presets", () => {
@@ -111,6 +170,10 @@ test("trailing sell inputs parse custom steps and formula presets", () => {
   assert.deepEqual(parseTrailingSellStepsInput("30% 2m, 20% 10s"), [
     { percent: 20, delayMs: 10_000 },
     { percent: 30, delayMs: 120_000 }
+  ]);
+  assert.deepEqual(parseTrailingSellStepsInput("50% 1s, 100%, 2s"), [
+    { percent: 50, delayMs: 1_000 },
+    { percent: 100, delayMs: 2_000 }
   ]);
   assert.deepEqual(parseTrailingSellFormulaInput("20% 10s 20% 30s 2m"), [
     { percent: 20, delayMs: 10_000 },
@@ -143,6 +206,8 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
   assert.match(dashboard, /👛 Trading Wallet:/);
   assert.match(dashboard, /62qc2C\.\.\.fafNgV/);
   assert.match(dashboard, /💰 Copy Amount:<\/b> 0.5 SOL/);
+  assert.match(dashboard, /⚙️ Buy:<\/b> 10% slip \/ 0.00005 SOL priority/);
+  assert.match(dashboard, /⚙️ Sell:<\/b> 10% slip \/ 0.00005 SOL priority/);
   assert.match(dashboard, /🎯 Copytrade Wallets:<\/b> 1/);
   assert.match(dashboard, /└ cented/);
   assert.doesNotMatch(dashboard, new RegExp(wallet));
@@ -161,10 +226,16 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
         updatedAt: "2026-05-23T00:00:00.000Z"
       }
     ],
+    buySlippagePercent: 12.5,
+    buyPriorityFeeSol: 0.00012,
+    sellSlippagePercent: 20,
+    sellPriorityFeeSol: 0.0002,
     now: new Date("2026-05-23T14:48:25.107Z")
   });
 
   assert.match(missing, /└ 39azUY\.\.\.5jUJjg/);
+  assert.match(missing, /⚙️ Buy:<\/b> 12.5% slip \/ 0.00012 SOL priority/);
+  assert.match(missing, /⚙️ Sell:<\/b> 20% slip \/ 0.0002 SOL priority/);
   assert.match(missing, /🔴 Setup is <b>inactive<\/b>/);
 });
 
@@ -272,12 +343,15 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
         publicKey: otherWallet,
         encryptedApiKey: encryptSecret("pump-key-alpha", encryptionSecret),
         apiKeyLast4: "lpha",
+        label: null,
         createdAt: "2026-05-23T00:00:00.000Z",
         updatedAt: "2026-05-23T00:00:00.000Z"
       }),
       true
     );
     assert.equal(await store.setTradingWallet("chat-2", store.getTradingWallet("chat-1")), false);
+    assert.equal(await store.renameTradingWallet("chat-1", "Main Wallet"), true);
+    assert.equal(await store.renameTradingWallet("chat-2", "Missing"), false);
     assert.equal(await store.watchCopyTradeWallet("chat-1", otherWallet, "Copy Alpha"), true);
     assert.equal(await store.watchCopyTradeWallet("chat-1", wallet, "Copy Beta"), true);
     assert.equal(
@@ -300,11 +374,22 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(await store.watchCopyTradeWallet("chat-2", wallet, "Unverified"), false);
     assert.equal(await store.setCopyWallet("chat-2", otherWallet), false);
     assert.equal(await store.setCopyAmountSol("chat-2", 0.25), false);
+    assert.equal(await store.setCopyTradeBuySlippage("chat-1", 12.5), true);
+    assert.equal(await store.setCopyTradeBuyPriorityFee("chat-1", 0.00012), true);
+    assert.equal(await store.setCopyTradeSellSlippage("chat-1", 20), true);
+    assert.equal(await store.setCopyTradeSellPriorityFee("chat-1", 0.0002), true);
+    assert.equal(await store.setCopyTradeBuySlippage("chat-2", 12.5), false);
+    assert.equal(await store.setCopyTradeSellPriorityFee("chat-2", 0.0002), false);
     assert.equal(store.get("chat-1")?.copyWalletAddress, otherWallet);
     assert.deepEqual(store.get("chat-1")?.copyWalletAddresses, [otherWallet, wallet]);
     assert.deepEqual(store.listCopyWallets("chat-1"), [otherWallet, wallet]);
     assert.equal(store.get("chat-1")?.copyAmountSol, 0.25);
+    assert.equal(store.get("chat-1")?.copyTradeBuySlippagePercent, 12.5);
+    assert.equal(store.get("chat-1")?.copyTradeBuyPriorityFeeSol, 0.00012);
+    assert.equal(store.get("chat-1")?.copyTradeSellSlippagePercent, 20);
+    assert.equal(store.get("chat-1")?.copyTradeSellPriorityFeeSol, 0.0002);
     assert.equal(store.getTradingWallet("chat-1")?.publicKey, otherWallet);
+    assert.equal(store.getTradingWallet("chat-1")?.label, "Main Wallet");
     assert.equal(decryptSecret(store.getTradingWallet("chat-1")?.encryptedApiKey || "", encryptionSecret), "pump-key-alpha");
     assert.deepEqual(
       store.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label, entry.trailingSellConfig?.percentBasis || null]),
@@ -323,7 +408,14 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(reloaded.get("chat-1")?.copyWalletAddress, null);
     assert.deepEqual(reloaded.get("chat-1")?.copyWalletAddresses, []);
     assert.equal(reloaded.get("chat-1")?.copyAmountSol, 0.25);
+    assert.equal(reloaded.get("chat-1")?.copyTradeBuySlippagePercent, 12.5);
+    assert.equal(reloaded.get("chat-1")?.copyTradeBuyPriorityFeeSol, 0.00012);
+    assert.equal(reloaded.get("chat-1")?.copyTradeSellSlippagePercent, 20);
+    assert.equal(reloaded.get("chat-1")?.copyTradeSellPriorityFeeSol, 0.0002);
     assert.equal(reloaded.getTradingWallet("chat-1")?.publicKey, otherWallet);
+    assert.equal(reloaded.getTradingWallet("chat-1")?.label, "Main Wallet");
+    assert.equal(await reloaded.renameTradingWallet("chat-1", null), true);
+    assert.equal(reloaded.getTradingWallet("chat-1")?.label, null);
     assert.deepEqual(
       reloaded.listCopyTradeWallets("chat-1").map((entry) => [entry.address, entry.label, entry.trailingSellConfig?.steps.length || 0]),
       [
@@ -332,6 +424,12 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
       ]
     );
     assert.equal(reloaded.get("chat-1")?.mode, null);
+    assert.equal(await reloaded.resetCopyTradeExecutionSettings("chat-1"), true);
+    assert.equal(reloaded.get("chat-1")?.copyTradeBuySlippagePercent, null);
+    assert.equal(reloaded.get("chat-1")?.copyTradeBuyPriorityFeeSol, null);
+    assert.equal(reloaded.get("chat-1")?.copyTradeSellSlippagePercent, null);
+    assert.equal(reloaded.get("chat-1")?.copyTradeSellPriorityFeeSol, null);
+    assert.equal(await reloaded.resetCopyTradeExecutionSettings("chat-2"), false);
 
     assert.equal(await reloaded.unwatchWallet("chat-1", wallet), true);
     assert.deepEqual(reloaded.listWatchedWallets("chat-1"), []);
@@ -473,35 +571,52 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
   assert.deepEqual(buildWalletTradeReplyMarkup(trade)?.inline_keyboard[0][0].copy_text, { text: mint });
 
   const message = formatWalletTradeMessage(trade);
-  assert.match(message, /Wallet trade detected/);
+  assert.match(message, /👀 Wallet Trade/);
+  assert.match(message, /🟢 Buy detected/);
   assert.match(message, /Alpha &lt;Wallet&gt;/);
   assert.match(message, /0.125 SOL -> 250,000 BONK/);
   assert.match(message, /0.125 SOL/);
-  assert.match(message, /Source:<\/b> JUPITER/);
+  assert.match(message, /📡 Source:<\/b> JUPITER/);
 
   const copyMessage = formatWalletTradeMessageWithCopySettings(trade, {
     copyWalletAddress: otherWallet,
     copyWalletAddresses: [otherWallet, wallet],
     copyAmountSol: 0.25
   });
-  assert.match(copyMessage, /Copy trade/);
+  assert.match(copyMessage, /⚡ Copy Trade Setup/);
   assert.match(copyMessage, new RegExp(otherWallet));
   assert.match(copyMessage, new RegExp(wallet));
-  assert.match(copyMessage, /Copy wallets:<\/b> 2/);
-  assert.match(copyMessage, /Copy amount:<\/b> 0.25 SOL/);
-  assert.match(copyMessage, /Status:<\/b> Ready to copy 0.25 SOL into this token from 2 wallet/);
+  assert.match(copyMessage, /👛 Copy Wallets:<\/b> 2/);
+  assert.match(copyMessage, /💰 Copy Amount:<\/b> 0.25 SOL/);
+  assert.match(copyMessage, /🟢 Ready to copy <b>0.25 SOL<\/b> into this token from 2 wallet/);
 
   assert.equal(isCopyableSolToTokenBuy(trade), true);
+  assert.equal(
+    isCopyableSolToTokenBuy({
+      ...trade,
+      input: {
+        mint: "So11111111111111111111111111111111111111112",
+        symbol: null,
+        amount: 4.889866666
+      },
+      output: {
+        mint,
+        symbol: null,
+        amount: 137035949.044437
+      }
+    }),
+    true
+  );
   const simulationMessage = formatCopyTradeSimulationMessage(trade, {
     copyWalletAddress: otherWallet,
     copyAmountSol: 0.25
   });
-  assert.match(simulationMessage || "", /Would copy trade/);
+  assert.match(simulationMessage || "", /⚡ Copy Trade Simulation/);
+  assert.match(simulationMessage || "", /🟡 Would buy this token/);
   assert.match(simulationMessage || "", /Alpha &lt;Wallet&gt;/);
   assert.match(simulationMessage || "", new RegExp(otherWallet));
   assert.match(simulationMessage || "", new RegExp(mint));
-  assert.match(simulationMessage || "", /Would buy this token with 0.25 SOL/);
-  assert.match(simulationMessage || "", /PumpPortal:<\/b> Local transaction build not requested/);
+  assert.match(simulationMessage || "", /Build:<\/b> Local transaction build not requested/);
   assert.doesNotMatch(simulationMessage || "", /500,000/);
 
   const builtSimulationMessage = formatCopyTradeSimulationMessage(
@@ -517,7 +632,7 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
       errorText: null
     }
   );
-  assert.match(builtSimulationMessage || "", /PumpPortal:<\/b> Local transaction built \(1,234 bytes\)/);
+  assert.match(builtSimulationMessage || "", /Build:<\/b> Local transaction built \(1,234 bytes\)/);
 
   assert.deepEqual(
     buildPumpPortalLocalTradeRequest({
@@ -573,7 +688,12 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
       raw: { signature: "tx-alpha" }
     }
   });
-  assert.match(autoBuyMessage || "", /Auto copy buy submitted/);
+  assert.match(autoBuyMessage || "", /⚡ Auto Copy Buy/);
+  assert.match(autoBuyMessage || "", /🟢 Buy submitted/);
+  assert.match(autoBuyMessage || "", /🎯 Target/);
+  assert.match(autoBuyMessage || "", /👛 Trading Wallet/);
+  assert.match(autoBuyMessage || "", /💰 Copy Amount/);
+  assert.match(autoBuyMessage || "", /🪙 Contract Address/);
   assert.match(autoBuyMessage || "", /Tx:<\/b> <code>tx-alpha<\/code>/);
   assert.doesNotMatch(autoBuyMessage || "", /PumpPortal:/);
   assert.match(autoBuyMessage || "", new RegExp(otherWallet));
@@ -608,7 +728,8 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
       raw: "rate limited"
     }
   });
-  assert.match(failedAutoBuyMessage || "", /Auto copy buy failed/);
+  assert.match(failedAutoBuyMessage || "", /⚡ Auto Copy Buy/);
+  assert.match(failedAutoBuyMessage || "", /🔴 Buy failed/);
   assert.match(failedAutoBuyMessage || "", /Trade failed:<\/b> HTTP 429 - rate limited/);
   assert.doesNotMatch(failedAutoBuyMessage || "", /PumpPortal:/);
 
@@ -646,7 +767,8 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
       }
     ]
   });
-  assert.match(trailingScheduledMessage || "", /Trailing sells scheduled/);
+  assert.match(trailingScheduledMessage || "", /📉 Trailing Sells/);
+  assert.match(trailingScheduledMessage || "", /🟢 Sell schedule created/);
   assert.match(trailingScheduledMessage || "", /Sell 20% after 2s/);
   assert.match(trailingScheduledMessage || "", /Sell 100% after 4s/);
   assert.doesNotMatch(trailingScheduledMessage || "", /Build-only/);
@@ -667,10 +789,32 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
       raw: { signature: "sell-tx-beta" }
     }
   });
-  assert.match(trailingResultMessage, /Trailing sell submitted/);
-  assert.match(trailingResultMessage, /Step:<\/b> 2\/2/);
-  assert.match(trailingResultMessage, /Sell amount:<\/b> 100%/);
+  assert.match(trailingResultMessage, /📉 Trailing Sell/);
+  assert.match(trailingResultMessage, /🟢 Sell submitted/);
+  assert.match(trailingResultMessage, /🪜 Step:<\/b> 2\/2/);
+  assert.match(trailingResultMessage, /💰 Sell Amount:<\/b> 100%/);
+  assert.match(trailingResultMessage, /🪙 Contract Address/);
   assert.match(trailingResultMessage, /Tx:<\/b> <code>sell-tx-beta<\/code>/);
+
+  const duplicateTrailingMessage = formatCopyTradeTrailingSellResultMessage({
+    trade,
+    stepIndex: 1,
+    totalSteps: 2,
+    request: {
+      ...sellRequest,
+      amount: "20%"
+    },
+    result: {
+      ok: true,
+      status: 200,
+      signature: "sell-tx-beta",
+      errorText: null,
+      raw: { signature: "sell-tx-beta" }
+    },
+    duplicateSignature: true
+  });
+  assert.match(duplicateTrailingMessage, /🟡 Duplicate tx returned/);
+  assert.match(duplicateTrailingMessage, /already used earlier/);
 
   const trailingFailureMessage = formatCopyTradeTrailingSellResultMessage({
     trade,
@@ -685,7 +829,7 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
       raw: "sell failed"
     }
   });
-  assert.match(trailingFailureMessage, /Trailing sell failed/);
+  assert.match(trailingFailureMessage, /🔴 Sell failed/);
   assert.match(trailingFailureMessage, /Trade failed:<\/b> HTTP 500 - sell failed/);
   assert.doesNotMatch(trailingFailureMessage, /PumpPortal:/);
 });
@@ -752,6 +896,22 @@ test("Helius swap normalization handles token to SOL and token to token swaps", 
   assert.equal(isCopyableSolToTokenBuy(tokenToSol), false);
   assert.equal(isCopyableSolToTokenBuy(tokenToToken), false);
   assert.equal(
+    isCopyableSolToTokenBuy({
+      ...tokenToSol,
+      input: {
+        mint,
+        symbol: null,
+        amount: 100
+      },
+      output: {
+        mint: "So11111111111111111111111111111111111111112",
+        symbol: null,
+        amount: 1.5
+      }
+    }),
+    false
+  );
+  assert.equal(
     formatCopyTradeSimulationMessage(tokenToSol, {
       copyWalletAddress: otherWallet,
       copyAmountSol: 0.1
@@ -777,7 +937,7 @@ test("Helius swap normalization handles token to SOL and token to token swaps", 
       copyWalletAddress: otherWallet,
       copyAmountSol: 0.1
     }),
-    /Status:<\/b> Not a copyable SOL-to-token buy/
+    /⚪ Not a copyable SOL-to-token buy/
   );
 });
 

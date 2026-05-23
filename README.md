@@ -92,6 +92,7 @@ npm run import-subscribers -- data/telegram-subscribers.json
 - Wallet swap monitor events are stored in `WALLET_TRADE_LOG_PATH`.
 - `/mywallets` creates one PumpPortal Lightning trading wallet per verified chat. The bot shows the private key once and does not store it. Users must save it themselves and deposit SOL to the public address.
 - Copytrade auto buys require a generated trading wallet from `/mywallets`, a copy amount, and Copytrade Wallets from `/copytrade`. For copyable SOL-to-token buys, the bot submits a PumpPortal Lightning `buy` using the stored encrypted API key.
+- Copytrade mirrors each distinct target buy transaction. Exact duplicate webhook deliveries for the same observed transaction are ignored while that copy buy is in flight.
 - Treat generated trading wallets as hot wallets. Anyone with the private key can withdraw funds, and anyone with the linked API key can trade from the funded wallet.
 - `COPY_TRADE_TRAILING_SELL_ENABLED=true` schedules live PumpPortal Lightning percentage sells after a successful auto copy buy. Scheduled sell timers are in-memory and are cleared if the bot restarts.
 - Expose `WEBHOOK_PORT` through your reverse proxy at the exact `HELIUS_WEBHOOK_PUBLIC_URL`, and forward the `Authorization` header unchanged.

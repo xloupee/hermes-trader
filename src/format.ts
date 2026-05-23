@@ -335,11 +335,11 @@ export function formatMigrationMessage(event: LooseRecord, config: MigrationForm
     migration.eventType === "create" ||
     (activeMethods.length === 1 && activeMethods.includes("subscribeNewToken")) ||
     config.alertMode === "newtokens";
-  const heading = isCreateEvent ? "New Pump.fun token" : "Pumpfun migration detected";
+  const heading = isCreateEvent ? "🌱 New Pump.fun Token" : "🚀 Pump.fun Migration";
   const tokenName = migration.name || "Unknown token";
   const tokenSymbol = migration.symbol ? ` (${migration.symbol})` : "";
 
-  const lines = [`<b>${heading}</b>`, `<b>${escapeHtml(tokenName)}${escapeHtml(tokenSymbol)}</b>`];
+  const lines = [`<b>${heading}</b>`, `<b>🪙 ${escapeHtml(tokenName)}${escapeHtml(tokenSymbol)}</b>`];
 
   if (migration.description) {
     lines.push(escapeHtml(String(migration.description).slice(0, 180)));
@@ -347,26 +347,26 @@ export function formatMigrationMessage(event: LooseRecord, config: MigrationForm
 
   if (migration.coinAddress) {
     lines.push("");
-    lines.push("<b>Contract address</b>");
+    lines.push("<b>📋 Contract Address</b>");
     lines.push(`<code>${escapeHtml(migration.coinAddress)}</code>`);
   }
 
   if (migration.marketCap !== null) {
     const marketCap = migration.marketCapUsd !== null ? formatUsd(migration.marketCapUsd) : formatSol(migration.marketCapSol);
     lines.push("");
-    lines.push(`<b>Market cap:</b> ${escapeHtml(marketCap)}`);
+    lines.push(`<b>💵 Market Cap:</b> ${escapeHtml(marketCap)}`);
   }
 
-  lines.push(`<b>Cashback:</b> ${formatBooleanStatus(migration.cashbackEnabled)}`);
-  lines.push(`<b>Agent buybacks:</b> ${formatBooleanStatus(migration.agentBuybacksEnabled)}`);
-  lines.push(`<b>Creator fees:</b> ${formatCreatorFeeStatus(migration)}`);
+  lines.push(`<b>💸 Cashback:</b> ${formatBooleanStatus(migration.cashbackEnabled)}`);
+  lines.push(`<b>🤖 Agent Buybacks:</b> ${formatBooleanStatus(migration.agentBuybacksEnabled)}`);
+  lines.push(`<b>👤 Creator Fees:</b> ${formatCreatorFeeStatus(migration)}`);
 
   if (migration.transactionAnalysis) {
     const flow = migration.transactionAnalysis;
     const flowLines = [];
 
     if (flow.networkFeeSol !== null && flow.networkFeeSol !== undefined) {
-      flowLines.push(`<b>Network fee:</b> ${escapeHtml(formatSolUsd(flow.networkFeeSol, migration.solUsdPrice))}`);
+      flowLines.push(`<b>Network Fee:</b> ${escapeHtml(formatSolUsd(flow.networkFeeSol, migration.solUsdPrice))}`);
     }
 
     for (const recipient of flow.recipients || []) {
@@ -377,7 +377,7 @@ export function formatMigrationMessage(event: LooseRecord, config: MigrationForm
 
     if (flowLines.length > 0) {
       lines.push("");
-      lines.push("<b>Fees / SOL flow</b>");
+      lines.push("<b>💧 Fees / SOL Flow</b>");
       lines.push(...flowLines);
     }
   }
@@ -390,7 +390,7 @@ export function formatMigrationMessage(event: LooseRecord, config: MigrationForm
 
   if (fallbackLinks.length > 0) {
     lines.push("");
-    lines.push(`<b>Links:</b> ${fallbackLinks.join(" | ")}`);
+    lines.push(`<b>🔗 Links:</b> ${fallbackLinks.join(" | ")}`);
   }
 
   return lines.join("\n");

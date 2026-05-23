@@ -13,6 +13,7 @@ import { isValidSolanaAddress } from "./wallet-monitor.js";
 import type {
   AlertModeValue,
   LegacyBotConfig,
+  SubscriberRecord,
   SubscriberStore,
   TelegramCallbackQuery,
   TelegramChatId,
@@ -39,8 +40,19 @@ const telegramCommands = [
 const MAX_WALLET_NICKNAME_LENGTH = 48;
 const PENDING_COPY_INPUT_TTL_MS = 10 * 60 * 1000;
 const MAX_TRAILING_SELL_STEPS = 20;
+const DEFAULT_COPY_TRADE_SLIPPAGE = 10;
+const DEFAULT_COPY_TRADE_PRIORITY_FEE = 0.00005;
 
-type PendingCopyInputAction = "copy_amount" | "trailing_step" | "trailing_steps" | "trailing_formula";
+type PendingCopyInputAction =
+  | "copy_amount"
+  | "rename_trading_wallet"
+  | "buy_slippage"
+  | "buy_priority_fee"
+  | "sell_slippage"
+  | "sell_priority_fee"
+  | "trailing_step"
+  | "trailing_steps"
+  | "trailing_formula";
 type PendingWalletInputAction =
   | "watch_wallet"
   | "rename_wallet"
@@ -115,6 +127,53 @@ function formatSolAmount(value: number): string {
   }).format(value);
 }
 
+function formatPercent(value: number): string {
+  return new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: 4
+  }).format(value);
+}
+
+function effectiveBuySlippage(subscriber: SubscriberRecord | null | undefined, config: LegacyBotConfig): number {
+  return subscriber?.copyTradeBuySlippagePercent ?? config.copyTradeSlippage ?? DEFAULT_COPY_TRADE_SLIPPAGE;
+}
+
+function effectiveBuyPriorityFee(subscriber: SubscriberRecord | null | undefined, config: LegacyBotConfig): number {
+  return subscriber?.copyTradeBuyPriorityFeeSol ?? config.copyTradePriorityFee ?? DEFAULT_COPY_TRADE_PRIORITY_FEE;
+}
+
+function effectiveSellSlippage(subscriber: SubscriberRecord | null | undefined, config: LegacyBotConfig): number {
+  return subscriber?.copyTradeSellSlippagePercent ?? config.copyTradeSlippage ?? DEFAULT_COPY_TRADE_SLIPPAGE;
+}
+
+function effectiveSellPriorityFee(subscriber: SubscriberRecord | null | undefined, config: LegacyBotConfig): number {
+  return subscriber?.copyTradeSellPriorityFeeSol ?? config.copyTradePriorityFee ?? DEFAULT_COPY_TRADE_PRIORITY_FEE;
+}
+
+function settingSource(value: number | null | undefined): string {
+  return value === null || value === undefined ? "Inherited" : "Custom";
+}
+
+export function parseSlippageInput(value: string): number | null {
+  const normalized = value.trim().replace(/%$/, "").trim();
+  const parsed = Number(normalized);
+
+  if (!Number.isFinite(parsed) || parsed < 0.1 || parsed > 100) {
+    return null;
+  }
+
+  return parsed;
+}
+
+export function parsePriorityFeeInput(value: string): number | null {
+  const parsed = Number(value.trim());
+
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1) {
+    return null;
+  }
+
+  return parsed;
+}
+
 function shortWallet(value: string): string {
   return value.length > 12 ? `${value.slice(0, 6)}...${value.slice(-6)}` : value;
 }
@@ -127,11 +186,19 @@ export function formatCopyTradeDashboardText({
   tradingWalletPublicKey,
   copyAmountSol,
   copyTradeWallets,
+  buySlippagePercent = DEFAULT_COPY_TRADE_SLIPPAGE,
+  buyPriorityFeeSol = DEFAULT_COPY_TRADE_PRIORITY_FEE,
+  sellSlippagePercent = DEFAULT_COPY_TRADE_SLIPPAGE,
+  sellPriorityFeeSol = DEFAULT_COPY_TRADE_PRIORITY_FEE,
   now = new Date()
 }: {
   tradingWalletPublicKey: string | null;
   copyAmountSol: number | null;
   copyTradeWallets: WatchedWallet[];
+  buySlippagePercent?: number;
+  buyPriorityFeeSol?: number;
+  sellSlippagePercent?: number;
+  sellPriorityFeeSol?: number;
   now?: Date;
 }): string {
   const ready = Boolean(tradingWalletPublicKey && copyAmountSol && copyTradeWallets.length > 0);
@@ -153,6 +220,8 @@ export function formatCopyTradeDashboardText({
     tradingWalletPublicKey ? `└ ${shortWallet(tradingWalletPublicKey)}` : "└ Not created",
     "",
     `<b>💰 Copy Amount:</b> ${copyAmountSol ? `${formatSolAmount(copyAmountSol)} SOL` : "Not set"}`,
+    `<b>⚙️ Buy:</b> ${formatPercent(buySlippagePercent)}% slip / ${formatSolAmount(buyPriorityFeeSol)} SOL priority`,
+    `<b>⚙️ Sell:</b> ${formatPercent(sellSlippagePercent)}% slip / ${formatSolAmount(sellPriorityFeeSol)} SOL priority`,
     "",
     `<b>🎯 Copytrade Wallets:</b> ${copyTradeWallets.length}`,
     ...walletLines,
@@ -312,14 +381,37 @@ export function parseTrailingSellStepInput(value: string): TrailingSellStep | nu
   return { percent, delayMs };
 }
 
+function normalizeTrailingSellStepEntries(value: string): string[] {
+  const rawEntries = value.split(/[\n,;]+/).map((entry) => entry.trim()).filter(Boolean);
+  const entries: string[] = [];
+
+  for (let index = 0; index < rawEntries.length; index += 1) {
+    const current = rawEntries[index];
+    const next = rawEntries[index + 1];
+
+    if (
+      current &&
+      next &&
+      parsePercentToken(current) !== null &&
+      parseDurationMs(next) !== null
+    ) {
+      entries.push(`${current} ${next}`);
+      index += 1;
+      continue;
+    }
+
+    entries.push(current);
+  }
+
+  return entries;
+}
+
 export function parseTrailingSellStepsInput(value: string): TrailingSellStep[] | null {
-  const steps = value
-    .split(/[\n,;]+/)
+  const rawEntries = normalizeTrailingSellStepEntries(value);
+  const steps = rawEntries
     .map((entry) => parseTrailingSellStepInput(entry))
     .filter((step): step is TrailingSellStep => Boolean(step))
     .sort((left, right) => left.delayMs - right.delayMs);
-
-  const rawEntries = value.split(/[\n,;]+/).map((entry) => entry.trim()).filter(Boolean);
 
   if (rawEntries.length === 0 || rawEntries.length !== steps.length || steps.length > MAX_TRAILING_SELL_STEPS) {
     return null;
@@ -396,22 +488,94 @@ function chooseModeText(): string {
 }
 
 function verificationPrompt(): string {
-  return ["<b>Verification required.</b>", "", "Send:", "<code>/verify your-code</code>"].join("\n");
+  return [
+    "<b>🚀 Welcome to Pump.fun Notifier</b>",
+    "",
+    "Real-time token alerts, wallet tracking, and Bloom-style copy trading from Telegram.",
+    "",
+    "🔴 Setup is <b>inactive</b>",
+    "",
+    "<b>🔐 Verification Required</b>",
+    "Send:",
+    "<code>/verify your-code</code>",
+    "",
+    "📚 <b>Dashboards</b>",
+    "├ /alerts - Token alerts",
+    "├ /trackwallets - Wallet tracking",
+    "├ /mywallets - Trading wallet",
+    "└ /copytrade - Copy trading",
+    "",
+    `🕒 Last updated: ${formatDashboardTime(new Date())}`
+  ].join("\n");
+}
+
+export function formatStartDashboardText(subscriber: SubscriberRecord): string {
+  const tokenAlertsActive = Boolean(subscriber.mode);
+  const tradingWalletStatus = subscriber.tradingWallet ? shortWallet(subscriber.tradingWallet.publicKey) : "Not created";
+  const copyReady = Boolean(subscriber.tradingWallet && subscriber.copyAmountSol && subscriber.copyTradeWallets.length > 0);
+  const copyWalletLines = subscriber.copyTradeWallets.length === 0
+    ? ["└ No Copytrade Wallets yet"]
+    : subscriber.copyTradeWallets.slice(0, 3).map((wallet) => `└ ${formatCopyTradeWalletSummary(wallet)}`);
+  const moreCopyWallets = subscriber.copyTradeWallets.length > 3
+    ? [`└ +${subscriber.copyTradeWallets.length - 3} more in /copytrade`]
+    : [];
+
+  return [
+    "<b>🚀 Welcome to Pump.fun Notifier</b>",
+    "",
+    "Real-time token alerts, wallet tracking, and Bloom-style copy trading from Telegram.",
+    "",
+    tokenAlertsActive || copyReady ? "🟢 Setup is <b>active</b>" : "🔴 Setup is <b>inactive</b>",
+    "",
+    "<b>🔔 Token Alerts</b>",
+    `└ ${tokenAlertsActive ? modeLabel(subscriber.mode as AlertModeValue) : "Paused"}`,
+    "",
+    "<b>👀 Tracked Wallets</b>",
+    `└ ${subscriber.watchedWallets.length}`,
+    "",
+    "<b>👛 Trading Wallet</b>",
+    `└ ${tradingWalletStatus}`,
+    "",
+    "<b>⚡ Copy Trading</b>",
+    `├ Amount: ${subscriber.copyAmountSol ? `${formatSolAmount(subscriber.copyAmountSol)} SOL` : "Not set"}`,
+    `├ Wallets: ${subscriber.copyTradeWallets.length}`,
+    ...copyWalletLines,
+    ...moreCopyWallets,
+    "",
+    "📚 <b>Dashboards</b>",
+    "├ /alerts - Token alerts",
+    "├ /trackwallets - Wallet tracking",
+    "├ /mywallets - Trading wallet",
+    "└ /copytrade - Copy trading",
+    "",
+    `🕒 Last updated: ${formatDashboardTime(new Date())}`
+  ].join("\n");
 }
 
 export function helpText(_chatId?: TelegramChatId): string {
   return [
-    "<b>Pump.fun notifier bot</b>",
+    "<b>📚 Pump.fun Notifier Help</b>",
     "",
-    "Commands:",
-    "/start - Start notifications",
-    "/verify &lt;code&gt; - Verify this chat",
-    "/stop - Stop notifications",
-    "/alerts - Open alert mode dashboard",
-    "/trackwallets - Open track wallet dashboard",
-    "/mywallets - Open trading wallet dashboard",
-    "/copytrade - Open copy trade setup menu",
-    "/help - Show commands"
+    "Everything runs through dashboards. Open one, tap buttons, and the bot will guide the next step.",
+    "",
+    "<b>🚀 Quick Start</b>",
+    "├ /start - Open your status page",
+    "├ /verify &lt;code&gt; - Verify this chat",
+    "└ /stop - Stop notifications",
+    "",
+    "<b>🔔 Alerts</b>",
+    "└ /alerts - Toggle migrated coins and new tokens",
+    "",
+    "<b>👀 Wallet Tracking</b>",
+    "└ /trackwallets - Track wallets for normal trade alerts",
+    "",
+    "<b>👛 Trading Wallet</b>",
+    "└ /mywallets - Create or view your PumpPortal trading wallet",
+    "",
+    "<b>⚡ Copy Trading</b>",
+    "└ /copytrade - Configure copy amount, wallets, and trailing sells",
+    "",
+    `🕒 Last updated: ${formatDashboardTime(new Date())}`
   ].join("\n");
 }
 
@@ -620,9 +784,58 @@ export function createTelegramCommandPoller({
       return;
     }
 
+    if (data === "mywallets:rename") {
+      setPendingCopyInput(chatId, "rename_trading_wallet");
+      await reply(chatId, "Send a trading wallet nickname, or send <code>-</code> to clear it.");
+      return;
+    }
+
     if (data === "copytrade:set_amount") {
       setPendingCopyInput(chatId, "copy_amount");
       await reply(chatId, "Send the fixed copy size in SOL, for example <code>0.1</code>.");
+      return;
+    }
+
+    if (data === "copytrade:settings") {
+      const dashboard = copyTradeSettingsDashboard(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data === "copytrade:settings:buy_slippage") {
+      setPendingCopyInput(chatId, "buy_slippage");
+      await reply(chatId, "Send buy slippage percent, for example <code>10</code>, <code>10%</code>, or <code>2.5</code>.");
+      return;
+    }
+
+    if (data === "copytrade:settings:buy_priority") {
+      setPendingCopyInput(chatId, "buy_priority_fee");
+      await reply(chatId, "Send buy priority fee in SOL, for example <code>0.00005</code>.");
+      return;
+    }
+
+    if (data === "copytrade:settings:sell_slippage") {
+      setPendingCopyInput(chatId, "sell_slippage");
+      await reply(chatId, "Send sell slippage percent, for example <code>10</code>, <code>10%</code>, or <code>2.5</code>.");
+      return;
+    }
+
+    if (data === "copytrade:settings:sell_priority") {
+      setPendingCopyInput(chatId, "sell_priority_fee");
+      await reply(chatId, "Send sell priority fee in SOL, for example <code>0.00005</code>.");
+      return;
+    }
+
+    if (data === "copytrade:settings:reset") {
+      const updated = await subscribers?.resetCopyTradeExecutionSettings(chatId);
+
+      if (!updated) {
+        await reply(chatId, verificationPrompt());
+        return;
+      }
+
+      const dashboard = copyTradeSettingsDashboard(chatId);
+      await reply(chatId, `<b>Execution settings reset to inherited defaults.</b>\n\n${dashboard.text}`, dashboard.replyMarkup);
       return;
     }
 
@@ -784,11 +997,7 @@ export function createTelegramCommandPoller({
     const subscriber = subscribers?.get(chatId);
 
     if (subscriber) {
-      if (!subscriber.mode) {
-        return `<b>You are verified.</b>\nNotifications are not on yet.\n\n${chooseModeText()}`;
-      }
-
-      return `<b>You are verified.</b>\nCurrent alerts: ${modeLabel(subscriber.mode)}\n\n${helpText(chatId)}`;
+      return formatStartDashboardText(subscriber);
     }
 
     if (args.length > 0) {
@@ -820,7 +1029,8 @@ export function createTelegramCommandPoller({
     }
 
     await subscribers.add(chatId);
-    return `<b>Verified.</b>\n\n${chooseModeText()}`;
+    const subscriber = subscribers.get(chatId);
+    return subscriber ? formatStartDashboardText(subscriber) : `<b>Verified.</b>\n\n${chooseModeText()}`;
   }
 
   function requireVerified(chatId: TelegramChatId): string | null {
@@ -1252,20 +1462,35 @@ export function createTelegramCommandPoller({
     }
 
     const tradingWallet = subscribers?.getTradingWallet(chatId) || null;
-    const text = [
-      "<b>Trading wallet</b>",
-      tradingWallet
-        ? `<b>Deposit address</b>\n<code>${tradingWallet.publicKey}</code>`
-        : "No trading wallet yet.",
-      tradingWallet ? `<b>API key:</b> saved ending in <code>${tradingWallet.apiKeyLast4}</code>` : "",
-      tradingWallet ? "<b>Private key:</b> shown once when created. The bot cannot recover it." : "",
-      "",
-      tradingWallet
-        ? "Deposit SOL here to enable auto copy buys."
-        : "Tap below to create one."
-    ]
-      .filter(Boolean)
-      .join("\n");
+    const text = tradingWallet
+      ? [
+          "<b>👛 Trading Wallet</b>",
+          "",
+          "Deposit SOL here to enable auto copy buys.",
+          "",
+          `<b>🏷️ Name:</b> ${tradingWallet.label ? escapeWalletLabel(tradingWallet.label) : "Not set"}`,
+          "",
+          "<b>📥 Deposit Address</b>",
+          `<code>${tradingWallet.publicKey}</code>`,
+          "",
+          `<b>🔑 API key:</b> Saved ending in <code>${tradingWallet.apiKeyLast4}</code>`,
+          "<b>🔐 Private key:</b> Shown once when created. The bot cannot recover it.",
+          "",
+          "🟢 Wallet is ready once it has SOL.",
+          "",
+          `🕒 Last updated: ${formatDashboardTime(new Date())}`
+        ].join("\n")
+      : [
+          "<b>👛 Trading Wallet</b>",
+          "",
+          "No trading wallet yet.",
+          "",
+          "Create a PumpPortal trading wallet to enable Bloom-style copy buys.",
+          "",
+          "🔴 Setup is <b>inactive</b>",
+          "",
+          `🕒 Last updated: ${formatDashboardTime(new Date())}`
+        ].join("\n");
 
     return {
       text,
@@ -1276,7 +1501,7 @@ export function createTelegramCommandPoller({
   function myWalletDashboardReplyMarkup(publicKey: string | null): TelegramReplyMarkup {
     if (!publicKey) {
       return {
-        inline_keyboard: [[{ text: "🌸 Create Wallet", callback_data: "mywallets:create" }]]
+        inline_keyboard: [[{ text: "🚀 Create Wallet", callback_data: "mywallets:create" }]]
       };
     }
 
@@ -1289,8 +1514,9 @@ export function createTelegramCommandPoller({
               text: publicKey
             }
           },
-          { text: "📊 Status", callback_data: "mywallets:dashboard" }
-        ]
+          { text: "✏️ Rename", callback_data: "mywallets:rename" }
+        ],
+        [{ text: "📊 Status", callback_data: "mywallets:dashboard" }]
       ]
     };
   }
@@ -1323,6 +1549,7 @@ export function createTelegramCommandPoller({
       publicKey: result.wallet.publicKey,
       encryptedApiKey: encryptSecret(result.wallet.apiKey, config.pumpPortalWalletKeyEncryptionSecret || ""),
       apiKeyLast4: last4(result.wallet.apiKey),
+      label: null,
       createdAt: now,
       updatedAt: now
     });
@@ -1387,6 +1614,28 @@ export function createTelegramCommandPoller({
 
     const value = message.text?.trim() || "";
 
+    if (pending.action === "rename_trading_wallet") {
+      const nextLabel = value === "-" ? null : value;
+      const nicknameError = nextLabel === null ? null : validateNickname(nextLabel);
+
+      if (nicknameError) {
+        return { text: nicknameError };
+      }
+
+      pendingCopyInputs.delete(String(chatId));
+      const updated = await subscribers?.renameTradingWallet(chatId, nextLabel);
+
+      if (!updated) {
+        return { text: "No trading wallet found yet. Open /mywallets to create one." };
+      }
+
+      const dashboard = myWalletDashboard(chatId);
+      return {
+        text: `${nextLabel === null ? "<b>Trading wallet nickname cleared.</b>" : `<b>Trading wallet renamed:</b> ${escapeWalletLabel(nextLabel)}`}\n\n${dashboard.text}`,
+        replyMarkup: dashboard.replyMarkup
+      };
+    }
+
     if (pending.action === "trailing_step" || pending.action === "trailing_steps" || pending.action === "trailing_formula") {
       const walletAddress = pending.walletAddress;
       const wallet = walletAddress
@@ -1440,6 +1689,53 @@ export function createTelegramCommandPoller({
       };
     }
 
+    if (
+      pending.action === "buy_slippage" ||
+      pending.action === "sell_slippage" ||
+      pending.action === "buy_priority_fee" ||
+      pending.action === "sell_priority_fee"
+    ) {
+      const isSlippage = pending.action === "buy_slippage" || pending.action === "sell_slippage";
+      const parsed = isSlippage ? parseSlippageInput(value) : parsePriorityFeeInput(value);
+
+      if (parsed === null) {
+        return {
+          text: isSlippage
+            ? "That slippage is not valid. Send a percent from <code>0.1</code> to <code>100</code>, like <code>10%</code>."
+            : "That priority fee is not valid. Send a SOL amount greater than <code>0</code> and no more than <code>1</code>, like <code>0.00005</code>."
+        };
+      }
+
+      pendingCopyInputs.delete(String(chatId));
+      const updated =
+        pending.action === "buy_slippage"
+          ? await subscribers?.setCopyTradeBuySlippage(chatId, parsed)
+          : pending.action === "buy_priority_fee"
+            ? await subscribers?.setCopyTradeBuyPriorityFee(chatId, parsed)
+            : pending.action === "sell_slippage"
+              ? await subscribers?.setCopyTradeSellSlippage(chatId, parsed)
+              : await subscribers?.setCopyTradeSellPriorityFee(chatId, parsed);
+
+      if (!updated) {
+        return { text: verificationPrompt() };
+      }
+
+      const dashboard = copyTradeSettingsDashboard(chatId);
+      const label =
+        pending.action === "buy_slippage"
+          ? "Buy slippage"
+          : pending.action === "buy_priority_fee"
+            ? "Buy priority fee"
+            : pending.action === "sell_slippage"
+              ? "Sell slippage"
+              : "Sell priority fee";
+      const formatted = isSlippage ? `${formatPercent(parsed)}%` : `${formatSolAmount(parsed)} SOL`;
+      return {
+        text: `<b>${label} saved:</b> ${formatted}\n\n${dashboard.text}`,
+        replyMarkup: dashboard.replyMarkup
+      };
+    }
+
     const amount = Number(value);
 
     if (!Number.isFinite(amount) || amount <= 0) {
@@ -1478,7 +1774,11 @@ export function createTelegramCommandPoller({
     const text = formatCopyTradeDashboardText({
       tradingWalletPublicKey: tradingWallet?.publicKey || null,
       copyAmountSol: subscriber?.copyAmountSol || null,
-      copyTradeWallets
+      copyTradeWallets,
+      buySlippagePercent: effectiveBuySlippage(subscriber, config),
+      buyPriorityFeeSol: effectiveBuyPriorityFee(subscriber, config),
+      sellSlippagePercent: effectiveSellSlippage(subscriber, config),
+      sellPriorityFeeSol: effectiveSellPriorityFee(subscriber, config)
     });
 
     return {
@@ -1500,9 +1800,56 @@ export function createTelegramCommandPoller({
         ],
         [
           { text: "📉 Trailing Sells", callback_data: "copytrade:trailing" },
-          { text: "📋 List Wallets", callback_data: "copytrade:wallets" }
-        ]
+          { text: "⚙️ Settings", callback_data: "copytrade:settings" }
+        ],
+        [{ text: "📋 List Wallets", callback_data: "copytrade:wallets" }]
       ]
+    };
+  }
+
+  function copyTradeSettingsDashboard(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return {
+        text: gate,
+        replyMarkup: copyTradeDashboardReplyMarkup()
+      };
+    }
+
+    const subscriber = subscribers?.get(chatId) || null;
+    const text = [
+      "<b>⚙️ Execution Settings</b>",
+      "",
+      "Tune buy and sell execution separately. Custom values override inherited env defaults.",
+      "",
+      "<b>🟢 Buy Settings</b>",
+      `├ Slippage: ${formatPercent(effectiveBuySlippage(subscriber, config))}% (${settingSource(subscriber?.copyTradeBuySlippagePercent)})`,
+      `└ Priority: ${formatSolAmount(effectiveBuyPriorityFee(subscriber, config))} SOL (${settingSource(subscriber?.copyTradeBuyPriorityFeeSol)})`,
+      "",
+      "<b>🔴 Sell Settings</b>",
+      `├ Slippage: ${formatPercent(effectiveSellSlippage(subscriber, config))}% (${settingSource(subscriber?.copyTradeSellSlippagePercent)})`,
+      `└ Priority: ${formatSolAmount(effectiveSellPriorityFee(subscriber, config))} SOL (${settingSource(subscriber?.copyTradeSellPriorityFeeSol)})`,
+      "",
+      `🕒 Last updated: ${formatDashboardTime(new Date())}`
+    ].join("\n");
+
+    return {
+      text,
+      replyMarkup: {
+        inline_keyboard: [
+          [
+            { text: "🟢 Buy Slippage", callback_data: "copytrade:settings:buy_slippage" },
+            { text: "🟢 Buy Priority", callback_data: "copytrade:settings:buy_priority" }
+          ],
+          [
+            { text: "🔴 Sell Slippage", callback_data: "copytrade:settings:sell_slippage" },
+            { text: "🔴 Sell Priority", callback_data: "copytrade:settings:sell_priority" }
+          ],
+          [{ text: "♻️ Reset Defaults", callback_data: "copytrade:settings:reset" }],
+          [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]
+        ]
+      }
     };
   }
 
@@ -1697,20 +2044,34 @@ export function createTelegramCommandPoller({
     }
 
     const effective = effectiveTrailingSellConfig(wallet);
+    const inherited = !wallet.trailingSellConfig;
+    const enabledLine = effective.enabled ? "🟢 Trailing sells are <b>active</b>" : "🔴 Trailing sells are <b>inactive</b>";
+    const sourceLine = inherited ? "Inherited env defaults" : "Custom wallet setup";
+    const walletName = wallet.label ? escapeWalletLabel(wallet.label) : shortWallet(wallet.address);
     const text = [
-      "<b>Trailing sells</b>",
-      `<b>Wallet:</b> ${wallet.label ? escapeWalletLabel(wallet.label) : shortWallet(wallet.address)}`,
-      wallet.label ? `<code>${wallet.address}</code>` : "",
-      `<b>Status:</b> ${trailingSellStatusLabel(wallet)}`,
-      `<b>Percent basis:</b> ${effective.percentBasis === "remaining_balance" ? "Remaining balance" : "Original position"}`,
-      `<b>Mode:</b> ${effective.mode === "formula" ? "Formula preset" : "Custom steps"}`,
-      `<b>Steps:</b> ${formatTrailingSellSteps(effective.steps)}`,
+      "<b>📉 Trailing Sells</b>",
       "",
-      wallet.trailingSellConfig
-        ? "Reset returns this wallet to inherited env defaults."
-        : "This wallet is using inherited env defaults until you customize it."
+      "Configure automated sell steps after this wallet triggers a copy buy.",
+      "",
+      `<b>🎯 Wallet:</b> ${walletName}`,
+      wallet.label ? `└ <code>${wallet.address}</code>` : null,
+      "",
+      enabledLine,
+      "",
+      `<b>⚙️ Source:</b> ${sourceLine}`,
+      `<b>📐 Basis:</b> ${effective.percentBasis === "remaining_balance" ? "Remaining balance" : "Original position"}`,
+      `<b>🧩 Mode:</b> ${effective.mode === "formula" ? "Formula preset" : "Custom steps"}`,
+      "",
+      "<b>🕒 Sell Schedule</b>",
+      ...effective.steps.map((step, index) => `├ ${index + 1}. Sell ${formatTrailingPercent(step.percent)}% after ${formatDuration(step.delayMs)}`),
+      "",
+      inherited
+        ? "⚪ Using inherited defaults until you customize this wallet."
+        : "♻️ Reset returns this wallet to inherited defaults.",
+      "",
+      `🕒 Last updated: ${formatDashboardTime(new Date())}`
     ]
-      .filter(Boolean)
+      .filter((line): line is string => line !== null)
       .join("\n");
 
     return {

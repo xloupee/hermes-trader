@@ -75,6 +75,10 @@ export function makeSubscriber(chatId: string, mode: AlertModeValue | null, now 
     copyWalletAddress: null,
     copyWalletAddresses: [],
     copyAmountSol: null,
+    copyTradeBuySlippagePercent: null,
+    copyTradeBuyPriorityFeeSol: null,
+    copyTradeSellSlippagePercent: null,
+    copyTradeSellPriorityFeeSol: null,
     copyTargetWalletAddress: null,
     verifiedAt: now,
     updatedAt: now
@@ -151,6 +155,10 @@ export function mergeSubscriber(
     copyWalletAddress: stringValue(existing?.copyWalletAddress) || null,
     copyWalletAddresses: existing?.copyWalletAddresses || [],
     copyAmountSol: finiteNumber(existing?.copyAmountSol),
+    copyTradeBuySlippagePercent: finiteNumber(existing?.copyTradeBuySlippagePercent),
+    copyTradeBuyPriorityFeeSol: finiteNumber(existing?.copyTradeBuyPriorityFeeSol),
+    copyTradeSellSlippagePercent: finiteNumber(existing?.copyTradeSellSlippagePercent),
+    copyTradeSellPriorityFeeSol: finiteNumber(existing?.copyTradeSellPriorityFeeSol),
     copyTargetWalletAddress: stringValue(existing?.copyTargetWalletAddress) || null,
     verifiedAt: typeof verifiedAt === "string" ? verifiedAt : existing?.verifiedAt || now,
     updatedAt: typeof updatedAt === "string" ? updatedAt : existing?.updatedAt || now
@@ -170,6 +178,7 @@ export function normalizeTradingWallet(value: unknown, fallbackNow = new Date().
     publicKey,
     encryptedApiKey,
     apiKeyLast4: stringValue(record.apiKeyLast4 || record.api_key_last4)?.trim() || "****",
+    label: stringValue(record.label || record.nickname)?.trim() || null,
     createdAt: typeof record.createdAt === "string" ? record.createdAt : fallbackNow,
     updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : fallbackNow
   };
@@ -237,6 +246,10 @@ function loadSubscriberRecordInto(subscribers: Map<string, SubscriberRecord>, va
       copyWalletAddresses: [],
       copyWalletAddress: null,
       copyAmountSol: finiteNumber(record.copyAmountSol ?? record.copyAmount) ?? existing.copyAmountSol,
+      copyTradeBuySlippagePercent: finiteNumber(record.copyTradeBuySlippagePercent ?? record.copy_trade_buy_slippage_percent) ?? existing.copyTradeBuySlippagePercent,
+      copyTradeBuyPriorityFeeSol: finiteNumber(record.copyTradeBuyPriorityFeeSol ?? record.copy_trade_buy_priority_fee_sol) ?? existing.copyTradeBuyPriorityFeeSol,
+      copyTradeSellSlippagePercent: finiteNumber(record.copyTradeSellSlippagePercent ?? record.copy_trade_sell_slippage_percent) ?? existing.copyTradeSellSlippagePercent,
+      copyTradeSellPriorityFeeSol: finiteNumber(record.copyTradeSellPriorityFeeSol ?? record.copy_trade_sell_priority_fee_sol) ?? existing.copyTradeSellPriorityFeeSol,
       copyTargetWalletAddress: legacyCopyTarget || existing.copyTargetWalletAddress
     });
   }
@@ -653,6 +666,33 @@ export function createSubscriberStore({
       await save();
       return true;
     },
+    async renameTradingWallet(chatId, label) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+
+      if (!existing.tradingWallet) {
+        return false;
+      }
+
+      const now = new Date().toISOString();
+      subscribers.set(normalized, {
+        ...existing,
+        tradingWallet: {
+          ...existing.tradingWallet,
+          label,
+          updatedAt: now
+        },
+        updatedAt: now
+      });
+      await save();
+      return true;
+    },
     getTradingWallet(chatId) {
       return subscribers.get(String(chatId))?.tradingWallet || null;
     },
@@ -713,6 +753,94 @@ export function createSubscriberStore({
       subscribers.set(normalized, {
         ...existing,
         copyAmountSol: amountSol,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return true;
+    },
+    async setCopyTradeBuySlippage(chatId, percent) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      subscribers.set(normalized, {
+        ...existing,
+        copyTradeBuySlippagePercent: percent,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return true;
+    },
+    async setCopyTradeBuyPriorityFee(chatId, sol) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      subscribers.set(normalized, {
+        ...existing,
+        copyTradeBuyPriorityFeeSol: sol,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return true;
+    },
+    async setCopyTradeSellSlippage(chatId, percent) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      subscribers.set(normalized, {
+        ...existing,
+        copyTradeSellSlippagePercent: percent,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return true;
+    },
+    async setCopyTradeSellPriorityFee(chatId, sol) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      subscribers.set(normalized, {
+        ...existing,
+        copyTradeSellPriorityFeeSol: sol,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return true;
+    },
+    async resetCopyTradeExecutionSettings(chatId) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      subscribers.set(normalized, {
+        ...existing,
+        copyTradeBuySlippagePercent: null,
+        copyTradeBuyPriorityFeeSol: null,
+        copyTradeSellSlippagePercent: null,
+        copyTradeSellPriorityFeeSol: null,
         updatedAt: new Date().toISOString()
       });
       await save();

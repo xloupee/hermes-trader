@@ -28,6 +28,10 @@ export interface SubscriberRow {
   copy_wallet_address: string | null;
   copy_wallet_addresses?: string[] | null;
   copy_amount_sol: string | number | null;
+  copy_trade_buy_slippage_percent?: string | number | null;
+  copy_trade_buy_priority_fee_sol?: string | number | null;
+  copy_trade_sell_slippage_percent?: string | number | null;
+  copy_trade_sell_priority_fee_sol?: string | number | null;
   copy_target_wallet_address: string | null;
   verified_at: string;
   updated_at: string;
@@ -55,6 +59,7 @@ export interface TradingWalletRow {
   public_key: string;
   encrypted_api_key: string;
   api_key_last4: string;
+  label?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -116,6 +121,10 @@ function subscriberRow(record: SubscriberRecord): Omit<SubscriberRow, "telegram_
     copy_wallet_address: null,
     copy_wallet_addresses: [],
     copy_amount_sol: record.copyAmountSol,
+    copy_trade_buy_slippage_percent: record.copyTradeBuySlippagePercent,
+    copy_trade_buy_priority_fee_sol: record.copyTradeBuyPriorityFeeSol,
+    copy_trade_sell_slippage_percent: record.copyTradeSellSlippagePercent,
+    copy_trade_sell_priority_fee_sol: record.copyTradeSellPriorityFeeSol,
     copy_target_wallet_address: record.copyTargetWalletAddress,
     verified_at: record.verifiedAt,
     updated_at: record.updatedAt
@@ -161,6 +170,7 @@ function tradingWalletRow(chatId: string, wallet: TradingWallet): TradingWalletR
     public_key: wallet.publicKey,
     encrypted_api_key: wallet.encryptedApiKey,
     api_key_last4: wallet.apiKeyLast4,
+    label: wallet.label,
     created_at: wallet.createdAt,
     updated_at: wallet.updatedAt
   };
@@ -236,6 +246,7 @@ export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
           publicKey: tradingWalletRow.public_key,
           encryptedApiKey: tradingWalletRow.encrypted_api_key,
           apiKeyLast4: tradingWalletRow.api_key_last4,
+          label: tradingWalletRow.label ?? null,
           createdAt: tradingWalletRow.created_at,
           updatedAt: tradingWalletRow.updated_at
         }
@@ -243,6 +254,10 @@ export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
     copyWalletAddress: null,
     copyWalletAddresses: [],
     copyAmountSol: numericValue(row.copy_amount_sol),
+    copyTradeBuySlippagePercent: numericValue(row.copy_trade_buy_slippage_percent ?? null),
+    copyTradeBuyPriorityFeeSol: numericValue(row.copy_trade_buy_priority_fee_sol ?? null),
+    copyTradeSellSlippagePercent: numericValue(row.copy_trade_sell_slippage_percent ?? null),
+    copyTradeSellPriorityFeeSol: numericValue(row.copy_trade_sell_priority_fee_sol ?? null),
     copyTargetWalletAddress: row.copy_target_wallet_address,
     verifiedAt: row.verified_at,
     updatedAt: row.updated_at
@@ -293,7 +308,7 @@ export function createSupabaseSubscriberRepository({
     async listSubscribers() {
       const { data: subscriberRows, error } = await client
         .from("telegram_subscribers")
-        .select("chat_id,mode,copy_wallet_address,copy_wallet_addresses,copy_amount_sol,copy_target_wallet_address,verified_at,updated_at")
+        .select("chat_id,mode,copy_wallet_address,copy_wallet_addresses,copy_amount_sol,copy_trade_buy_slippage_percent,copy_trade_buy_priority_fee_sol,copy_trade_sell_slippage_percent,copy_trade_sell_priority_fee_sol,copy_target_wallet_address,verified_at,updated_at")
         .order("chat_id", { ascending: true });
       const formattedError = formatSupabaseError(error);
 
@@ -308,7 +323,7 @@ export function createSupabaseSubscriberRepository({
       ] = await Promise.all([
         client.from("telegram_watched_wallets").select("chat_id,address,label,added_at,updated_at"),
         client.from("telegram_copytrade_wallets").select("chat_id,address,label,added_at,updated_at,trailing_sell_config"),
-        client.from("telegram_trading_wallets").select("chat_id,public_key,encrypted_api_key,api_key_last4,created_at,updated_at")
+        client.from("telegram_trading_wallets").select("chat_id,public_key,encrypted_api_key,api_key_last4,label,created_at,updated_at")
       ]);
       const childError =
         formatSupabaseError(watchedError) ||
@@ -764,6 +779,37 @@ export function createSupabaseSubscriberStore({
       subscribers.set(normalized, next);
       return true;
     },
+    async renameTradingWallet(chatId, label) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+
+      if (!existing.tradingWallet) {
+        return false;
+      }
+
+      const now = new Date().toISOString();
+      const tradingWallet = {
+        ...existing.tradingWallet,
+        label,
+        updatedAt: now
+      };
+      const next = {
+        ...existing,
+        tradingWallet,
+        updatedAt: now
+      };
+
+      await repository.upsertSubscriber(next);
+      await repository.upsertTradingWallet(normalized, tradingWallet);
+      subscribers.set(normalized, next);
+      return true;
+    },
     getTradingWallet(chatId) {
       return subscribers.get(String(chatId))?.tradingWallet || null;
     },
@@ -825,6 +871,99 @@ export function createSupabaseSubscriberStore({
       const next = {
         ...(subscribers.get(normalized) || makeSubscriber(normalized, null)),
         copyAmountSol: amountSol,
+        updatedAt: new Date().toISOString()
+      };
+
+      await repository.upsertSubscriber(next);
+      subscribers.set(normalized, next);
+      return true;
+    },
+    async setCopyTradeBuySlippage(chatId, percent) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const next = {
+        ...(subscribers.get(normalized) || makeSubscriber(normalized, null)),
+        copyTradeBuySlippagePercent: percent,
+        updatedAt: new Date().toISOString()
+      };
+
+      await repository.upsertSubscriber(next);
+      subscribers.set(normalized, next);
+      return true;
+    },
+    async setCopyTradeBuyPriorityFee(chatId, sol) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const next = {
+        ...(subscribers.get(normalized) || makeSubscriber(normalized, null)),
+        copyTradeBuyPriorityFeeSol: sol,
+        updatedAt: new Date().toISOString()
+      };
+
+      await repository.upsertSubscriber(next);
+      subscribers.set(normalized, next);
+      return true;
+    },
+    async setCopyTradeSellSlippage(chatId, percent) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const next = {
+        ...(subscribers.get(normalized) || makeSubscriber(normalized, null)),
+        copyTradeSellSlippagePercent: percent,
+        updatedAt: new Date().toISOString()
+      };
+
+      await repository.upsertSubscriber(next);
+      subscribers.set(normalized, next);
+      return true;
+    },
+    async setCopyTradeSellPriorityFee(chatId, sol) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const next = {
+        ...(subscribers.get(normalized) || makeSubscriber(normalized, null)),
+        copyTradeSellPriorityFeeSol: sol,
+        updatedAt: new Date().toISOString()
+      };
+
+      await repository.upsertSubscriber(next);
+      subscribers.set(normalized, next);
+      return true;
+    },
+    async resetCopyTradeExecutionSettings(chatId) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const next = {
+        ...(subscribers.get(normalized) || makeSubscriber(normalized, null)),
+        copyTradeBuySlippagePercent: null,
+        copyTradeBuyPriorityFeeSol: null,
+        copyTradeSellSlippagePercent: null,
+        copyTradeSellPriorityFeeSol: null,
         updatedAt: new Date().toISOString()
       };
 

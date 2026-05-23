@@ -89,7 +89,7 @@ npm run import-subscribers -- data/telegram-subscribers.json
 - To inspect recent on-chain migrations without waiting for a live event, run `npm run past-migrations -- 10`.
 - Set `SOLANA_RPC_URL` in `.env` if public Solana RPC rate limits you.
 - Wallet swap monitor events are stored in `WALLET_TRADE_LOG_PATH`.
-- Wallet swap alerts include copy-trade details when copy wallet, amount, and target are configured through `/copytrade`. This is alert output only; it does not execute trades.
+- Wallet swap alerts include copy-trade details when copy wallet, amount, and target are configured through `/copytrade`. For copyable SOL-to-token buys, the bot also asks PumpPortal `trade-local` to build an unsigned local transaction and reports whether that build worked. This is alert output only; it does not sign or execute trades.
 - Expose `WEBHOOK_PORT` through your reverse proxy at the exact `HELIUS_WEBHOOK_PUBLIC_URL`, and forward the `Authorization` header unchanged.
 
 ## Research

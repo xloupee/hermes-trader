@@ -5,7 +5,12 @@ import { buildMigrationReplyMarkup, extractMigrationData, formatMigrationMessage
 import { createTelegramCommandPoller } from "./commands.js";
 import { createHeliusWebhookServer, missingHeliusConfigWarning, syncHeliusWebhook } from "./helius.js";
 import { heliusEventMentionsWatchedWallet, isHeliusSwapEvent, normalizeHeliusSwapData } from "./helius-swaps.js";
-import { createPumpPortalMigrationListener } from "./pumpportal.js";
+import {
+  buildPumpPortalLocalTrade,
+  buildPumpPortalLocalTradeRequest,
+  createPumpPortalMigrationListener,
+  PUMPPORTAL_TRADE_LOCAL_URL
+} from "./pumpportal.js";
 import { analyzeSolanaTransaction } from "./solana.js";
 import { createSubscriberStore } from "./subscribers.js";
 import { createSupabaseSubscriberStoreFromEnv } from "./subscribers-supabase.js";
@@ -13,10 +18,28 @@ import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
 import { asRecord, errorMessage, isRecord, stringValue } from "./types.js";
 import {
   buildWalletTradeReplyMarkup,
+  formatCopyTradeSimulationMessage,
   formatWalletTradeMessageWithCopySettings,
-  getWalletTradeEventId
+  getWalletTradeEventId,
+  isCopyableSolToTokenBuy
 } from "./wallet-monitor.js";
-import type { AlertModeValue, BotConfig, LooseRecord, MigrationData, SubscriberRecord, TransactionAnalysis, WalletTradeData } from "./types.js";
+import type { AlertModeValue, BotConfig, LooseRecord, MigrationData, PumpPortalTradePool, SubscriberRecord, TransactionAnalysis, WalletTradeData } from "./types.js";
+
+function numberFromEnv(value: string | undefined, fallback: number): number {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function pumpPortalPoolFromEnv(value: string | undefined): PumpPortalTradePool {
+  return value === "pump" ||
+    value === "pump-amm" ||
+    value === "raydium" ||
+    value === "raydium-cpmm" ||
+    value === "launchlab" ||
+    value === "bonk"
+    ? value
+    : "auto";
+}
 
 const config: BotConfig = {
   telegramToken: process.env.TELEGRAM_BOT_TOKEN,
@@ -27,6 +50,7 @@ const config: BotConfig = {
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE,
   pumpPortalApiKey: process.env.PUMPPORTAL_API_KEY,
   pumpPortalWsUrl: process.env.PUMPPORTAL_WS_URL || "wss://pumpportal.fun/api/data",
+  pumpPortalTradeLocalUrl: process.env.PUMPPORTAL_TRADE_LOCAL_URL || PUMPPORTAL_TRADE_LOCAL_URL,
   alertMode: process.env.ALERT_MODE || process.env.PUMPPORTAL_ALERT_MODE || "migrations",
   solscanBaseUrl: process.env.SOLSCAN_BASE_URL || "https://solscan.io",
   pumpFunBaseUrl: process.env.PUMPFUN_BASE_URL || "https://pump.fun",
@@ -44,7 +68,10 @@ const config: BotConfig = {
   solanaRpcUrl: process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
   transactionFlowEnabled: process.env.TRANSACTION_FLOW_ENABLED === "true",
   transactionAccountLabels: process.env.TRANSACTION_ACCOUNT_LABELS,
-  shutdownReason: process.env.BOT_SHUTDOWN_REASON
+  shutdownReason: process.env.BOT_SHUTDOWN_REASON,
+  copyTradeSlippage: numberFromEnv(process.env.COPY_TRADE_SLIPPAGE, 10),
+  copyTradePriorityFee: numberFromEnv(process.env.COPY_TRADE_PRIORITY_FEE, 0.00005),
+  copyTradePool: pumpPortalPoolFromEnv(process.env.COPY_TRADE_POOL)
 };
 
 const seenEvents = new Set<string>();
@@ -237,6 +264,33 @@ async function sendWalletTradeAlert(subscriber: SubscriberRecord, trade: WalletT
       text: formatWalletTradeMessageWithCopySettings(trade, copySettings),
       replyMarkup: buildWalletTradeReplyMarkup(trade)
     });
+
+    const pumpPortalRequest =
+      copySettings && isCopyableSolToTokenBuy(trade)
+        ? buildPumpPortalLocalTradeRequest({
+            trade,
+            copySettings,
+            slippage: config.copyTradeSlippage,
+            priorityFee: config.copyTradePriorityFee,
+            pool: config.copyTradePool
+          })
+        : null;
+    const pumpPortalBuild = pumpPortalRequest
+      ? await buildPumpPortalLocalTrade({
+          url: config.pumpPortalTradeLocalUrl,
+          request: pumpPortalRequest
+        })
+      : null;
+    const copyTradeSimulationMessage = formatCopyTradeSimulationMessage(trade, copySettings, pumpPortalBuild);
+
+    if (copyTradeSimulationMessage) {
+      await sendTelegramMessage({
+        token: config.telegramToken,
+        chatId: subscriber.chatId,
+        text: copyTradeSimulationMessage,
+        replyMarkup: buildWalletTradeReplyMarkup(trade)
+      });
+    }
   } catch (error) {
     console.warn(`Could not send wallet trade alert to ${subscriber.chatId}: ${errorMessage(error)}`);
   }

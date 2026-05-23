@@ -6,12 +6,15 @@ import test from "node:test";
 import { commandFromMessage, helpText, toggleAlertMode } from "../dist/commands.js";
 import { buildHeliusWebhookPayload, createHeliusWebhookServer, syncHeliusWebhook } from "../dist/helius.js";
 import { heliusEventMentionsWatchedWallet, normalizeHeliusSwapData } from "../dist/helius-swaps.js";
+import { buildPumpPortalLocalTradeRequest } from "../dist/pumpportal.js";
 import { createSubscriberStore } from "../dist/subscribers.js";
 import {
   buildWalletTradeReplyMarkup,
+  formatCopyTradeSimulationMessage,
   formatWalletTradeMessage,
   formatWalletTradeMessageWithCopySettings,
   getWalletTradeEventId,
+  isCopyableSolToTokenBuy,
   isValidSolanaAddress
 } from "../dist/wallet-monitor.js";
 
@@ -227,6 +230,57 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
   assert.match(copyMessage, new RegExp(otherWallet));
   assert.match(copyMessage, /Copy amount:<\/b> 0.25 SOL/);
   assert.match(copyMessage, /Status:<\/b> Ready to copy 0.25 SOL into this token/);
+
+  assert.equal(isCopyableSolToTokenBuy(trade), true);
+  const simulationMessage = formatCopyTradeSimulationMessage(trade, {
+    copyWalletAddress: otherWallet,
+    copyAmountSol: 0.25
+  });
+  assert.match(simulationMessage || "", /Would copy trade/);
+  assert.match(simulationMessage || "", /Alpha &lt;Wallet&gt;/);
+  assert.match(simulationMessage || "", new RegExp(otherWallet));
+  assert.match(simulationMessage || "", new RegExp(mint));
+  assert.match(simulationMessage || "", /Would buy this token with 0.25 SOL/);
+  assert.match(simulationMessage || "", /PumpPortal:<\/b> Local transaction build not requested/);
+  assert.doesNotMatch(simulationMessage || "", /500,000/);
+
+  const builtSimulationMessage = formatCopyTradeSimulationMessage(
+    trade,
+    {
+      copyWalletAddress: otherWallet,
+      copyAmountSol: 0.25
+    },
+    {
+      ok: true,
+      status: 200,
+      bodyLength: 1234,
+      errorText: null
+    }
+  );
+  assert.match(builtSimulationMessage || "", /PumpPortal:<\/b> Local transaction built \(1,234 bytes\)/);
+
+  assert.deepEqual(
+    buildPumpPortalLocalTradeRequest({
+      trade,
+      copySettings: {
+        copyWalletAddress: otherWallet,
+        copyAmountSol: 0.25
+      },
+      slippage: 15,
+      priorityFee: 0.00009,
+      pool: "auto"
+    }),
+    {
+      publicKey: otherWallet,
+      action: "buy",
+      mint,
+      amount: 0.25,
+      denominatedInSol: "true",
+      slippage: 15,
+      priorityFee: 0.00009,
+      pool: "auto"
+    }
+  );
 });
 
 test("Helius swap normalization handles token to SOL and token to token swaps", () => {
@@ -288,6 +342,29 @@ test("Helius swap normalization handles token to SOL and token to token swaps", 
     symbol: "USDT",
     amount: 12.5
   });
+  assert.equal(isCopyableSolToTokenBuy(tokenToSol), false);
+  assert.equal(isCopyableSolToTokenBuy(tokenToToken), false);
+  assert.equal(
+    formatCopyTradeSimulationMessage(tokenToSol, {
+      copyWalletAddress: otherWallet,
+      copyAmountSol: 0.1
+    }),
+    null
+  );
+  assert.equal(
+    formatCopyTradeSimulationMessage(tokenToToken, {
+      copyWalletAddress: otherWallet,
+      copyAmountSol: 0.1
+    }),
+    null
+  );
+  assert.equal(
+    formatCopyTradeSimulationMessage(tokenToToken, {
+      copyWalletAddress: null,
+      copyAmountSol: 0.1
+    }),
+    null
+  );
   assert.match(
     formatWalletTradeMessageWithCopySettings(tokenToSol, {
       copyWalletAddress: otherWallet,

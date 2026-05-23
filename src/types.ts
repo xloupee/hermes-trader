@@ -33,6 +33,7 @@ export interface BotConfig extends MigrationFormatConfig {
   supabaseServiceRoleKey?: string;
   pumpPortalApiKey?: string;
   pumpPortalWsUrl: string;
+  pumpPortalTradeLocalUrl: string;
   migrationLogPath: string;
   walletTradeLogPath: string;
   heliusApiKey?: string;
@@ -49,6 +50,9 @@ export interface BotConfig extends MigrationFormatConfig {
   transactionAccountLabels?: string;
   alertModeLabel?: string;
   shutdownReason?: string;
+  copyTradeSlippage: number;
+  copyTradePriorityFee: number;
+  copyTradePool: PumpPortalTradePool;
 }
 
 export interface LegacyBotConfig extends MigrationFormatConfig {
@@ -169,6 +173,26 @@ export interface CopyTradeSettings {
   copyWalletAddress: string | null;
   copyAmountSol: number | null;
   copyTargetWalletAddress?: string | null;
+}
+
+export type PumpPortalTradePool = "auto" | "pump" | "pump-amm" | "raydium" | "raydium-cpmm" | "launchlab" | "bonk";
+
+export interface PumpPortalLocalTradeRequest {
+  publicKey: string;
+  action: "buy";
+  mint: string;
+  amount: number;
+  denominatedInSol: "true";
+  slippage: number;
+  priorityFee: number;
+  pool: PumpPortalTradePool;
+}
+
+export interface PumpPortalLocalTradeBuildResult {
+  ok: boolean;
+  status: number | null;
+  bodyLength: number | null;
+  errorText: string | null;
 }
 
 export interface TransactionAccountChange {

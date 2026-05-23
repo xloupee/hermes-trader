@@ -1,6 +1,15 @@
 import WebSocket, { type RawData } from "ws";
 import { isRecord } from "./types.js";
-import type { LooseRecord } from "./types.js";
+import type {
+  CopyTradeSettings,
+  LooseRecord,
+  PumpPortalLocalTradeBuildResult,
+  PumpPortalLocalTradeRequest,
+  PumpPortalTradePool,
+  WalletTradeData
+} from "./types.js";
+
+export const PUMPPORTAL_TRADE_LOCAL_URL = "https://pumpportal.fun/api/trade-local";
 
 export type PumpPortalSubscription =
   | string
@@ -35,6 +44,68 @@ export function buildPumpPortalUrl({ pumpPortalWsUrl, pumpPortalApiKey }: PumpPo
   }
 
   return url.toString();
+}
+
+export function buildPumpPortalLocalTradeRequest({
+  trade,
+  copySettings,
+  slippage,
+  priorityFee,
+  pool
+}: {
+  trade: WalletTradeData;
+  copySettings: CopyTradeSettings;
+  slippage: number;
+  priorityFee: number;
+  pool: PumpPortalTradePool;
+}): PumpPortalLocalTradeRequest | null {
+  if (!copySettings.copyWalletAddress || !copySettings.copyAmountSol || !trade.mint) {
+    return null;
+  }
+
+  return {
+    publicKey: copySettings.copyWalletAddress,
+    action: "buy",
+    mint: trade.mint,
+    amount: copySettings.copyAmountSol,
+    denominatedInSol: "true",
+    slippage,
+    priorityFee,
+    pool
+  };
+}
+
+export async function buildPumpPortalLocalTrade({
+  url,
+  request
+}: {
+  url: string;
+  request: PumpPortalLocalTradeRequest;
+}): Promise<PumpPortalLocalTradeBuildResult> {
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(request)
+    });
+    const body = Buffer.from(await response.arrayBuffer());
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      bodyLength: body.length,
+      errorText: response.ok ? null : body.toString("utf8").slice(0, 500)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: null,
+      bodyLength: null,
+      errorText: error instanceof Error ? error.message : String(error)
+    };
+  }
 }
 
 export function createPumpPortalMigrationListener({

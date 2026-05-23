@@ -1,5 +1,12 @@
 import { escapeHtml } from "./format.js";
-import type { CopyTradeSettings, TelegramReplyMarkup, WalletTradeAction, WalletTradeAsset, WalletTradeData } from "./types.js";
+import type {
+  CopyTradeSettings,
+  PumpPortalLocalTradeBuildResult,
+  TelegramReplyMarkup,
+  WalletTradeAction,
+  WalletTradeAsset,
+  WalletTradeData
+} from "./types.js";
 
 const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
@@ -140,7 +147,7 @@ export function formatWalletTradeMessageWithCopySettings(trade: WalletTradeData,
     return lines.join("\n");
   }
 
-  if (isSolToTokenSwap(trade)) {
+  if (isCopyableSolToTokenBuy(trade)) {
     lines.push(`<b>Status:</b> Ready to copy ${formatNumber(copySettings.copyAmountSol)} SOL into this token`);
   } else {
     lines.push("<b>Status:</b> Not a copyable SOL-to-token buy");
@@ -149,8 +156,48 @@ export function formatWalletTradeMessageWithCopySettings(trade: WalletTradeData,
   return lines.join("\n");
 }
 
-function isSolToTokenSwap(trade: WalletTradeData): boolean {
+export function isCopyableSolToTokenBuy(trade: WalletTradeData): boolean {
   return trade.input?.symbol === "SOL" && Boolean(trade.output?.mint) && trade.output?.symbol !== "SOL";
+}
+
+export function formatCopyTradeSimulationMessage(
+  trade: WalletTradeData,
+  copySettings?: CopyTradeSettings | null,
+  pumpPortalBuild?: PumpPortalLocalTradeBuildResult | null
+): string | null {
+  if (!copySettings?.copyWalletAddress || !copySettings.copyAmountSol || !isCopyableSolToTokenBuy(trade) || !trade.mint) {
+    return null;
+  }
+
+  const walletName = trade.label || shortenAddress(trade.targetWallet);
+  return [
+    "<b>Would copy trade</b>",
+    `<b>Target:</b> ${escapeHtml(walletName)}`,
+    `<code>${escapeHtml(trade.targetWallet)}</code>`,
+    "",
+    `<b>Copy wallet:</b> <code>${escapeHtml(copySettings.copyWalletAddress)}</code>`,
+    `<b>Copy amount:</b> ${formatNumber(copySettings.copyAmountSol)} SOL`,
+    "",
+    "<b>Contract address</b>",
+    `<code>${escapeHtml(trade.mint)}</code>`,
+    "",
+    `<b>Status:</b> Would buy this token with ${formatNumber(copySettings.copyAmountSol)} SOL`,
+    `<b>PumpPortal:</b> ${formatPumpPortalBuildStatus(pumpPortalBuild)}`
+  ].join("\n");
+}
+
+function formatPumpPortalBuildStatus(result?: PumpPortalLocalTradeBuildResult | null): string {
+  if (!result) {
+    return "Local transaction build not requested";
+  }
+
+  if (result.ok) {
+    return `Local transaction built${result.bodyLength === null ? "" : ` (${formatNumber(result.bodyLength)} bytes)`}`;
+  }
+
+  const status = result.status === null ? "request failed" : `HTTP ${result.status}`;
+  const detail = result.errorText?.trim();
+  return detail ? `Local transaction build failed: ${escapeHtml(status)} - ${escapeHtml(detail)}` : `Local transaction build failed: ${escapeHtml(status)}`;
 }
 
 function formatAsset({ amount, symbol, mint }: WalletTradeAsset): string | null {

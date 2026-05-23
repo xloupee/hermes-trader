@@ -893,14 +893,14 @@ export function createTelegramCommandPoller({
     const text = [
       "<b>Trading wallet</b>",
       tradingWallet
-        ? `<b>Deposit address:</b>\n<code>${tradingWallet.publicKey}</code>`
-        : "<b>Status:</b> No trading wallet yet.",
+        ? `<b>Deposit address</b>\n<code>${tradingWallet.publicKey}</code>`
+        : "No trading wallet yet.",
       tradingWallet ? `<b>API key:</b> saved ending in <code>${tradingWallet.apiKeyLast4}</code>` : "",
       tradingWallet ? "<b>Private key:</b> shown once when created. The bot cannot recover it." : "",
       "",
       tradingWallet
-        ? "Deposit SOL to this address before enabling auto copy buys."
-        : "Create a PumpPortal trading wallet to use Bloom-style copytrade."
+        ? "Deposit SOL here to enable auto copy buys."
+        : "Tap below to create one."
     ]
       .filter(Boolean)
       .join("\n");
@@ -914,7 +914,7 @@ export function createTelegramCommandPoller({
   function myWalletDashboardReplyMarkup(publicKey: string | null): TelegramReplyMarkup {
     if (!publicKey) {
       return {
-        inline_keyboard: [[{ text: "🌸 Create Trading Wallet", callback_data: "mywallets:create" }]]
+        inline_keyboard: [[{ text: "🌸 Create Wallet", callback_data: "mywallets:create" }]]
       };
     }
 
@@ -922,13 +922,13 @@ export function createTelegramCommandPoller({
       inline_keyboard: [
         [
           {
-            text: "📋 Copy Deposit Address",
+            text: "📋 Copy Address",
             copy_text: {
               text: publicKey
             }
-          }
-        ],
-        [{ text: "📊 Status", callback_data: "mywallets:dashboard" }]
+          },
+          { text: "📊 Status", callback_data: "mywallets:dashboard" }
+        ]
       ]
     };
   }
@@ -1083,17 +1083,17 @@ export function createTelegramCommandPoller({
       inline_keyboard: [
         [
           { text: "📊 Status", callback_data: "copytrade:status" },
-          { text: "👛 Trading Wallet", callback_data: "copytrade:mywallets" }
+          { text: "👛 Wallet", callback_data: "copytrade:mywallets" }
         ],
         [
-          { text: "💰 Set Amount", callback_data: "copytrade:set_amount" },
-          { text: "➕ Add Copytrade Wallet", callback_data: "copytrade:add_wallet" }
+          { text: "💰 Amount", callback_data: "copytrade:set_amount" },
+          { text: "➕ Add Wallet", callback_data: "copytrade:add_wallet" }
         ],
         [
-          { text: "✏️ Rename Copytrade", callback_data: "copytrade:rename_wallet" },
-          { text: "🗑️ Remove Copytrade", callback_data: "copytrade:remove_trade_wallet" }
+          { text: "✏️ Rename", callback_data: "copytrade:rename_wallet" },
+          { text: "🗑️ Remove", callback_data: "copytrade:remove_trade_wallet" }
         ],
-        [{ text: "📋 List Copytrade Wallets", callback_data: "copytrade:wallets" }]
+        [{ text: "📋 List Wallets", callback_data: "copytrade:wallets" }]
       ]
     };
   }

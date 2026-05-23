@@ -29,6 +29,8 @@ export interface BotConfig extends MigrationFormatConfig {
   telegramChatId?: string;
   telegramVerifyCode?: string;
   telegramSubscribersPath?: string;
+  supabaseUrl?: string;
+  supabaseServiceRoleKey?: string;
   pumpPortalApiKey?: string;
   pumpPortalWsUrl: string;
   migrationLogPath: string;

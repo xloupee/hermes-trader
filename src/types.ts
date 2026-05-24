@@ -69,6 +69,8 @@ export interface BotConfig extends MigrationFormatConfig {
   transactionAccountLabels?: string;
   alertModeLabel?: string;
   shutdownReason?: string;
+  copyTradeEnabled: boolean;
+  copyTradeDryRun: boolean;
   copyTradeSlippage: number;
   copyTradePriorityFee: number;
   copyTradePool: PumpPortalTradePool;
@@ -285,6 +287,7 @@ export interface PumpPortalLightningTradeRequest {
   slippage: number;
   priorityFee: number;
   pool: PumpPortalTradePool;
+  skipPreflight?: boolean;
 }
 
 export interface PumpPortalLightningTradeResult {

@@ -91,10 +91,11 @@ npm run import-subscribers -- data/telegram-subscribers.json
 - Set `SOLANA_RPC_URL` in `.env` if public Solana RPC rate limits you.
 - Wallet swap monitor events are stored in `WALLET_TRADE_LOG_PATH`.
 - `/mywallets` creates one PumpPortal Lightning trading wallet per verified chat. The bot shows the private key once and does not store it. Users must save it themselves and deposit SOL to the public address.
-- Copytrade auto buys require a generated trading wallet from `/mywallets`, a copy amount, and Copytrade Wallets from `/copytrade`. For copyable SOL-to-token buys, the bot submits a PumpPortal Lightning `buy` using the stored encrypted API key.
+- Copytrade auto buys require a generated trading wallet from `/mywallets`, a copy amount, Copytrade Wallets from `/copytrade`, `COPY_TRADE_ENABLED=true`, and `COPY_TRADE_DRY_RUN=false`. Unless both switches are set that way, the bot logs and sends the intended copy buy but does not submit a PumpPortal order.
 - Copytrade mirrors each distinct target buy transaction. Exact duplicate webhook deliveries for the same observed transaction are ignored while that copy buy is in flight.
 - Treat generated trading wallets as hot wallets. Anyone with the private key can withdraw funds, and anyone with the linked API key can trade from the funded wallet.
-- `COPY_TRADE_TRAILING_SELL_ENABLED=true` schedules live PumpPortal Lightning percentage sells after a successful auto copy buy. Scheduled sell timers are in-memory and are cleared if the bot restarts.
+- Keep `COPY_TRADE_ENABLED=false` or `COPY_TRADE_DRY_RUN=true` as the kill switch. First live run recommendation: fund only about `0.02-0.05 SOL`, set copy amount around `0.001-0.005 SOL`, copy one target wallet, use `COPY_TRADE_ENABLED=true`, `COPY_TRADE_DRY_RUN=false`, `COPY_TRADE_SLIPPAGE=10`, `COPY_TRADE_PRIORITY_FEE=0.00005`, and watch logs, Telegram, and Solscan before increasing exposure.
+- `COPY_TRADE_TRAILING_SELL_ENABLED=true` schedules live PumpPortal Lightning percentage sells after a successful auto copy buy. Scheduled sell timers are in-memory and are cleared if the bot restarts; they only run after live copy buys are enabled and submitted.
 - Expose `WEBHOOK_PORT` through your reverse proxy at the exact `HELIUS_WEBHOOK_PUBLIC_URL`, and forward the `Authorization` header unchanged.
 
 ## Research

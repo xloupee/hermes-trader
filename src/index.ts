@@ -3,6 +3,11 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { buildMigrationReplyMarkup, extractMigrationData, formatMigrationMessage, getEventId } from "./format.js";
 import { createTelegramCommandPoller } from "./commands.js";
+import {
+  copyTradeLiveExecutionBlockedReason,
+  copyTradeLiveExecutionEnabled,
+  formatCopyTradeExecutionStateLog
+} from "./copytrade-execution-mode.js";
 import { copyBuySubmissionKey, createCopyBuySubmissionGuard } from "./copytrade-guard.js";
 import { createHeliusWebhookServer, missingHeliusConfigWarning, syncHeliusWebhook } from "./helius.js";
 import { heliusEventMentionsWatchedWallet, isHeliusSwapEvent, normalizeHeliusSwapData } from "./helius-swaps.js";
@@ -24,6 +29,7 @@ import { asRecord, errorMessage, isRecord, stringValue } from "./types.js";
 import {
   buildWalletTradeReplyMarkup,
   formatAutoCopyBuyMessage,
+  formatCopyTradeSimulationMessage,
   formatCopyTradeTrailingSellResultMessage,
   formatCopyTradeTrailingSellScheduledMessage,
   formatWalletTradeMessageWithCopySettings,
@@ -108,6 +114,8 @@ const config: BotConfig = {
   transactionFlowEnabled: process.env.TRANSACTION_FLOW_ENABLED === "true",
   transactionAccountLabels: process.env.TRANSACTION_ACCOUNT_LABELS,
   shutdownReason: process.env.BOT_SHUTDOWN_REASON,
+  copyTradeEnabled: process.env.COPY_TRADE_ENABLED === "true",
+  copyTradeDryRun: process.env.COPY_TRADE_DRY_RUN !== "false",
   copyTradeSlippage: numberFromEnv(process.env.COPY_TRADE_SLIPPAGE, 10),
   copyTradePriorityFee: numberFromEnv(process.env.COPY_TRADE_PRIORITY_FEE, 0.00005),
   copyTradePool: pumpPortalPoolFromEnv(process.env.COPY_TRADE_POOL),
@@ -163,6 +171,17 @@ function copyTradeSellExecutionSettings(subscriber: SubscriberRecord): { slippag
     slippage: subscriber.copyTradeSellSlippagePercent ?? config.copyTradeSlippage,
     priorityFee: subscriber.copyTradeSellPriorityFeeSol ?? config.copyTradePriorityFee
   };
+}
+
+function logCopyTradeExecutionState(): void {
+  const message = formatCopyTradeExecutionStateLog(config);
+
+  if (copyTradeLiveExecutionEnabled(config)) {
+    console.warn(message);
+    return;
+  }
+
+  console.log(message);
 }
 
 function watchedWalletAddresses(): string[] {
@@ -364,11 +383,6 @@ async function sendCopyTradeSimulationAlert(
     return;
   }
 
-  if (!encryptionSecretReady(config.pumpPortalWalletKeyEncryptionSecret)) {
-    console.warn(`Skipping auto copy buy for ${subscriber.chatId}: missing PUMPPORTAL_WALLET_KEY_ENCRYPTION_SECRET`);
-    return;
-  }
-
   const copyBuyKey = copyBuySubmissionKey({
     chatId: subscriber.chatId,
     tradingWalletPublicKey: subscriber.tradingWallet.publicKey,
@@ -389,6 +403,23 @@ async function sendCopyTradeSimulationAlert(
     });
 
     if (!request) {
+      return;
+    }
+
+    const blockedReason = copyTradeLiveExecutionBlockedReason(config);
+    if (blockedReason) {
+      await notifySkippedAutoCopyBuy({
+        subscriber,
+        trade,
+        copyTradeWallet,
+        request,
+        reason: blockedReason
+      });
+      return;
+    }
+
+    if (!encryptionSecretReady(config.pumpPortalWalletKeyEncryptionSecret)) {
+      console.warn(`Skipping auto copy buy for ${subscriber.chatId}: missing PUMPPORTAL_WALLET_KEY_ENCRYPTION_SECRET`);
       return;
     }
 
@@ -457,6 +488,81 @@ async function sendCopyTradeSimulationAlert(
       copyBuySubmissionGuard.release(copyBuyKey);
     }
   }
+}
+
+async function notifySkippedAutoCopyBuy({
+  subscriber,
+  trade,
+  copyTradeWallet,
+  request,
+  reason
+}: {
+  subscriber: SubscriberRecord;
+  trade: WalletTradeData;
+  copyTradeWallet: WatchedWallet;
+  request: PumpPortalLightningTradeRequest;
+  reason: string;
+}): Promise<void> {
+  const sourceWallet = copyTradeWallet.label
+    ? `${copyTradeWallet.label} (${copyTradeWallet.address})`
+    : copyTradeWallet.address;
+  console.warn(
+    [
+      `Skipping auto copy buy for ${subscriber.chatId}: ${reason}`,
+      `intended PumpPortal buy ${request.amount} SOL of ${request.mint}`,
+      `source wallet ${sourceWallet}`,
+      `trading wallet ${subscriber.tradingWallet?.publicKey || "unknown"}`,
+      `observed tx ${trade.signature || "unknown"}`
+    ].join("; ")
+  );
+
+  const message = formatSkippedAutoCopyBuyMessage({ subscriber, trade, reason });
+  if (!message) {
+    return;
+  }
+
+  try {
+    await sendTelegramMessage({
+      token: config.telegramToken,
+      chatId: subscriber.chatId,
+      text: message,
+      replyMarkup: buildWalletTradeReplyMarkup(trade)
+    });
+  } catch (error) {
+    console.warn(`Could not send skipped auto copy buy alert to ${subscriber.chatId}: ${errorMessage(error)}`);
+  }
+}
+
+function formatSkippedAutoCopyBuyMessage({
+  subscriber,
+  trade,
+  reason
+}: {
+  subscriber: SubscriberRecord;
+  trade: WalletTradeData;
+  reason: string;
+}): string | null {
+  const simulationMessage = formatCopyTradeSimulationMessage(
+    trade,
+    {
+      copyWalletAddress: subscriber.tradingWallet?.publicKey || null,
+      copyAmountSol: subscriber.copyAmountSol
+    },
+    null
+  );
+
+  if (!simulationMessage) {
+    return null;
+  }
+
+  const mode = config.copyTradeEnabled ? "Copy trade dry run is active" : "Live copy trading is disabled";
+
+  return [
+    simulationMessage,
+    "",
+    `🟡 ${mode}; no PumpPortal order was submitted.`,
+    `<b>Reason:</b> <code>${reason}</code>`
+  ].join("\n");
 }
 
 function buildTrailingSellSchedule({
@@ -691,6 +797,32 @@ async function buildAndNotifyTrailingSell({
   copyTradeWallet: WatchedWallet;
   seenSellSignatures: Set<string>;
 }): Promise<PumpPortalLightningTradeResult> {
+  const blockedReason = copyTradeLiveExecutionBlockedReason(config);
+  if (blockedReason) {
+    const result: PumpPortalLightningTradeResult = {
+      ok: false,
+      status: null,
+      signature: null,
+      errorText: `Trailing sell skipped: ${blockedReason}`,
+      raw: null
+    };
+
+    console.warn(`Skipping trailing sell for ${subscriber.chatId}: ${blockedReason}`);
+    await sendTelegramMessage({
+      token: config.telegramToken,
+      chatId: subscriber.chatId,
+      text: formatCopyTradeTrailingSellResultMessage({
+        trade,
+        stepIndex,
+        totalSteps,
+        request,
+        result
+      }),
+      replyMarkup: buildWalletTradeReplyMarkup(trade)
+    });
+    return result;
+  }
+
   const { result, duplicateSignature } = await executeTrailingSellWithDuplicateRetry({
     apiKey,
     request,
@@ -1330,6 +1462,7 @@ assertConfig();
 await subscribers.init();
 console.log(`Using ${subscriberStoreLabel} subscriber storage`);
 console.log(`Loaded ${subscribers.count()} verified Telegram subscriber(s)`);
+logCopyTradeExecutionState();
 if (watchedWalletAddresses().length > 0) {
   await syncHeliusWalletWebhook();
 }

@@ -154,6 +154,60 @@ function settingSource(value: number | null | undefined): string {
   return value === null || value === undefined ? "Inherited" : "Custom";
 }
 
+export function canCreatePumpPortalTradingWalletInChat(chatType?: string | null): boolean {
+  return !chatType || chatType === "private";
+}
+
+export function tradingWalletCreationBlockedText(chatType?: string | null): string | null {
+  if (canCreatePumpPortalTradingWalletInChat(chatType)) {
+    return null;
+  }
+
+  return [
+    "<b>Trading wallet creation is only available in a private Telegram chat.</b>",
+    "",
+    "PumpPortal trading wallets reveal a private key once. Open a 1:1 chat with this bot and run /mywallets there so the key is not posted in a group, supergroup, or channel."
+  ].join("\n");
+}
+
+export function tradingWalletBackupWarningText(): string {
+  return [
+    "<b>Hot-wallet/private-key warning</b>",
+    "This creates a PumpPortal hot wallet for copy buys.",
+    "The private key is shown once. Back it up somewhere private before depositing SOL.",
+    "Anyone who sees that key can spend the wallet, and the bot cannot recover it later."
+  ].join("\n");
+}
+
+export function formatTradingWalletCreateConfirmText({
+  existingPublicKey = null
+}: {
+  existingPublicKey?: string | null;
+} = {}): string {
+  if (!existingPublicKey) {
+    return [
+      "<b>Create Trading Wallet?</b>",
+      "",
+      "This creates a PumpPortal trading wallet and makes it your active copytrade wallet.",
+      "",
+      tradingWalletBackupWarningText()
+    ].join("\n");
+  }
+
+  return [
+    "<b>Create New Trading Wallet?</b>",
+    "",
+    "This creates a fresh PumpPortal trading wallet and makes it your active copytrade wallet.",
+    "",
+    "<b>Current wallet</b>",
+    `<code>${escapeHtml(existingPublicKey)}</code>`,
+    "",
+    "Your old wallet will still exist on-chain, but the bot will use the new wallet for future copy buys.",
+    "",
+    tradingWalletBackupWarningText()
+  ].join("\n");
+}
+
 export function parseSlippageInput(value: string): number | null {
   const normalized = value.trim().replace(/%$/, "").trim();
   const parsed = Number(normalized);
@@ -705,6 +759,7 @@ export function createTelegramCommandPoller({
     }
 
     const data = callbackQuery.data || "";
+    const chatType = callbackQuery.message?.chat?.type;
     const gate = requireVerified(chatId);
 
     if (gate) {
@@ -781,18 +836,24 @@ export function createTelegramCommandPoller({
     }
 
     if (data === "mywallets:create") {
-      await createTradingWallet(chatId);
+      const dashboard = myWalletCreateConfirm(chatId, { chatType });
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data === "mywallets:create_confirm") {
+      await createTradingWallet(chatId, { chatType });
       return;
     }
 
     if (data === "mywallets:new") {
-      const dashboard = myWalletCreateNewConfirm(chatId);
+      const dashboard = myWalletCreateConfirm(chatId, { replaceExisting: true, chatType });
       await reply(chatId, dashboard.text, dashboard.replyMarkup);
       return;
     }
 
     if (data === "mywallets:new_confirm") {
-      await createTradingWallet(chatId, { replaceExisting: true });
+      await createTradingWallet(chatId, { replaceExisting: true, chatType });
       return;
     }
 
@@ -1640,46 +1701,76 @@ export function createTelegramCommandPoller({
     return wallet.label ? escapeWalletLabel(wallet.label) : shortWallet(wallet.publicKey);
   }
 
-  function myWalletCreateNewConfirm(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
+  function myWalletCreateConfirm(
+    chatId: TelegramChatId,
+    {
+      replaceExisting = false,
+      chatType
+    }: {
+      replaceExisting?: boolean;
+      chatType?: string | null;
+    } = {}
+  ): { text: string; replyMarkup: TelegramReplyMarkup } {
+    const blockedText = tradingWalletCreationBlockedText(chatType);
+
+    if (blockedText) {
+      return {
+        text: blockedText,
+        replyMarkup: myWalletBackReplyMarkup()
+      };
+    }
+
     const existing = subscribers?.getTradingWallet(chatId);
 
-    if (!existing) {
+    if (existing && !replaceExisting) {
+      const dashboard = myWalletDashboard(chatId);
       return {
-        text: "No trading wallet exists yet. Create your first trading wallet?",
-        replyMarkup: {
-          inline_keyboard: [
-            [{ text: "🚀 Create Wallet", callback_data: "mywallets:create" }],
-            [{ text: "↩️ Back", callback_data: "mywallets:dashboard" }]
-          ]
-        }
+        text: `<b>Trading wallet already exists.</b>\n\n${dashboard.text}`,
+        replyMarkup: dashboard.replyMarkup
       };
     }
 
     return {
-      text: [
-        "<b>➕ Create New Trading Wallet?</b>",
-        "",
-        "This creates a fresh PumpPortal trading wallet and makes it your active copytrade wallet.",
-        "",
-        "<b>Current wallet</b>",
-        `<code>${existing.publicKey}</code>`,
-        "",
-        "Your old wallet will still exist on-chain, but the bot will use the new wallet for future copy buys.",
-        "The new private key will be shown once."
-      ].join("\n"),
+      text: formatTradingWalletCreateConfirmText({
+        existingPublicKey: replaceExisting ? existing?.publicKey || null : null
+      }),
       replyMarkup: {
         inline_keyboard: [
-          [{ text: "✅ Create New Wallet", callback_data: "mywallets:new_confirm" }],
+          [
+            {
+              text: replaceExisting && existing ? "✅ Create New Wallet" : "✅ Create Wallet",
+              callback_data: replaceExisting && existing ? "mywallets:new_confirm" : "mywallets:create_confirm"
+            }
+          ],
           [{ text: "↩️ Back", callback_data: "mywallets:dashboard" }]
         ]
       }
     };
   }
 
+  function myWalletBackReplyMarkup(): TelegramReplyMarkup {
+    return {
+      inline_keyboard: [[{ text: "↩️ Back", callback_data: "mywallets:dashboard" }]]
+    };
+  }
+
   async function createTradingWallet(
     chatId: TelegramChatId,
-    { replaceExisting = false }: { replaceExisting?: boolean } = {}
+    {
+      replaceExisting = false,
+      chatType
+    }: {
+      replaceExisting?: boolean;
+      chatType?: string | null;
+    } = {}
   ): Promise<void> {
+    const blockedText = tradingWalletCreationBlockedText(chatType);
+
+    if (blockedText) {
+      await reply(chatId, blockedText, myWalletBackReplyMarkup());
+      return;
+    }
+
     const existing = subscribers?.getTradingWallet(chatId);
 
     if (existing && !replaceExisting) {

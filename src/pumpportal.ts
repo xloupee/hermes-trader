@@ -226,19 +226,21 @@ export function buildPumpPortalLightningBuyRequest({
   amountSol,
   slippage,
   priorityFee,
-  pool
+  pool,
+  skipPreflight
 }: {
   trade: WalletTradeData;
   amountSol: number;
   slippage: number;
   priorityFee: number;
   pool: PumpPortalTradePool;
+  skipPreflight?: boolean;
 }): PumpPortalLightningTradeRequest | null {
   if (!trade.mint || !Number.isFinite(amountSol) || amountSol <= 0) {
     return null;
   }
 
-  return {
+  const request: PumpPortalLightningTradeRequest = {
     action: "buy",
     mint: trade.mint,
     amount: amountSol,
@@ -247,6 +249,12 @@ export function buildPumpPortalLightningBuyRequest({
     priorityFee,
     pool
   };
+
+  if (typeof skipPreflight === "boolean") {
+    request.skipPreflight = skipPreflight;
+  }
+
+  return request;
 }
 
 export function buildPumpPortalLightningSellRequest({
@@ -254,19 +262,21 @@ export function buildPumpPortalLightningSellRequest({
   amountPercent,
   slippage,
   priorityFee,
-  pool
+  pool,
+  skipPreflight
 }: {
   mint: string;
   amountPercent: number;
   slippage: number;
   priorityFee: number;
   pool: PumpPortalTradePool;
+  skipPreflight?: boolean;
 }): PumpPortalLightningTradeRequest | null {
   if (!mint || !Number.isFinite(amountPercent) || amountPercent <= 0) {
     return null;
   }
 
-  return {
+  const request: PumpPortalLightningTradeRequest = {
     action: "sell",
     mint,
     amount: `${Math.min(100, amountPercent)}%`,
@@ -275,6 +285,96 @@ export function buildPumpPortalLightningSellRequest({
     priorityFee,
     pool
   };
+
+  if (typeof skipPreflight === "boolean") {
+    request.skipPreflight = skipPreflight;
+  }
+
+  return request;
+}
+
+const PUMPPORTAL_LIGHTNING_SIGNATURE_KEYS = [
+  "signature",
+  "tx",
+  "txid",
+  "txId",
+  "txHash",
+  "transaction",
+  "transactionHash",
+  "transactionSignature"
+];
+
+const PUMPPORTAL_LIGHTNING_ERROR_KEYS = ["error", "errors", "errorText", "error_text", "errorMessage", "error_message"];
+
+function hasResponseField(record: LooseRecord, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function summarizeResponseValue(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value.trim() ? value.trim().slice(0, 500) : null;
+  }
+
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+
+  if (value === null || typeof value === "undefined") {
+    return null;
+  }
+
+  try {
+    return JSON.stringify(value).slice(0, 500);
+  } catch {
+    return String(value).slice(0, 500);
+  }
+}
+
+function summarizeResponseBody(body: unknown, text: string): string | null {
+  const trimmedText = text.trim();
+
+  if (trimmedText) {
+    return trimmedText.slice(0, 500);
+  }
+
+  return summarizeResponseValue(body);
+}
+
+function fieldErrorText(record: LooseRecord, key: string): string {
+  const value = record[key];
+  const detail = summarizeResponseValue(value);
+
+  return detail ? `${key}: ${detail}` : `${key} field present`;
+}
+
+function pumpPortalLightningErrorText(record: LooseRecord): string | null {
+  for (const key of PUMPPORTAL_LIGHTNING_ERROR_KEYS) {
+    if (hasResponseField(record, key)) {
+      return fieldErrorText(record, key);
+    }
+  }
+
+  const status = responseString(record, ["status"]);
+
+  if (status && /^(error|failed|failure)$/i.test(status)) {
+    const detail = responseString(record, ["message", "reason", "description"]);
+    return detail || `status: ${status}`;
+  }
+
+  if (record.ok === false || record.success === false) {
+    const detail = responseString(record, ["message", "reason", "description"]);
+    return detail || "PumpPortal response marked the trade as failed";
+  }
+
+  return null;
+}
+
+function missingPumpPortalLightningSignatureText(body: unknown, text: string): string {
+  const bodySummary = summarizeResponseBody(body, text);
+
+  return bodySummary
+    ? `PumpPortal did not return a transaction signature: ${bodySummary}`
+    : "PumpPortal did not return a transaction signature";
 }
 
 export async function executePumpPortalLightningTrade({
@@ -307,14 +407,44 @@ export async function executePumpPortalLightningTrade({
     }
 
     const record = isRecord(body) ? body : {};
-    const signature = responseString(record, ["signature", "tx", "txid", "txId", "transaction", "transactionSignature"]);
-    const errorText = response.ok ? null : text.slice(0, 500) || `HTTP ${response.status}`;
+    const signature = responseString(record, PUMPPORTAL_LIGHTNING_SIGNATURE_KEYS);
+    const responseErrorText = pumpPortalLightningErrorText(record);
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        signature,
+        errorText: responseErrorText || summarizeResponseBody(body, text) || `HTTP ${response.status}`,
+        raw: body
+      };
+    }
+
+    if (responseErrorText) {
+      return {
+        ok: false,
+        status: response.status,
+        signature,
+        errorText: responseErrorText,
+        raw: body
+      };
+    }
+
+    if (!signature) {
+      return {
+        ok: false,
+        status: response.status,
+        signature: null,
+        errorText: missingPumpPortalLightningSignatureText(body, text),
+        raw: body
+      };
+    }
 
     return {
-      ok: response.ok,
+      ok: true,
       status: response.status,
       signature,
-      errorText,
+      errorText: null,
       raw: body
     };
   } catch (error) {

@@ -532,6 +532,27 @@ function heliusSwapEvent(overrides = {}) {
         symbol: "BONK"
       }
     ],
+    events: {
+      swap: {
+        nativeInput: {
+          account: wallet,
+          amount: "125000000"
+        },
+        nativeOutput: null,
+        tokenInputs: [],
+        tokenOutputs: [
+          {
+            userAccount: wallet,
+            mint,
+            rawTokenAmount: {
+              tokenAmount: "250000000000",
+              decimals: 6
+            },
+            symbol: "BONK"
+          }
+        ]
+      }
+    },
     ...overrides
   };
 }
@@ -852,7 +873,28 @@ test("Helius swap normalization handles token to SOL and token to token swaps", 
           tokenAmount: 100,
           symbol: "BONK"
         }
-      ]
+      ],
+      events: {
+        swap: {
+          nativeInput: null,
+          nativeOutput: {
+            account: wallet,
+            amount: "1500000000"
+          },
+          tokenInputs: [
+            {
+              userAccount: wallet,
+              mint,
+              rawTokenAmount: {
+                tokenAmount: "100000000",
+                decimals: 6
+              },
+              symbol: "BONK"
+            }
+          ],
+          tokenOutputs: []
+        }
+      }
     }),
     targetWallet: wallet,
     config
@@ -875,7 +917,35 @@ test("Helius swap normalization handles token to SOL and token to token swaps", 
           tokenAmount: 12.5,
           symbol: "USDT"
         }
-      ]
+      ],
+      events: {
+        swap: {
+          nativeInput: null,
+          nativeOutput: null,
+          tokenInputs: [
+            {
+              userAccount: wallet,
+              mint,
+              rawTokenAmount: {
+                tokenAmount: "100000000",
+                decimals: 6
+              },
+              symbol: "BONK"
+            }
+          ],
+          tokenOutputs: [
+            {
+              userAccount: wallet,
+              mint: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY6JqTd6FJqyf2s",
+              rawTokenAmount: {
+                tokenAmount: "12500000",
+                decimals: 6
+              },
+              symbol: "USDT"
+            }
+          ]
+        }
+      }
     }),
     targetWallet: wallet,
     config

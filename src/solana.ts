@@ -314,3 +314,24 @@ export async function analyzeSolanaTransaction({
     senders
   };
 }
+
+export async function getSolanaBalanceSol({
+  address,
+  rpcUrl
+}: {
+  address: string;
+  rpcUrl: string;
+}): Promise<number> {
+  const result = await rpc({
+    rpcUrl,
+    method: "getBalance",
+    params: [address]
+  });
+  const value = Number(asRecord(result).value);
+
+  if (!Number.isFinite(value)) {
+    throw new Error("RPC getBalance returned an invalid balance");
+  }
+
+  return lamportsToSol(value);
+}

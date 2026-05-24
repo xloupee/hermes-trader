@@ -74,6 +74,14 @@ export interface BotConfig extends MigrationFormatConfig {
   copyTradeSlippage: number;
   copyTradePriorityFee: number;
   copyTradePool: PumpPortalTradePool;
+  copyTradeMaxBuySol: number;
+  copyTradeDailySolCap: number;
+  copyTradeMinWalletReserveSol: number;
+  copyTradeMaxSignalAgeMs: number;
+  copyTradeMaxCopyWalletsPerChat: number;
+  copyTradeAllowedSources: string[];
+  copyTradeMaxSlippage: number;
+  copyTradeMaxPriorityFee: number;
   copyTradeTrailingSellEnabled: boolean;
   copyTradeTrailingSellHoldMs: number;
   copyTradeTrailingSellFirstPercent: number;
@@ -100,6 +108,14 @@ export interface LegacyBotConfig extends MigrationFormatConfig {
   copyTradeTrailingSellMaxBuilds?: number;
   copyTradeSlippage?: number;
   copyTradePriorityFee?: number;
+  copyTradeMaxBuySol?: number;
+  copyTradeDailySolCap?: number;
+  copyTradeMinWalletReserveSol?: number;
+  copyTradeMaxSignalAgeMs?: number;
+  copyTradeMaxCopyWalletsPerChat?: number;
+  copyTradeAllowedSources?: string[];
+  copyTradeMaxSlippage?: number;
+  copyTradeMaxPriorityFee?: number;
   getModeLabel?: () => string;
   pumpPortalSubscriptionMethod?: string;
 }

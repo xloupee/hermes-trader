@@ -224,7 +224,7 @@ export function formatWalletTradeMessageWithCopySettings(trade: WalletTradeData,
 }
 
 export function isCopyableSolToTokenBuy(trade: WalletTradeData): boolean {
-  return isSolAsset(trade.input) && Boolean(trade.output?.mint) && !isSolAsset(trade.output);
+  return trade.action === "buy" && isSolAsset(trade.input) && Boolean(trade.output?.mint) && !isSolAsset(trade.output);
 }
 
 function isSolAsset(asset?: WalletTradeAsset | null): boolean {

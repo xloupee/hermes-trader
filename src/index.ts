@@ -4,6 +4,14 @@ import { dirname } from "node:path";
 import { buildMigrationReplyMarkup, extractMigrationData, formatMigrationMessage, getEventId } from "./format.js";
 import { createTelegramCommandPoller } from "./commands.js";
 import {
+  copyTradeBuyRiskBlockedReason,
+  copyTradeDailyBudgetKey,
+  copyTradeRequestRiskBlockedReason,
+  copyTradeWalletReserveBlockedReason,
+  createInMemoryCopyTradeDailySolBudget,
+  formatCopyTradeRiskControlLog
+} from "./copytrade-risk-controls.js";
+import {
   copyTradeLiveExecutionBlockedReason,
   copyTradeLiveExecutionEnabled,
   formatCopyTradeExecutionStateLog
@@ -21,7 +29,7 @@ import {
   PUMPPORTAL_TRADE_LOCAL_URL
 } from "./pumpportal.js";
 import { decryptSecret, encryptionSecretReady } from "./secrets.js";
-import { analyzeSolanaTransaction } from "./solana.js";
+import { analyzeSolanaTransaction, getSolanaBalanceSol } from "./solana.js";
 import { createSubscriberStore } from "./subscribers.js";
 import { createSupabaseCopyTradeRecorderFromEnv, createSupabaseSubscriberStoreFromEnv } from "./subscribers-supabase.js";
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
@@ -63,6 +71,11 @@ function positiveNumberFromEnv(value: string | undefined, fallback: number): num
   return number > 0 ? number : fallback;
 }
 
+function nonNegativeNumberFromEnv(value: string | undefined, fallback: number): number {
+  const number = numberFromEnv(value, fallback);
+  return number >= 0 ? number : fallback;
+}
+
 function positiveIntegerFromEnv(value: string | undefined, fallback: number): number {
   return Math.max(1, Math.floor(positiveNumberFromEnv(value, fallback)));
 }
@@ -70,6 +83,12 @@ function positiveIntegerFromEnv(value: string | undefined, fallback: number): nu
 function percentFromEnv(value: string | undefined, fallback: number): number {
   const number = positiveNumberFromEnv(value, fallback);
   return Math.min(100, number);
+}
+
+function listFromEnv(value: string | undefined): string[] {
+  return value
+    ? [...new Set(value.split(",").map((entry) => entry.trim().toUpperCase()).filter(Boolean))]
+    : [];
 }
 
 function pumpPortalPoolFromEnv(value: string | undefined): PumpPortalTradePool {
@@ -119,6 +138,14 @@ const config: BotConfig = {
   copyTradeSlippage: numberFromEnv(process.env.COPY_TRADE_SLIPPAGE, 10),
   copyTradePriorityFee: numberFromEnv(process.env.COPY_TRADE_PRIORITY_FEE, 0.00005),
   copyTradePool: pumpPortalPoolFromEnv(process.env.COPY_TRADE_POOL),
+  copyTradeMaxBuySol: positiveNumberFromEnv(process.env.COPY_TRADE_MAX_BUY_SOL, 0.005),
+  copyTradeDailySolCap: positiveNumberFromEnv(process.env.COPY_TRADE_DAILY_SOL_CAP, 0.02),
+  copyTradeMinWalletReserveSol: nonNegativeNumberFromEnv(process.env.COPY_TRADE_MIN_WALLET_RESERVE_SOL, 0),
+  copyTradeMaxSignalAgeMs: positiveIntegerFromEnv(process.env.COPY_TRADE_MAX_SIGNAL_AGE_MS, 60_000),
+  copyTradeMaxCopyWalletsPerChat: positiveIntegerFromEnv(process.env.COPY_TRADE_MAX_COPY_WALLETS_PER_CHAT, 1),
+  copyTradeAllowedSources: listFromEnv(process.env.COPY_TRADE_ALLOWED_SOURCES),
+  copyTradeMaxSlippage: percentFromEnv(process.env.COPY_TRADE_MAX_SLIPPAGE, 15),
+  copyTradeMaxPriorityFee: positiveNumberFromEnv(process.env.COPY_TRADE_MAX_PRIORITY_FEE, 0.0002),
   copyTradeTrailingSellEnabled: process.env.COPY_TRADE_TRAILING_SELL_ENABLED === "true",
   copyTradeTrailingSellHoldMs: positiveIntegerFromEnv(process.env.COPY_TRADE_TRAILING_SELL_HOLD_MS, 2000),
   copyTradeTrailingSellFirstPercent: percentFromEnv(process.env.COPY_TRADE_TRAILING_SELL_FIRST_PERCENT, 20),
@@ -135,6 +162,7 @@ const tokenInfoCache = new Map<string, LooseRecord | null>();
 const trailingSellTimers = new Set<NodeJS.Timeout>();
 const activeTrailingSellSchedules = new Set<string>();
 const copyBuySubmissionGuard = createCopyBuySubmissionGuard();
+const copyTradeDailySolBudget = createInMemoryCopyTradeDailySolBudget();
 let isShuttingDown = false;
 const pumpFunCoinInfoRetryDelaysMs = [0, 750, 1500, 3000, 6000];
 const subscribers =
@@ -178,10 +206,11 @@ function logCopyTradeExecutionState(): void {
 
   if (copyTradeLiveExecutionEnabled(config)) {
     console.warn(message);
-    return;
+  } else {
+    console.log(message);
   }
 
-  console.log(message);
+  console.log(formatCopyTradeRiskControlLog(config));
 }
 
 function watchedWalletAddresses(): string[] {
@@ -406,6 +435,42 @@ async function sendCopyTradeSimulationAlert(
       return;
     }
 
+    const amountSol = typeof request.amount === "number" ? request.amount : null;
+    const dailyBudgetKey = copyTradeDailyBudgetKey({
+      chatId: subscriber.chatId,
+      tradingWalletPublicKey: subscriber.tradingWallet.publicKey
+    });
+    const nowMs = Date.now();
+    const riskBlockedReason = copyTradeBuyRiskBlockedReason({
+      config,
+      request,
+      trade,
+      copyTradeWalletCount: subscriber.copyTradeWallets.length,
+      dailySpentSol: copyTradeDailySolBudget.spentSol({ key: dailyBudgetKey, nowMs }),
+      nowMs
+    });
+    if (riskBlockedReason) {
+      await notifySkippedAutoCopyBuy({
+        subscriber,
+        trade,
+        copyTradeWallet,
+        request,
+        reason: riskBlockedReason
+      });
+      return;
+    }
+
+    if (amountSol === null) {
+      await notifySkippedAutoCopyBuy({
+        subscriber,
+        trade,
+        copyTradeWallet,
+        request,
+        reason: "copy buy amount is not a fixed SOL amount"
+      });
+      return;
+    }
+
     const blockedReason = copyTradeLiveExecutionBlockedReason(config);
     if (blockedReason) {
       await notifySkippedAutoCopyBuy({
@@ -416,6 +481,36 @@ async function sendCopyTradeSimulationAlert(
         reason: blockedReason
       });
       return;
+    }
+
+    if (config.copyTradeMinWalletReserveSol > 0) {
+      let tradingWalletBalanceSol: number | null = null;
+
+      try {
+        tradingWalletBalanceSol = await getSolanaBalanceSol({
+          address: subscriber.tradingWallet.publicKey,
+          rpcUrl: config.solanaRpcUrl
+        });
+      } catch (error) {
+        console.warn(`Could not fetch trading wallet balance for ${subscriber.chatId}: ${errorMessage(error)}`);
+      }
+
+      const reserveBlockedReason = copyTradeWalletReserveBlockedReason({
+        config,
+        request,
+        tradingWalletBalanceSol
+      });
+
+      if (reserveBlockedReason) {
+        await notifySkippedAutoCopyBuy({
+          subscriber,
+          trade,
+          copyTradeWallet,
+          request,
+          reason: reserveBlockedReason
+        });
+        return;
+      }
     }
 
     if (!encryptionSecretReady(config.pumpPortalWalletKeyEncryptionSecret)) {
@@ -430,6 +525,23 @@ async function sendCopyTradeSimulationAlert(
       return;
     }
     copyBuyReserved = true;
+
+    const budgetReservation = copyTradeDailySolBudget.reserve({
+      key: dailyBudgetKey,
+      amountSol,
+      capSol: config.copyTradeDailySolCap,
+      nowMs: Date.now()
+    });
+    if (!budgetReservation.ok) {
+      await notifySkippedAutoCopyBuy({
+        subscriber,
+        trade,
+        copyTradeWallet,
+        request,
+        reason: budgetReservation.reason || "daily copy buy budget exceeded"
+      });
+      return;
+    }
 
     const apiKey = decryptSecret(subscriber.tradingWallet.encryptedApiKey, config.pumpPortalWalletKeyEncryptionSecret || "");
     result = await executePumpPortalLightningTrade({
@@ -555,7 +667,11 @@ function formatSkippedAutoCopyBuyMessage({
     return null;
   }
 
-  const mode = config.copyTradeEnabled ? "Copy trade dry run is active" : "Live copy trading is disabled";
+  const mode = copyTradeLiveExecutionEnabled(config)
+    ? "Copy trade risk controls blocked this order"
+    : config.copyTradeEnabled
+      ? "Copy trade dry run is active"
+      : "Live copy trading is disabled";
 
   return [
     simulationMessage,
@@ -797,7 +913,7 @@ async function buildAndNotifyTrailingSell({
   copyTradeWallet: WatchedWallet;
   seenSellSignatures: Set<string>;
 }): Promise<PumpPortalLightningTradeResult> {
-  const blockedReason = copyTradeLiveExecutionBlockedReason(config);
+  const blockedReason = copyTradeLiveExecutionBlockedReason(config) || copyTradeRequestRiskBlockedReason({ config, request });
   if (blockedReason) {
     const result: PumpPortalLightningTradeResult = {
       ok: false,

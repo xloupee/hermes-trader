@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   canCreatePumpPortalTradingWalletInChat,
+  copyTradeRiskSettingConfirmReplyMarkup,
+  formatCopyTradeRiskSettingConfirmText,
   formatTradingWalletCreateConfirmText,
   tradingWalletBackupWarningText,
   tradingWalletCreationBlockedText
@@ -40,4 +42,18 @@ test("trading wallet creation confirmation includes hot-wallet backup warning", 
   assert.match(replacementConfirm, /wallet&lt;key&gt;/);
   assert.match(replacementConfirm, /old wallet will still exist on-chain/);
   assert.match(replacementConfirm, /Back it up somewhere private before depositing SOL/);
+});
+
+test("copy trade risk setting confirmation warns before saving live-affecting values", () => {
+  const text = formatCopyTradeRiskSettingConfirmText("buy_slippage", 12.5);
+  assert.match(text, /Confirm Buy slippage/);
+  assert.match(text, /12\.5%/);
+  assert.match(text, /affect live SOL trades/);
+
+  assert.deepEqual(copyTradeRiskSettingConfirmReplyMarkup(), {
+    inline_keyboard: [
+      [{ text: "✅ Confirm", callback_data: "copytrade:confirm_pending" }],
+      [{ text: "↩️ Cancel", callback_data: "copytrade:cancel_pending" }]
+    ]
+  });
 });

@@ -61,12 +61,17 @@ type PendingWalletInputAction =
   | "copytrade_wallet"
   | "rename_copytrade_wallet"
   | "remove_copytrade_wallet";
+type CopyTradeExecutionSettingInputAction = Extract<
+  PendingCopyInputAction,
+  "buy_slippage" | "buy_priority_fee" | "sell_slippage" | "sell_priority_fee"
+>;
 type ToggleAlertType = Exclude<AlertModeValue, "both">;
 
 interface PendingCopyInput {
   action: PendingCopyInputAction;
   expiresAt: number;
   walletAddress?: string;
+  confirmValue?: number;
 }
 
 interface PendingWalletInput {
@@ -148,6 +153,76 @@ function effectiveSellSlippage(subscriber: SubscriberRecord | null | undefined, 
 
 function effectiveSellPriorityFee(subscriber: SubscriberRecord | null | undefined, config: LegacyBotConfig): number {
   return subscriber?.copyTradeSellPriorityFeeSol ?? config.copyTradePriorityFee ?? DEFAULT_COPY_TRADE_PRIORITY_FEE;
+}
+
+function capEnabled(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function isCopyTradeExecutionSettingInputAction(action: PendingCopyInputAction): action is CopyTradeExecutionSettingInputAction {
+  return action === "buy_slippage" ||
+    action === "buy_priority_fee" ||
+    action === "sell_slippage" ||
+    action === "sell_priority_fee";
+}
+
+function isSlippageInputAction(action: CopyTradeExecutionSettingInputAction): boolean {
+  return action === "buy_slippage" || action === "sell_slippage";
+}
+
+function copyTradeInputLabel(action: PendingCopyInputAction): string {
+  if (action === "copy_amount") {
+    return "Copy amount";
+  }
+
+  if (action === "buy_slippage") {
+    return "Buy slippage";
+  }
+
+  if (action === "buy_priority_fee") {
+    return "Buy priority fee";
+  }
+
+  if (action === "sell_slippage") {
+    return "Sell slippage";
+  }
+
+  if (action === "sell_priority_fee") {
+    return "Sell priority fee";
+  }
+
+  return "Copy trade setting";
+}
+
+function formatCopyTradeInputValue(action: PendingCopyInputAction, value: number): string {
+  if (action === "copy_amount" || action === "buy_priority_fee" || action === "sell_priority_fee") {
+    return `${formatSolAmount(value)} SOL`;
+  }
+
+  return `${formatPercent(value)}%`;
+}
+
+export function formatCopyTradeRiskSettingConfirmText(action: PendingCopyInputAction, value: number): string {
+  const label = copyTradeInputLabel(action);
+  const formatted = formatCopyTradeInputValue(action, value);
+
+  return [
+    `<b>Confirm ${label}</b>`,
+    "",
+    `<b>New value:</b> <code>${formatted}</code>`,
+    "",
+    "This setting can affect live SOL trades when copy trading is enabled and dry-run is off.",
+    "Tap Confirm to save it."
+  ].join("\n");
+}
+
+export function copyTradeRiskSettingConfirmReplyMarkup(): TelegramReplyMarkup {
+  return {
+    inline_keyboard: [
+      [{ text: "✅ Confirm", callback_data: "copytrade:confirm_pending" }],
+      [{ text: "↩️ Cancel", callback_data: "copytrade:cancel_pending" }]
+    ]
+  };
 }
 
 function settingSource(value: number | null | undefined): string {
@@ -800,6 +875,18 @@ export function createTelegramCommandPoller({
       return;
     }
 
+    if (data === "copytrade:confirm_pending") {
+      const response = await confirmPendingCopyInput(chatId);
+      await reply(chatId, response.text, response.replyMarkup);
+      return;
+    }
+
+    if (data === "copytrade:cancel_pending") {
+      pendingCopyInputs.delete(String(chatId));
+      await reply(chatId, "Copy trade setting change canceled.", copyTradeDashboardReplyMarkup());
+      return;
+    }
+
     if (data === "trackwallets:dashboard") {
       const dashboard = trackWalletDashboard(chatId);
       await reply(chatId, dashboard.text, dashboard.replyMarkup);
@@ -877,7 +964,12 @@ export function createTelegramCommandPoller({
 
     if (data === "copytrade:set_amount") {
       setPendingCopyInput(chatId, "copy_amount");
-      await reply(chatId, "Send the fixed copy size in SOL, for example <code>0.1</code>.");
+      await reply(
+        chatId,
+        capEnabled(config.copyTradeMaxBuySol)
+          ? `Send the fixed copy size in SOL, up to <code>${formatSolAmount(config.copyTradeMaxBuySol)}</code>. For example <code>0.001</code>.`
+          : "Send the fixed copy size in SOL, for example <code>0.1</code>."
+      );
       return;
     }
 
@@ -889,25 +981,45 @@ export function createTelegramCommandPoller({
 
     if (data === "copytrade:settings:buy_slippage") {
       setPendingCopyInput(chatId, "buy_slippage");
-      await reply(chatId, "Send buy slippage percent, for example <code>10</code>, <code>10%</code>, or <code>2.5</code>.");
+      await reply(
+        chatId,
+        capEnabled(config.copyTradeMaxSlippage)
+          ? `Send buy slippage percent up to <code>${formatPercent(config.copyTradeMaxSlippage)}%</code>, for example <code>10</code>, <code>10%</code>, or <code>2.5</code>.`
+          : "Send buy slippage percent, for example <code>10</code>, <code>10%</code>, or <code>2.5</code>."
+      );
       return;
     }
 
     if (data === "copytrade:settings:buy_priority") {
       setPendingCopyInput(chatId, "buy_priority_fee");
-      await reply(chatId, "Send buy priority fee in SOL, for example <code>0.00005</code>.");
+      await reply(
+        chatId,
+        capEnabled(config.copyTradeMaxPriorityFee)
+          ? `Send buy priority fee in SOL up to <code>${formatSolAmount(config.copyTradeMaxPriorityFee)}</code>, for example <code>0.00005</code>.`
+          : "Send buy priority fee in SOL, for example <code>0.00005</code>."
+      );
       return;
     }
 
     if (data === "copytrade:settings:sell_slippage") {
       setPendingCopyInput(chatId, "sell_slippage");
-      await reply(chatId, "Send sell slippage percent, for example <code>10</code>, <code>10%</code>, or <code>2.5</code>.");
+      await reply(
+        chatId,
+        capEnabled(config.copyTradeMaxSlippage)
+          ? `Send sell slippage percent up to <code>${formatPercent(config.copyTradeMaxSlippage)}%</code>, for example <code>10</code>, <code>10%</code>, or <code>2.5</code>.`
+          : "Send sell slippage percent, for example <code>10</code>, <code>10%</code>, or <code>2.5</code>."
+      );
       return;
     }
 
     if (data === "copytrade:settings:sell_priority") {
       setPendingCopyInput(chatId, "sell_priority_fee");
-      await reply(chatId, "Send sell priority fee in SOL, for example <code>0.00005</code>.");
+      await reply(
+        chatId,
+        capEnabled(config.copyTradeMaxPriorityFee)
+          ? `Send sell priority fee in SOL up to <code>${formatSolAmount(config.copyTradeMaxPriorityFee)}</code>, for example <code>0.00005</code>.`
+          : "Send sell priority fee in SOL, for example <code>0.00005</code>."
+      );
       return;
     }
 
@@ -1851,6 +1963,99 @@ export function createTelegramCommandPoller({
     });
   }
 
+  function setPendingCopyInputConfirmation(chatId: TelegramChatId, action: PendingCopyInputAction, value: number): void {
+    const key = String(chatId);
+    const pending = pendingCopyInputs.get(key);
+
+    pendingCopyInputs.set(key, {
+      action,
+      expiresAt: Date.now() + PENDING_COPY_INPUT_TTL_MS,
+      walletAddress: pending?.walletAddress,
+      confirmValue: value
+    });
+  }
+
+  async function confirmPendingCopyInput(chatId: TelegramChatId): Promise<{ text: string; replyMarkup?: TelegramReplyMarkup }> {
+    const pending = pendingCopyInputs.get(String(chatId));
+
+    if (!pending) {
+      return {
+        text: "No copy trade setting change is waiting for confirmation. Send /copytrade to start again.",
+        replyMarkup: copyTradeDashboardReplyMarkup()
+      };
+    }
+
+    if (pending.expiresAt < Date.now()) {
+      pendingCopyInputs.delete(String(chatId));
+      return {
+        text: "That copy trade setup step expired. Send /copytrade to start again.",
+        replyMarkup: copyTradeDashboardReplyMarkup()
+      };
+    }
+
+    if (typeof pending.confirmValue !== "number" || !Number.isFinite(pending.confirmValue)) {
+      return {
+        text: "No parsed copy trade setting is waiting for confirmation. Send the value again.",
+        replyMarkup: copyTradeRiskSettingConfirmReplyMarkup()
+      };
+    }
+
+    pendingCopyInputs.delete(String(chatId));
+
+    if (pending.action === "copy_amount") {
+      return saveCopyAmount(chatId, pending.confirmValue);
+    }
+
+    if (isCopyTradeExecutionSettingInputAction(pending.action)) {
+      return saveCopyTradeExecutionSetting(chatId, pending.action, pending.confirmValue);
+    }
+
+    return {
+      text: "That copy trade setup step cannot be confirmed from here. Send /copytrade to start again.",
+      replyMarkup: copyTradeDashboardReplyMarkup()
+    };
+  }
+
+  async function saveCopyTradeExecutionSetting(
+    chatId: TelegramChatId,
+    action: CopyTradeExecutionSettingInputAction,
+    value: number
+  ): Promise<{ text: string; replyMarkup?: TelegramReplyMarkup }> {
+    const updated =
+      action === "buy_slippage"
+        ? await subscribers?.setCopyTradeBuySlippage(chatId, value)
+        : action === "buy_priority_fee"
+          ? await subscribers?.setCopyTradeBuyPriorityFee(chatId, value)
+          : action === "sell_slippage"
+            ? await subscribers?.setCopyTradeSellSlippage(chatId, value)
+            : await subscribers?.setCopyTradeSellPriorityFee(chatId, value);
+
+    if (!updated) {
+      return { text: verificationPrompt() };
+    }
+
+    const dashboard = copyTradeSettingsDashboard(chatId);
+    const formatted = isSlippageInputAction(action) ? `${formatPercent(value)}%` : `${formatSolAmount(value)} SOL`;
+    return {
+      text: `<b>${copyTradeInputLabel(action)} saved:</b> ${formatted}\n\n${dashboard.text}`,
+      replyMarkup: dashboard.replyMarkup
+    };
+  }
+
+  async function saveCopyAmount(chatId: TelegramChatId, amount: number): Promise<{ text: string; replyMarkup?: TelegramReplyMarkup }> {
+    const updated = await subscribers?.setCopyAmountSol(chatId, amount);
+
+    if (!updated) {
+      return { text: verificationPrompt() };
+    }
+
+    const dashboard = copyTradeDashboard(chatId);
+    return {
+      text: `<b>Copy amount saved:</b> ${formatSolAmount(amount)} SOL\n\n${dashboard.text}`,
+      replyMarkup: dashboard.replyMarkup
+    };
+  }
+
   async function handlePendingCopyInput(
     chatId: TelegramChatId,
     message: TelegramMessage
@@ -1962,33 +2167,22 @@ export function createTelegramCommandPoller({
         };
       }
 
-      pendingCopyInputs.delete(String(chatId));
-      const updated =
-        pending.action === "buy_slippage"
-          ? await subscribers?.setCopyTradeBuySlippage(chatId, parsed)
-          : pending.action === "buy_priority_fee"
-            ? await subscribers?.setCopyTradeBuyPriorityFee(chatId, parsed)
-            : pending.action === "sell_slippage"
-              ? await subscribers?.setCopyTradeSellSlippage(chatId, parsed)
-              : await subscribers?.setCopyTradeSellPriorityFee(chatId, parsed);
-
-      if (!updated) {
-        return { text: verificationPrompt() };
+      if (isSlippage && capEnabled(config.copyTradeMaxSlippage) && parsed > config.copyTradeMaxSlippage) {
+        return {
+          text: `That slippage is above this bot's hard live-trading cap of <code>${formatPercent(config.copyTradeMaxSlippage)}%</code>.`
+        };
       }
 
-      const dashboard = copyTradeSettingsDashboard(chatId);
-      const label =
-        pending.action === "buy_slippage"
-          ? "Buy slippage"
-          : pending.action === "buy_priority_fee"
-            ? "Buy priority fee"
-            : pending.action === "sell_slippage"
-              ? "Sell slippage"
-              : "Sell priority fee";
-      const formatted = isSlippage ? `${formatPercent(parsed)}%` : `${formatSolAmount(parsed)} SOL`;
+      if (!isSlippage && capEnabled(config.copyTradeMaxPriorityFee) && parsed > config.copyTradeMaxPriorityFee) {
+        return {
+          text: `That priority fee is above this bot's hard live-trading cap of <code>${formatSolAmount(config.copyTradeMaxPriorityFee)} SOL</code>.`
+        };
+      }
+
+      setPendingCopyInputConfirmation(chatId, pending.action, parsed);
       return {
-        text: `<b>${label} saved:</b> ${formatted}\n\n${dashboard.text}`,
-        replyMarkup: dashboard.replyMarkup
+        text: formatCopyTradeRiskSettingConfirmText(pending.action, parsed),
+        replyMarkup: copyTradeRiskSettingConfirmReplyMarkup()
       };
     }
 
@@ -2000,17 +2194,16 @@ export function createTelegramCommandPoller({
       };
     }
 
-    pendingCopyInputs.delete(String(chatId));
-    const updated = await subscribers?.setCopyAmountSol(chatId, amount);
-
-    if (!updated) {
-      return { text: verificationPrompt() };
+    if (capEnabled(config.copyTradeMaxBuySol) && amount > config.copyTradeMaxBuySol) {
+      return {
+        text: `That copy amount is above this bot's hard live-trading cap of <code>${formatSolAmount(config.copyTradeMaxBuySol)} SOL</code>.`
+      };
     }
 
-    const dashboard = copyTradeDashboard(chatId);
+    setPendingCopyInputConfirmation(chatId, pending.action, amount);
     return {
-      text: `<b>Copy amount saved:</b> ${formatSolAmount(amount)} SOL\n\n${dashboard.text}`,
-      replyMarkup: dashboard.replyMarkup
+      text: formatCopyTradeRiskSettingConfirmText(pending.action, amount),
+      replyMarkup: copyTradeRiskSettingConfirmReplyMarkup()
     };
   }
 

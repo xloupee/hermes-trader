@@ -898,13 +898,27 @@ export function createTelegramCommandPoller({
     }
 
     if (data === "copytrade:stop") {
-      const dashboard = copyTradeStopConfirm(chatId);
+      const dashboard = copyTradeStopPicker(chatId);
       await reply(chatId, dashboard.text, dashboard.replyMarkup);
       return;
     }
 
     if (data === "copytrade:stop_confirm") {
-      await stopCopyTrading(chatId);
+      const dashboard = copyTradeStopPicker(chatId);
+      await reply(chatId, `Choose which Copytrade Wallet to stop.\n\n${dashboard.text}`, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data.startsWith("copytrade:stop_one:")) {
+      const walletIndex = Number(data.slice("copytrade:stop_one:".length));
+      const dashboard = copyTradeStopConfirm(chatId, walletIndex);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data.startsWith("copytrade:stop_confirm:")) {
+      const walletIndex = Number(data.slice("copytrade:stop_confirm:".length));
+      await stopCopyTradingByIndex(chatId, walletIndex);
       return;
     }
 
@@ -1953,8 +1967,10 @@ export function createTelegramCommandPoller({
           { text: "📉 Trailing Sells", callback_data: "copytrade:trailing" },
           { text: "⚙️ Settings", callback_data: "copytrade:settings" }
         ],
-        [{ text: "⏹️ Stop Copy Trading", callback_data: "copytrade:stop" }],
-        [{ text: "📋 List Wallets", callback_data: "copytrade:wallets" }]
+        [
+          { text: "⏹️ Stop Copy Trading", callback_data: "copytrade:stop" },
+          { text: "📋 List Wallets", callback_data: "copytrade:wallets" }
+        ]
       ]
     };
   }
@@ -2084,10 +2100,10 @@ export function createTelegramCommandPoller({
     };
   }
 
-  function copyTradeStopConfirm(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
-    const walletCount = subscribers?.listCopyTradeWallets(chatId).length || 0;
+  function copyTradeStopPicker(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
+    const wallets = subscribers?.listCopyTradeWallets(chatId) || [];
 
-    if (walletCount === 0) {
+    if (wallets.length === 0) {
       return {
         text: "Copy trading is already stopped. Add a Copytrade Wallet to turn it back on.",
         replyMarkup: {
@@ -2098,15 +2114,48 @@ export function createTelegramCommandPoller({
 
     return {
       text: [
-        "<b>⏹️ Stop Copy Trading?</b>",
+        "<b>⏹️ Stop Copy Trading</b>",
         "",
-        `This will remove all ${walletCount} Copytrade Wallet${walletCount === 1 ? "" : "s"} and stop auto copy buys.`,
-        "Your trading wallet, amount, settings, and trailing sell configs stay saved."
+        "Choose the target wallet you want to stop copytrading.",
+        "Your trading wallet, amount, and execution settings stay saved."
       ].join("\n"),
       replyMarkup: {
         inline_keyboard: [
-          [{ text: "✅ Confirm Stop", callback_data: "copytrade:stop_confirm" }],
+          ...wallets.map((wallet, index) => [
+            {
+              text: `⏹️ ${formatCopyTradeWalletSummary(wallet)}`,
+              callback_data: `copytrade:stop_one:${index}`
+            }
+          ]),
           [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]
+        ]
+      }
+    };
+  }
+
+  function copyTradeStopConfirm(chatId: TelegramChatId, walletIndex: number): { text: string; replyMarkup: TelegramReplyMarkup } {
+    const wallet = copyTradeWalletByIndex(chatId, walletIndex);
+
+    if (!wallet) {
+      const picker = copyTradeStopPicker(chatId);
+      return {
+        text: `That Copytrade Wallet is no longer available.\n\n${picker.text}`,
+        replyMarkup: picker.replyMarkup
+      };
+    }
+
+    return {
+      text: [
+        "<b>Confirm stop</b>",
+        `Stop copytrading ${formatCopyTradeWalletSummary(wallet)}?`,
+        "",
+        "This only removes this target from Copytrade Wallets.",
+        "Your trading wallet, amount, settings, and other targets stay saved."
+      ].join("\n"),
+      replyMarkup: {
+        inline_keyboard: [
+          [{ text: "✅ Confirm Stop", callback_data: `copytrade:stop_confirm:${walletIndex}` }],
+          [{ text: "↩️ Back", callback_data: "copytrade:stop" }]
         ]
       }
     };
@@ -2156,12 +2205,20 @@ export function createTelegramCommandPoller({
     );
   }
 
-  async function stopCopyTrading(chatId: TelegramChatId): Promise<void> {
-    const removedCount = await subscribers?.unwatchAllCopyTradeWallets(chatId);
+  async function stopCopyTradingByIndex(chatId: TelegramChatId, walletIndex: number): Promise<void> {
+    const wallet = copyTradeWalletByIndex(chatId, walletIndex);
 
-    if (!removedCount) {
-      const dashboard = copyTradeDashboard(chatId);
-      await reply(chatId, `Copy trading is already stopped.\n\n${dashboard.text}`, dashboard.replyMarkup);
+    if (!wallet) {
+      const picker = copyTradeStopPicker(chatId);
+      await reply(chatId, `That Copytrade Wallet is no longer available.\n\n${picker.text}`, picker.replyMarkup);
+      return;
+    }
+
+    const removed = await subscribers?.unwatchCopyTradeWallet(chatId, wallet.address);
+
+    if (!removed) {
+      const picker = copyTradeStopPicker(chatId);
+      await reply(chatId, `That Copytrade Wallet is no longer available.\n\n${picker.text}`, picker.replyMarkup);
       return;
     }
 
@@ -2169,7 +2226,7 @@ export function createTelegramCommandPoller({
     const dashboard = copyTradeDashboard(chatId);
     await reply(
       chatId,
-      `<b>⏹️ Copy trading stopped.</b>\nRemoved ${removedCount} Copytrade Wallet${removedCount === 1 ? "" : "s"}.${syncWarning ? `\n\n${syncWarning}` : ""}\n\n${dashboard.text}`,
+      `<b>⏹️ Copy trading stopped for:</b> ${formatCopyTradeWalletSummary(wallet)}${syncWarning ? `\n\n${syncWarning}` : ""}\n\n${dashboard.text}`,
       dashboard.replyMarkup
     );
   }

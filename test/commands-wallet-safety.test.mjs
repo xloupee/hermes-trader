@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   canCreatePumpPortalTradingWalletInChat,
+  copyTradeEmergencyStopConfirmReplyMarkup,
   copyTradeRiskSettingConfirmReplyMarkup,
+  formatCopyTradeEmergencyStopActivatedText,
+  formatCopyTradeEmergencyStopConfirmText,
+  formatCopyTradeEmergencyStopUnavailableText,
   formatCopyTradeRiskSettingConfirmText,
   formatTradingWalletCreateConfirmText,
   tradingWalletBackupWarningText,
@@ -56,4 +60,32 @@ test("copy trade risk setting confirmation warns before saving live-affecting va
       [{ text: "↩️ Cancel", callback_data: "copytrade:cancel_pending" }]
     ]
   });
+});
+
+test("copy trade emergency stop confirmation is explicit and preserves setup", () => {
+  const text = formatCopyTradeEmergencyStopConfirmText();
+  assert.match(text, /Emergency Stop Live Copy Trading/);
+  assert.match(text, /disables live PumpPortal copy submissions/);
+  assert.match(text, /will not remove Copytrade Wallets/);
+  assert.match(text, /trading wallet config/);
+  assert.match(text, /token alerts/);
+
+  assert.deepEqual(copyTradeEmergencyStopConfirmReplyMarkup(), {
+    inline_keyboard: [
+      [{ text: "🚨 Confirm Emergency Stop", callback_data: "copytrade:emergency_stop_confirm" }],
+      [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]
+    ]
+  });
+});
+
+test("copy trade emergency stop state text reports disabled live submissions", () => {
+  const active = formatCopyTradeEmergencyStopActivatedText("Execution state: EMERGENCY_STOPPED");
+  assert.match(active, /Emergency stop active/);
+  assert.match(active, /Live PumpPortal copy submissions are disabled/);
+  assert.match(active, /were left unchanged/);
+  assert.match(active, /Execution state: EMERGENCY_STOPPED/);
+
+  const unavailable = formatCopyTradeEmergencyStopUnavailableText();
+  assert.match(unavailable, /Emergency stop unavailable/);
+  assert.match(unavailable, /live copy trading was not changed/);
 });

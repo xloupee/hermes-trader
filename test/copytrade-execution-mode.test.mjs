@@ -14,6 +14,7 @@ test("copy trade execution mode blocks live PumpPortal submissions by default", 
   assert.equal(copyTradeLiveExecutionBlockedReason(config), "COPY_TRADE_ENABLED is not true");
   assert.equal(copyTradeExecutionStateLabel(config), "DISABLED + DRY RUN");
   assert.match(formatCopyTradeExecutionStateLog(config), /livePumpPortalSubmissions=blocked/);
+  assert.match(formatCopyTradeExecutionStateLog(config), /emergencyStop=inactive/);
 });
 
 test("copy trade execution mode requires enabled and not dry-run for live submissions", () => {
@@ -30,4 +31,18 @@ test("copy trade execution mode requires enabled and not dry-run for live submis
   assert.equal(copyTradeLiveExecutionBlockedReason(liveConfig), null);
   assert.equal(copyTradeExecutionStateLabel(liveConfig), "LIVE");
   assert.match(formatCopyTradeExecutionStateLog(liveConfig), /livePumpPortalSubmissions=allowed/);
+});
+
+test("copy trade execution mode emergency stop overrides live env settings", () => {
+  const config = {
+    copyTradeEnabled: true,
+    copyTradeDryRun: false,
+    copyTradeEmergencyStopped: true
+  };
+
+  assert.equal(copyTradeLiveExecutionEnabled(config), false);
+  assert.equal(copyTradeLiveExecutionBlockedReason(config), "copy trade emergency stop is active");
+  assert.equal(copyTradeExecutionStateLabel(config), "EMERGENCY STOPPED");
+  assert.match(formatCopyTradeExecutionStateLog(config), /emergencyStop=active/);
+  assert.match(formatCopyTradeExecutionStateLog(config), /livePumpPortalSubmissions=blocked/);
 });

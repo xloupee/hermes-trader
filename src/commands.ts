@@ -89,6 +89,7 @@ interface CommandPollerOptions {
   testMessage: () => string;
   subscribers?: SubscriberStore;
   onWalletWatchlistChange?: () => string | void | Promise<string | void>;
+  onCopyTradeEmergencyStop?: (chatId: TelegramChatId) => string | void | Promise<string | void>;
 }
 
 interface TelegramCommandPoller {
@@ -223,6 +224,45 @@ export function copyTradeRiskSettingConfirmReplyMarkup(): TelegramReplyMarkup {
       [{ text: "↩️ Cancel", callback_data: "copytrade:cancel_pending" }]
     ]
   };
+}
+
+export function formatCopyTradeEmergencyStopConfirmText(): string {
+  return [
+    "<b>🚨 Emergency Stop Live Copy Trading?</b>",
+    "",
+    "This disables live PumpPortal copy submissions in this running bot process.",
+    "",
+    "It will not remove Copytrade Wallets, trading wallet config, saved settings, or token alerts.",
+    "Tap Confirm Emergency Stop to disable live execution now."
+  ].join("\n");
+}
+
+export function copyTradeEmergencyStopConfirmReplyMarkup(): TelegramReplyMarkup {
+  return {
+    inline_keyboard: [
+      [{ text: "🚨 Confirm Emergency Stop", callback_data: "copytrade:emergency_stop_confirm" }],
+      [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]
+    ]
+  };
+}
+
+export function formatCopyTradeEmergencyStopActivatedText(statusText?: string | null): string {
+  return [
+    "<b>🚨 Emergency stop active</b>",
+    "",
+    "Live PumpPortal copy submissions are disabled in this running bot process.",
+    "Copytrade Wallets, trading wallet config, saved settings, and token alerts were left unchanged.",
+    ...(statusText ? ["", statusText] : [])
+  ].join("\n");
+}
+
+export function formatCopyTradeEmergencyStopUnavailableText(): string {
+  return [
+    "<b>🚨 Emergency stop unavailable</b>",
+    "",
+    "This bot runtime has no emergency-stop handler configured, so live copy trading was not changed.",
+    "Use SSH/env controls until the runtime handler is wired in."
+  ].join("\n");
 }
 
 function settingSource(value: number | null | undefined): string {
@@ -713,7 +753,8 @@ export function createTelegramCommandPoller({
   config,
   testMessage: _testMessage,
   subscribers,
-  onWalletWatchlistChange
+  onWalletWatchlistChange,
+  onCopyTradeEmergencyStop
 }: CommandPollerOptions): TelegramCommandPoller {
   let nextOffset: number | undefined;
   let shouldPoll = true;
@@ -1073,6 +1114,27 @@ export function createTelegramCommandPoller({
     if (data === "copytrade:stop") {
       const dashboard = copyTradeStopPicker(chatId);
       await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data === "copytrade:emergency_stop") {
+      await reply(chatId, formatCopyTradeEmergencyStopConfirmText(), copyTradeEmergencyStopConfirmReplyMarkup());
+      return;
+    }
+
+    if (data === "copytrade:emergency_stop_confirm") {
+      if (!onCopyTradeEmergencyStop) {
+        await reply(chatId, formatCopyTradeEmergencyStopUnavailableText(), copyTradeDashboardReplyMarkup());
+        return;
+      }
+
+      const statusText = await onCopyTradeEmergencyStop(chatId);
+      const dashboard = copyTradeDashboard(chatId);
+      await reply(
+        chatId,
+        `${formatCopyTradeEmergencyStopActivatedText(statusText || null)}\n\n${dashboard.text}`,
+        dashboard.replyMarkup
+      );
       return;
     }
 
@@ -2254,7 +2316,8 @@ export function createTelegramCommandPoller({
         [
           { text: "⏹️ Stop Copy Trading", callback_data: "copytrade:stop" },
           { text: "📋 List Wallets", callback_data: "copytrade:wallets" }
-        ]
+        ],
+        [{ text: "🚨 Emergency Stop", callback_data: "copytrade:emergency_stop" }]
       ]
     };
   }

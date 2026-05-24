@@ -585,6 +585,7 @@ async function scheduleCopyTradeTrailingSells({
     console.warn(`Skipping overlapping trailing sell schedule for ${subscriber.chatId}:${trade.mint}: schedule already active`);
     return;
   }
+  activeTrailingSellSchedules.add(scheduleKey);
 
   const scheduledMessage = formatCopyTradeTrailingSellScheduledMessage({
     trade,
@@ -592,15 +593,18 @@ async function scheduleCopyTradeTrailingSells({
   });
 
   if (scheduledMessage) {
-    await sendTelegramMessage({
-      token: config.telegramToken,
-      chatId: subscriber.chatId,
-      text: scheduledMessage,
-      replyMarkup: buildWalletTradeReplyMarkup(trade)
-    });
+    try {
+      await sendTelegramMessage({
+        token: config.telegramToken,
+        chatId: subscriber.chatId,
+        text: scheduledMessage,
+        replyMarkup: buildWalletTradeReplyMarkup(trade)
+      });
+    } catch (error) {
+      console.warn(`Could not send trailing sell schedule alert to ${subscriber.chatId}: ${errorMessage(error)}`);
+    }
   }
 
-  activeTrailingSellSchedules.add(scheduleKey);
   runTrailingSellSchedule({
     subscriber,
     trade,
@@ -617,8 +621,7 @@ function trailingSellScheduleKey({ subscriber, trade }: { subscriber: Subscriber
   return [
     subscriber.chatId,
     subscriber.tradingWallet?.publicKey || "unknown-wallet",
-    trade.mint || "unknown-mint",
-    trade.signature || trade.observedAt
+    trade.mint || "unknown-mint"
   ].join(":");
 }
 

@@ -72,6 +72,7 @@ export function makeSubscriber(chatId: string, mode: AlertModeValue | null, now 
     watchedWallets: [],
     copyTradeWallets: [],
     tradingWallet: null,
+    tradingWallets: [],
     copyWalletAddress: null,
     copyWalletAddresses: [],
     copyAmountSol: null,
@@ -152,6 +153,7 @@ export function mergeSubscriber(
     watchedWallets: existing?.watchedWallets || [],
     copyTradeWallets: existing?.copyTradeWallets || [],
     tradingWallet: existing?.tradingWallet || null,
+    tradingWallets: existing?.tradingWallets || (existing?.tradingWallet ? [existing.tradingWallet] : []),
     copyWalletAddress: stringValue(existing?.copyWalletAddress) || null,
     copyWalletAddresses: existing?.copyWalletAddresses || [],
     copyAmountSol: finiteNumber(existing?.copyAmountSol),
@@ -182,6 +184,16 @@ export function normalizeTradingWallet(value: unknown, fallbackNow = new Date().
     createdAt: typeof record.createdAt === "string" ? record.createdAt : fallbackNow,
     updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : fallbackNow
   };
+}
+
+export function dedupeTradingWallets(tradingWallets: TradingWallet[]): TradingWallet[] {
+  const byPublicKey = new Map<string, TradingWallet>();
+
+  for (const wallet of tradingWallets) {
+    byPublicKey.set(wallet.publicKey, wallet);
+  }
+
+  return [...byPublicKey.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 }
 
 export function dedupeWatchedWallets(watchedWallets: WatchedWallet[]): WatchedWallet[] {
@@ -220,7 +232,11 @@ function loadSubscriberRecordInto(subscribers: Map<string, SubscriberRecord>, va
   const copyTradeWallets = Array.isArray(record.copyTradeWallets)
     ? record.copyTradeWallets.map((wallet) => normalizeWatchedWallet(wallet)).filter((wallet): wallet is WatchedWallet => Boolean(wallet))
     : [];
+  const tradingWallets = Array.isArray(record.tradingWallets)
+    ? record.tradingWallets.map((wallet) => normalizeTradingWallet(wallet)).filter((wallet): wallet is TradingWallet => Boolean(wallet))
+    : [];
   const tradingWallet = normalizeTradingWallet(record.tradingWallet || record.pumpPortalTradingWallet);
+  const nextTradingWallets = dedupeTradingWallets(tradingWallet ? [...tradingWallets, tradingWallet] : tradingWallets);
   const legacyCopyTarget = copyTradeWallets.length === 0
     ? stringValue(record.copyTargetWalletAddress || record.copyTargetWallet)?.trim() || null
     : null;
@@ -242,7 +258,8 @@ function loadSubscriberRecordInto(subscribers: Map<string, SubscriberRecord>, va
       ...existing,
       watchedWallets: nextWatchedWallets.length > 0 || watchedWallets.length > 0 ? dedupeWatchedWallets(nextWatchedWallets) : existing.watchedWallets,
       copyTradeWallets: nextCopyTradeWallets.length > 0 ? dedupeWatchedWallets(nextCopyTradeWallets) : existing.copyTradeWallets,
-      tradingWallet: tradingWallet || existing.tradingWallet,
+      tradingWallet: tradingWallet || existing.tradingWallet || nextTradingWallets[0] || null,
+      tradingWallets: nextTradingWallets.length > 0 ? nextTradingWallets : existing.tradingWallets,
       copyWalletAddresses: [],
       copyWalletAddress: null,
       copyAmountSol: finiteNumber(record.copyAmountSol ?? record.copyAmount) ?? existing.copyAmountSol,
@@ -658,9 +675,11 @@ export function createSubscriberStore({
       }
 
       const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const tradingWallets = dedupeTradingWallets([...(existing.tradingWallets || []), wallet]);
       subscribers.set(normalized, {
         ...existing,
         tradingWallet: wallet,
+        tradingWallets,
         updatedAt: new Date().toISOString()
       });
       await save();
@@ -688,13 +707,50 @@ export function createSubscriberStore({
           label,
           updatedAt: now
         },
+        tradingWallets: dedupeTradingWallets([...(existing.tradingWallets || []), existing.tradingWallet].filter((wallet): wallet is TradingWallet => Boolean(wallet)).map((wallet) =>
+          wallet.publicKey === existing.tradingWallet?.publicKey
+            ? {
+                ...wallet,
+                label,
+                updatedAt: now
+              }
+            : wallet
+        )),
         updatedAt: now
+      });
+      await save();
+      return true;
+    },
+    async setActiveTradingWallet(chatId, publicKey) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const wallet = (existing.tradingWallets || []).find((entry) => entry.publicKey === publicKey);
+
+      if (!wallet) {
+        return false;
+      }
+
+      subscribers.set(normalized, {
+        ...existing,
+        tradingWallet: wallet,
+        tradingWallets: dedupeTradingWallets(existing.tradingWallets || [wallet]),
+        updatedAt: new Date().toISOString()
       });
       await save();
       return true;
     },
     getTradingWallet(chatId) {
       return subscribers.get(String(chatId))?.tradingWallet || null;
+    },
+    listTradingWallets(chatId) {
+      const subscriber = subscribers.get(String(chatId));
+      return subscriber?.tradingWallets?.length ? [...subscriber.tradingWallets] : subscriber?.tradingWallet ? [subscriber.tradingWallet] : [];
     },
     async setCopyWallet(chatId, address) {
       await load();

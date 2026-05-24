@@ -20,6 +20,7 @@ import type {
   TelegramMessage,
   TelegramReplyMarkup,
   TelegramUpdate,
+  TradingWallet,
   TrailingSellConfig,
   TrailingSellPercentBasis,
   TrailingSellStep,
@@ -784,9 +785,32 @@ export function createTelegramCommandPoller({
       return;
     }
 
+    if (data === "mywallets:new") {
+      const dashboard = myWalletCreateNewConfirm(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data === "mywallets:new_confirm") {
+      await createTradingWallet(chatId, { replaceExisting: true });
+      return;
+    }
+
     if (data === "mywallets:rename") {
       setPendingCopyInput(chatId, "rename_trading_wallet");
       await reply(chatId, "Send a trading wallet nickname, or send <code>-</code> to clear it.");
+      return;
+    }
+
+    if (data === "mywallets:switch") {
+      const dashboard = myWalletSwitchPicker(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data.startsWith("mywallets:select:")) {
+      const walletIndex = Number(data.slice("mywallets:select:".length));
+      await selectTradingWalletByIndex(chatId, walletIndex);
       return;
     }
 
@@ -870,6 +894,17 @@ export function createTelegramCommandPoller({
     if (data === "copytrade:remove_trade_wallet" || data === "copytrade:remove_picker") {
       const dashboard = copyTradeRemovePicker(chatId);
       await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data === "copytrade:stop") {
+      const dashboard = copyTradeStopConfirm(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data === "copytrade:stop_confirm") {
+      await stopCopyTrading(chatId);
       return;
     }
 
@@ -1462,11 +1497,15 @@ export function createTelegramCommandPoller({
     }
 
     const tradingWallet = subscribers?.getTradingWallet(chatId) || null;
+    const tradingWallets = subscribers?.listTradingWallets(chatId) || [];
+    const otherWalletCount = Math.max(0, tradingWallets.length - (tradingWallet ? 1 : 0));
     const text = tradingWallet
       ? [
           "<b>👛 Trading Wallet</b>",
           "",
           "Deposit SOL here to enable auto copy buys.",
+          "",
+          `<b>📚 Saved Wallets:</b> ${tradingWallets.length}`,
           "",
           `<b>🏷️ Name:</b> ${tradingWallet.label ? escapeWalletLabel(tradingWallet.label) : "Not set"}`,
           "",
@@ -1477,9 +1516,10 @@ export function createTelegramCommandPoller({
           "<b>🔐 Private key:</b> Shown once when created. The bot cannot recover it.",
           "",
           "🟢 Wallet is ready once it has SOL.",
+          otherWalletCount > 0 ? `🔁 ${otherWalletCount} other wallet${otherWalletCount === 1 ? "" : "s"} saved. Use Switch Wallet to change active wallets.` : null,
           "",
           `🕒 Last updated: ${formatDashboardTime(new Date())}`
-        ].join("\n")
+        ].filter((line): line is string => line !== null).join("\n")
       : [
           "<b>👛 Trading Wallet</b>",
           "",
@@ -1516,15 +1556,119 @@ export function createTelegramCommandPoller({
           },
           { text: "✏️ Rename", callback_data: "mywallets:rename" }
         ],
+        [
+          { text: "➕ New Wallet", callback_data: "mywallets:new" },
+          { text: "🔁 Switch Wallet", callback_data: "mywallets:switch" }
+        ],
         [{ text: "📊 Status", callback_data: "mywallets:dashboard" }]
       ]
     };
   }
 
-  async function createTradingWallet(chatId: TelegramChatId): Promise<void> {
+  function myWalletSwitchPicker(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
+    const wallets = subscribers?.listTradingWallets(chatId) || [];
+    const activeWallet = subscribers?.getTradingWallet(chatId) || null;
+
+    if (wallets.length === 0) {
+      return {
+        text: "No trading wallets yet.",
+        replyMarkup: {
+          inline_keyboard: [
+            [{ text: "🚀 Create Wallet", callback_data: "mywallets:create" }],
+            [{ text: "↩️ Back", callback_data: "mywallets:dashboard" }]
+          ]
+        }
+      };
+    }
+
+    return {
+      text: [
+        "<b>🔁 Switch Trading Wallet</b>",
+        "",
+        "Choose which wallet the bot should use for future copy buys."
+      ].join("\n"),
+      replyMarkup: {
+        inline_keyboard: [
+          ...wallets.map((wallet, index) => [
+            {
+              text: `${wallet.publicKey === activeWallet?.publicKey ? "🟢" : "⚪"} ${formatTradingWalletButtonLabel(wallet)}`,
+              callback_data: `mywallets:select:${index}`
+            }
+          ]),
+          [{ text: "↩️ Back", callback_data: "mywallets:dashboard" }]
+        ]
+      }
+    };
+  }
+
+  async function selectTradingWalletByIndex(chatId: TelegramChatId, walletIndex: number): Promise<void> {
+    const wallets = subscribers?.listTradingWallets(chatId) || [];
+    const wallet = Number.isInteger(walletIndex) && walletIndex >= 0 ? wallets[walletIndex] : null;
+
+    if (!wallet) {
+      const picker = myWalletSwitchPicker(chatId);
+      await reply(chatId, `That trading wallet is no longer available.\n\n${picker.text}`, picker.replyMarkup);
+      return;
+    }
+
+    const updated = await subscribers?.setActiveTradingWallet(chatId, wallet.publicKey);
+
+    if (!updated) {
+      await reply(chatId, verificationPrompt());
+      return;
+    }
+
+    const dashboard = myWalletDashboard(chatId);
+    await reply(chatId, `<b>Active trading wallet updated:</b> ${formatTradingWalletButtonLabel(wallet)}\n\n${dashboard.text}`, dashboard.replyMarkup);
+  }
+
+  function formatTradingWalletButtonLabel(wallet: TradingWallet): string {
+    return wallet.label ? escapeWalletLabel(wallet.label) : shortWallet(wallet.publicKey);
+  }
+
+  function myWalletCreateNewConfirm(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
     const existing = subscribers?.getTradingWallet(chatId);
 
-    if (existing) {
+    if (!existing) {
+      return {
+        text: "No trading wallet exists yet. Create your first trading wallet?",
+        replyMarkup: {
+          inline_keyboard: [
+            [{ text: "🚀 Create Wallet", callback_data: "mywallets:create" }],
+            [{ text: "↩️ Back", callback_data: "mywallets:dashboard" }]
+          ]
+        }
+      };
+    }
+
+    return {
+      text: [
+        "<b>➕ Create New Trading Wallet?</b>",
+        "",
+        "This creates a fresh PumpPortal trading wallet and makes it your active copytrade wallet.",
+        "",
+        "<b>Current wallet</b>",
+        `<code>${existing.publicKey}</code>`,
+        "",
+        "Your old wallet will still exist on-chain, but the bot will use the new wallet for future copy buys.",
+        "The new private key will be shown once."
+      ].join("\n"),
+      replyMarkup: {
+        inline_keyboard: [
+          [{ text: "✅ Create New Wallet", callback_data: "mywallets:new_confirm" }],
+          [{ text: "↩️ Back", callback_data: "mywallets:dashboard" }]
+        ]
+      }
+    };
+  }
+
+  async function createTradingWallet(
+    chatId: TelegramChatId,
+    { replaceExisting = false }: { replaceExisting?: boolean } = {}
+  ): Promise<void> {
+    const existing = subscribers?.getTradingWallet(chatId);
+
+    if (existing && !replaceExisting) {
       const dashboard = myWalletDashboard(chatId);
       await reply(chatId, `<b>Trading wallet already exists.</b>\n\n${dashboard.text}`, dashboard.replyMarkup);
       return;
@@ -1562,7 +1706,7 @@ export function createTelegramCommandPoller({
     await reply(
       chatId,
       [
-        "<b>Trading wallet created.</b>",
+        replaceExisting ? "<b>New trading wallet created.</b>" : "<b>Trading wallet created.</b>",
         "",
         "<b>Deposit SOL here:</b>",
         `<code>${result.wallet.publicKey}</code>`,
@@ -1573,6 +1717,13 @@ export function createTelegramCommandPoller({
         "<b>Private key</b>",
         `<code>${escapeWalletLabel(result.wallet.privateKey)}</code>`,
         "",
+        ...(replaceExisting && existing
+          ? [
+              "<b>Previous active wallet</b>",
+              `<code>${existing.publicKey}</code>`,
+              ""
+            ]
+          : []),
         "Auto copy buys can use this wallet after you deposit SOL and set /copytrade."
       ].join("\n"),
       myWalletDashboardReplyMarkup(result.wallet.publicKey)
@@ -1802,6 +1953,7 @@ export function createTelegramCommandPoller({
           { text: "📉 Trailing Sells", callback_data: "copytrade:trailing" },
           { text: "⚙️ Settings", callback_data: "copytrade:settings" }
         ],
+        [{ text: "⏹️ Stop Copy Trading", callback_data: "copytrade:stop" }],
         [{ text: "📋 List Wallets", callback_data: "copytrade:wallets" }]
       ]
     };
@@ -1932,6 +2084,34 @@ export function createTelegramCommandPoller({
     };
   }
 
+  function copyTradeStopConfirm(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
+    const walletCount = subscribers?.listCopyTradeWallets(chatId).length || 0;
+
+    if (walletCount === 0) {
+      return {
+        text: "Copy trading is already stopped. Add a Copytrade Wallet to turn it back on.",
+        replyMarkup: {
+          inline_keyboard: [[{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]]
+        }
+      };
+    }
+
+    return {
+      text: [
+        "<b>⏹️ Stop Copy Trading?</b>",
+        "",
+        `This will remove all ${walletCount} Copytrade Wallet${walletCount === 1 ? "" : "s"} and stop auto copy buys.`,
+        "Your trading wallet, amount, settings, and trailing sell configs stay saved."
+      ].join("\n"),
+      replyMarkup: {
+        inline_keyboard: [
+          [{ text: "✅ Confirm Stop", callback_data: "copytrade:stop_confirm" }],
+          [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]
+        ]
+      }
+    };
+  }
+
   async function removeCopyTradeWalletByIndex(chatId: TelegramChatId, walletIndex: number): Promise<void> {
     const wallet = copyTradeWalletByIndex(chatId, walletIndex);
 
@@ -1972,6 +2152,24 @@ export function createTelegramCommandPoller({
     await reply(
       chatId,
       `<b>Removed ${removedCount} Copytrade Wallet${removedCount === 1 ? "" : "s"}.</b>${syncWarning ? `\n\n${syncWarning}` : ""}\n\n${dashboard.text}`,
+      dashboard.replyMarkup
+    );
+  }
+
+  async function stopCopyTrading(chatId: TelegramChatId): Promise<void> {
+    const removedCount = await subscribers?.unwatchAllCopyTradeWallets(chatId);
+
+    if (!removedCount) {
+      const dashboard = copyTradeDashboard(chatId);
+      await reply(chatId, `Copy trading is already stopped.\n\n${dashboard.text}`, dashboard.replyMarkup);
+      return;
+    }
+
+    const syncWarning = await onWalletWatchlistChange?.();
+    const dashboard = copyTradeDashboard(chatId);
+    await reply(
+      chatId,
+      `<b>⏹️ Copy trading stopped.</b>\nRemoved ${removedCount} Copytrade Wallet${removedCount === 1 ? "" : "s"}.${syncWarning ? `\n\n${syncWarning}` : ""}\n\n${dashboard.text}`,
       dashboard.replyMarkup
     );
   }

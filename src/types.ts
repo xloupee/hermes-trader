@@ -166,7 +166,9 @@ export interface SubscriberStore {
   ) => Promise<boolean>;
   setTradingWallet: (chatId: TelegramChatId, wallet: TradingWallet) => Promise<boolean>;
   renameTradingWallet: (chatId: TelegramChatId, label: string | null) => Promise<boolean>;
+  setActiveTradingWallet: (chatId: TelegramChatId, publicKey: string) => Promise<boolean>;
   getTradingWallet: (chatId: TelegramChatId) => TradingWallet | null;
+  listTradingWallets: (chatId: TelegramChatId) => TradingWallet[];
   setCopyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   removeCopyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   setCopyAmountSol: (chatId: TelegramChatId, amountSol: number) => Promise<boolean>;
@@ -189,6 +191,7 @@ export interface SubscriberRecord {
   watchedWallets: WatchedWallet[];
   copyTradeWallets: WatchedWallet[];
   tradingWallet: TradingWallet | null;
+  tradingWallets: TradingWallet[];
   copyWalletAddress: string | null;
   copyWalletAddresses: string[];
   copyAmountSol: number | null;

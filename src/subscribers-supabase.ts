@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import {
   dedupeCopyWallets,
+  dedupeTradingWallets,
   dedupeWatchedWallets,
   makeSubscriber,
   normalizeChatId,
@@ -125,7 +126,7 @@ function subscriberRow(record: SubscriberRecord): Omit<SubscriberRow, "telegram_
     copy_trade_buy_priority_fee_sol: record.copyTradeBuyPriorityFeeSol,
     copy_trade_sell_slippage_percent: record.copyTradeSellSlippagePercent,
     copy_trade_sell_priority_fee_sol: record.copyTradeSellPriorityFeeSol,
-    copy_target_wallet_address: record.copyTargetWalletAddress,
+    copy_target_wallet_address: encodeTradingWalletState(record) || record.copyTargetWalletAddress,
     verified_at: record.verifiedAt,
     updated_at: record.updatedAt
   };
@@ -146,6 +147,61 @@ function copyTradeWalletRow(chatId: string, wallet: WatchedWallet): WatchedWalle
     ...watchedWalletRow(chatId, wallet),
     trailing_sell_config: wallet.trailingSellConfig ?? null
   };
+}
+
+const TRADING_WALLET_STATE_PREFIX = "trading_wallets_v1:";
+
+function encodeTradingWalletState(record: SubscriberRecord): string | null {
+  const wallets = dedupeTradingWallets([
+    ...(record.tradingWallets || []),
+    ...(record.tradingWallet ? [record.tradingWallet] : [])
+  ]);
+
+  if (wallets.length === 0) {
+    return null;
+  }
+
+  return `${TRADING_WALLET_STATE_PREFIX}${JSON.stringify({
+    activePublicKey: record.tradingWallet?.publicKey || wallets[0]?.publicKey || null,
+    wallets
+  })}`;
+}
+
+function decodeTradingWalletState(value: string | null): { activePublicKey: string | null; wallets: TradingWallet[] } | null {
+  if (!value?.startsWith(TRADING_WALLET_STATE_PREFIX)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(value.slice(TRADING_WALLET_STATE_PREFIX.length)) as unknown;
+    const record = typeof parsed === "object" && parsed !== null ? parsed as Record<string, unknown> : {};
+    const activePublicKey = typeof record.activePublicKey === "string" ? record.activePublicKey : null;
+    const wallets = Array.isArray(record.wallets)
+      ? record.wallets.map((wallet) => {
+          const walletRecord = typeof wallet === "object" && wallet !== null ? wallet as Record<string, unknown> : {};
+          const publicKey = typeof walletRecord.publicKey === "string" ? walletRecord.publicKey : "";
+          const encryptedApiKey = typeof walletRecord.encryptedApiKey === "string" ? walletRecord.encryptedApiKey : "";
+
+          return publicKey && encryptedApiKey
+            ? {
+                publicKey,
+                encryptedApiKey,
+                apiKeyLast4: typeof walletRecord.apiKeyLast4 === "string" ? walletRecord.apiKeyLast4 : "****",
+                label: typeof walletRecord.label === "string" ? walletRecord.label : null,
+                createdAt: typeof walletRecord.createdAt === "string" ? walletRecord.createdAt : new Date().toISOString(),
+                updatedAt: typeof walletRecord.updatedAt === "string" ? walletRecord.updatedAt : new Date().toISOString()
+              }
+            : null;
+        }).filter((wallet): wallet is TradingWallet => Boolean(wallet))
+      : [];
+
+    return {
+      activePublicKey,
+      wallets: dedupeTradingWallets(wallets)
+    };
+  } catch {
+    return null;
+  }
 }
 
 function groupRowsByChatId<T extends { chat_id?: string }>(rows: T[]): Map<string, T[]> {
@@ -222,10 +278,28 @@ export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
         trailingSellConfig: normalizeTrailingSellConfig(wallet.trailing_sell_config, wallet.updated_at)
       }))
     : [];
-  const tradingWalletRow = Array.isArray(row.telegram_trading_wallets) ? row.telegram_trading_wallets[0] : null;
-  const legacyCopyTargetWallet = row.copy_target_wallet_address && copyTradeWallets.length === 0
+  const tradingWalletState = decodeTradingWalletState(row.copy_target_wallet_address);
+  const tradingWalletRows = Array.isArray(row.telegram_trading_wallets) ? row.telegram_trading_wallets : [];
+  const rowTradingWallets = dedupeTradingWallets(
+    tradingWalletRows.map((wallet) => ({
+      publicKey: wallet.public_key,
+      encryptedApiKey: wallet.encrypted_api_key,
+      apiKeyLast4: wallet.api_key_last4,
+      label: wallet.label ?? null,
+      createdAt: wallet.created_at,
+      updatedAt: wallet.updated_at
+    }))
+  );
+  const tradingWallets = tradingWalletState?.wallets.length
+    ? dedupeTradingWallets([...tradingWalletState.wallets, ...rowTradingWallets])
+    : rowTradingWallets;
+  const tradingWallet = tradingWalletState?.activePublicKey
+    ? tradingWallets.find((wallet) => wallet.publicKey === tradingWalletState.activePublicKey) || tradingWallets[0] || null
+    : tradingWallets[0] || null;
+  const legacyCopyTarget = row.copy_target_wallet_address?.startsWith(TRADING_WALLET_STATE_PREFIX) ? null : row.copy_target_wallet_address;
+  const legacyCopyTargetWallet = legacyCopyTarget && copyTradeWallets.length === 0
     ? watchedWallets.find((wallet) => wallet.address === row.copy_target_wallet_address) || {
-        address: row.copy_target_wallet_address,
+        address: legacyCopyTarget,
         label: null,
         addedAt: row.updated_at,
         updatedAt: row.updated_at
@@ -233,7 +307,7 @@ export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
     : null;
   const nextCopyTradeWallets = legacyCopyTargetWallet ? dedupeWatchedWallets([...copyTradeWallets, legacyCopyTargetWallet]) : copyTradeWallets;
   const nextWatchedWallets = legacyCopyTargetWallet
-    ? watchedWallets.filter((wallet) => wallet.address !== row.copy_target_wallet_address)
+    ? watchedWallets.filter((wallet) => wallet.address !== legacyCopyTarget)
     : watchedWallets;
 
   return {
@@ -241,16 +315,8 @@ export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
     mode: normalizeMode(row.mode),
     watchedWallets: dedupeWatchedWallets(nextWatchedWallets),
     copyTradeWallets: dedupeWatchedWallets(nextCopyTradeWallets),
-    tradingWallet: tradingWalletRow
-      ? {
-          publicKey: tradingWalletRow.public_key,
-          encryptedApiKey: tradingWalletRow.encrypted_api_key,
-          apiKeyLast4: tradingWalletRow.api_key_last4,
-          label: tradingWalletRow.label ?? null,
-          createdAt: tradingWalletRow.created_at,
-          updatedAt: tradingWalletRow.updated_at
-        }
-      : null,
+    tradingWallet,
+    tradingWallets,
     copyWalletAddress: null,
     copyWalletAddresses: [],
     copyAmountSol: numericValue(row.copy_amount_sol),
@@ -258,7 +324,7 @@ export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
     copyTradeBuyPriorityFeeSol: numericValue(row.copy_trade_buy_priority_fee_sol ?? null),
     copyTradeSellSlippagePercent: numericValue(row.copy_trade_sell_slippage_percent ?? null),
     copyTradeSellPriorityFeeSol: numericValue(row.copy_trade_sell_priority_fee_sol ?? null),
-    copyTargetWalletAddress: row.copy_target_wallet_address,
+    copyTargetWalletAddress: legacyCopyTarget,
     verifiedAt: row.verified_at,
     updatedAt: row.updated_at
   };
@@ -771,6 +837,7 @@ export function createSupabaseSubscriberStore({
       const next = {
         ...(subscribers.get(normalized) || makeSubscriber(normalized, null)),
         tradingWallet: wallet,
+        tradingWallets: dedupeTradingWallets([...(subscribers.get(normalized)?.tradingWallets || []), wallet]),
         updatedAt: new Date().toISOString()
       };
 
@@ -799,9 +866,19 @@ export function createSupabaseSubscriberStore({
         label,
         updatedAt: now
       };
+      const tradingWallets = dedupeTradingWallets([...(existing.tradingWallets || []), existing.tradingWallet].filter((wallet): wallet is TradingWallet => Boolean(wallet)).map((wallet) =>
+        wallet.publicKey === existing.tradingWallet?.publicKey
+          ? {
+              ...wallet,
+              label,
+              updatedAt: now
+            }
+          : wallet
+      ));
       const next = {
         ...existing,
         tradingWallet,
+        tradingWallets,
         updatedAt: now
       };
 
@@ -810,8 +887,39 @@ export function createSupabaseSubscriberStore({
       subscribers.set(normalized, next);
       return true;
     },
+    async setActiveTradingWallet(chatId, publicKey) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const wallet = (existing.tradingWallets || []).find((entry) => entry.publicKey === publicKey);
+
+      if (!wallet) {
+        return false;
+      }
+
+      const next = {
+        ...existing,
+        tradingWallet: wallet,
+        tradingWallets: dedupeTradingWallets(existing.tradingWallets || [wallet]),
+        updatedAt: new Date().toISOString()
+      };
+
+      await repository.upsertSubscriber(next);
+      await repository.upsertTradingWallet(normalized, wallet);
+      subscribers.set(normalized, next);
+      return true;
+    },
     getTradingWallet(chatId) {
       return subscribers.get(String(chatId))?.tradingWallet || null;
+    },
+    listTradingWallets(chatId) {
+      const subscriber = subscribers.get(String(chatId));
+      return subscriber?.tradingWallets?.length ? [...subscriber.tradingWallets] : subscriber?.tradingWallet ? [subscriber.tradingWallet] : [];
     },
     async setCopyWallet(chatId, address) {
       await load();
@@ -1087,8 +1195,14 @@ export async function importSubscribersToSupabase({
       await repository.upsertCopyTradeWallet(subscriber.chatId, wallet);
     }
 
-    if (subscriber.tradingWallet) {
-      await repository.upsertTradingWallet(subscriber.chatId, subscriber.tradingWallet);
+    const tradingWallets = (subscriber.tradingWallets || []).length > 0
+      ? subscriber.tradingWallets
+      : subscriber.tradingWallet
+        ? [subscriber.tradingWallet]
+        : [];
+
+    for (const wallet of tradingWallets) {
+      await repository.upsertTradingWallet(subscriber.chatId, wallet);
     }
   }
 }

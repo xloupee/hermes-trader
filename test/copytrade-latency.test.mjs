@@ -53,6 +53,18 @@ test("index runtime wires Helius receipt and normalization timestamps into copy 
     indexSource,
     /await Promise\.all\(copyTradeEntries\.map\(\(entry\) =>[\s\S]*sendCopyTradeSimulationAlert/
   );
+  assert.match(
+    indexSource,
+    /function scheduleCopyTradeTrailingSellsAfterConfirmation[\s\S]*await waitForSignatureConfirmation\(buySignature\)[\s\S]*await scheduleCopyTradeTrailingSells/
+  );
+  assert.match(
+    indexSource,
+    /if \(result\.ok\) \{[\s\S]*scheduleCopyTradeTrailingSellsAfterConfirmation\([\s\S]*buySignature: result\.signature/
+  );
+  assert.doesNotMatch(
+    indexSource,
+    /if \(result\.ok\) \{[\s\S]{0,400}await scheduleCopyTradeTrailingSells\(/
+  );
 });
 
 test("copy trade latency trace records deterministic total and stage timings", () => {

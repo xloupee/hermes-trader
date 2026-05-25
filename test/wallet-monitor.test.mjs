@@ -30,6 +30,7 @@ import {
   buildWalletTradeReplyMarkup,
   formatAutoCopyBuyMessage,
   formatCopyTradeTrailingSellResultMessage,
+  formatCopyTradeTrailingSellSkippedMessage,
   formatCopyTradeTrailingSellScheduledMessage,
   formatCopyTradeSimulationMessage,
   formatWalletTradeMessage,
@@ -793,6 +794,14 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
   assert.match(trailingScheduledMessage || "", /Sell 20% after 2s/);
   assert.match(trailingScheduledMessage || "", /Sell 100% after 4s/);
   assert.doesNotMatch(trailingScheduledMessage || "", /Build-only/);
+
+  const trailingSkippedMessage = formatCopyTradeTrailingSellSkippedMessage({
+    trade,
+    reason: "copy buy was not confirmed before trailing sell scheduling timeout"
+  });
+  assert.match(trailingSkippedMessage || "", /📉 Trailing Sells/);
+  assert.match(trailingSkippedMessage || "", /🟡 Sell schedule skipped/);
+  assert.match(trailingSkippedMessage || "", /not confirmed/);
 
   const trailingResultMessage = formatCopyTradeTrailingSellResultMessage({
     trade,

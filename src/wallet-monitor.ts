@@ -356,6 +356,32 @@ export function formatCopyTradeTrailingSellScheduledMessage({
   return lines.join("\n");
 }
 
+export function formatCopyTradeTrailingSellSkippedMessage({
+  trade,
+  reason
+}: {
+  trade: WalletTradeData;
+  reason: string;
+}): string | null {
+  if (!trade.mint) {
+    return null;
+  }
+
+  const walletName = trade.label || shortenAddress(trade.targetWallet);
+
+  return [
+    "<b>📉 Trailing Sells</b>",
+    "🟡 Sell schedule skipped",
+    "",
+    `<b>🎯 Target:</b> ${escapeHtml(walletName)}`,
+    "",
+    "<b>🪙 Contract Address</b>",
+    `<code>${escapeHtml(trade.mint)}</code>`,
+    "",
+    `<b>Reason:</b> <code>${escapeHtml(reason)}</code>`
+  ].join("\n");
+}
+
 export function formatCopyTradeTrailingSellResultMessage({
   trade,
   stepIndex,

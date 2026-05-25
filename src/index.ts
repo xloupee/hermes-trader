@@ -47,6 +47,7 @@ import {
   formatAutoCopyBuyMessage,
   formatCopyTradeSimulationMessage,
   formatCopyTradeTrailingSellResultMessage,
+  formatCopyTradeTrailingSellSkippedMessage,
   formatCopyTradeTrailingSellScheduledMessage,
   formatWalletTradeMessageWithCopySettings,
   getWalletTradeEventId,
@@ -979,6 +980,18 @@ async function sendCopyTradeSimulationAlert(
     });
     logLatencyOnce();
 
+    if (result.ok) {
+      scheduleCopyTradeTrailingSellsAfterConfirmation({
+        subscriber,
+        trade,
+        apiKey,
+        copyTradeWallet,
+        buySignature: result.signature
+      }).catch((error) => {
+        console.warn(`Could not prepare trailing sells after copy buy confirmation: ${errorMessage(error)}`);
+      });
+    }
+
     await recordCopyTradeExecution({
       subscriber,
       trade,
@@ -1004,24 +1017,6 @@ async function sendCopyTradeSimulationAlert(
       });
     }
 
-    if (result.ok) {
-      if (result.signature) {
-        waitForSignatureConfirmation(result.signature).then((confirmed) => {
-          if (!confirmed) {
-            console.warn(`Auto copy buy signature was not observable before trailing sells started: ${result?.signature}`);
-          }
-        }).catch((error) => {
-          console.warn(`Could not check auto copy buy confirmation: ${errorMessage(error)}`);
-        });
-      }
-
-      await scheduleCopyTradeTrailingSells({
-        subscriber,
-        trade,
-        apiKey,
-        copyTradeWallet
-      });
-    }
   } catch (error) {
     if (durableCopyBuyClaimKey && !result) {
       await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, errorMessage(error));
@@ -1033,6 +1028,73 @@ async function sendCopyTradeSimulationAlert(
     if (copyBuyReserved) {
       copyBuySubmissionGuard.release(copyBuyKey);
     }
+  }
+}
+
+async function scheduleCopyTradeTrailingSellsAfterConfirmation({
+  subscriber,
+  trade,
+  apiKey,
+  copyTradeWallet,
+  buySignature
+}: {
+  subscriber: SubscriberRecord;
+  trade: WalletTradeData;
+  apiKey: string;
+  copyTradeWallet: WatchedWallet;
+  buySignature: string | null;
+}): Promise<void> {
+  if (!buySignature) {
+    await notifySkippedTrailingSellSchedule({
+      subscriber,
+      trade,
+      reason: "copy buy did not return a transaction signature"
+    });
+    return;
+  }
+
+  const confirmed = await waitForSignatureConfirmation(buySignature);
+  if (!confirmed) {
+    await notifySkippedTrailingSellSchedule({
+      subscriber,
+      trade,
+      reason: "copy buy was not confirmed before trailing sell scheduling timeout"
+    });
+    return;
+  }
+
+  await scheduleCopyTradeTrailingSells({
+    subscriber,
+    trade,
+    apiKey,
+    copyTradeWallet
+  });
+}
+
+async function notifySkippedTrailingSellSchedule({
+  subscriber,
+  trade,
+  reason
+}: {
+  subscriber: SubscriberRecord;
+  trade: WalletTradeData;
+  reason: string;
+}): Promise<void> {
+  console.warn(`Skipping trailing sell schedule for ${subscriber.chatId}:${trade.mint || "unknown"}: ${reason}`);
+  const message = formatCopyTradeTrailingSellSkippedMessage({ trade, reason });
+  if (!message) {
+    return;
+  }
+
+  try {
+    await sendTelegramMessage({
+      token: config.telegramToken,
+      chatId: subscriber.chatId,
+      text: message,
+      replyMarkup: buildWalletTradeReplyMarkup(trade)
+    });
+  } catch (error) {
+    console.warn(`Could not send skipped trailing sell schedule alert to ${subscriber.chatId}: ${errorMessage(error)}`);
   }
 }
 

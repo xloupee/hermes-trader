@@ -168,11 +168,15 @@ export function createHeliusWebhookServer({ authHeader, port, onEvents }: Helius
       return;
     }
 
-    sendJson(response, 200, { ok: true, received: events.length });
-
-    Promise.resolve(onEvents(events)).catch((error) => {
+    try {
+      await onEvents(events);
+    } catch (error) {
       console.error("Failed to process Helius webhook events:", error);
-    });
+      sendJson(response, 500, { ok: false, error: "event processing failed" });
+      return;
+    }
+
+    sendJson(response, 200, { ok: true, received: events.length });
   }
 
   return {

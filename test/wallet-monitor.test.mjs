@@ -1169,3 +1169,96 @@ test("Helius webhook receiver enforces Authorization", async () => {
     await server.stop();
   }
 });
+
+test("Helius webhook receiver waits for event processing before ACKing success", async () => {
+  let releaseProcessing;
+  let responseSettled = false;
+  let processed = false;
+  let markProcessingStarted;
+  const processingStarted = new Promise((resolve) => {
+    markProcessingStarted = resolve;
+  });
+  const server = createHeliusWebhookServer({
+    authHeader: "Bearer secret",
+    port: 0,
+    onEvents: async () => {
+      markProcessingStarted();
+      await new Promise((resolve) => {
+        releaseProcessing = resolve;
+      });
+      processed = true;
+    }
+  });
+
+  await server.start();
+  const port = server.port();
+  assert.ok(port);
+
+  try {
+    const responsePromise = fetch(`http://127.0.0.1:${port}/webhooks/helius`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer secret",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify([heliusSwapEvent()])
+    }).then(async (response) => ({
+      body: await response.json(),
+      status: response.status
+    }));
+    responsePromise.then(
+      () => {
+        responseSettled = true;
+      },
+      () => {
+        responseSettled = true;
+      }
+    );
+
+    await processingStarted;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(responseSettled, false);
+
+    releaseProcessing();
+    const response = await responsePromise;
+
+    assert.equal(processed, true);
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body, { ok: true, received: 1 });
+  } finally {
+    await server.stop();
+  }
+});
+
+test("Helius webhook receiver returns non-2xx when event processing fails", async () => {
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  const server = createHeliusWebhookServer({
+    authHeader: "Bearer secret",
+    port: 0,
+    onEvents: async () => {
+      throw new Error("processor failed");
+    }
+  });
+
+  await server.start();
+  const port = server.port();
+  assert.ok(port);
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/webhooks/helius`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer secret",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify([heliusSwapEvent()])
+    });
+
+    assert.equal(response.status, 500);
+    assert.deepEqual(await response.json(), { ok: false, error: "event processing failed" });
+  } finally {
+    await server.stop();
+    console.error = originalConsoleError;
+  }
+});

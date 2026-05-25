@@ -17,6 +17,12 @@ import {
   formatCopyTradeExecutionStateLog
 } from "./copytrade-execution-mode.js";
 import { copyBuySubmissionKey, createCopyBuySubmissionGuard } from "./copytrade-guard.js";
+import {
+  createJsonCopyTradeBuyIdempotencyStore,
+  createSupabaseCopyTradeBuyIdempotencyStore,
+  safelyCompleteCopyTradeBuyIdempotency,
+  safelyFailCopyTradeBuyIdempotency
+} from "./copytrade-idempotency.js";
 import { createCopyTradeLatencyClock, createCopyTradeLatencyTracker } from "./copytrade-latency.js";
 import { createHeliusWebhookServer, missingHeliusConfigWarning, syncHeliusWebhook } from "./helius.js";
 import { heliusEventMentionsWatchedWallet, isHeliusSwapEvent, normalizeHeliusSwapData } from "./helius-swaps.js";
@@ -198,6 +204,15 @@ const copyTradeRecorder =
         serviceRoleKey: config.supabaseServiceRoleKey
       })
     : null;
+const copyTradeBuyIdempotency =
+  config.supabaseUrl && config.supabaseServiceRoleKey
+    ? createSupabaseCopyTradeBuyIdempotencyStore({
+        url: config.supabaseUrl,
+        serviceRoleKey: config.supabaseServiceRoleKey
+      })
+    : createJsonCopyTradeBuyIdempotencyStore({
+        path: process.env.COPY_TRADE_BUY_IDEMPOTENCY_PATH || "data/copytrade-buy-idempotency.json"
+      });
 
 const baseSubscriptionMethods: PumpPortalSubscription[] = ["subscribeNewToken", "subscribeMigration"];
 
@@ -727,6 +742,7 @@ async function sendCopyTradeSimulationAlert(
     observedSignature: trade.signature
   });
   let copyBuyReserved = false;
+  let durableCopyBuyClaimKey: string | null = null;
   let result: PumpPortalLightningTradeResult | null = null;
 
   try {
@@ -868,6 +884,66 @@ async function sendCopyTradeSimulationAlert(
       return;
     }
 
+    const durableCopyBuyKey = copyBuyKey && trade.mint ? [copyBuyKey, trade.mint, "buy"].join(":") : null;
+
+    if (!durableCopyBuyKey || !trade.signature || !trade.mint) {
+      const reason = "copy buy idempotency key is unavailable";
+      skipWithLatencyLog(reason);
+      await notifySkippedAutoCopyBuy({
+        subscriber,
+        trade,
+        copyTradeWallet,
+        request,
+        reason
+      });
+      return;
+    }
+
+    let idempotencyClaim;
+    try {
+      idempotencyClaim = await copyTradeBuyIdempotency.claimBuy({
+        key: durableCopyBuyKey,
+        chatId: subscriber.chatId,
+        sourceWalletAddress: copyTradeWallet.address,
+        tradingWalletPublicKey: subscriber.tradingWallet.publicKey,
+        observedSignature: trade.signature,
+        mint: trade.mint,
+        amountSol,
+        provider: trade.provider,
+        request
+      });
+    } catch (error) {
+      const reason = `copy buy idempotency claim failed: ${errorMessage(error)}`;
+      skipWithLatencyLog(reason);
+      await notifySkippedAutoCopyBuy({
+        subscriber,
+        trade,
+        copyTradeWallet,
+        request,
+        reason
+      });
+      return;
+    }
+    if (!idempotencyClaim.claimed) {
+      const existing = idempotencyClaim.existing;
+      const reason = existing
+        ? `copy buy was already claimed (${existing.status})`
+        : "copy buy was already claimed";
+      skipWithLatencyLog(reason);
+      console.warn(
+        `Skipping duplicate auto copy buy for ${subscriber.chatId}:${copyTradeWallet.address}:${trade.signature}: durable idempotency claimed`
+      );
+      await notifySkippedAutoCopyBuy({
+        subscriber,
+        trade,
+        copyTradeWallet,
+        request,
+        reason
+      });
+      return;
+    }
+    durableCopyBuyClaimKey = durableCopyBuyKey;
+
     const budgetReservation = copyTradeDailySolBudget.reserve({
       key: dailyBudgetKey,
       amountSol,
@@ -875,13 +951,15 @@ async function sendCopyTradeSimulationAlert(
       nowMs: Date.now()
     });
     if (!budgetReservation.ok) {
-      skipWithLatencyLog(budgetReservation.reason || "daily copy buy budget exceeded");
+      const reason = budgetReservation.reason || "daily copy buy budget exceeded";
+      await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, reason);
+      skipWithLatencyLog(reason);
       await notifySkippedAutoCopyBuy({
         subscriber,
         trade,
         copyTradeWallet,
         request,
-        reason: budgetReservation.reason || "daily copy buy budget exceeded"
+        reason
       });
       return;
     }
@@ -893,6 +971,7 @@ async function sendCopyTradeSimulationAlert(
       apiKey,
       request
     });
+    await safelyCompleteCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, result);
     latencyTracker.mark("submit_finished", {
       status: result.ok ? "submitted" : "failed",
       reason: result.ok ? null : result.errorText,
@@ -944,6 +1023,9 @@ async function sendCopyTradeSimulationAlert(
       });
     }
   } catch (error) {
+    if (durableCopyBuyClaimKey && !result) {
+      await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, errorMessage(error));
+    }
     latencyTracker.skip(errorMessage(error), { status: "failed" });
     logLatencyOnce();
     console.warn(`Could not execute auto copy buy for ${subscriber.chatId}: ${errorMessage(error)}`);

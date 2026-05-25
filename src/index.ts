@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { buildMigrationReplyMarkup, extractMigrationData, formatMigrationMessage, getEventId } from "./format.js";
 import { createTelegramCommandPoller } from "./commands.js";
@@ -29,6 +29,7 @@ import {
   PUMPPORTAL_LIGHTNING_TRADE_URL,
   PUMPPORTAL_TRADE_LOCAL_URL
 } from "./pumpportal.js";
+import type { PumpPortalSubscription } from "./pumpportal.js";
 import { decryptSecret, encryptionSecretReady } from "./secrets.js";
 import { analyzeSolanaTransaction, getSolanaBalanceSol } from "./solana.js";
 import { createSubscriberStore } from "./subscribers.js";
@@ -93,6 +94,15 @@ function listFromEnv(value: string | undefined): string[] {
     : [];
 }
 
+function finiteNumberValue(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 function pumpPortalPoolFromEnv(value: string | undefined): PumpPortalTradePool {
   return value === "pump" ||
     value === "pump-amm" ||
@@ -122,6 +132,7 @@ const config: BotConfig = {
   pumpFunBaseUrl: process.env.PUMPFUN_BASE_URL || "https://pump.fun",
   migrationLogPath: process.env.MIGRATION_LOG_PATH || "logs/migrations.jsonl",
   walletTradeLogPath: process.env.WALLET_TRADE_LOG_PATH || "logs/wallet-trades.jsonl",
+  copyTradeEmergencyStopPath: process.env.COPY_TRADE_EMERGENCY_STOP_PATH || "data/copytrade-emergency-stop.json",
   heliusApiKey: process.env.HELIUS_API_KEY,
   heliusApiBaseUrl: process.env.HELIUS_API_BASE_URL || "https://api-mainnet.helius-rpc.com",
   heliusWebhookAuthHeader: process.env.HELIUS_WEBHOOK_AUTH_HEADER,
@@ -188,7 +199,7 @@ const copyTradeRecorder =
       })
     : null;
 
-const baseSubscriptionMethods = ["subscribeNewToken", "subscribeMigration"];
+const baseSubscriptionMethods: PumpPortalSubscription[] = ["subscribeNewToken", "subscribeMigration"];
 
 function copyTradeBuyExecutionSettings(subscriber: SubscriberRecord): { slippage: number; priorityFee: number } {
   return {
@@ -228,8 +239,34 @@ function logCopyTradeExecutionState(): void {
   console.log(formatCopyTradeRiskControlLog(config));
 }
 
-function activateCopyTradeEmergencyStop(chatId: string | number): string {
+async function loadCopyTradeEmergencyStop(): Promise<void> {
+  try {
+    const state = asRecord(JSON.parse(await readFile(config.copyTradeEmergencyStopPath, "utf8")));
+    copyTradeEmergencyStopped = state.active === true;
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      copyTradeEmergencyStopped = false;
+      return;
+    }
+
+    throw error;
+  }
+}
+
+async function persistCopyTradeEmergencyStop(chatId: string | number): Promise<void> {
+  const state = {
+    active: true,
+    activatedByChatId: String(chatId),
+    activatedAt: new Date().toISOString()
+  };
+
+  await mkdir(dirname(config.copyTradeEmergencyStopPath), { recursive: true });
+  await writeFile(config.copyTradeEmergencyStopPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
+async function activateCopyTradeEmergencyStop(chatId: string | number): Promise<string> {
   copyTradeEmergencyStopped = true;
+  await persistCopyTradeEmergencyStop(chatId);
   const message = formatCopyTradeExecutionStateLog(copyTradeExecutionModeConfig());
 
   console.warn(`Copy trade emergency stop activated by ${chatId}: ${message}`);
@@ -255,12 +292,40 @@ function watchedWalletAddresses(): string[] {
   ].sort();
 }
 
-function activePumpPortalSubscriptions(): string[] {
-  return [...baseSubscriptionMethods];
+function copyTradeWalletAddresses(): string[] {
+  return [
+    ...new Set(
+      subscribers
+        .list()
+        .flatMap((subscriber) => subscriber.copyTradeWallets || [])
+        .map((wallet) => wallet.address)
+        .filter(Boolean)
+    )
+  ].sort();
+}
+
+function activePumpPortalSubscriptions(): PumpPortalSubscription[] {
+  const copyTradeWallets = copyTradeWalletAddresses();
+
+  return [
+    ...baseSubscriptionMethods,
+    ...(copyTradeWallets.length > 0
+      ? [
+          {
+            method: "subscribeAccountTrade",
+            keys: copyTradeWallets
+          }
+        ]
+      : [])
+  ];
 }
 
 function activeSubscriptionMethodNames(): string[] {
-  return activePumpPortalSubscriptions();
+  return activePumpPortalSubscriptions().map((subscription) =>
+    typeof subscription === "string"
+      ? subscription
+      : `${subscription.method}${subscription.keys?.length ? `(${subscription.keys.length})` : ""}`
+  );
 }
 
 function rememberEvent(id: string | null): boolean {
@@ -328,6 +393,10 @@ async function handleMigration(event: LooseRecord): Promise<void> {
 }
 
 async function handlePumpPortalEvent(event: LooseRecord): Promise<void> {
+  if (await handlePumpPortalAccountTrade(event)) {
+    return;
+  }
+
   const eventMode = classifyEventMode(event);
 
   if (eventMode) {
@@ -336,6 +405,170 @@ async function handlePumpPortalEvent(event: LooseRecord): Promise<void> {
   }
 
   console.warn(`Skipping unknown PumpPortal event type: ${JSON.stringify(event)}`);
+}
+
+function walletTradeSeenEventId(trade: WalletTradeData): string | null {
+  return trade.signature
+    ? ["wallet-trade-source", trade.signature, trade.targetWallet].join(":")
+    : getWalletTradeEventId(trade);
+}
+
+function pumpPortalAccountTradeAction(event: LooseRecord): "buy" | "sell" | null {
+  const action = String(event.txType ?? event.type ?? event.eventType ?? event.action ?? "").toLowerCase();
+
+  return action === "buy" || action === "sell" ? action : null;
+}
+
+function pumpPortalAccountTradeSource(event: LooseRecord): string {
+  const source = stringValue(event.source);
+  const pool = stringValue(event.pool);
+
+  if (source) {
+    return source;
+  }
+
+  if (pool && pool.toLowerCase().startsWith("pump")) {
+    return "PUMP_FUN";
+  }
+
+  return "PUMPPORTAL_ACCOUNT_TRADE";
+}
+
+function normalizePumpPortalAccountTradeData({
+  event,
+  targetWallet,
+  label
+}: {
+  event: LooseRecord;
+  targetWallet: string;
+  label?: string | null;
+}): WalletTradeData | null {
+  const action = pumpPortalAccountTradeAction(event);
+  const trader = stringValue(event.traderPublicKey || event.trader || event.user || event.account || event.wallet);
+  const mint = stringValue(event.mint || event.ca || event.token || event.tokenAddress || event.address);
+  const signature = stringValue(event.signature || event.tx || event.txHash || event.transaction || event.transactionHash);
+
+  if (!action || trader !== targetWallet || !mint || !signature) {
+    return null;
+  }
+
+  const timestamp = finiteNumberValue(event.timestamp || event.blockTime || event.time) ?? Math.floor(Date.now() / 1000);
+  const solAmount = finiteNumberValue(event.solAmount);
+  const tokenAmount = finiteNumberValue(event.tokenAmount);
+  const pool = stringValue(event.pool);
+  const source = pumpPortalAccountTradeSource(event);
+  const input = action === "buy"
+    ? { mint: "So11111111111111111111111111111111111111112", symbol: "SOL", amount: solAmount }
+    : { mint, symbol: null, amount: tokenAmount };
+  const output = action === "buy"
+    ? { mint, symbol: null, amount: tokenAmount }
+    : { mint: "So11111111111111111111111111111111111111112", symbol: "SOL", amount: solAmount };
+
+  return {
+    observedAt: new Date().toISOString(),
+    provider: "pumpportal",
+    targetWallet,
+    label: label || null,
+    action,
+    mint,
+    signature,
+    timestamp,
+    feePayer: trader,
+    source,
+    input,
+    output,
+    solAmount,
+    tokenAmount,
+    pool,
+    marketCapSol: finiteNumberValue(event.marketCapSol || event.marketCap),
+    pumpFunUrl: `${config.pumpFunBaseUrl}/${mint}`,
+    solscanTokenUrl: `${config.solscanBaseUrl}/token/${mint}`,
+    solscanTxUrl: signature ? `${config.solscanBaseUrl}/tx/${signature}` : null,
+    raw: {
+      ...event,
+      pumpPortalAccountTradeParser: {
+        action,
+        copyable: action === "buy"
+      }
+    }
+  };
+}
+
+async function handlePumpPortalAccountTrade(event: LooseRecord): Promise<boolean> {
+  const action = pumpPortalAccountTradeAction(event);
+
+  if (!action) {
+    return false;
+  }
+
+  const trader = stringValue(event.traderPublicKey || event.trader || event.user || event.account || event.wallet);
+
+  if (!trader) {
+    return false;
+  }
+
+  const entries = subscribers
+    .list()
+    .flatMap((subscriber) =>
+      (subscriber.watchedWallets || [])
+        .filter((wallet) => wallet.address === trader)
+        .map((wallet) => ({ subscriber, wallet, label: wallet.label }))
+    );
+  const copyTradeEntries = subscribers
+    .list()
+    .flatMap((subscriber) =>
+      (subscriber.copyTradeWallets || [])
+        .filter((wallet) => wallet.address === trader)
+        .map((wallet) => ({ subscriber, wallet, label: wallet.label }))
+    );
+
+  if (entries.length === 0 && copyTradeEntries.length === 0) {
+    return false;
+  }
+
+  const trade = normalizePumpPortalAccountTradeData({
+    event,
+    targetWallet: trader,
+    label: null
+  });
+
+  if (!trade) {
+    return false;
+  }
+
+  const eventId = walletTradeSeenEventId(trade);
+
+  if (rememberEvent(eventId)) {
+    return true;
+  }
+
+  await writeWalletTradeLog(trade);
+  console.log(`Wallet trade event: ${JSON.stringify(trade)}`);
+
+  const receivedAtMs = Date.now();
+  await Promise.all(copyTradeEntries.map((entry) =>
+    sendCopyTradeSimulationAlert(
+      entry.subscriber,
+      {
+        ...trade,
+        label: entry.label
+      },
+      entry.wallet,
+      {
+        receivedAtMs,
+        normalizedAtMs: receivedAtMs
+      }
+    )
+  ));
+
+  await Promise.all(entries.map((entry) =>
+    sendWalletTradeAlert(entry.subscriber, {
+      ...trade,
+      label: entry.label
+    })
+  ));
+
+  return true;
 }
 
 async function handleHeliusWebhookEvents(events: LooseRecord[]): Promise<void> {
@@ -390,7 +623,7 @@ async function handleHeliusSwap(event: LooseRecord, { receivedAtMs = Date.now() 
       config
     });
     const normalizedAtMs = Date.now();
-    const eventId = getWalletTradeEventId(loggedTrade);
+    const eventId = walletTradeSeenEventId(loggedTrade);
 
     if (rememberEvent(eventId)) {
       continue;
@@ -399,17 +632,9 @@ async function handleHeliusSwap(event: LooseRecord, { receivedAtMs = Date.now() 
     await writeWalletTradeLog(loggedTrade);
     console.log(`Wallet trade event: ${JSON.stringify(loggedTrade)}`);
 
-    const entries = subscribersByWallet.get(targetWallet) || [];
-    for (const entry of entries) {
-      await sendWalletTradeAlert(entry.subscriber, {
-        ...loggedTrade,
-        label: entry.label
-      });
-    }
-
     const copyTradeEntries = copyTradeSubscribersByWallet.get(targetWallet) || [];
-    for (const entry of copyTradeEntries) {
-      await sendCopyTradeSimulationAlert(
+    await Promise.all(copyTradeEntries.map((entry) =>
+      sendCopyTradeSimulationAlert(
         entry.subscriber,
         {
           ...loggedTrade,
@@ -420,8 +645,16 @@ async function handleHeliusSwap(event: LooseRecord, { receivedAtMs = Date.now() 
           receivedAtMs,
           normalizedAtMs
         }
-      );
-    }
+      )
+    ));
+
+    const entries = subscribersByWallet.get(targetWallet) || [];
+    await Promise.all(entries.map((entry) =>
+      sendWalletTradeAlert(entry.subscriber, {
+        ...loggedTrade,
+        label: entry.label
+      })
+    ));
   }
 
   return true;
@@ -1652,6 +1885,7 @@ const commandPoller = createTelegramCommandPoller({
   testMessage: testMigrationMessage,
   subscribers,
   onWalletWatchlistChange: () => {
+    migrationListener.setSubscriptionMethods(activePumpPortalSubscriptions());
     return syncHeliusWalletWebhook();
   },
   onCopyTradeEmergencyStop: (chatId) => {
@@ -1745,9 +1979,13 @@ process.on("SIGTERM", () => {
 
 assertConfig();
 await subscribers.init();
+await loadCopyTradeEmergencyStop();
 console.log(`Using ${subscriberStoreLabel} subscriber storage`);
 console.log(`Loaded ${subscribers.count()} verified Telegram subscriber(s)`);
 logCopyTradeExecutionState();
+// Supabase-backed subscribers load at startup, so compute account-trade
+// subscriptions after init rather than from the empty pre-init store.
+migrationListener.setSubscriptionMethods(activePumpPortalSubscriptions());
 if (watchedWalletAddresses().length > 0) {
   await syncHeliusWalletWebhook();
 }

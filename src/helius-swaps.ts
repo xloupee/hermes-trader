@@ -5,6 +5,7 @@ import type { ExplorerConfig, LooseRecord, WalletTradeAction, WalletTradeAsset, 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const MIN_COPYABLE_NATIVE_SOL_INPUT = 0.001;
+const PUMP_FUN_SOURCE = "PUMP_FUN";
 
 type AssetSource = "native-transfer" | "native-balance-change" | "token-transfer" | "token-balance-change";
 
@@ -100,6 +101,10 @@ function stripSource(asset: AssetCandidate | null): WalletTradeAsset | null {
 
 function isSolMint(mint: string | null): boolean {
   return mint === SOL_MINT;
+}
+
+function sourceIsPumpFun(event: LooseRecord): boolean {
+  return String(event.source || "").toUpperCase() === PUMP_FUN_SOURCE;
 }
 
 function accountMatches(record: LooseRecord, targetWallet: string): boolean {
@@ -300,6 +305,55 @@ function pickStructuredSwapAssets(event: LooseRecord, targetWallet: string): Swa
   };
 }
 
+function isHighConfidencePumpFunTopLevelBuy({
+  event,
+  targetWallet,
+  outgoingNativeTransfer,
+  outgoingNativeBalance,
+  incomingNativeTransfer,
+  incomingNativeBalance,
+  incomingNonSolTokens,
+  outgoingNonSolTokens
+}: {
+  event: LooseRecord;
+  targetWallet: string;
+  outgoingNativeTransfer: AssetCandidate | null;
+  outgoingNativeBalance: AssetCandidate | null;
+  incomingNativeTransfer: AssetCandidate | null;
+  incomingNativeBalance: AssetCandidate | null;
+  incomingNonSolTokens: AssetCandidate[];
+  outgoingNonSolTokens: AssetCandidate[];
+}): boolean {
+  if (!sourceIsPumpFun(event) || stringValue(event.feePayer) !== targetWallet || event.transactionError) {
+    return false;
+  }
+
+  if (
+    !outgoingNativeTransfer ||
+    !outgoingNativeBalance ||
+    incomingNativeTransfer ||
+    incomingNativeBalance ||
+    incomingNonSolTokens.length !== 1 ||
+    outgoingNonSolTokens.length !== 0
+  ) {
+    return false;
+  }
+
+  if (outgoingNativeTransfer.amount !== null && outgoingNativeTransfer.amount < MIN_COPYABLE_NATIVE_SOL_INPUT) {
+    return false;
+  }
+
+  if (
+    outgoingNativeTransfer.amount !== null &&
+    outgoingNativeBalance.amount !== null &&
+    outgoingNativeBalance.amount < outgoingNativeTransfer.amount
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 function pickSwapAssets(event: LooseRecord, targetWallet: string): SwapAssetRoute {
   const structuredRoute = pickStructuredSwapAssets(event, targetWallet);
 
@@ -367,6 +421,26 @@ function pickSwapAssets(event: LooseRecord, targetWallet: string): SwapAssetRout
         output: stripSource(incomingNonSolTokens[0]),
         action: "unknown",
         reason: "watched wallet native SOL transfer is too small to prove it is the swap input"
+      };
+    }
+
+    if (
+      isHighConfidencePumpFunTopLevelBuy({
+        event,
+        targetWallet,
+        outgoingNativeTransfer,
+        outgoingNativeBalance,
+        incomingNativeTransfer,
+        incomingNativeBalance,
+        incomingNonSolTokens,
+        outgoingNonSolTokens
+      })
+    ) {
+      return {
+        input: stripSource(outgoingNativeTransfer),
+        output: stripSource(incomingNonSolTokens[0]),
+        action: "buy",
+        reason: null
       };
     }
 

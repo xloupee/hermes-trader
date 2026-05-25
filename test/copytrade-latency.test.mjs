@@ -23,6 +23,22 @@ test("index runtime wires Helius receipt and normalization timestamps into copy 
 
   assert.match(
     indexSource,
+    /subscribeAccountTrade[\s\S]*keys: copyTradeWallets/
+  );
+  assert.match(
+    indexSource,
+    /handlePumpPortalAccountTrade[\s\S]*sendCopyTradeSimulationAlert\([\s\S]*receivedAtMs,\s*[\r\n\s]*normalizedAtMs: receivedAtMs/
+  );
+  assert.match(
+    indexSource,
+    /const signature = stringValue\(event\.signature[\s\S]*if \(!action \|\| trader !== targetWallet \|\| !mint \|\| !signature\)/
+  );
+  assert.match(
+    indexSource,
+    /await loadCopyTradeEmergencyStop\(\);[\s\S]*logCopyTradeExecutionState\(\);/
+  );
+  assert.match(
+    indexSource,
     /async function handleHeliusWebhookEvents[\s\S]*const receivedAtMs = Date\.now\(\);[\s\S]*await handleHeliusSwap\(event, \{ receivedAtMs \}\);/
   );
   assert.match(
@@ -32,6 +48,10 @@ test("index runtime wires Helius receipt and normalization timestamps into copy 
   assert.match(
     indexSource,
     /createCopyTradeLatencyTracker\([\s\S]*clock: createCopyTradeLatencyClock\(timing\)/
+  );
+  assert.match(
+    indexSource,
+    /await Promise\.all\(copyTradeEntries\.map\(\(entry\) =>[\s\S]*sendCopyTradeSimulationAlert/
   );
 });
 

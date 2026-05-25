@@ -107,6 +107,16 @@ test("executePumpPortalLightningTrade succeeds for 200 JSON with a signature", a
   assert.deepEqual(result.raw, { signature });
 });
 
+test("executePumpPortalLightningTrade succeeds for 200 JSON with a signature and empty errors", async () => {
+  const result = await withFetchResponse(jsonResponse({ signature, errors: [] }), () => execute());
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, 200);
+  assert.equal(result.signature, signature);
+  assert.equal(result.errorText, null);
+  assert.deepEqual(result.raw, { signature, errors: [] });
+});
+
 test("executePumpPortalLightningTrade fails for 200 JSON with an error field", async () => {
   const result = await withFetchResponse(jsonResponse({ error: "insufficient funds", signature }), () => execute());
 
@@ -115,6 +125,16 @@ test("executePumpPortalLightningTrade fails for 200 JSON with an error field", a
   assert.equal(result.signature, signature);
   assert.match(result.errorText, /error: insufficient funds/);
   assert.deepEqual(result.raw, { error: "insufficient funds", signature });
+});
+
+test("executePumpPortalLightningTrade fails for 200 JSON with non-empty errors", async () => {
+  const result = await withFetchResponse(jsonResponse({ errors: ["slippage exceeded"], signature }), () => execute());
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 200);
+  assert.equal(result.signature, signature);
+  assert.match(result.errorText, /errors: \["slippage exceeded"\]/);
+  assert.deepEqual(result.raw, { errors: ["slippage exceeded"], signature });
 });
 
 test("executePumpPortalLightningTrade fails for 200 JSON without a signature", async () => {

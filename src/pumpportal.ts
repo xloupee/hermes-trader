@@ -330,6 +330,18 @@ function summarizeResponseValue(value: unknown): string | null {
   }
 }
 
+function summarizeResponseErrorValue(value: unknown): string | null {
+  if (Array.isArray(value)) {
+    return value.length > 0 ? summarizeResponseValue(value) : null;
+  }
+
+  if (isRecord(value)) {
+    return Object.keys(value).length > 0 ? summarizeResponseValue(value) : null;
+  }
+
+  return summarizeResponseValue(value);
+}
+
 function summarizeResponseBody(body: unknown, text: string): string | null {
   const trimmedText = text.trim();
 
@@ -342,15 +354,19 @@ function summarizeResponseBody(body: unknown, text: string): string | null {
 
 function fieldErrorText(record: LooseRecord, key: string): string {
   const value = record[key];
-  const detail = summarizeResponseValue(value);
+  const detail = summarizeResponseErrorValue(value);
 
-  return detail ? `${key}: ${detail}` : `${key} field present`;
+  return detail ? `${key}: ${detail}` : "";
 }
 
 function pumpPortalLightningErrorText(record: LooseRecord): string | null {
   for (const key of PUMPPORTAL_LIGHTNING_ERROR_KEYS) {
     if (hasResponseField(record, key)) {
-      return fieldErrorText(record, key);
+      const detail = fieldErrorText(record, key);
+
+      if (detail) {
+        return detail;
+      }
     }
   }
 

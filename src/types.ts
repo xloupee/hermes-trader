@@ -55,6 +55,7 @@ export interface BotConfig extends MigrationFormatConfig {
   pumpPortalWalletKeyEncryptionSecret?: string;
   migrationLogPath: string;
   walletTradeLogPath: string;
+  copyTradeEmergencyStopPath: string;
   heliusApiKey?: string;
   heliusApiBaseUrl: string;
   heliusWebhookAuthHeader?: string;

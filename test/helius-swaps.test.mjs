@@ -289,6 +289,109 @@ test("Helius swap parser rejects top-level native transfer plus token-in without
   }
 });
 
+test("Helius swap parser accepts high-confidence Pump.fun top-level SOL to token buys", () => {
+  const pumpMint = "7sNaUnzXkXZXUah8Mv7xcxJW85ttFupNEafYHsuGpump";
+  const trade = normalize({
+    source: "PUMP_FUN",
+    events: {},
+    nativeTransfers: [
+      {
+        fromUserAccount: wallet,
+        toUserAccount: "Pool111111111111111111111111111111111111111",
+        amount: 977777777
+      },
+      {
+        fromUserAccount: wallet,
+        toUserAccount: "Tip1111111111111111111111111111111111111111",
+        amount: 4644444
+      }
+    ],
+    tokenTransfers: [
+      {
+        fromUserAccount: "Pool111111111111111111111111111111111111111",
+        toUserAccount: wallet,
+        mint: pumpMint,
+        tokenAmount: 33393724.317703
+      }
+    ],
+    accountData: [
+      {
+        account: wallet,
+        nativeBalanceChange: -983235021
+      }
+    ]
+  });
+
+  assert.equal(trade.action, "buy");
+  assert.equal(trade.mint, pumpMint);
+  assert.deepEqual(trade.input, {
+    mint: SOL_MINT,
+    symbol: "SOL",
+    amount: 0.982422221
+  });
+  assert.deepEqual(trade.output, {
+    mint: pumpMint,
+    symbol: null,
+    amount: 33393724.317703
+  });
+  assert.equal(trade.raw.heliusSwapParser.reason, null);
+  assert.equal(isCopyableSolToTokenBuy(trade), true);
+});
+
+test("Helius swap parser rejects Pump.fun top-level buys without fee payer and balance confirmation", () => {
+  for (const partialEvent of [
+    {
+      source: "PUMP_FUN",
+      feePayer: "Other1111111111111111111111111111111111111111",
+      accountData: [
+        {
+          account: wallet,
+          nativeBalanceChange: -200000000
+        }
+      ]
+    },
+    {
+      source: "PUMP_FUN",
+      feePayer: null,
+      accountData: [
+        {
+          account: wallet,
+          nativeBalanceChange: -200000000
+        }
+      ]
+    },
+    {
+      source: "PUMP_FUN",
+      accountData: []
+    }
+  ]) {
+    const trade = normalize({
+      ...partialEvent,
+      nativeTransfers: [
+        {
+          fromUserAccount: wallet,
+          toUserAccount: "Pool111111111111111111111111111111111111111",
+          amount: 200000000
+        }
+      ],
+      tokenTransfers: [
+        {
+          fromUserAccount: "Pool111111111111111111111111111111111111111",
+          toUserAccount: wallet,
+          mint: bonkMint,
+          tokenAmount: 500,
+          symbol: "BONK"
+        }
+      ]
+    });
+
+    assert.equal(trade.action, "unknown");
+    assert.equal(trade.mint, null);
+    assert.match(trade.raw.heliusSwapParser.reason, /lacks structured Helius swap proof/);
+    assertNotCopyable(trade);
+  }
+});
+
 test("Helius swap parser rejects native balance inflow ambiguity", () => {
   const trade = normalize({
     nativeTransfers: [

@@ -2,8 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   canCreatePumpPortalTradingWalletInChat,
+  copyTradeEmergencyResumeConfirmReplyMarkup,
   copyTradeEmergencyStopConfirmReplyMarkup,
   copyTradeRiskSettingConfirmReplyMarkup,
+  formatCopyTradeEmergencyResumeActivatedText,
+  formatCopyTradeEmergencyResumeConfirmText,
+  formatCopyTradeEmergencyResumeUnavailableText,
   formatCopyTradeEmergencyStopActivatedText,
   formatCopyTradeEmergencyStopConfirmText,
   formatCopyTradeEmergencyStopUnavailableText,
@@ -87,5 +91,33 @@ test("copy trade emergency stop state text reports disabled live submissions", (
 
   const unavailable = formatCopyTradeEmergencyStopUnavailableText();
   assert.match(unavailable, /Emergency stop unavailable/);
+  assert.match(unavailable, /live copy trading was not changed/);
+});
+
+test("copy trade emergency resume confirmation is explicit about env gates", () => {
+  const text = formatCopyTradeEmergencyResumeConfirmText();
+  assert.match(text, /Clear Emergency Stop/);
+  assert.match(text, /clears the runtime emergency stop/);
+  assert.match(text, /does not change COPY_TRADE_ENABLED/);
+  assert.match(text, /COPY_TRADE_DRY_RUN/);
+  assert.match(text, /caps/);
+
+  assert.deepEqual(copyTradeEmergencyResumeConfirmReplyMarkup(), {
+    inline_keyboard: [
+      [{ text: "🟢 Confirm Clear", callback_data: "copytrade:emergency_resume_confirm" }],
+      [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]
+    ]
+  });
+});
+
+test("copy trade emergency resume state text reports live gates still apply", () => {
+  const active = formatCopyTradeEmergencyResumeActivatedText("Execution state: LIVE_ENABLED");
+  assert.match(active, /Emergency stop cleared/);
+  assert.match(active, /no longer blocking PumpPortal copy submissions/);
+  assert.match(active, /Live trading still depends on COPY_TRADE_ENABLED/);
+  assert.match(active, /Execution state: LIVE_ENABLED/);
+
+  const unavailable = formatCopyTradeEmergencyResumeUnavailableText();
+  assert.match(unavailable, /Clear emergency stop unavailable/);
   assert.match(unavailable, /live copy trading was not changed/);
 });

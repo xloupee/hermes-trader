@@ -280,12 +280,32 @@ async function persistCopyTradeEmergencyStop(chatId: string | number): Promise<v
   await writeFile(config.copyTradeEmergencyStopPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
 }
 
+async function persistCopyTradeEmergencyStopCleared(chatId: string | number): Promise<void> {
+  const state = {
+    active: false,
+    clearedByChatId: String(chatId),
+    clearedAt: new Date().toISOString()
+  };
+
+  await mkdir(dirname(config.copyTradeEmergencyStopPath), { recursive: true });
+  await writeFile(config.copyTradeEmergencyStopPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
 async function activateCopyTradeEmergencyStop(chatId: string | number): Promise<string> {
   copyTradeEmergencyStopped = true;
   await persistCopyTradeEmergencyStop(chatId);
   const message = formatCopyTradeExecutionStateLog(copyTradeExecutionModeConfig());
 
   console.warn(`Copy trade emergency stop activated by ${chatId}: ${message}`);
+  return message;
+}
+
+async function clearCopyTradeEmergencyStop(chatId: string | number): Promise<string> {
+  copyTradeEmergencyStopped = false;
+  await persistCopyTradeEmergencyStopCleared(chatId);
+  const message = formatCopyTradeExecutionStateLog(copyTradeExecutionModeConfig());
+
+  console.warn(`Copy trade emergency stop cleared by ${chatId}: ${message}`);
   return message;
 }
 
@@ -2034,6 +2054,9 @@ const commandPoller = createTelegramCommandPoller({
   },
   onCopyTradeEmergencyStop: (chatId) => {
     return activateCopyTradeEmergencyStop(chatId);
+  },
+  onCopyTradeEmergencyResume: (chatId) => {
+    return clearCopyTradeEmergencyStop(chatId);
   }
 });
 const migrationListener = createPumpPortalMigrationListener({

@@ -90,6 +90,7 @@ interface CommandPollerOptions {
   subscribers?: SubscriberStore;
   onWalletWatchlistChange?: () => string | void | Promise<string | void>;
   onCopyTradeEmergencyStop?: (chatId: TelegramChatId) => string | void | Promise<string | void>;
+  onCopyTradeEmergencyResume?: (chatId: TelegramChatId) => string | void | Promise<string | void>;
 }
 
 interface TelegramCommandPoller {
@@ -261,6 +262,45 @@ export function formatCopyTradeEmergencyStopUnavailableText(): string {
     "<b>🚨 Emergency stop unavailable</b>",
     "",
     "This bot runtime has no emergency-stop handler configured, so live copy trading was not changed.",
+    "Use SSH/env controls until the runtime handler is wired in."
+  ].join("\n");
+}
+
+export function formatCopyTradeEmergencyResumeConfirmText(): string {
+  return [
+    "<b>🟢 Clear Emergency Stop?</b>",
+    "",
+    "This clears the runtime emergency stop for live PumpPortal copy submissions.",
+    "",
+    "It does not change COPY_TRADE_ENABLED, COPY_TRADE_DRY_RUN, wallet balances, caps, slippage, or saved copytrade settings.",
+    "Tap Confirm Clear to allow the bot to use its current execution settings again."
+  ].join("\n");
+}
+
+export function copyTradeEmergencyResumeConfirmReplyMarkup(): TelegramReplyMarkup {
+  return {
+    inline_keyboard: [
+      [{ text: "🟢 Confirm Clear", callback_data: "copytrade:emergency_resume_confirm" }],
+      [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]
+    ]
+  };
+}
+
+export function formatCopyTradeEmergencyResumeActivatedText(statusText?: string | null): string {
+  return [
+    "<b>🟢 Emergency stop cleared</b>",
+    "",
+    "The runtime emergency stop is no longer blocking PumpPortal copy submissions.",
+    "Live trading still depends on COPY_TRADE_ENABLED, COPY_TRADE_DRY_RUN, funded wallets, caps, and risk settings.",
+    ...(statusText ? ["", statusText] : [])
+  ].join("\n");
+}
+
+export function formatCopyTradeEmergencyResumeUnavailableText(): string {
+  return [
+    "<b>🟢 Clear emergency stop unavailable</b>",
+    "",
+    "This bot runtime has no clear-stop handler configured, so live copy trading was not changed.",
     "Use SSH/env controls until the runtime handler is wired in."
   ].join("\n");
 }
@@ -754,7 +794,8 @@ export function createTelegramCommandPoller({
   testMessage: _testMessage,
   subscribers,
   onWalletWatchlistChange,
-  onCopyTradeEmergencyStop
+  onCopyTradeEmergencyStop,
+  onCopyTradeEmergencyResume
 }: CommandPollerOptions): TelegramCommandPoller {
   let nextOffset: number | undefined;
   let shouldPoll = true;
@@ -1133,6 +1174,27 @@ export function createTelegramCommandPoller({
       await reply(
         chatId,
         `${formatCopyTradeEmergencyStopActivatedText(statusText || null)}\n\n${dashboard.text}`,
+        dashboard.replyMarkup
+      );
+      return;
+    }
+
+    if (data === "copytrade:emergency_resume") {
+      await reply(chatId, formatCopyTradeEmergencyResumeConfirmText(), copyTradeEmergencyResumeConfirmReplyMarkup());
+      return;
+    }
+
+    if (data === "copytrade:emergency_resume_confirm") {
+      if (!onCopyTradeEmergencyResume) {
+        await reply(chatId, formatCopyTradeEmergencyResumeUnavailableText(), copyTradeDashboardReplyMarkup());
+        return;
+      }
+
+      const statusText = await onCopyTradeEmergencyResume(chatId);
+      const dashboard = copyTradeDashboard(chatId);
+      await reply(
+        chatId,
+        `${formatCopyTradeEmergencyResumeActivatedText(statusText || null)}\n\n${dashboard.text}`,
         dashboard.replyMarkup
       );
       return;
@@ -2317,7 +2379,10 @@ export function createTelegramCommandPoller({
           { text: "⏹️ Stop Copy Trading", callback_data: "copytrade:stop" },
           { text: "📋 List Wallets", callback_data: "copytrade:wallets" }
         ],
-        [{ text: "🚨 Emergency Stop", callback_data: "copytrade:emergency_stop" }]
+        [
+          { text: "🚨 Emergency Stop", callback_data: "copytrade:emergency_stop" },
+          { text: "🟢 Clear Stop", callback_data: "copytrade:emergency_resume" }
+        ]
       ]
     };
   }

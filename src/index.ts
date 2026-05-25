@@ -20,6 +20,7 @@ import { copyBuySubmissionKey, createCopyBuySubmissionGuard } from "./copytrade-
 import {
   createJsonCopyTradeBuyIdempotencyStore,
   createSupabaseCopyTradeBuyIdempotencyStore,
+  copyTradeBuyIdempotencyKey,
   safelyCompleteCopyTradeBuyIdempotency,
   safelyFailCopyTradeBuyIdempotency
 } from "./copytrade-idempotency.js";
@@ -205,14 +206,18 @@ const copyTradeRecorder =
         serviceRoleKey: config.supabaseServiceRoleKey
       })
     : null;
+const copyTradeBuyIdempotencyPath = process.env.COPY_TRADE_BUY_IDEMPOTENCY_PATH || "data/copytrade-buy-idempotency.json";
 const copyTradeBuyIdempotency =
   config.supabaseUrl && config.supabaseServiceRoleKey
     ? createSupabaseCopyTradeBuyIdempotencyStore({
         url: config.supabaseUrl,
-        serviceRoleKey: config.supabaseServiceRoleKey
+        serviceRoleKey: config.supabaseServiceRoleKey,
+        fallback: createJsonCopyTradeBuyIdempotencyStore({
+          path: copyTradeBuyIdempotencyPath
+        })
       })
     : createJsonCopyTradeBuyIdempotencyStore({
-        path: process.env.COPY_TRADE_BUY_IDEMPOTENCY_PATH || "data/copytrade-buy-idempotency.json"
+        path: copyTradeBuyIdempotencyPath
       });
 
 const baseSubscriptionMethods: PumpPortalSubscription[] = ["subscribeNewToken", "subscribeMigration"];
@@ -783,35 +788,6 @@ async function sendCopyTradeSimulationAlert(
     latencyTracker.mark("request_built");
 
     const amountSol = typeof request.amount === "number" ? request.amount : null;
-    const dailyBudgetKey = copyTradeDailyBudgetKey({
-      chatId: subscriber.chatId,
-      tradingWalletPublicKey: subscriber.tradingWallet.publicKey
-    });
-    const nowMs = Date.now();
-    const riskBlockedReason = copyTradeBuyRiskBlockedReason({
-      config,
-      request,
-      trade,
-      copyTradeWalletCount: subscriber.copyTradeWallets.length,
-      dailySpentSol: copyTradeDailySolBudget.spentSol({ key: dailyBudgetKey, nowMs }),
-      nowMs
-    });
-    latencyTracker.mark("risk_checked", {
-      status: riskBlockedReason ? "blocked" : "ok",
-      reason: riskBlockedReason
-    });
-    if (riskBlockedReason) {
-      skipWithLatencyLog(riskBlockedReason);
-      await notifySkippedAutoCopyBuy({
-        subscriber,
-        trade,
-        copyTradeWallet,
-        request,
-        reason: riskBlockedReason
-      });
-      return;
-    }
-
     if (amountSol === null) {
       skipWithLatencyLog("copy buy amount is not a fixed SOL amount");
       await notifySkippedAutoCopyBuy({
@@ -824,88 +800,11 @@ async function sendCopyTradeSimulationAlert(
       return;
     }
 
-    const blockedReason = copyTradeLiveExecutionBlockedReason(copyTradeExecutionModeConfig());
-    latencyTracker.mark("live_gate_checked", {
-      status: blockedReason ? "blocked" : "ok",
-      reason: blockedReason
+    const durableCopyBuyKey = copyTradeBuyIdempotencyKey({
+      chatId: subscriber.chatId,
+      mint: trade.mint,
+      action: "buy"
     });
-    if (blockedReason) {
-      skipWithLatencyLog(blockedReason);
-      await notifySkippedAutoCopyBuy({
-        subscriber,
-        trade,
-        copyTradeWallet,
-        request,
-        reason: blockedReason
-      });
-      return;
-    }
-
-    if (config.copyTradeMinWalletReserveSol > 0) {
-      let tradingWalletBalanceSol: number | null = null;
-
-      try {
-        tradingWalletBalanceSol = await getSolanaBalanceSol({
-          address: subscriber.tradingWallet.publicKey,
-          rpcUrl: config.solanaRpcUrl
-        });
-      } catch (error) {
-        console.warn(`Could not fetch trading wallet balance for ${subscriber.chatId}: ${errorMessage(error)}`);
-      }
-
-      const reserveBlockedReason = copyTradeWalletReserveBlockedReason({
-        config,
-        request,
-        tradingWalletBalanceSol
-      });
-      latencyTracker.mark("balance_checked", {
-        status: reserveBlockedReason ? "blocked" : "ok",
-        reason: reserveBlockedReason
-      });
-
-      if (reserveBlockedReason) {
-        skipWithLatencyLog(reserveBlockedReason);
-        await notifySkippedAutoCopyBuy({
-          subscriber,
-          trade,
-          copyTradeWallet,
-          request,
-          reason: reserveBlockedReason
-        });
-        return;
-      }
-    }
-
-    if (!encryptionSecretReady(config.pumpPortalWalletKeyEncryptionSecret)) {
-      const reason = "missing PUMPPORTAL_WALLET_KEY_ENCRYPTION_SECRET";
-      skipWithLatencyLog(reason);
-      console.warn(`Skipping auto copy buy for ${subscriber.chatId}: ${reason}`);
-      return;
-    }
-
-    if (!copyBuySubmissionGuard.reserve(copyBuyKey)) {
-      skipWithLatencyLog("copy buy is already in flight");
-      console.warn(
-        `Skipping duplicate auto copy buy for ${subscriber.chatId}:${copyTradeWallet.address}:${trade.signature}: already in flight`
-      );
-      return;
-    }
-    copyBuyReserved = true;
-
-    const finalBlockedReason = copyTradeLiveExecutionBlockedReason(copyTradeExecutionModeConfig());
-    if (finalBlockedReason) {
-      skipWithLatencyLog(finalBlockedReason);
-      await notifySkippedAutoCopyBuy({
-        subscriber,
-        trade,
-        copyTradeWallet,
-        request,
-        reason: finalBlockedReason
-      });
-      return;
-    }
-
-    const durableCopyBuyKey = copyBuyKey && trade.mint ? [copyBuyKey, trade.mint, "buy"].join(":") : null;
 
     if (!durableCopyBuyKey || !trade.signature || !trade.mint) {
       const reason = "copy buy idempotency key is unavailable";
@@ -945,25 +844,136 @@ async function sendCopyTradeSimulationAlert(
       });
       return;
     }
+
     if (!idempotencyClaim.claimed) {
       const existing = idempotencyClaim.existing;
       const reason = existing
-        ? `copy buy was already claimed (${existing.status})`
-        : "copy buy was already claimed";
+        ? `copy buy coin was already handled (${existing.status})`
+        : "copy buy coin was already handled";
       skipWithLatencyLog(reason);
       console.warn(
-        `Skipping duplicate auto copy buy for ${subscriber.chatId}:${copyTradeWallet.address}:${trade.signature}: durable idempotency claimed`
+        `Skipping duplicate auto copy buy for ${subscriber.chatId}:${trade.mint}: coin already handled`
       );
+      return;
+    }
+    durableCopyBuyClaimKey = durableCopyBuyKey;
+
+    const dailyBudgetKey = copyTradeDailyBudgetKey({
+      chatId: subscriber.chatId,
+      tradingWalletPublicKey: subscriber.tradingWallet.publicKey
+    });
+    const nowMs = Date.now();
+    const riskBlockedReason = copyTradeBuyRiskBlockedReason({
+      config,
+      request,
+      trade,
+      copyTradeWalletCount: subscriber.copyTradeWallets.length,
+      dailySpentSol: copyTradeDailySolBudget.spentSol({ key: dailyBudgetKey, nowMs }),
+      nowMs
+    });
+    latencyTracker.mark("risk_checked", {
+      status: riskBlockedReason ? "blocked" : "ok",
+      reason: riskBlockedReason
+    });
+    if (riskBlockedReason) {
+      await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, riskBlockedReason);
+      skipWithLatencyLog(riskBlockedReason);
       await notifySkippedAutoCopyBuy({
         subscriber,
         trade,
         copyTradeWallet,
         request,
-        reason
+        reason: riskBlockedReason
       });
       return;
     }
-    durableCopyBuyClaimKey = durableCopyBuyKey;
+
+    const blockedReason = copyTradeLiveExecutionBlockedReason(copyTradeExecutionModeConfig());
+    latencyTracker.mark("live_gate_checked", {
+      status: blockedReason ? "blocked" : "ok",
+      reason: blockedReason
+    });
+    if (blockedReason) {
+      await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, blockedReason);
+      skipWithLatencyLog(blockedReason);
+      await notifySkippedAutoCopyBuy({
+        subscriber,
+        trade,
+        copyTradeWallet,
+        request,
+        reason: blockedReason
+      });
+      return;
+    }
+
+    if (config.copyTradeMinWalletReserveSol > 0) {
+      let tradingWalletBalanceSol: number | null = null;
+
+      try {
+        tradingWalletBalanceSol = await getSolanaBalanceSol({
+          address: subscriber.tradingWallet.publicKey,
+          rpcUrl: config.solanaRpcUrl
+        });
+      } catch (error) {
+        console.warn(`Could not fetch trading wallet balance for ${subscriber.chatId}: ${errorMessage(error)}`);
+      }
+
+      const reserveBlockedReason = copyTradeWalletReserveBlockedReason({
+        config,
+        request,
+        tradingWalletBalanceSol
+      });
+      latencyTracker.mark("balance_checked", {
+        status: reserveBlockedReason ? "blocked" : "ok",
+        reason: reserveBlockedReason
+      });
+
+      if (reserveBlockedReason) {
+        await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, reserveBlockedReason);
+        skipWithLatencyLog(reserveBlockedReason);
+        await notifySkippedAutoCopyBuy({
+          subscriber,
+          trade,
+          copyTradeWallet,
+          request,
+          reason: reserveBlockedReason
+        });
+        return;
+      }
+    }
+
+    if (!encryptionSecretReady(config.pumpPortalWalletKeyEncryptionSecret)) {
+      const reason = "missing PUMPPORTAL_WALLET_KEY_ENCRYPTION_SECRET";
+      await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, reason);
+      skipWithLatencyLog(reason);
+      console.warn(`Skipping auto copy buy for ${subscriber.chatId}: ${reason}`);
+      return;
+    }
+
+    if (!copyBuySubmissionGuard.reserve(copyBuyKey)) {
+      const reason = "copy buy is already in flight";
+      await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, reason);
+      skipWithLatencyLog(reason);
+      console.warn(
+        `Skipping duplicate auto copy buy for ${subscriber.chatId}:${copyTradeWallet.address}:${trade.signature}: already in flight`
+      );
+      return;
+    }
+    copyBuyReserved = true;
+
+    const finalBlockedReason = copyTradeLiveExecutionBlockedReason(copyTradeExecutionModeConfig());
+    if (finalBlockedReason) {
+      await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, finalBlockedReason);
+      skipWithLatencyLog(finalBlockedReason);
+      await notifySkippedAutoCopyBuy({
+        subscriber,
+        trade,
+        copyTradeWallet,
+        request,
+        reason: finalBlockedReason
+      });
+      return;
+    }
 
     const budgetReservation = copyTradeDailySolBudget.reserve({
       key: dailyBudgetKey,

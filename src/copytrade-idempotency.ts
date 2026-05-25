@@ -56,6 +56,25 @@ export interface CopyTradeBuyIdempotencyStore {
   failBuy: (key: string, errorText: string) => Promise<void>;
 }
 
+export function copyTradeBuyIdempotencyKey({
+  chatId,
+  mint,
+  action = "buy"
+}: {
+  chatId: string | null | undefined;
+  mint: string | null | undefined;
+  action?: "buy";
+}): string | null {
+  const normalizedChatId = chatId?.trim();
+  const normalizedMint = mint?.trim();
+
+  if (!normalizedChatId || !normalizedMint) {
+    return null;
+  }
+
+  return [normalizedChatId, normalizedMint, action].join(":");
+}
+
 interface StoredCopyTradeBuyIdempotencyFile {
   version: 1;
   records: CopyTradeBuyIdempotencyRecord[];
@@ -230,6 +249,10 @@ function failedRecord(
   };
 }
 
+function sameSemanticBuy(record: CopyTradeBuyIdempotencyRecord, input: CopyTradeBuyIdempotencyClaimInput): boolean {
+  return record.chatId === input.chatId && record.mint === input.mint && record.action === (input.action || "buy");
+}
+
 async function readLocalFile(path: string): Promise<StoredCopyTradeBuyIdempotencyFile> {
   try {
     const parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
@@ -281,7 +304,7 @@ export function createJsonCopyTradeBuyIdempotencyStore({
     claimBuy(input) {
       return withLock(async () => {
         const data = await readLocalFile(path);
-        const existing = data.records.find((record) => record.key === input.key) || null;
+        const existing = data.records.find((record) => record.key === input.key || sameSemanticBuy(record, input)) || null;
 
         if (existing) {
           return {
@@ -324,16 +347,29 @@ function isUniqueViolation(error: SupabaseErrorLike | null): boolean {
   );
 }
 
+function isMissingSupabaseRelation(error: SupabaseErrorLike | null): boolean {
+  return Boolean(
+    error &&
+      (
+        error.code === "42P01" ||
+        error.code === "PGRST205" ||
+        /Could not find the table|schema cache|relation .* does not exist/i.test(error.message || "")
+      )
+  );
+}
+
 function formatSupabaseError(error: SupabaseErrorLike | null): Error | null {
   return error ? new Error(error.message || "Supabase copy trade idempotency request failed") : null;
 }
 
 export function createSupabaseCopyTradeBuyIdempotencyStore({
   url,
-  serviceRoleKey
+  serviceRoleKey,
+  fallback
 }: {
   url: string;
   serviceRoleKey: string;
+  fallback?: CopyTradeBuyIdempotencyStore;
 }): CopyTradeBuyIdempotencyStore {
   const client = createClient(url, serviceRoleKey, {
     auth: {
@@ -341,24 +377,68 @@ export function createSupabaseCopyTradeBuyIdempotencyStore({
       autoRefreshToken: false
     }
   });
+  let useFallback = false;
+  let warnedAboutFallback = false;
 
-  async function readExisting(key: string): Promise<CopyTradeBuyIdempotencyRecord | null> {
-    const { data, error } = await client
-      .from("telegram_copytrade_buy_idempotency")
-      .select("*")
-      .eq("idempotency_key", key)
-      .maybeSingle();
-    const formattedError = formatSupabaseError(error);
-
-    if (formattedError) {
-      throw formattedError;
+  function activateFallback(error: SupabaseErrorLike | null): boolean {
+    if (!fallback || !isMissingSupabaseRelation(error)) {
+      return false;
     }
 
-    return data ? recordFromSupabaseRow(data as SupabaseCopyTradeBuyIdempotencyRow) : null;
+    useFallback = true;
+
+    if (!warnedAboutFallback) {
+      warnedAboutFallback = true;
+      console.warn(
+        `Supabase copy trade idempotency table is unavailable; using local JSON idempotency fallback: ${
+          error?.message || "missing relation"
+        }`
+      );
+    }
+
+    return true;
+  }
+
+  async function readExisting(input: CopyTradeBuyIdempotencyClaimInput): Promise<CopyTradeBuyIdempotencyRecord | null> {
+    const byKey = await client
+      .from("telegram_copytrade_buy_idempotency")
+      .select("*")
+      .eq("idempotency_key", input.key)
+      .maybeSingle();
+    const keyError = formatSupabaseError(byKey.error);
+
+    if (keyError) {
+      throw keyError;
+    }
+
+    if (byKey.data) {
+      return recordFromSupabaseRow(byKey.data as SupabaseCopyTradeBuyIdempotencyRow);
+    }
+
+    const bySemantic = await client
+      .from("telegram_copytrade_buy_idempotency")
+      .select("*")
+      .eq("chat_id", input.chatId)
+      .eq("mint", input.mint)
+      .eq("action", input.action || "buy")
+      .order("claimed_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    const semanticError = formatSupabaseError(bySemantic.error);
+
+    if (semanticError) {
+      throw semanticError;
+    }
+
+    return bySemantic.data ? recordFromSupabaseRow(bySemantic.data as SupabaseCopyTradeBuyIdempotencyRow) : null;
   }
 
   return {
     async claimBuy(input) {
+      if (useFallback && fallback) {
+        return fallback.claimBuy(input);
+      }
+
       const record = baseRecord(input);
       const { error } = await client
         .from("telegram_copytrade_buy_idempotency")
@@ -374,14 +454,22 @@ export function createSupabaseCopyTradeBuyIdempotencyStore({
       if (isUniqueViolation(error)) {
         return {
           claimed: false,
-          existing: await readExisting(input.key)
+          existing: await readExisting(input)
         };
+      }
+
+      if (activateFallback(error) && fallback) {
+        return fallback.claimBuy(input);
       }
 
       const formattedError = formatSupabaseError(error);
       throw formattedError || new Error("Supabase copy trade idempotency request failed");
     },
     async completeBuy(key, result) {
+      if (useFallback && fallback) {
+        return fallback.completeBuy(key, result);
+      }
+
       const now = new Date().toISOString();
       const { error } = await client
         .from("telegram_copytrade_buy_idempotency")
@@ -395,6 +483,11 @@ export function createSupabaseCopyTradeBuyIdempotencyStore({
           completed_at: now
         })
         .eq("idempotency_key", key);
+
+      if (activateFallback(error) && fallback) {
+        return fallback.completeBuy(key, result);
+      }
+
       const formattedError = formatSupabaseError(error);
 
       if (formattedError) {
@@ -402,6 +495,10 @@ export function createSupabaseCopyTradeBuyIdempotencyStore({
       }
     },
     async failBuy(key, errorText) {
+      if (useFallback && fallback) {
+        return fallback.failBuy(key, errorText);
+      }
+
       const now = new Date().toISOString();
       const { error } = await client
         .from("telegram_copytrade_buy_idempotency")
@@ -412,6 +509,11 @@ export function createSupabaseCopyTradeBuyIdempotencyStore({
           completed_at: now
         })
         .eq("idempotency_key", key);
+
+      if (activateFallback(error) && fallback) {
+        return fallback.failBuy(key, errorText);
+      }
+
       const formattedError = formatSupabaseError(error);
 
       if (formattedError) {

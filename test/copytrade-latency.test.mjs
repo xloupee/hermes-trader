@@ -51,6 +51,14 @@ test("index runtime wires Helius receipt and normalization timestamps into copy 
   );
   assert.match(
     indexSource,
+    /copyTradeBuyIdempotency\.claimBuy\([\s\S]*copyTradeBuyRiskBlockedReason/
+  );
+  assert.match(
+    indexSource,
+    /if \(!idempotencyClaim\.claimed\) \{[\s\S]*coin already handled[\s\S]*return;[\s\S]*\}\s*durableCopyBuyClaimKey = durableCopyBuyKey;/
+  );
+  assert.match(
+    indexSource,
     /await Promise\.all\(copyTradeEntries\.map\(\(entry\) =>[\s\S]*sendCopyTradeSimulationAlert/
   );
   assert.match(

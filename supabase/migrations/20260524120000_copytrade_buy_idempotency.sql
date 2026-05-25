@@ -28,9 +28,6 @@ create index if not exists telegram_copytrade_buy_idempotency_observed_signature
 create unique index if not exists telegram_copytrade_buy_idempotency_semantic_buy_idx
   on public.telegram_copytrade_buy_idempotency(
     chat_id,
-    trading_wallet_public_key,
-    source_wallet_address,
-    observed_signature,
     mint,
     action
   );

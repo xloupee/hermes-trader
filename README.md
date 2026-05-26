@@ -108,6 +108,45 @@ npm run import-subscribers -- data/telegram-subscribers.json
 - Compare PumpPortal, Helius, and Geyser accepted wallet events with `npm run wallet-feed-report -- --path=logs/wallet-trades.jsonl`. Add `--since=2026-05-29T00:00:00Z` or `--limit=50` for a narrower report.
 - [VA RPC and Geyser runbook](docs/va-geyser-runbook.md) documents the VA endpoints, IP allowlisting, smoke tests, canary env, feed comparison, rollback paths, and the 20-stream Geyser limit.
 
+## ShredStream discovery prototype
+
+PumpPortal remains the production token discovery source. The ShredStream path is a standalone prototype for decoding deshredded transaction JSONL and measuring whether a lower-level feed can beat PumpPortal before it is wired into copy-trading.
+
+Run the prototype against a local JSONL capture:
+
+```bash
+SHREDSTREAM_DISCOVERY_ENABLED=true \
+SHREDSTREAM_INPUT_PATH=path/to/deshred-sample.jsonl \
+SHREDSTREAM_EVENT_LOG_PATH=logs/shred-pump-events.jsonl \
+npm run shred-listener
+```
+
+Use `SHREDSTREAM_INPUT_PATH=-` to read JSONL from stdin. The input shape is intentionally lightweight so it can be fed by Jito ShredStream's gRPC/deshred sample client later:
+
+```json
+{
+  "slot": 123,
+  "signature": "tx-signature",
+  "receivedAtMs": 1710000000000,
+  "accountKeys": ["program-or-account-pubkey"],
+  "instructions": [
+    {
+      "programIdIndex": 0,
+      "accounts": [0],
+      "dataBase64": "base64-instruction-data"
+    }
+  ]
+}
+```
+
+Safety defaults:
+
+- `SHREDSTREAM_DISCOVERY_ENABLED=true` is required or the process exits without reading input.
+- The listener only writes normalized events to `SHREDSTREAM_EVENT_LOG_PATH`; it does not send Telegram messages or submit trades.
+- The decoder only emits Pump/PumpSwap events for the allowlisted program IDs and preserves unknown Pump instructions for later analysis.
+
+The next step is to connect a real ShredStream gRPC source to this JSONL-normalized listener and run it side by side with PumpPortal for latency measurement.
+
 ## Direct trading SDK trust review
 
 This repo currently uses PumpPortal Lightning for live copy-trade execution, which charges an extra execution fee and uses a PumpPortal-linked trading API key. The planned direct-trading migration is to keep PumpPortal data feeds temporarily, but replace Lightning execution with locally built, locally signed Solana transactions.

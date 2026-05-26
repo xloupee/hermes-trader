@@ -99,6 +99,41 @@ npm run import-subscribers -- data/telegram-subscribers.json
 - `COPY_TRADE_TRAILING_SELL_ENABLED=true` schedules live PumpPortal Lightning percentage sells after a successful auto copy buy. Scheduled sell timers are in-memory and are cleared if the bot restarts; they only run after live copy buys are enabled and submitted.
 - Expose `WEBHOOK_PORT` through your reverse proxy at the exact `HELIUS_WEBHOOK_PUBLIC_URL`, and forward the `Authorization` header unchanged.
 
+## Direct trading SDK trust review
+
+This repo currently uses PumpPortal Lightning for live copy-trade execution, which charges an extra execution fee and uses a PumpPortal-linked trading API key. The planned direct-trading migration is to keep PumpPortal data feeds temporarily, but replace Lightning execution with locally built, locally signed Solana transactions.
+
+The intended SDKs are usable, but should be treated as live-trading supply-chain dependencies rather than blindly trusted packages:
+
+- `@pump-fun/pump-sdk@1.36.0` is the Pump bonding-curve SDK.
+- `@pump-fun/pump-swap-sdk@1.16.0` is the PumpSwap AMM SDK.
+- Both packages are published under the `@pump-fun` npm scope, have matching Baton maintainers, registry signatures, SHA512 integrity, and tarballs shaped like normal SDK packages with source, dist files, IDLs, program IDs, and buy/sell instruction builders.
+- The public `pump-fun/pump-public-docs` repo links to `@pump-fun/pump-sdk` and appears to be the best public canonical Pump docs source.
+- The SDK package metadata points at `github.com/pump-fun/pump-sdk` and `github.com/pump-fun/pump-swap-sdk`, but those source repos are not publicly readable right now, so the npm packages are not fully source-verifiable from GitHub.
+- No install, postinstall, prepare, bin, shell execution, direct filesystem, direct secret handling, or obvious key-exfiltration behavior was found in the two Pump SDK tarballs during the local audit.
+- Red flags to keep in mind: `docs.pump.fun`/docs root behavior is messy, no npm provenance attestations were found for the target versions, `@pump-fun/pump-sdk` pulls `@pump-fun/agent-payments-sdk@1.0.7`, and the wider Solana dependency stack has normal npm audit noise and a few transitive native install scripts.
+
+Direct-trading implementation must add a verification layer before signing any transaction:
+
+- Pin exact SDK versions and commit `package-lock.json` integrity hashes.
+- Re-audit package tarballs before SDK upgrades.
+- Build transactions in dry-run first and simulate every new route before live sends.
+- Reject any generated instruction whose program ID is outside the expected allowlist.
+- Start live canaries with tiny funded hot wallets only.
+
+Expected program allowlist for direct Pump execution:
+
+```text
+Pump bonding curve: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
+PumpSwap AMM:       pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA
+Pump fee program:   pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ
+System program:     11111111111111111111111111111111
+SPL Token:          TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
+Token 2022:         TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb
+Associated Token:   ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL
+Compute Budget:     ComputeBudget111111111111111111111111111111
+```
+
 ## Research
 
 - [Copy trading wallet research](docs/copy-trading-research.md) - technical plan for adding wallet trade monitoring, dry-run copy-trade planning, and guarded local execution.

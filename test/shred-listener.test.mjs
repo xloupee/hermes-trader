@@ -4,6 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { runShredListener, shredDiscoveryEnabled } from "../dist/shred-listener.js";
+import {
+  createShredstreamSource,
+  parseShredstreamSourceMode,
+  resolveShredstreamSourceConfig
+} from "../dist/shredstream-source.js";
 import { PUMP_BONDING_CURVE_PROGRAM_ID, PUMPSWAP_AMM_PROGRAM_ID } from "../dist/shredstream-decoder.js";
 
 function dataBase64(discriminatorHex) {
@@ -16,6 +21,69 @@ test("ShredStream listener kill switch is off unless explicitly enabled", () => 
   assert.equal(shredDiscoveryEnabled({}), false);
   assert.equal(shredDiscoveryEnabled({ SHREDSTREAM_DISCOVERY_ENABLED: "false" }), false);
   assert.equal(shredDiscoveryEnabled({ SHREDSTREAM_DISCOVERY_ENABLED: "true" }), true);
+});
+
+test("ShredStream source mode defaults to JSONL stdin", () => {
+  assert.equal(parseShredstreamSourceMode({}), "jsonl");
+  assert.deepEqual(resolveShredstreamSourceConfig({}), {
+    mode: "jsonl",
+    inputPath: "-"
+  });
+});
+
+test("ShredStream source mode rejects invalid values", () => {
+  assert.throws(
+    () => resolveShredstreamSourceConfig({ SHREDSTREAM_SOURCE: "websocket" }),
+    /Invalid SHREDSTREAM_SOURCE="websocket".*Expected "jsonl" or "grpc"/
+  );
+});
+
+test("ShredStream gRPC source mode requires a URL before adapter creation", () => {
+  assert.throws(
+    () => resolveShredstreamSourceConfig({ SHREDSTREAM_SOURCE: "grpc" }),
+    /SHREDSTREAM_GRPC_URL is required when SHREDSTREAM_SOURCE=grpc/
+  );
+});
+
+test("ShredStream gRPC source mode reads normalized JSONL from decoder command", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "shred-listener-grpc-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const decoderPath = join(dir, "decoder.mjs");
+  const eventLogPath = join(dir, "events.jsonl");
+
+  await writeFile(
+    decoderPath,
+    `
+const discriminator = Buffer.alloc(8);
+Buffer.from("181ec828051c0777", "hex").copy(discriminator, 0);
+console.log(JSON.stringify({
+  slot: 4,
+  signature: "grpc-pump-sig",
+  receivedAtMs: 300,
+  accountKeys: ["${PUMP_BONDING_CURVE_PROGRAM_ID}", "mint", "bonding", "trader"],
+  instructions: [{ programIdIndex: 0, accounts: [1, 1, 2, 1, 1, 1, 1, 3], dataBase64: discriminator.toString("base64") }]
+}));
+`,
+    "utf8"
+  );
+
+  const source = createShredstreamSource({
+    mode: "grpc",
+    grpcUrl: "127.0.0.1:9999",
+    decoderCommand: `node ${decoderPath}`
+  });
+  const stats = await runShredListener({ source, eventLogPath });
+  const lines = (await readFile(eventLogPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+
+  assert.deepEqual(stats, {
+    linesRead: 1,
+    recordsAccepted: 1,
+    eventsWritten: 1,
+    parseErrors: 0
+  });
+  assert.equal(lines[0].signature, "grpc-pump-sig");
+  assert.equal(lines[0].eventType, "create");
 });
 
 test("JSONL harness writes only decoded Pump and PumpSwap events", async (t) => {

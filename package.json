@@ -11,6 +11,8 @@
     "chat-id": "npm run build && node dist/get-chat-id.js",
     "past-migrations": "npm run build && node dist/past-migrations.js",
     "import-subscribers": "npm run build && node dist/import-subscribers.js",
+    "shredstream-decoder:check": "cargo check --manifest-path tools/shredstream-rs/Cargo.toml",
+    "shredstream-decoder:test": "cargo test --manifest-path tools/shredstream-rs/Cargo.toml",
     "check": "tsc --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
     "wallet-feed-report": "node scripts/wallet-feed-comparison-report.mjs",

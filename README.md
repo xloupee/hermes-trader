@@ -145,7 +145,32 @@ Safety defaults:
 - The listener only writes normalized events to `SHREDSTREAM_EVENT_LOG_PATH`; it does not send Telegram messages or submit trades.
 - The decoder only emits Pump/PumpSwap events for the allowlisted program IDs and preserves unknown Pump instructions for later analysis.
 
-The next step is to connect a real ShredStream gRPC source to this JSONL-normalized listener and run it side by side with PumpPortal for latency measurement.
+Run the prototype against a local Jito ShredStream proxy gRPC service:
+
+```bash
+SHREDSTREAM_DISCOVERY_ENABLED=true \
+SHREDSTREAM_SOURCE=grpc \
+SHREDSTREAM_GRPC_URL=127.0.0.1:9999 \
+SHREDSTREAM_EVENT_LOG_PATH=logs/shred-pump-events.jsonl \
+npm run shred-listener
+```
+
+The gRPC mode shells out to the Rust sidecar in `tools/shredstream-rs`. The sidecar subscribes to Jito `ShredstreamProxy.SubscribeEntries`, bincode-decodes `Vec<solana_entry::entry::Entry>` with Solana `2.2.1` types to match the current Jito proxy, and writes normalized transaction JSONL to stdout for the Node listener.
+
+Optional override:
+
+```bash
+SHREDSTREAM_DECODER_CMD="tools/shredstream-rs/target/release/shredstream-rs watch --grpc-url {grpcUrl}"
+```
+
+Validate the sidecar with:
+
+```bash
+npm run shredstream-decoder:check
+npm run shredstream-decoder:test
+```
+
+Address lookup table accounts are not hydrated in this first bridge; emitted account keys are the transaction's static keys. Pump/PumpSwap launch traffic should still be visible when the relevant program and instruction accounts are static, but the live side-by-side run must measure missed/unknown events before this becomes a trading signal.
 
 ## Direct trading SDK trust review
 

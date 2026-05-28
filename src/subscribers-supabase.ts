@@ -6,6 +6,7 @@ import {
   makeSubscriber,
   normalizeChatId,
   normalizeMode,
+  normalizeTradingWallet,
   normalizeTrailingSellConfig,
   seedSubscriberMap
 } from "./subscribers.js";
@@ -34,6 +35,7 @@ export interface SubscriberRow {
   copy_trade_sell_slippage_percent?: string | number | null;
   copy_trade_sell_priority_fee_sol?: string | number | null;
   copy_target_wallet_address: string | null;
+  active_trading_wallet_public_key?: string | null;
   verified_at: string;
   updated_at: string;
   telegram_watched_wallets?: WatchedWalletRow[] | null;
@@ -58,8 +60,13 @@ export interface WatchedWalletRow {
 export interface TradingWalletRow {
   chat_id?: string;
   public_key: string;
-  encrypted_api_key: string;
+  encrypted_api_key: string | null;
   api_key_last4: string;
+  provider?: string | null;
+  kind?: string | null;
+  encrypted_secret_key?: string | null;
+  secret_key_format?: string | null;
+  key_last4?: string | null;
   label?: string | null;
   created_at: string;
   updated_at: string;
@@ -106,6 +113,11 @@ function formatSupabaseError(error: SupabaseErrorLike | null): Error | null {
   return error ? new Error(error.message || "Supabase subscriber store request failed") : null;
 }
 
+function isMissingSupabaseColumn(error: SupabaseErrorLike | null): boolean {
+  const message = error?.message?.toLowerCase() || "";
+  return message.includes("column") && (message.includes("does not exist") || message.includes("schema cache"));
+}
+
 function numericValue(value: string | number | null): number | null {
   if (value === null) {
     return null;
@@ -126,7 +138,8 @@ function subscriberRow(record: SubscriberRecord): Omit<SubscriberRow, "telegram_
     copy_trade_buy_priority_fee_sol: record.copyTradeBuyPriorityFeeSol,
     copy_trade_sell_slippage_percent: record.copyTradeSellSlippagePercent,
     copy_trade_sell_priority_fee_sol: record.copyTradeSellPriorityFeeSol,
-    copy_target_wallet_address: encodeTradingWalletState(record) || record.copyTargetWalletAddress,
+    copy_target_wallet_address: record.copyTargetWalletAddress,
+    active_trading_wallet_public_key: record.tradingWallet?.publicKey || null,
     verified_at: record.verifiedAt,
     updated_at: record.updatedAt
   };
@@ -179,19 +192,7 @@ function decodeTradingWalletState(value: string | null): { activePublicKey: stri
     const wallets = Array.isArray(record.wallets)
       ? record.wallets.map((wallet) => {
           const walletRecord = typeof wallet === "object" && wallet !== null ? wallet as Record<string, unknown> : {};
-          const publicKey = typeof walletRecord.publicKey === "string" ? walletRecord.publicKey : "";
-          const encryptedApiKey = typeof walletRecord.encryptedApiKey === "string" ? walletRecord.encryptedApiKey : "";
-
-          return publicKey && encryptedApiKey
-            ? {
-                publicKey,
-                encryptedApiKey,
-                apiKeyLast4: typeof walletRecord.apiKeyLast4 === "string" ? walletRecord.apiKeyLast4 : "****",
-                label: typeof walletRecord.label === "string" ? walletRecord.label : null,
-                createdAt: typeof walletRecord.createdAt === "string" ? walletRecord.createdAt : new Date().toISOString(),
-                updatedAt: typeof walletRecord.updatedAt === "string" ? walletRecord.updatedAt : new Date().toISOString()
-              }
-            : null;
+          return normalizeTradingWallet(walletRecord);
         }).filter((wallet): wallet is TradingWallet => Boolean(wallet))
       : [];
 
@@ -226,10 +227,44 @@ function tradingWalletRow(chatId: string, wallet: TradingWallet): TradingWalletR
     public_key: wallet.publicKey,
     encrypted_api_key: wallet.encryptedApiKey,
     api_key_last4: wallet.apiKeyLast4,
+    provider: wallet.provider || "pumpportal-lightning",
+    kind: wallet.kind || wallet.provider || "pumpportal-lightning",
+    encrypted_secret_key: wallet.encryptedSecretKey || null,
+    secret_key_format: wallet.secretKeyFormat || null,
+    key_last4: wallet.keyLast4 || wallet.apiKeyLast4,
     label: wallet.label,
     created_at: wallet.createdAt,
     updated_at: wallet.updatedAt
   };
+}
+
+function redactSensitivePayload(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(redactSensitivePayload);
+  }
+
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const redacted: Record<string, unknown> = {};
+
+  for (const [key, entry] of Object.entries(value)) {
+    const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const sensitive =
+      normalizedKey.includes("apikey") ||
+      normalizedKey.includes("privatekey") ||
+      normalizedKey.includes("secretkey") ||
+      normalizedKey.includes("encryptedapikey") ||
+      normalizedKey.includes("encryptedsecretkey");
+    redacted[key] = sensitive ? "[redacted]" : redactSensitivePayload(entry);
+  }
+
+  return redacted;
 }
 
 function copyTradeExecutionRow(record: CopyTradeExecutionRecord): CopyTradeExecutionRow {
@@ -246,9 +281,9 @@ function copyTradeExecutionRow(record: CopyTradeExecutionRecord): CopyTradeExecu
     signature: record.signature,
     error_text: record.errorText,
     http_status: record.httpStatus,
-    observed_trade: record.observedTrade,
-    request: record.request,
-    response: record.response,
+    observed_trade: redactSensitivePayload(record.observedTrade),
+    request: redactSensitivePayload(record.request),
+    response: redactSensitivePayload(record.response),
     trailing_sell_step_index: record.trailingSellStepIndex ?? null,
     trailing_sell_total_steps: record.trailingSellTotalSteps ?? null
   };
@@ -281,20 +316,30 @@ export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
   const tradingWalletState = decodeTradingWalletState(row.copy_target_wallet_address);
   const tradingWalletRows = Array.isArray(row.telegram_trading_wallets) ? row.telegram_trading_wallets : [];
   const rowTradingWallets = dedupeTradingWallets(
-    tradingWalletRows.map((wallet) => ({
-      publicKey: wallet.public_key,
-      encryptedApiKey: wallet.encrypted_api_key,
-      apiKeyLast4: wallet.api_key_last4,
-      label: wallet.label ?? null,
-      createdAt: wallet.created_at,
-      updatedAt: wallet.updated_at
-    }))
+    tradingWalletRows
+      .map((wallet) =>
+        normalizeTradingWallet({
+          publicKey: wallet.public_key,
+          provider: wallet.provider,
+          kind: wallet.kind,
+          encryptedApiKey: wallet.encrypted_api_key,
+          apiKeyLast4: wallet.api_key_last4,
+          encryptedSecretKey: wallet.encrypted_secret_key,
+          secretKeyFormat: wallet.secret_key_format,
+          keyLast4: wallet.key_last4,
+          label: wallet.label ?? null,
+          createdAt: wallet.created_at,
+          updatedAt: wallet.updated_at
+        })
+      )
+      .filter((wallet): wallet is TradingWallet => Boolean(wallet))
   );
   const tradingWallets = tradingWalletState?.wallets.length
     ? dedupeTradingWallets([...tradingWalletState.wallets, ...rowTradingWallets])
     : rowTradingWallets;
-  const tradingWallet = tradingWalletState?.activePublicKey
-    ? tradingWallets.find((wallet) => wallet.publicKey === tradingWalletState.activePublicKey) || tradingWallets[0] || null
+  const activePublicKey = row.active_trading_wallet_public_key || tradingWalletState?.activePublicKey || null;
+  const tradingWallet = activePublicKey
+    ? tradingWallets.find((wallet) => wallet.publicKey === activePublicKey) || tradingWallets[0] || null
     : tradingWallets[0] || null;
   const legacyCopyTarget = row.copy_target_wallet_address?.startsWith(TRADING_WALLET_STATE_PREFIX) ? null : row.copy_target_wallet_address;
   const legacyCopyTargetWallet = legacyCopyTarget && copyTradeWallets.length === 0
@@ -372,11 +417,27 @@ export function createSupabaseSubscriberRepository({
 
   return {
     async listSubscribers() {
-      const { data: subscriberRows, error } = await client
+      const subscriberSelect =
+        "chat_id,mode,copy_wallet_address,copy_wallet_addresses,copy_amount_sol,copy_trade_buy_slippage_percent,copy_trade_buy_priority_fee_sol,copy_trade_sell_slippage_percent,copy_trade_sell_priority_fee_sol,copy_target_wallet_address,active_trading_wallet_public_key,verified_at,updated_at";
+      const legacySubscriberSelect =
+        "chat_id,mode,copy_wallet_address,copy_wallet_addresses,copy_amount_sol,copy_trade_buy_slippage_percent,copy_trade_buy_priority_fee_sol,copy_trade_sell_slippage_percent,copy_trade_sell_priority_fee_sol,copy_target_wallet_address,verified_at,updated_at";
+      const subscriberResult = await client
         .from("telegram_subscribers")
-        .select("chat_id,mode,copy_wallet_address,copy_wallet_addresses,copy_amount_sol,copy_trade_buy_slippage_percent,copy_trade_buy_priority_fee_sol,copy_trade_sell_slippage_percent,copy_trade_sell_priority_fee_sol,copy_target_wallet_address,verified_at,updated_at")
+        .select(subscriberSelect)
         .order("chat_id", { ascending: true });
-      const formattedError = formatSupabaseError(error);
+      let subscriberRows = subscriberResult.data as unknown;
+      let subscriberError = subscriberResult.error;
+
+      if (isMissingSupabaseColumn(subscriberError)) {
+        const legacySubscriberResult = await client
+          .from("telegram_subscribers")
+          .select(legacySubscriberSelect)
+          .order("chat_id", { ascending: true });
+        subscriberRows = legacySubscriberResult.data as unknown;
+        subscriberError = legacySubscriberResult.error;
+      }
+
+      const formattedError = formatSupabaseError(subscriberError);
 
       if (formattedError) {
         throw formattedError;
@@ -385,12 +446,23 @@ export function createSupabaseSubscriberRepository({
       const [
         { data: watchedRows, error: watchedError },
         { data: copyTradeRows, error: copyTradeError },
-        { data: tradingWalletRows, error: tradingWalletError }
+        tradingWalletResult
       ] = await Promise.all([
         client.from("telegram_watched_wallets").select("chat_id,address,label,added_at,updated_at"),
         client.from("telegram_copytrade_wallets").select("chat_id,address,label,added_at,updated_at,trailing_sell_config"),
-        client.from("telegram_trading_wallets").select("chat_id,public_key,encrypted_api_key,api_key_last4,label,created_at,updated_at")
+        client.from("telegram_trading_wallets").select("chat_id,public_key,encrypted_api_key,api_key_last4,provider,kind,encrypted_secret_key,secret_key_format,key_last4,label,created_at,updated_at")
       ]);
+      let tradingWalletRows = tradingWalletResult.data as unknown;
+      let tradingWalletError = tradingWalletResult.error;
+
+      if (isMissingSupabaseColumn(tradingWalletError)) {
+        const legacyTradingWalletResult = await client
+          .from("telegram_trading_wallets")
+          .select("chat_id,public_key,encrypted_api_key,api_key_last4,label,created_at,updated_at");
+        tradingWalletRows = legacyTradingWalletResult.data as unknown;
+        tradingWalletError = legacyTradingWalletResult.error;
+      }
+
       const childError =
         formatSupabaseError(watchedError) ||
         formatSupabaseError(copyTradeError) ||
@@ -477,7 +549,7 @@ export function createSupabaseSubscriberRepository({
     async upsertTradingWallet(chatId, wallet) {
       const { error } = await client
         .from("telegram_trading_wallets")
-        .upsert(tradingWalletRow(chatId, wallet), { onConflict: "chat_id" });
+        .upsert(tradingWalletRow(chatId, wallet), { onConflict: "chat_id,public_key" });
       const formattedError = formatSupabaseError(error);
 
       if (formattedError) {

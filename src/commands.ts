@@ -7,7 +7,7 @@ import {
   setTelegramCommands
 } from "./telegram.js";
 import { createPumpPortalLightningWallet } from "./pumpportal.js";
-import { encryptSecret, encryptionSecretReady } from "./secrets.js";
+import { encryptSecret, encryptionSecretReady, generateLocalSolanaHotWallet } from "./secrets.js";
 import { errorMessage } from "./types.js";
 import { isValidSolanaAddress } from "./wallet-monitor.js";
 import type {
@@ -231,7 +231,7 @@ export function formatCopyTradeEmergencyStopConfirmText(): string {
   return [
     "<b>🚨 Emergency Stop Live Copy Trading?</b>",
     "",
-    "This disables live PumpPortal copy submissions in this running bot process.",
+    "This disables live copy-trade submissions in this running bot process.",
     "",
     "It will not remove Copytrade Wallets, trading wallet config, saved settings, or token alerts.",
     "Tap Confirm Emergency Stop to disable live execution now."
@@ -251,7 +251,7 @@ export function formatCopyTradeEmergencyStopActivatedText(statusText?: string | 
   return [
     "<b>🚨 Emergency stop active</b>",
     "",
-    "Live PumpPortal copy submissions are disabled in this running bot process.",
+    "Live copy-trade submissions are disabled in this running bot process.",
     "Copytrade Wallets, trading wallet config, saved settings, and token alerts were left unchanged.",
     ...(statusText ? ["", statusText] : [])
   ].join("\n");
@@ -270,7 +270,7 @@ export function formatCopyTradeEmergencyResumeConfirmText(): string {
   return [
     "<b>🟢 Clear Emergency Stop?</b>",
     "",
-    "This clears the runtime emergency stop for live PumpPortal copy submissions.",
+    "This clears the runtime emergency stop for live copy-trade submissions.",
     "",
     "It does not change COPY_TRADE_ENABLED, COPY_TRADE_DRY_RUN, wallet balances, caps, slippage, or saved copytrade settings.",
     "Tap Confirm Clear to allow the bot to use its current execution settings again."
@@ -290,7 +290,7 @@ export function formatCopyTradeEmergencyResumeActivatedText(statusText?: string 
   return [
     "<b>🟢 Emergency stop cleared</b>",
     "",
-    "The runtime emergency stop is no longer blocking PumpPortal copy submissions.",
+    "The runtime emergency stop is no longer blocking live copy-trade submissions.",
     "Live trading still depends on COPY_TRADE_ENABLED, COPY_TRADE_DRY_RUN, funded wallets, caps, and risk settings.",
     ...(statusText ? ["", statusText] : [])
   ].join("\n");
@@ -328,22 +328,26 @@ export function tradingWalletCreationBlockedText(chatType?: string | null): stri
 export function tradingWalletBackupWarningText(): string {
   return [
     "<b>Hot-wallet/private-key warning</b>",
-    "This creates a PumpPortal hot wallet for copy buys.",
-    "The private key is shown once. Back it up somewhere private before depositing SOL.",
-    "Anyone who sees that key can spend the wallet, and the bot cannot recover it later."
+    "This creates a hot wallet for copy buys.",
+    "The private key or secret key is shown once. Back it up somewhere private before depositing SOL.",
+    "Anyone who sees it can spend the wallet, and the bot cannot recover it later."
   ].join("\n");
 }
 
 export function formatTradingWalletCreateConfirmText({
-  existingPublicKey = null
+  existingPublicKey = null,
+  provider = "pumpportal-lightning"
 }: {
   existingPublicKey?: string | null;
+  provider?: "pumpportal-lightning" | "local-solana";
 } = {}): string {
+  const walletType = provider === "local-solana" ? "local Solana signing wallet" : "PumpPortal trading wallet";
+
   if (!existingPublicKey) {
     return [
       "<b>Create Trading Wallet?</b>",
       "",
-      "This creates a PumpPortal trading wallet and makes it your active copytrade wallet.",
+      `This creates a ${walletType} and makes it your active copytrade wallet.`,
       "",
       tradingWalletBackupWarningText()
     ].join("\n");
@@ -352,7 +356,7 @@ export function formatTradingWalletCreateConfirmText({
   return [
     "<b>Create New Trading Wallet?</b>",
     "",
-    "This creates a fresh PumpPortal trading wallet and makes it your active copytrade wallet.",
+    `This creates a fresh ${walletType} and makes it your active copytrade wallet.`,
     "",
     "<b>Current wallet</b>",
     `<code>${escapeHtml(existingPublicKey)}</code>`,
@@ -1010,8 +1014,19 @@ export function createTelegramCommandPoller({
       return;
     }
 
+    if (data === "mywallets:create_local") {
+      const dashboard = myWalletCreateConfirm(chatId, { chatType, provider: "local-solana" });
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
     if (data === "mywallets:create_confirm") {
       await createTradingWallet(chatId, { chatType });
+      return;
+    }
+
+    if (data === "mywallets:create_local_confirm") {
+      await createLocalTradingWallet(chatId, { chatType });
       return;
     }
 
@@ -1021,8 +1036,19 @@ export function createTelegramCommandPoller({
       return;
     }
 
+    if (data === "mywallets:new_local") {
+      const dashboard = myWalletCreateConfirm(chatId, { replaceExisting: true, chatType, provider: "local-solana" });
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
     if (data === "mywallets:new_confirm") {
       await createTradingWallet(chatId, { replaceExisting: true, chatType });
+      return;
+    }
+
+    if (data === "mywallets:new_local_confirm") {
+      await createLocalTradingWallet(chatId, { replaceExisting: true, chatType });
       return;
     }
 
@@ -1819,12 +1845,15 @@ export function createTelegramCommandPoller({
           `<b>📚 Saved Wallets:</b> ${tradingWallets.length}`,
           "",
           `<b>🏷️ Name:</b> ${tradingWallet.label ? escapeWalletLabel(tradingWallet.label) : "Not set"}`,
+          `<b>🧭 Type:</b> ${tradingWalletTypeLabel(tradingWallet)}`,
           "",
           "<b>📥 Deposit Address</b>",
           `<code>${tradingWallet.publicKey}</code>`,
           "",
-          `<b>🔑 API key:</b> Saved ending in <code>${tradingWallet.apiKeyLast4}</code>`,
-          "<b>🔐 Private key:</b> Shown once when created. The bot cannot recover it.",
+          tradingWallet.provider === "local-solana"
+            ? `<b>🔑 Secret key:</b> Encrypted, ending in <code>${tradingWallet.keyLast4 || tradingWallet.apiKeyLast4}</code>`
+            : `<b>🔑 API key:</b> Saved ending in <code>${tradingWallet.apiKeyLast4}</code>`,
+          "<b>🔐 Backup:</b> Shown once when created. The bot cannot recover it.",
           "",
           "🟢 Wallet is ready once it has SOL.",
           otherWalletCount > 0 ? `🔁 ${otherWalletCount} other wallet${otherWalletCount === 1 ? "" : "s"} saved. Use Switch Wallet to change active wallets.` : null,
@@ -1836,7 +1865,7 @@ export function createTelegramCommandPoller({
           "",
           "No trading wallet yet.",
           "",
-          "Create a PumpPortal trading wallet to enable Bloom-style copy buys.",
+          "Create a PumpPortal Lightning or local signing wallet to enable copy buys.",
           "",
           "🔴 Setup is <b>inactive</b>",
           "",
@@ -1852,7 +1881,10 @@ export function createTelegramCommandPoller({
   function myWalletDashboardReplyMarkup(publicKey: string | null): TelegramReplyMarkup {
     if (!publicKey) {
       return {
-        inline_keyboard: [[{ text: "🚀 Create Wallet", callback_data: "mywallets:create" }]]
+        inline_keyboard: [
+          [{ text: "🚀 Create PumpPortal", callback_data: "mywallets:create" }],
+          [{ text: "🧭 Create Local", callback_data: "mywallets:create_local" }]
+        ]
       };
     }
 
@@ -1868,7 +1900,8 @@ export function createTelegramCommandPoller({
           { text: "✏️ Rename", callback_data: "mywallets:rename" }
         ],
         [
-          { text: "➕ New Wallet", callback_data: "mywallets:new" },
+          { text: "➕ New PumpPortal", callback_data: "mywallets:new" },
+          { text: "🧭 New Local", callback_data: "mywallets:new_local" },
           { text: "🔁 Switch Wallet", callback_data: "mywallets:switch" }
         ],
         [{ text: "📊 Status", callback_data: "mywallets:dashboard" }]
@@ -1885,7 +1918,8 @@ export function createTelegramCommandPoller({
         text: "No trading wallets yet.",
         replyMarkup: {
           inline_keyboard: [
-            [{ text: "🚀 Create Wallet", callback_data: "mywallets:create" }],
+            [{ text: "🚀 Create PumpPortal", callback_data: "mywallets:create" }],
+            [{ text: "🧭 Create Local", callback_data: "mywallets:create_local" }],
             [{ text: "↩️ Back", callback_data: "mywallets:dashboard" }]
           ]
         }
@@ -1934,17 +1968,24 @@ export function createTelegramCommandPoller({
   }
 
   function formatTradingWalletButtonLabel(wallet: TradingWallet): string {
-    return wallet.label ? escapeWalletLabel(wallet.label) : shortWallet(wallet.publicKey);
+    const name = wallet.label ? escapeWalletLabel(wallet.label) : shortWallet(wallet.publicKey);
+    return `${name} (${wallet.provider === "local-solana" ? "Local" : "PumpPortal"})`;
+  }
+
+  function tradingWalletTypeLabel(wallet: TradingWallet): string {
+    return wallet.provider === "local-solana" ? "Local signing" : "PumpPortal Lightning";
   }
 
   function myWalletCreateConfirm(
     chatId: TelegramChatId,
     {
       replaceExisting = false,
-      chatType
+      chatType,
+      provider = "pumpportal-lightning"
     }: {
       replaceExisting?: boolean;
       chatType?: string | null;
+      provider?: "pumpportal-lightning" | "local-solana";
     } = {}
   ): { text: string; replyMarkup: TelegramReplyMarkup } {
     const blockedText = tradingWalletCreationBlockedText(chatType);
@@ -1968,14 +2009,21 @@ export function createTelegramCommandPoller({
 
     return {
       text: formatTradingWalletCreateConfirmText({
-        existingPublicKey: replaceExisting ? existing?.publicKey || null : null
+        existingPublicKey: replaceExisting ? existing?.publicKey || null : null,
+        provider
       }),
       replyMarkup: {
         inline_keyboard: [
           [
             {
               text: replaceExisting && existing ? "✅ Create New Wallet" : "✅ Create Wallet",
-              callback_data: replaceExisting && existing ? "mywallets:new_confirm" : "mywallets:create_confirm"
+              callback_data: provider === "local-solana"
+                ? replaceExisting && existing
+                  ? "mywallets:new_local_confirm"
+                  : "mywallets:create_local_confirm"
+                : replaceExisting && existing
+                  ? "mywallets:new_confirm"
+                  : "mywallets:create_confirm"
             }
           ],
           [{ text: "↩️ Back", callback_data: "mywallets:dashboard" }]
@@ -2032,8 +2080,11 @@ export function createTelegramCommandPoller({
     const now = new Date().toISOString();
     const saved = await subscribers?.setTradingWallet(chatId, {
       publicKey: result.wallet.publicKey,
+      provider: "pumpportal-lightning",
+      kind: "pumpportal-lightning",
       encryptedApiKey: encryptSecret(result.wallet.apiKey, config.pumpPortalWalletKeyEncryptionSecret || ""),
       apiKeyLast4: last4(result.wallet.apiKey),
+      keyLast4: last4(result.wallet.apiKey),
       label: null,
       createdAt: now,
       updatedAt: now
@@ -2068,6 +2119,85 @@ export function createTelegramCommandPoller({
         "Auto copy buys can use this wallet after you deposit SOL and set /copytrade."
       ].join("\n"),
       myWalletDashboardReplyMarkup(result.wallet.publicKey)
+    );
+  }
+
+  async function createLocalTradingWallet(
+    chatId: TelegramChatId,
+    {
+      replaceExisting = false,
+      chatType
+    }: {
+      replaceExisting?: boolean;
+      chatType?: string | null;
+    } = {}
+  ): Promise<void> {
+    const blockedText = tradingWalletCreationBlockedText(chatType);
+
+    if (blockedText) {
+      await reply(chatId, blockedText, myWalletBackReplyMarkup());
+      return;
+    }
+
+    const existing = subscribers?.getTradingWallet(chatId);
+
+    if (existing && !replaceExisting) {
+      const dashboard = myWalletDashboard(chatId);
+      await reply(chatId, `<b>Trading wallet already exists.</b>\n\n${dashboard.text}`, dashboard.replyMarkup);
+      return;
+    }
+
+    if (!encryptionSecretReady(config.pumpPortalWalletKeyEncryptionSecret)) {
+      await reply(chatId, "Trading wallet creation is not configured yet. Missing <code>PUMPPORTAL_WALLET_KEY_ENCRYPTION_SECRET</code>.");
+      return;
+    }
+
+    const wallet = generateLocalSolanaHotWallet();
+    const now = new Date().toISOString();
+    const secretLast4 = last4(wallet.secretKey);
+    const saved = await subscribers?.setTradingWallet(chatId, {
+      publicKey: wallet.publicKey,
+      provider: "local-solana",
+      kind: "local-solana",
+      encryptedApiKey: "",
+      apiKeyLast4: secretLast4,
+      encryptedSecretKey: encryptSecret(wallet.secretKey, config.pumpPortalWalletKeyEncryptionSecret || ""),
+      secretKeyFormat: wallet.secretKeyFormat,
+      keyLast4: secretLast4,
+      label: null,
+      createdAt: now,
+      updatedAt: now
+    });
+
+    if (!saved) {
+      await reply(chatId, verificationPrompt());
+      return;
+    }
+
+    await reply(
+      chatId,
+      [
+        replaceExisting ? "<b>New local signing wallet created.</b>" : "<b>Local signing wallet created.</b>",
+        "",
+        "<b>Deposit SOL here:</b>",
+        `<code>${wallet.publicKey}</code>`,
+        "",
+        "<b>Save this secret key now.</b>",
+        "The bot stores only an encrypted copy and cannot show it again.",
+        "",
+        `<b>Secret key (${wallet.secretKeyFormat})</b>`,
+        `<code>${escapeWalletLabel(wallet.secretKey)}</code>`,
+        "",
+        ...(replaceExisting && existing
+          ? [
+              "<b>Previous active wallet</b>",
+              `<code>${existing.publicKey}</code>`,
+              ""
+            ]
+          : []),
+        "Direct execution can use this wallet after it has SOL and local signing is enabled."
+      ].join("\n"),
+      myWalletDashboardReplyMarkup(wallet.publicKey)
     );
   }
 

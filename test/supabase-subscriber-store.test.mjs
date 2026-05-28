@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createSupabaseSubscriberStore, importSubscribersToSupabase } from "../dist/subscribers-supabase.js";
+import { createSupabaseSubscriberStore, importSubscribersToSupabase, subscriberFromRow } from "../dist/subscribers-supabase.js";
 
 const wallet = "Wallet111111111111111111111111111111111111111";
 const otherWallet = "Other111111111111111111111111111111111111111";
@@ -17,7 +17,8 @@ class MemorySubscriberRepository {
         ...record,
         watchedWallets: [],
         copyTradeWallets: [],
-        tradingWallet: null
+        tradingWallet: record.tradingWallet || null,
+        tradingWallets: []
       });
 
       for (const walletRecord of record.watchedWallets || []) {
@@ -34,10 +35,16 @@ class MemorySubscriberRepository {
         });
       }
 
-      if (record.tradingWallet) {
-        this.tradingWallets.set(record.chatId, {
+      const tradingWallets = record.tradingWallets?.length
+        ? record.tradingWallets
+        : record.tradingWallet
+          ? [record.tradingWallet]
+          : [];
+
+      for (const tradingWallet of tradingWallets) {
+        this.tradingWallets.set(`${record.chatId}:${tradingWallet.publicKey}`, {
           chatId: record.chatId,
-          ...record.tradingWallet
+          ...tradingWallet
         });
       }
     }
@@ -45,18 +52,27 @@ class MemorySubscriberRepository {
 
   async listSubscribers() {
     return [...this.subscribers.values()]
-      .map((subscriber) => ({
-        ...subscriber,
-        watchedWallets: [...this.wallets.values()]
+      .map((subscriber) => {
+        const tradingWallets = [...this.tradingWallets.values()]
+          .filter((walletRecord) => walletRecord.chatId === subscriber.chatId)
+          .map(({ chatId: _chatId, ...walletRecord }) => ({ ...walletRecord }));
+        const activePublicKey = subscriber.tradingWallet?.publicKey || null;
+        const tradingWallet = activePublicKey
+          ? tradingWallets.find((walletRecord) => walletRecord.publicKey === activePublicKey) || tradingWallets[0] || null
+          : tradingWallets[0] || null;
+
+        return {
+          ...subscriber,
+          watchedWallets: [...this.wallets.values()]
           .filter((walletRecord) => walletRecord.chatId === subscriber.chatId)
           .map(({ chatId: _chatId, ...walletRecord }) => ({ ...walletRecord })),
-        copyTradeWallets: [...this.copyTradeWallets.values()]
+          copyTradeWallets: [...this.copyTradeWallets.values()]
           .filter((walletRecord) => walletRecord.chatId === subscriber.chatId)
           .map(({ chatId: _chatId, ...walletRecord }) => ({ ...walletRecord })),
-        tradingWallet: this.tradingWallets.has(subscriber.chatId)
-          ? (({ chatId: _chatId, ...walletRecord }) => ({ ...walletRecord }))(this.tradingWallets.get(subscriber.chatId))
-          : null
-      }))
+          tradingWallet,
+          tradingWallets
+        };
+      })
       .sort((left, right) => left.chatId.localeCompare(right.chatId));
   }
 
@@ -66,7 +82,8 @@ class MemorySubscriberRepository {
       ...subscriber,
       watchedWallets: existing?.watchedWallets || [],
       copyTradeWallets: existing?.copyTradeWallets || [],
-      tradingWallet: existing?.tradingWallet || null,
+      tradingWallet: subscriber.tradingWallet || existing?.tradingWallet || null,
+      tradingWallets: [],
       copyWalletAddress: null,
       copyWalletAddresses: []
     });
@@ -87,7 +104,11 @@ class MemorySubscriberRepository {
       }
     }
 
-    this.tradingWallets.delete(chatId);
+    for (const key of this.tradingWallets.keys()) {
+      if (key.startsWith(`${chatId}:`)) {
+        this.tradingWallets.delete(key);
+      }
+    }
   }
 
   async upsertWatchedWallet(chatId, walletRecord) {
@@ -121,7 +142,7 @@ class MemorySubscriberRepository {
   }
 
   async upsertTradingWallet(chatId, walletRecord) {
-    this.tradingWallets.set(chatId, {
+    this.tradingWallets.set(`${chatId}:${walletRecord.publicKey}`, {
       chatId,
       ...walletRecord
     });
@@ -332,6 +353,149 @@ test("importSubscribersToSupabase upserts subscribers and watched wallets", asyn
     imported[0].watchedWallets.map((entry) => [entry.address, entry.label]),
     [[wallet, "Alpha"]]
   );
+});
+
+test("Supabase subscriber store persists local Solana custody metadata", async () => {
+  const repository = new MemorySubscriberRepository();
+  const store = createSupabaseSubscriberStore({ repository });
+
+  await store.init();
+  await store.add("chat-1");
+
+  assert.equal(
+    await store.setTradingWallet("chat-1", {
+      publicKey: otherWallet,
+      provider: "local-solana",
+      kind: "local-solana",
+      encryptedApiKey: "",
+      apiKeyLast4: "3cr3",
+      encryptedSecretKey: "encrypted-secret-key",
+      secretKeyFormat: "base64",
+      keyLast4: "3cr3",
+      label: "Local One",
+      createdAt: "2026-05-28T00:00:00.000Z",
+      updatedAt: "2026-05-28T00:00:00.000Z"
+    }),
+    true
+  );
+
+  const reloaded = createSupabaseSubscriberStore({ repository });
+  await reloaded.init();
+  const walletRecord = reloaded.getTradingWallet("chat-1");
+
+  assert.equal(walletRecord?.provider, "local-solana");
+  assert.equal(walletRecord?.kind, "local-solana");
+  assert.equal(walletRecord?.encryptedSecretKey, "encrypted-secret-key");
+  assert.equal(walletRecord?.secretKeyFormat, "base64");
+  assert.equal(walletRecord?.keyLast4, "3cr3");
+  assert.equal(walletRecord?.label, "Local One");
+});
+
+test("Supabase subscriber store persists multiple trading wallets and active selection", async () => {
+  const repository = new MemorySubscriberRepository();
+  const store = createSupabaseSubscriberStore({ repository });
+
+  await store.init();
+  await store.add("chat-1");
+
+  const firstWallet = {
+    publicKey: wallet,
+    provider: "local-solana",
+    kind: "local-solana",
+    encryptedApiKey: "",
+    apiKeyLast4: "1111",
+    encryptedSecretKey: "encrypted-secret-key-1",
+    secretKeyFormat: "base64",
+    keyLast4: "1111",
+    label: "Local One",
+    createdAt: "2026-05-28T00:00:00.000Z",
+    updatedAt: "2026-05-28T00:00:00.000Z"
+  };
+  const secondWallet = {
+    publicKey: otherWallet,
+    provider: "local-solana",
+    kind: "local-solana",
+    encryptedApiKey: "",
+    apiKeyLast4: "2222",
+    encryptedSecretKey: "encrypted-secret-key-2",
+    secretKeyFormat: "base64",
+    keyLast4: "2222",
+    label: "Local Two",
+    createdAt: "2026-05-28T00:01:00.000Z",
+    updatedAt: "2026-05-28T00:01:00.000Z"
+  };
+
+  assert.equal(await store.setTradingWallet("chat-1", firstWallet), true);
+  assert.equal(await store.setTradingWallet("chat-1", secondWallet), true);
+  assert.equal(store.getTradingWallet("chat-1")?.publicKey, otherWallet);
+  assert.deepEqual(store.listTradingWallets("chat-1").map((entry) => entry.publicKey), [wallet, otherWallet]);
+  assert.equal(await store.setActiveTradingWallet("chat-1", wallet), true);
+  assert.equal(store.getTradingWallet("chat-1")?.publicKey, wallet);
+
+  const reloaded = createSupabaseSubscriberStore({ repository });
+  await reloaded.init();
+
+  assert.deepEqual(reloaded.listTradingWallets("chat-1").map((entry) => entry.publicKey), [wallet, otherWallet]);
+  assert.equal(reloaded.getTradingWallet("chat-1")?.publicKey, wallet);
+
+  const stored = await repository.listSubscribers();
+  assert.equal(stored[0].copyTargetWalletAddress, null);
+});
+
+test("subscriberFromRow maps legacy PumpPortal and local Solana trading wallet rows", () => {
+  const legacy = subscriberFromRow({
+    chat_id: "chat-1",
+    mode: "both",
+    copy_wallet_address: null,
+    copy_wallet_addresses: [],
+    copy_amount_sol: null,
+    copy_target_wallet_address: null,
+    verified_at: "2026-05-28T00:00:00.000Z",
+    updated_at: "2026-05-28T00:00:00.000Z",
+    telegram_watched_wallets: [],
+    telegram_copytrade_wallets: [],
+    telegram_trading_wallets: [
+      {
+        public_key: wallet,
+        encrypted_api_key: "encrypted-api-key",
+        api_key_last4: "ikey",
+        created_at: "2026-05-28T00:00:00.000Z",
+        updated_at: "2026-05-28T00:00:00.000Z"
+      }
+    ]
+  });
+  const local = subscriberFromRow({
+    chat_id: "chat-2",
+    mode: "both",
+    copy_wallet_address: null,
+    copy_wallet_addresses: [],
+    copy_amount_sol: null,
+    copy_target_wallet_address: null,
+    verified_at: "2026-05-28T00:00:00.000Z",
+    updated_at: "2026-05-28T00:00:00.000Z",
+    telegram_watched_wallets: [],
+    telegram_copytrade_wallets: [],
+    telegram_trading_wallets: [
+      {
+        public_key: otherWallet,
+        encrypted_api_key: "",
+        api_key_last4: "3cr3",
+        provider: "local-solana",
+        kind: "local-solana",
+        encrypted_secret_key: "encrypted-secret-key",
+        secret_key_format: "base64",
+        key_last4: "3cr3",
+        created_at: "2026-05-28T00:00:00.000Z",
+        updated_at: "2026-05-28T00:00:00.000Z"
+      }
+    ]
+  });
+
+  assert.equal(legacy.tradingWallet?.provider, "pumpportal-lightning");
+  assert.equal(legacy.tradingWallet?.encryptedApiKey, "encrypted-api-key");
+  assert.equal(local.tradingWallet?.provider, "local-solana");
+  assert.equal(local.tradingWallet?.encryptedSecretKey, "encrypted-secret-key");
+  assert.equal(local.tradingWallet?.secretKeyFormat, "base64");
 });
 
 test("Supabase subscriber store migrates legacy copy target out of watched wallets", async () => {

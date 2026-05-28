@@ -2,6 +2,11 @@ export interface CopyTradeExecutionModeConfig {
   copyTradeEnabled: boolean;
   copyTradeDryRun: boolean;
   copyTradeEmergencyStopped?: boolean;
+  copyTradeExecutionProvider?: "pumpportal-lightning" | "direct-pump" | "direct-pumpswap" | "direct-auto";
+  directExecutionEnabled?: boolean;
+  directExecutionLiveEnabled?: boolean;
+  directExecutionBuildOnly?: boolean;
+  directExecutionSimulateOnly?: boolean;
 }
 
 export function copyTradeLiveExecutionEnabled(config: CopyTradeExecutionModeConfig): boolean {
@@ -41,11 +46,18 @@ export function copyTradeExecutionStateLabel(config: CopyTradeExecutionModeConfi
 }
 
 export function formatCopyTradeExecutionStateLog(config: CopyTradeExecutionModeConfig): string {
+  const provider = config.copyTradeExecutionProvider || "pumpportal-lightning";
+  const directProvider = provider === "direct-pump" || provider === "direct-pumpswap" || provider === "direct-auto";
+
   return [
     `Copy trade execution state: ${copyTradeExecutionStateLabel(config)}`,
+    `executionProvider=${provider}`,
     `COPY_TRADE_ENABLED=${config.copyTradeEnabled ? "true" : "false"}`,
     `COPY_TRADE_DRY_RUN=${config.copyTradeDryRun ? "true" : "false"}`,
     `emergencyStop=${config.copyTradeEmergencyStopped ? "active" : "inactive"}`,
-    `livePumpPortalSubmissions=${copyTradeLiveExecutionEnabled(config) ? "allowed" : "blocked"}`
+    `livePumpPortalSubmissions=${!directProvider && copyTradeLiveExecutionEnabled(config) ? "allowed" : "blocked"}`,
+    `directExecution=${config.directExecutionEnabled ? "enabled" : "disabled"}`,
+    `directLive=${config.directExecutionLiveEnabled ? "enabled" : "disabled"}`,
+    `directMode=${config.directExecutionBuildOnly ? "build-only" : config.directExecutionSimulateOnly ? "simulate-only" : "send"}`
   ].join(" | ");
 }

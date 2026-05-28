@@ -39,8 +39,14 @@ test("trading wallet creation confirmation includes hot-wallet backup warning", 
 
   const firstWalletConfirm = formatTradingWalletCreateConfirmText();
   assert.match(firstWalletConfirm, /Create Trading Wallet\?/);
-  assert.match(firstWalletConfirm, /PumpPortal hot wallet/);
-  assert.match(firstWalletConfirm, /private key is shown once/i);
+  assert.match(firstWalletConfirm, /PumpPortal trading wallet/);
+  assert.match(firstWalletConfirm, /private key or secret key is shown once/i);
+
+  const localWalletConfirm = formatTradingWalletCreateConfirmText({
+    provider: "local-solana"
+  });
+  assert.match(localWalletConfirm, /local Solana signing wallet/);
+  assert.match(localWalletConfirm, /private key or secret key is shown once/i);
 
   const replacementConfirm = formatTradingWalletCreateConfirmText({
     existingPublicKey: "wallet<key>"
@@ -69,7 +75,7 @@ test("copy trade risk setting confirmation warns before saving live-affecting va
 test("copy trade emergency stop confirmation is explicit and preserves setup", () => {
   const text = formatCopyTradeEmergencyStopConfirmText();
   assert.match(text, /Emergency Stop Live Copy Trading/);
-  assert.match(text, /disables live PumpPortal copy submissions/);
+  assert.match(text, /disables live copy-trade submissions/);
   assert.match(text, /will not remove Copytrade Wallets/);
   assert.match(text, /trading wallet config/);
   assert.match(text, /token alerts/);
@@ -85,7 +91,7 @@ test("copy trade emergency stop confirmation is explicit and preserves setup", (
 test("copy trade emergency stop state text reports disabled live submissions", () => {
   const active = formatCopyTradeEmergencyStopActivatedText("Execution state: EMERGENCY_STOPPED");
   assert.match(active, /Emergency stop active/);
-  assert.match(active, /Live PumpPortal copy submissions are disabled/);
+  assert.match(active, /Live copy-trade submissions are disabled/);
   assert.match(active, /were left unchanged/);
   assert.match(active, /Execution state: EMERGENCY_STOPPED/);
 
@@ -113,7 +119,7 @@ test("copy trade emergency resume confirmation is explicit about env gates", () 
 test("copy trade emergency resume state text reports live gates still apply", () => {
   const active = formatCopyTradeEmergencyResumeActivatedText("Execution state: LIVE_ENABLED");
   assert.match(active, /Emergency stop cleared/);
-  assert.match(active, /no longer blocking PumpPortal copy submissions/);
+  assert.match(active, /no longer blocking live copy-trade submissions/);
   assert.match(active, /Live trading still depends on COPY_TRADE_ENABLED/);
   assert.match(active, /Execution state: LIVE_ENABLED/);
 

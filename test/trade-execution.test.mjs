@@ -1,0 +1,120 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  buildDirectRouteMetadata,
+  directExecutionLiveBlockedReason,
+  directExecutionLiveEnabled,
+  formatTradeExecutionResultLog,
+  isDirectTradeExecutionProvider,
+  parseTradeExecutionProvider,
+  tradeExecutionProviderConfigError,
+  tradeExecutionSkippedResult
+} from "../dist/trade-execution.js";
+
+test("trade execution provider parsing defaults safely to PumpPortal Lightning", () => {
+  assert.equal(parseTradeExecutionProvider(null), "pumpportal-lightning");
+  assert.equal(parseTradeExecutionProvider(" DIRECT-PUMP "), "direct-pump");
+  assert.equal(parseTradeExecutionProvider("nope"), "pumpportal-lightning");
+  assert.equal(tradeExecutionProviderConfigError("nope")?.includes("unsupported trade execution provider"), true);
+  assert.equal(tradeExecutionProviderConfigError("direct-pumpswap"), null);
+});
+
+test("trade execution helpers identify only direct providers as direct", () => {
+  assert.equal(isDirectTradeExecutionProvider("pumpportal-lightning"), false);
+  assert.equal(isDirectTradeExecutionProvider("direct-pump"), true);
+  assert.equal(isDirectTradeExecutionProvider("direct-pumpswap"), true);
+  assert.equal(isDirectTradeExecutionProvider("direct-auto"), true);
+});
+
+test("direct execution live gate fails closed until every direct/live gate is explicit", () => {
+  const base = {
+    provider: "direct-pump",
+    copyTradeEnabled: true,
+    copyTradeDryRun: false,
+    directExecutionEnabled: true,
+    directExecutionLiveEnabled: true
+  };
+
+  assert.equal(directExecutionLiveEnabled(base), true);
+  assert.equal(directExecutionLiveBlockedReason(base), null);
+
+  assert.match(
+    directExecutionLiveBlockedReason({ ...base, provider: "pumpportal-lightning" }),
+    /not a direct provider/
+  );
+  assert.equal(
+    directExecutionLiveBlockedReason({ ...base, copyTradeEnabled: false }),
+    "COPY_TRADE_ENABLED is not true"
+  );
+  assert.equal(
+    directExecutionLiveBlockedReason({ ...base, copyTradeDryRun: true }),
+    "COPY_TRADE_DRY_RUN is enabled"
+  );
+  assert.equal(
+    directExecutionLiveBlockedReason({ ...base, directExecutionEnabled: false }),
+    "DIRECT_EXECUTION_ENABLED is not true"
+  );
+  assert.equal(
+    directExecutionLiveBlockedReason({ ...base, directExecutionLiveEnabled: false }),
+    "DIRECT_EXECUTION_LIVE_ENABLED is not true"
+  );
+  assert.equal(
+    directExecutionLiveBlockedReason({ ...base, directExecutionBuildOnly: true }),
+    "direct execution build-only mode is enabled"
+  );
+  assert.equal(
+    directExecutionLiveBlockedReason({ ...base, directExecutionSimulateOnly: true }),
+    "direct execution simulate-only mode is enabled"
+  );
+  assert.equal(
+    directExecutionLiveBlockedReason({ ...base, emergencyStopped: true }),
+    "copy trade emergency stop is active"
+  );
+});
+
+test("direct route metadata records route-specific execution context", () => {
+  assert.deepEqual(
+    buildDirectRouteMetadata({
+      provider: "direct-pumpswap",
+      mint: "Mint111111111111111111111111111111111111111",
+      walletPublicKey: "Wallet111111111111111111111111111111111111",
+      poolAddress: "Pool1111111111111111111111111111111111111",
+      priorityFeeSol: 0.00005,
+      slippagePercent: 10,
+      amount: 1000000,
+      amountBasis: "sol"
+    }),
+    {
+      provider: "direct-pumpswap",
+      route: "pumpswap-amm",
+      mint: "Mint111111111111111111111111111111111111111",
+      walletPublicKey: "Wallet111111111111111111111111111111111111",
+      poolAddress: "Pool1111111111111111111111111111111111111",
+      priorityFeeSol: 0.00005,
+      slippagePercent: 10,
+      amount: 1000000,
+      amountBasis: "sol"
+    }
+  );
+});
+
+test("provider-neutral result log includes platform fee accounting", () => {
+  const result = tradeExecutionSkippedResult({
+    provider: "direct-pump",
+    route: "pump-bonding-curve",
+    reason: "build-only",
+    platformFee: {
+      enabled: true,
+      bps: 100,
+      treasury: "Treasury111111111111111111111111111111111",
+      budgetLamports: 1000n,
+      feeLamports: 10n,
+      tradeLamports: 990n
+    }
+  });
+
+  assert.match(formatTradeExecutionResultLog(result), /provider=direct-pump/);
+  assert.match(formatTradeExecutionResultLog(result), /platformFeeBps=100/);
+  assert.match(formatTradeExecutionResultLog(result), /tradeLamports=990/);
+  assert.match(formatTradeExecutionResultLog(result), /budgetLamports=1000/);
+});

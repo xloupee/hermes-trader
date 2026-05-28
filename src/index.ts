@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { Connection, PublicKey } from "@solana/web3.js";
 import { buildMigrationReplyMarkup, extractMigrationData, formatMigrationMessage, getEventId } from "./format.js";
 import { createTelegramCommandPoller } from "./commands.js";
 import {
@@ -25,6 +26,8 @@ import {
   safelyFailCopyTradeBuyIdempotency
 } from "./copytrade-idempotency.js";
 import { createCopyTradeLatencyClock, createCopyTradeLatencyTracker } from "./copytrade-latency.js";
+import { buildDirectSolanaPayload, sendSolanaDirectTransaction, simulateSolanaDirectTransaction } from "./direct-solana.js";
+import type { DirectTransactionPayload } from "./direct-pump.js";
 import { createHeliusWebhookServer, missingHeliusConfigWarning, syncHeliusWebhook } from "./helius.js";
 import { heliusEventMentionsWatchedWallet, isHeliusSwapEvent, normalizeHeliusSwapData } from "./helius-swaps.js";
 import {
@@ -37,7 +40,21 @@ import {
   PUMPPORTAL_TRADE_LOCAL_URL
 } from "./pumpportal.js";
 import type { PumpPortalSubscription } from "./pumpportal.js";
-import { decryptSecret, encryptionSecretReady } from "./secrets.js";
+import { decryptLocalSolanaKeypair, decryptSecret, encryptionSecretReady } from "./secrets.js";
+import { calculatePlatformFeeSplit, platformFeeConfigBlockedReason } from "./platform-fee.js";
+import {
+  formatTradeExecutionResultLog,
+  isDirectTradeExecutionProvider,
+  parseTradeExecutionProvider,
+  tradeExecutionProviderConfigError,
+  tradeExecutionSkippedResult
+} from "./trade-execution.js";
+import type {
+  DirectTradeExecutionProvider,
+  TradeExecutionPlatformFee,
+  TradeExecutionProvider,
+  TradeExecutionResult
+} from "./trade-execution.js";
 import { analyzeSolanaTransaction, getSolanaBalanceSol } from "./solana.js";
 import { createSubscriberStore } from "./subscribers.js";
 import { createSupabaseCopyTradeRecorderFromEnv, createSupabaseSubscriberStoreFromEnv } from "./subscribers-supabase.js";
@@ -102,6 +119,12 @@ function listFromEnv(value: string | undefined): string[] {
     : [];
 }
 
+function rawListFromEnv(value: string | undefined): string[] {
+  return value
+    ? [...new Set(value.split(",").map((entry) => entry.trim()).filter(Boolean))]
+    : [];
+}
+
 function finiteNumberValue(value: unknown): number | null {
   if (value === null || value === undefined || value === "") {
     return null;
@@ -121,6 +144,9 @@ function pumpPortalPoolFromEnv(value: string | undefined): PumpPortalTradePool {
     ? value
     : "auto";
 }
+
+const rawCopyTradeExecutionProvider = process.env.COPY_TRADE_EXECUTION_PROVIDER || process.env.TRADE_EXECUTION_PROVIDER;
+const copyTradeExecutionProviderError = tradeExecutionProviderConfigError(rawCopyTradeExecutionProvider);
 
 const config: BotConfig = {
   telegramToken: process.env.TELEGRAM_BOT_TOKEN,
@@ -156,6 +182,7 @@ const config: BotConfig = {
   shutdownReason: process.env.BOT_SHUTDOWN_REASON,
   copyTradeEnabled: process.env.COPY_TRADE_ENABLED === "true",
   copyTradeDryRun: process.env.COPY_TRADE_DRY_RUN !== "false",
+  copyTradeExecutionProvider: parseTradeExecutionProvider(rawCopyTradeExecutionProvider),
   copyTradeSlippage: numberFromEnv(process.env.COPY_TRADE_SLIPPAGE, 10),
   copyTradePriorityFee: numberFromEnv(process.env.COPY_TRADE_PRIORITY_FEE, 0.00005),
   copyTradePool: pumpPortalPoolFromEnv(process.env.COPY_TRADE_POOL),
@@ -172,7 +199,18 @@ const config: BotConfig = {
   copyTradeTrailingSellFirstPercent: percentFromEnv(process.env.COPY_TRADE_TRAILING_SELL_FIRST_PERCENT, 20),
   copyTradeTrailingSellTrailPercent: percentFromEnv(process.env.COPY_TRADE_TRAILING_SELL_TRAIL_PERCENT, 20),
   copyTradeTrailingSellIntervalMs: positiveIntegerFromEnv(process.env.COPY_TRADE_TRAILING_SELL_INTERVAL_MS, 2000),
-  copyTradeTrailingSellMaxBuilds: positiveIntegerFromEnv(process.env.COPY_TRADE_TRAILING_SELL_MAX_BUILDS, 5)
+  copyTradeTrailingSellMaxBuilds: positiveIntegerFromEnv(process.env.COPY_TRADE_TRAILING_SELL_MAX_BUILDS, 5),
+  directExecutionEnabled: process.env.DIRECT_EXECUTION_ENABLED === "true",
+  directExecutionLiveEnabled: process.env.DIRECT_EXECUTION_LIVE_ENABLED === "true",
+  directExecutionBuildOnly: process.env.DIRECT_EXECUTION_BUILD_ONLY === "true",
+  directExecutionSimulateOnly: process.env.DIRECT_EXECUTION_SIMULATE_ONLY === "true",
+  directExecutionSkipPreflight: process.env.DIRECT_EXECUTION_SKIP_PREFLIGHT === "true",
+  directExecutionMaxRetries: Math.floor(nonNegativeNumberFromEnv(process.env.DIRECT_EXECUTION_MAX_RETRIES, 3)),
+  directExecutionCanaryChatIds: rawListFromEnv(process.env.DIRECT_EXECUTION_CANARY_CHAT_IDS),
+  directExecutionCanaryWallets: rawListFromEnv(process.env.DIRECT_EXECUTION_CANARY_WALLETS),
+  platformFeeEnabled: process.env.PLATFORM_FEE_ENABLED === "true",
+  platformFeeBps: Math.floor(nonNegativeNumberFromEnv(process.env.PLATFORM_FEE_BPS, 100)),
+  platformFeeTreasury: process.env.PLATFORM_FEE_TREASURY
 };
 
 const seenEvents = new Set<string>();
@@ -247,6 +285,200 @@ function copyTradeLatencyMode(): "dry" | "live" {
   return copyTradeLiveExecutionEnabled(copyTradeExecutionModeConfig()) ? "live" : "dry";
 }
 
+type CopyTradeExecutionResult = PumpPortalLightningTradeResult | TradeExecutionResult;
+
+function isProviderNeutralResult(result: CopyTradeExecutionResult): result is TradeExecutionResult {
+  return typeof result.status === "string";
+}
+
+function resultSignature(result: CopyTradeExecutionResult): string | null {
+  return result.signature;
+}
+
+function resultOk(result: CopyTradeExecutionResult): boolean {
+  return result.ok;
+}
+
+function legacyResultFromExecution(result: CopyTradeExecutionResult): PumpPortalLightningTradeResult {
+  if (!isProviderNeutralResult(result)) {
+    return result;
+  }
+
+  return {
+    ok: result.ok,
+    status: null,
+    signature: result.signature,
+    errorText: result.errorText,
+    raw: {
+      status: result.status,
+      provider: result.provider,
+      route: result.route,
+      metadata: result.metadata,
+      raw: result.raw
+    }
+  };
+}
+
+function resolveExecutionProviderForTrade(trade: WalletTradeData): TradeExecutionProvider {
+  void trade;
+  return config.copyTradeExecutionProvider;
+}
+
+function directExecutionGate(provider: TradeExecutionProvider) {
+  return {
+    provider,
+    copyTradeEnabled: config.copyTradeEnabled,
+    copyTradeDryRun: config.copyTradeDryRun,
+    copyTradeEmergencyStopped,
+    emergencyStopped: copyTradeEmergencyStopped,
+    directExecutionEnabled: config.directExecutionEnabled,
+    directExecutionLiveEnabled: config.directExecutionLiveEnabled,
+    directExecutionBuildOnly: config.directExecutionBuildOnly,
+    directExecutionSimulateOnly: config.directExecutionSimulateOnly
+  };
+}
+
+function directBuildOrSimulateMode(provider: TradeExecutionProvider): boolean {
+  return isDirectTradeExecutionProvider(provider) && config.directExecutionEnabled && (config.directExecutionBuildOnly || config.directExecutionSimulateOnly);
+}
+
+function copyTradeSubmissionBlockedReason(provider: TradeExecutionProvider): string | null {
+  if (copyTradeExecutionProviderError) {
+    return copyTradeExecutionProviderError;
+  }
+
+  if (directBuildOrSimulateMode(provider)) {
+    if (copyTradeEmergencyStopped) {
+      return "copy trade emergency stop is active";
+    }
+
+    if (!config.copyTradeEnabled) {
+      return "COPY_TRADE_ENABLED is not true";
+    }
+
+    return null;
+  }
+
+  if (isDirectTradeExecutionProvider(provider)) {
+    if (copyTradeEmergencyStopped) {
+      return "copy trade emergency stop is active";
+    }
+
+    if (!config.copyTradeEnabled) {
+      return "COPY_TRADE_ENABLED is not true";
+    }
+
+    if (config.copyTradeDryRun) {
+      return "COPY_TRADE_DRY_RUN is enabled";
+    }
+
+    if (!config.directExecutionEnabled) {
+      return "DIRECT_EXECUTION_ENABLED is not true";
+    }
+
+    if (!config.directExecutionLiveEnabled) {
+      return "DIRECT_EXECUTION_LIVE_ENABLED is not true";
+    }
+
+    return null;
+  }
+
+  return copyTradeLiveExecutionBlockedReason(copyTradeExecutionModeConfig());
+}
+
+function shouldReserveDailyBudget(provider: TradeExecutionProvider): boolean {
+  return !directBuildOrSimulateMode(provider);
+}
+
+function directCanaryBlockedReason({
+  provider,
+  chatId,
+  tradingWalletPublicKey
+}: {
+  provider: TradeExecutionProvider;
+  chatId: string;
+  tradingWalletPublicKey: string;
+}): string | null {
+  if (!isDirectTradeExecutionProvider(provider)) {
+    return null;
+  }
+
+  const directExecutionModeEnabled =
+    config.directExecutionEnabled &&
+    (config.directExecutionLiveEnabled || config.directExecutionBuildOnly || config.directExecutionSimulateOnly);
+
+  if (!directExecutionModeEnabled) {
+    return null;
+  }
+
+  if (config.directExecutionCanaryChatIds.length === 0 && config.directExecutionCanaryWallets.length === 0) {
+    return "direct execution requires DIRECT_EXECUTION_CANARY_CHAT_IDS or DIRECT_EXECUTION_CANARY_WALLETS";
+  }
+
+  if (config.directExecutionCanaryChatIds.length > 0 && !config.directExecutionCanaryChatIds.includes(chatId)) {
+    return `chat ${chatId} is not in DIRECT_EXECUTION_CANARY_CHAT_IDS`;
+  }
+
+  if (
+    config.directExecutionCanaryWallets.length > 0 &&
+    !config.directExecutionCanaryWallets.includes(tradingWalletPublicKey)
+  ) {
+    return `trading wallet ${tradingWalletPublicKey} is not in DIRECT_EXECUTION_CANARY_WALLETS`;
+  }
+
+  return null;
+}
+
+function validateSolanaPublicKey(value: string): string | null {
+  try {
+    new PublicKey(value);
+    return null;
+  } catch {
+    return `invalid Solana public key: ${value}`;
+  }
+}
+
+function solToLamports(amountSol: number): bigint {
+  return BigInt(Math.max(0, Math.round(amountSol * 1_000_000_000)));
+}
+
+function lamportsToSol(lamports: bigint): number {
+  return Number(lamports) / 1_000_000_000;
+}
+
+function platformFeeResultFields(split: ReturnType<typeof calculatePlatformFeeSplit>): TradeExecutionPlatformFee | null {
+  return split.enabled
+    ? {
+        enabled: split.enabled,
+        bps: split.bps,
+        treasury: split.treasury,
+        budgetLamports: split.budgetLamports,
+        feeLamports: split.feeLamports,
+        tradeLamports: split.tradeLamports
+      }
+    : null;
+}
+
+function withPlatformFeeResult(
+  result: TradeExecutionResult,
+  split: ReturnType<typeof calculatePlatformFeeSplit> | null
+): TradeExecutionResult {
+  return split?.enabled ? { ...result, platformFee: platformFeeResultFields(split) } : result;
+}
+
+function percentAmountToBasisPoints(amount: number | string): bigint | null {
+  if (typeof amount === "number") {
+    return null;
+  }
+
+  const percent = Number(amount.replace("%", ""));
+  if (!Number.isFinite(percent) || percent <= 0) {
+    return null;
+  }
+
+  return BigInt(Math.floor(percent * 100));
+}
+
 function logCopyTradeExecutionState(): void {
   const modeConfig = copyTradeExecutionModeConfig();
   const message = formatCopyTradeExecutionStateLog(modeConfig);
@@ -258,6 +490,33 @@ function logCopyTradeExecutionState(): void {
   }
 
   console.log(formatCopyTradeRiskControlLog(config));
+  console.log(
+    [
+      "Direct execution controls",
+      `provider=${config.copyTradeExecutionProvider}`,
+      `enabled=${config.directExecutionEnabled ? "true" : "false"}`,
+      `live=${config.directExecutionLiveEnabled ? "true" : "false"}`,
+      `buildOnly=${config.directExecutionBuildOnly ? "true" : "false"}`,
+      `simulateOnly=${config.directExecutionSimulateOnly ? "true" : "false"}`,
+      `canaryChats=${config.directExecutionCanaryChatIds.length || "none"}`,
+      `canaryWallets=${config.directExecutionCanaryWallets.length || "none"}`,
+      `platformFee=${config.platformFeeEnabled ? `${config.platformFeeBps}bps` : "disabled"}`
+    ].join(" | ")
+  );
+
+  const platformFeeBlockedReason = platformFeeConfigBlockedReason({
+    enabled: config.platformFeeEnabled,
+    bps: config.platformFeeBps,
+    treasury: config.platformFeeTreasury,
+    validateTreasury: validateSolanaPublicKey
+  });
+  if (platformFeeBlockedReason) {
+    console.warn(`Platform fee config blocks fee-enabled direct execution: ${platformFeeBlockedReason}`);
+  }
+
+  if (copyTradeExecutionProviderError) {
+    console.warn(`Copy trade execution provider config blocks live submissions: ${copyTradeExecutionProviderError}`);
+  }
 }
 
 async function loadCopyTradeEmergencyStop(): Promise<void> {
@@ -714,6 +973,256 @@ async function sendWalletTradeAlert(subscriber: SubscriberRecord, trade: WalletT
   }
 }
 
+function isDirectPayload(value: TradeExecutionResult | DirectTransactionPayload): value is DirectTransactionPayload {
+  return Array.isArray((value as DirectTransactionPayload).instructions);
+}
+
+async function executeDirectCopyTrade({
+  subscriber,
+  provider,
+  request,
+  amountLamports,
+  amountBasis,
+  platformFee = null,
+  metadata = {}
+}: {
+  subscriber: SubscriberRecord;
+  provider: DirectTradeExecutionProvider;
+  request: PumpPortalLightningTradeRequest;
+  amountLamports: bigint;
+  amountBasis: "sol" | "percent" | "token";
+  platformFee?: ReturnType<typeof calculatePlatformFeeSplit> | null;
+  metadata?: Record<string, unknown>;
+}): Promise<TradeExecutionResult> {
+  const tradingWallet = subscriber.tradingWallet;
+
+  if (!tradingWallet || tradingWallet.provider !== "local-solana" || !tradingWallet.encryptedSecretKey) {
+    return tradeExecutionSkippedResult({
+      provider,
+      route: provider === "direct-pumpswap" ? "pumpswap-amm" : provider === "direct-pump" ? "pump-bonding-curve" : "auto",
+      reason: "direct execution requires an active local-signing trading wallet",
+      metadata,
+      platformFee: platformFee ? platformFeeResultFields(platformFee) : null
+    });
+  }
+
+  const canaryBlockedReason = directCanaryBlockedReason({
+    provider,
+    chatId: subscriber.chatId,
+    tradingWalletPublicKey: tradingWallet.publicKey
+  });
+  if (canaryBlockedReason) {
+    return tradeExecutionSkippedResult({
+      provider,
+      route: provider === "direct-pumpswap" ? "pumpswap-amm" : provider === "direct-pump" ? "pump-bonding-curve" : "auto",
+      reason: canaryBlockedReason,
+      metadata,
+      platformFee: platformFee ? platformFeeResultFields(platformFee) : null
+    });
+  }
+
+  if (!encryptionSecretReady(config.pumpPortalWalletKeyEncryptionSecret)) {
+    return tradeExecutionSkippedResult({
+      provider,
+      route: provider === "direct-pumpswap" ? "pumpswap-amm" : provider === "direct-pump" ? "pump-bonding-curve" : "auto",
+      reason: "missing PUMPPORTAL_WALLET_KEY_ENCRYPTION_SECRET",
+      metadata,
+      platformFee: platformFee ? platformFeeResultFields(platformFee) : null
+    });
+  }
+
+  let signer: ReturnType<typeof decryptLocalSolanaKeypair>;
+  try {
+    signer = decryptLocalSolanaKeypair({
+      encryptedSecretKey: tradingWallet.encryptedSecretKey,
+      encryptionSecret: config.pumpPortalWalletKeyEncryptionSecret || "",
+      secretKeyFormat: tradingWallet.secretKeyFormat
+    });
+  } catch (error) {
+    return tradeExecutionSkippedResult({
+      provider,
+      route: provider === "direct-pumpswap" ? "pumpswap-amm" : provider === "direct-pump" ? "pump-bonding-curve" : "auto",
+      reason: `could not decrypt local-signing trading wallet: ${errorMessage(error)}`,
+      metadata,
+      platformFee: platformFee ? platformFeeResultFields(platformFee) : null
+    });
+  }
+  const connection = new Connection(config.solanaRpcUrl, "confirmed");
+  const built = await buildDirectSolanaPayload({
+    connection,
+    request: {
+      provider,
+      action: request.action,
+      mint: request.mint,
+      amountLamports,
+      amountBasis,
+      slippagePercent: request.slippage,
+      priorityFeeSol: request.priorityFee,
+      walletPublicKey: tradingWallet.publicKey,
+      platformFee,
+      metadata
+    }
+  });
+
+  if (!isDirectPayload(built)) {
+    return withPlatformFeeResult(built, platformFee);
+  }
+
+  if (config.directExecutionBuildOnly) {
+    return withPlatformFeeResult({
+      ok: false,
+      status: "skipped",
+      provider: built.provider,
+      route: built.route.route,
+      signature: null,
+      errorText: "direct execution build-only mode is enabled; transaction was built but not submitted",
+      raw: null,
+      submittedAtMs: null,
+      confirmedAtMs: null,
+      slot: null,
+      metadata: {
+        ...built.metadata,
+        instructionCount: built.instructions.length
+      }
+    }, platformFee);
+  }
+
+  if (config.directExecutionSimulateOnly) {
+    return withPlatformFeeResult(await simulateSolanaDirectTransaction({
+      connection,
+      signer,
+      payload: built
+    }), platformFee);
+  }
+
+  return withPlatformFeeResult(await sendSolanaDirectTransaction({
+    connection,
+    signer,
+    payload: built,
+    config: {
+      gate: directExecutionGate(provider),
+      skipPreflight: config.directExecutionSkipPreflight,
+      maxRetries: config.directExecutionMaxRetries
+    }
+  }), platformFee);
+}
+
+async function executeCopyTradeBuy({
+  subscriber,
+  trade,
+  request,
+  provider,
+  platformFee
+}: {
+  subscriber: SubscriberRecord;
+  trade: WalletTradeData;
+  request: PumpPortalLightningTradeRequest;
+  provider: TradeExecutionProvider;
+  platformFee: ReturnType<typeof calculatePlatformFeeSplit>;
+}): Promise<CopyTradeExecutionResult> {
+  if (!isDirectTradeExecutionProvider(provider)) {
+    if (platformFee.enabled) {
+      return tradeExecutionSkippedResult({
+        provider: "pumpportal-lightning",
+        route: "pumpportal-lightning",
+        reason: "PLATFORM_FEE_ENABLED requires a direct execution provider",
+        platformFee: platformFeeResultFields(platformFee),
+        metadata: { observedSignature: trade.signature }
+      });
+    }
+
+    if (subscriber.tradingWallet?.provider === "local-solana") {
+      return tradeExecutionSkippedResult({
+        provider: "pumpportal-lightning",
+        route: "pumpportal-lightning",
+        reason: "PumpPortal Lightning execution requires a PumpPortal-backed trading wallet",
+        metadata: { observedSignature: trade.signature }
+      });
+    }
+
+    const apiKey = decryptSecret(subscriber.tradingWallet?.encryptedApiKey || "", config.pumpPortalWalletKeyEncryptionSecret || "");
+    return executePumpPortalLightningTrade({
+      url: config.pumpPortalLightningTradeUrl,
+      apiKey,
+      request
+    });
+  }
+
+  return executeDirectCopyTrade({
+    subscriber,
+    provider,
+    request,
+    amountLamports: platformFee.tradeLamports,
+    amountBasis: "sol",
+    platformFee,
+    metadata: {
+      observedSignature: trade.signature,
+      sourceWallet: trade.targetWallet,
+      budgetLamports: platformFee.budgetLamports.toString()
+    }
+  });
+}
+
+async function executeCopyTradeSell({
+  subscriber,
+  trade,
+  request,
+  provider,
+  seenSellSignatures
+}: {
+  subscriber: SubscriberRecord;
+  trade: WalletTradeData;
+  request: PumpPortalLightningTradeRequest;
+  provider: TradeExecutionProvider;
+  seenSellSignatures: Set<string>;
+}): Promise<{ result: CopyTradeExecutionResult; duplicateSignature: boolean }> {
+  if (!isDirectTradeExecutionProvider(provider)) {
+    if (subscriber.tradingWallet?.provider === "local-solana") {
+      return {
+        result: tradeExecutionSkippedResult({
+          provider: "pumpportal-lightning",
+          route: "pumpportal-lightning",
+          reason: "PumpPortal Lightning execution requires a PumpPortal-backed trading wallet",
+          metadata: { observedSignature: trade.signature }
+        }),
+        duplicateSignature: false
+      };
+    }
+
+    const apiKey = decryptSecret(subscriber.tradingWallet?.encryptedApiKey || "", config.pumpPortalWalletKeyEncryptionSecret || "");
+    return executeTrailingSellWithDuplicateRetry({
+      apiKey,
+      request,
+      seenSellSignatures
+    });
+  }
+
+  const percentBasisPoints = percentAmountToBasisPoints(request.amount);
+  const result = percentBasisPoints === null
+    ? tradeExecutionSkippedResult({
+        provider,
+        route: provider === "direct-pumpswap" ? "pumpswap-amm" : provider === "direct-pump" ? "pump-bonding-curve" : "auto",
+        reason: "direct trailing sell requires a percent amount",
+        metadata: { observedSignature: trade.signature }
+      })
+    : await executeDirectCopyTrade({
+        subscriber,
+        provider,
+        request,
+        amountLamports: percentBasisPoints,
+        amountBasis: "percent",
+        metadata: {
+          observedSignature: trade.signature,
+          sourceWallet: trade.targetWallet
+        }
+      });
+
+  return {
+    result,
+    duplicateSignature: Boolean(result.ok && result.signature && seenSellSignatures.has(result.signature))
+  };
+}
+
 async function sendCopyTradeSimulationAlert(
   subscriber: SubscriberRecord,
   trade: WalletTradeData,
@@ -769,9 +1278,10 @@ async function sendCopyTradeSimulationAlert(
   });
   let copyBuyReserved = false;
   let durableCopyBuyClaimKey: string | null = null;
-  let result: PumpPortalLightningTradeResult | null = null;
+  let result: CopyTradeExecutionResult | null = null;
 
   try {
+    const executionProvider = resolveExecutionProviderForTrade(trade);
     const executionSettings = copyTradeBuyExecutionSettings(subscriber);
     const request = buildPumpPortalLightningBuyRequest({
       trade,
@@ -782,7 +1292,7 @@ async function sendCopyTradeSimulationAlert(
     });
 
     if (!request) {
-      skipWithLatencyLog("could not build PumpPortal buy request");
+      skipWithLatencyLog("could not build copy buy request");
       return;
     }
     latencyTracker.mark("request_built");
@@ -800,63 +1310,110 @@ async function sendCopyTradeSimulationAlert(
       return;
     }
 
-    const durableCopyBuyKey = copyTradeBuyIdempotencyKey({
-      chatId: subscriber.chatId,
-      mint: trade.mint,
-      action: "buy"
+    const platformFee = calculatePlatformFeeSplit({
+      action: "buy",
+      budgetLamports: solToLamports(amountSol),
+      config: {
+        enabled: config.platformFeeEnabled,
+        bps: config.platformFeeBps,
+        treasury: config.platformFeeTreasury,
+        validateTreasury: validateSolanaPublicKey
+      }
     });
+    const platformFeeBlockedReason = platformFee.blockedReason ||
+      (platformFee.enabled && platformFee.tradeLamports <= 0n ? "copy buy amount is too small after platform fee" : null) ||
+      (platformFee.enabled && !isDirectTradeExecutionProvider(executionProvider)
+        ? "PLATFORM_FEE_ENABLED requires a direct execution provider"
+        : null);
 
-    if (!durableCopyBuyKey || !trade.signature || !trade.mint) {
-      const reason = "copy buy idempotency key is unavailable";
-      skipWithLatencyLog(reason);
+    if (platformFeeBlockedReason) {
+      skipWithLatencyLog(platformFeeBlockedReason);
       await notifySkippedAutoCopyBuy({
         subscriber,
         trade,
         copyTradeWallet,
         request,
-        reason
+        reason: platformFeeBlockedReason
       });
       return;
     }
 
-    let idempotencyClaim;
-    try {
-      idempotencyClaim = await copyTradeBuyIdempotency.claimBuy({
-        key: durableCopyBuyKey,
+    const canaryBlockedReason = directCanaryBlockedReason({
+      provider: executionProvider,
+      chatId: subscriber.chatId,
+      tradingWalletPublicKey: subscriber.tradingWallet.publicKey
+    });
+    if (canaryBlockedReason) {
+      skipWithLatencyLog(canaryBlockedReason);
+      await notifySkippedAutoCopyBuy({
+        subscriber,
+        trade,
+        copyTradeWallet,
+        request,
+        reason: canaryBlockedReason
+      });
+      return;
+    }
+
+    if (shouldReserveDailyBudget(executionProvider)) {
+      const durableCopyBuyKey = copyTradeBuyIdempotencyKey({
         chatId: subscriber.chatId,
-        sourceWalletAddress: copyTradeWallet.address,
-        tradingWalletPublicKey: subscriber.tradingWallet.publicKey,
-        observedSignature: trade.signature,
         mint: trade.mint,
-        amountSol,
-        provider: trade.provider,
-        request
+        action: "buy"
       });
-    } catch (error) {
-      const reason = `copy buy idempotency claim failed: ${errorMessage(error)}`;
-      skipWithLatencyLog(reason);
-      await notifySkippedAutoCopyBuy({
-        subscriber,
-        trade,
-        copyTradeWallet,
-        request,
-        reason
-      });
-      return;
-    }
 
-    if (!idempotencyClaim.claimed) {
-      const existing = idempotencyClaim.existing;
-      const reason = existing
-        ? `copy buy coin was already handled (${existing.status})`
-        : "copy buy coin was already handled";
-      skipWithLatencyLog(reason);
-      console.warn(
-        `Skipping duplicate auto copy buy for ${subscriber.chatId}:${trade.mint}: coin already handled`
-      );
-      return;
+      if (!durableCopyBuyKey || !trade.signature || !trade.mint) {
+        const reason = "copy buy idempotency key is unavailable";
+        skipWithLatencyLog(reason);
+        await notifySkippedAutoCopyBuy({
+          subscriber,
+          trade,
+          copyTradeWallet,
+          request,
+          reason
+        });
+        return;
+      }
+
+      let idempotencyClaim;
+      try {
+        idempotencyClaim = await copyTradeBuyIdempotency.claimBuy({
+          key: durableCopyBuyKey,
+          chatId: subscriber.chatId,
+          sourceWalletAddress: copyTradeWallet.address,
+          tradingWalletPublicKey: subscriber.tradingWallet.publicKey,
+          observedSignature: trade.signature,
+          mint: trade.mint,
+          amountSol,
+          provider: trade.provider,
+          request
+        });
+      } catch (error) {
+        const reason = `copy buy idempotency claim failed: ${errorMessage(error)}`;
+        skipWithLatencyLog(reason);
+        await notifySkippedAutoCopyBuy({
+          subscriber,
+          trade,
+          copyTradeWallet,
+          request,
+          reason
+        });
+        return;
+      }
+
+      if (!idempotencyClaim.claimed) {
+        const existing = idempotencyClaim.existing;
+        const reason = existing
+          ? `copy buy coin was already handled (${existing.status})`
+          : "copy buy coin was already handled";
+        skipWithLatencyLog(reason);
+        console.warn(
+          `Skipping duplicate auto copy buy for ${subscriber.chatId}:${trade.mint}: coin already handled`
+        );
+        return;
+      }
+      durableCopyBuyClaimKey = durableCopyBuyKey;
     }
-    durableCopyBuyClaimKey = durableCopyBuyKey;
 
     const dailyBudgetKey = copyTradeDailyBudgetKey({
       chatId: subscriber.chatId,
@@ -876,7 +1433,9 @@ async function sendCopyTradeSimulationAlert(
       reason: riskBlockedReason
     });
     if (riskBlockedReason) {
-      await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, riskBlockedReason);
+      if (durableCopyBuyClaimKey) {
+        await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, riskBlockedReason);
+      }
       skipWithLatencyLog(riskBlockedReason);
       await notifySkippedAutoCopyBuy({
         subscriber,
@@ -888,13 +1447,15 @@ async function sendCopyTradeSimulationAlert(
       return;
     }
 
-    const blockedReason = copyTradeLiveExecutionBlockedReason(copyTradeExecutionModeConfig());
+    const blockedReason = copyTradeSubmissionBlockedReason(executionProvider);
     latencyTracker.mark("live_gate_checked", {
       status: blockedReason ? "blocked" : "ok",
       reason: blockedReason
     });
     if (blockedReason) {
-      await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, blockedReason);
+      if (durableCopyBuyClaimKey) {
+        await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, blockedReason);
+      }
       skipWithLatencyLog(blockedReason);
       await notifySkippedAutoCopyBuy({
         subscriber,
@@ -929,7 +1490,9 @@ async function sendCopyTradeSimulationAlert(
       });
 
       if (reserveBlockedReason) {
-        await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, reserveBlockedReason);
+        if (durableCopyBuyClaimKey) {
+          await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, reserveBlockedReason);
+        }
         skipWithLatencyLog(reserveBlockedReason);
         await notifySkippedAutoCopyBuy({
           subscriber,
@@ -944,7 +1507,9 @@ async function sendCopyTradeSimulationAlert(
 
     if (!encryptionSecretReady(config.pumpPortalWalletKeyEncryptionSecret)) {
       const reason = "missing PUMPPORTAL_WALLET_KEY_ENCRYPTION_SECRET";
-      await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, reason);
+      if (durableCopyBuyClaimKey) {
+        await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, reason);
+      }
       skipWithLatencyLog(reason);
       console.warn(`Skipping auto copy buy for ${subscriber.chatId}: ${reason}`);
       return;
@@ -952,7 +1517,9 @@ async function sendCopyTradeSimulationAlert(
 
     if (!copyBuySubmissionGuard.reserve(copyBuyKey)) {
       const reason = "copy buy is already in flight";
-      await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, reason);
+      if (durableCopyBuyClaimKey) {
+        await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, reason);
+      }
       skipWithLatencyLog(reason);
       console.warn(
         `Skipping duplicate auto copy buy for ${subscriber.chatId}:${copyTradeWallet.address}:${trade.signature}: already in flight`
@@ -961,9 +1528,11 @@ async function sendCopyTradeSimulationAlert(
     }
     copyBuyReserved = true;
 
-    const finalBlockedReason = copyTradeLiveExecutionBlockedReason(copyTradeExecutionModeConfig());
+    const finalBlockedReason = copyTradeSubmissionBlockedReason(executionProvider);
     if (finalBlockedReason) {
-      await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, finalBlockedReason);
+      if (durableCopyBuyClaimKey) {
+        await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, finalBlockedReason);
+      }
       skipWithLatencyLog(finalBlockedReason);
       await notifySkippedAutoCopyBuy({
         subscriber,
@@ -975,48 +1544,56 @@ async function sendCopyTradeSimulationAlert(
       return;
     }
 
-    const budgetReservation = copyTradeDailySolBudget.reserve({
-      key: dailyBudgetKey,
-      amountSol,
-      capSol: config.copyTradeDailySolCap,
-      nowMs: Date.now()
-    });
-    if (!budgetReservation.ok) {
-      const reason = budgetReservation.reason || "daily copy buy budget exceeded";
-      await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, reason);
-      skipWithLatencyLog(reason);
-      await notifySkippedAutoCopyBuy({
-        subscriber,
-        trade,
-        copyTradeWallet,
-        request,
-        reason
+    if (shouldReserveDailyBudget(executionProvider)) {
+      const budgetReservation = copyTradeDailySolBudget.reserve({
+        key: dailyBudgetKey,
+        amountSol,
+        capSol: config.copyTradeDailySolCap,
+        nowMs: Date.now()
       });
-      return;
+      if (!budgetReservation.ok) {
+        const reason = budgetReservation.reason || "daily copy buy budget exceeded";
+        if (durableCopyBuyClaimKey) {
+          await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, reason);
+        }
+        skipWithLatencyLog(reason);
+        await notifySkippedAutoCopyBuy({
+          subscriber,
+          trade,
+          copyTradeWallet,
+          request,
+          reason
+        });
+        return;
+      }
     }
 
-    const apiKey = decryptSecret(subscriber.tradingWallet.encryptedApiKey, config.pumpPortalWalletKeyEncryptionSecret || "");
     latencyTracker.mark("submit_started");
-    result = await executePumpPortalLightningTrade({
-      url: config.pumpPortalLightningTradeUrl,
-      apiKey,
-      request
+    result = await executeCopyTradeBuy({
+      subscriber,
+      trade,
+      request,
+      provider: executionProvider,
+      platformFee
     });
-    await safelyCompleteCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, result);
+    if (durableCopyBuyClaimKey) {
+      await safelyCompleteCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, legacyResultFromExecution(result));
+    }
     latencyTracker.mark("submit_finished", {
-      status: result.ok ? "submitted" : "failed",
-      reason: result.ok ? null : result.errorText,
-      signature: result.signature
+      status: resultOk(result) ? (isProviderNeutralResult(result) ? result.status : "submitted") : "failed",
+      reason: resultOk(result) ? null : result.errorText,
+      signature: resultSignature(result)
     });
     logLatencyOnce();
+    console.log(`Copy trade execution result: ${isProviderNeutralResult(result) ? formatTradeExecutionResultLog(result) : JSON.stringify(result)}`);
 
-    if (result.ok) {
+    if (resultOk(result) && resultSignature(result)) {
       scheduleCopyTradeTrailingSellsAfterConfirmation({
         subscriber,
         trade,
-        apiKey,
         copyTradeWallet,
-        buySignature: result.signature
+        buySignature: resultSignature(result),
+        executionProvider
       }).catch((error) => {
         console.warn(`Could not prepare trailing sells after copy buy confirmation: ${errorMessage(error)}`);
       });
@@ -1064,15 +1641,15 @@ async function sendCopyTradeSimulationAlert(
 async function scheduleCopyTradeTrailingSellsAfterConfirmation({
   subscriber,
   trade,
-  apiKey,
   copyTradeWallet,
-  buySignature
+  buySignature,
+  executionProvider
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
-  apiKey: string;
   copyTradeWallet: WatchedWallet;
   buySignature: string | null;
+  executionProvider: TradeExecutionProvider;
 }): Promise<void> {
   if (!buySignature) {
     await notifySkippedTrailingSellSchedule({
@@ -1096,8 +1673,8 @@ async function scheduleCopyTradeTrailingSellsAfterConfirmation({
   await scheduleCopyTradeTrailingSells({
     subscriber,
     trade,
-    apiKey,
-    copyTradeWallet
+    copyTradeWallet,
+    executionProvider
   });
 }
 
@@ -1147,7 +1724,7 @@ async function notifySkippedAutoCopyBuy({
   console.warn(
     [
       `Skipping auto copy buy for ${subscriber.chatId}: ${reason}`,
-      `intended PumpPortal buy ${request.amount} SOL of ${request.mint}`,
+      `intended copy buy ${request.amount} SOL of ${request.mint}`,
       `source wallet ${sourceWallet}`,
       `trading wallet ${subscriber.tradingWallet?.publicKey || "unknown"}`,
       `observed tx ${trade.signature || "unknown"}`
@@ -1205,7 +1782,7 @@ function formatSkippedAutoCopyBuyMessage({
   return [
     simulationMessage,
     "",
-    `🟡 ${mode}; no PumpPortal order was submitted.`,
+    `🟡 ${mode}; no copy order was submitted.`,
     `<b>Reason:</b> <code>${reason}</code>`
   ].join("\n");
 }
@@ -1316,13 +1893,13 @@ function originalPositionPercentsToRemainingBalancePercents(steps: TrailingSellS
 async function scheduleCopyTradeTrailingSells({
   subscriber,
   trade,
-  apiKey,
-  copyTradeWallet
+  copyTradeWallet,
+  executionProvider
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
-  apiKey: string;
   copyTradeWallet: WatchedWallet;
+  executionProvider: TradeExecutionProvider;
 }): Promise<void> {
   const trailingSellConfig = resolveTrailingSellConfig(copyTradeWallet);
   const steps = buildTrailingSellSchedule({ subscriber, trade, trailingSellConfig });
@@ -1359,10 +1936,10 @@ async function scheduleCopyTradeTrailingSells({
   runTrailingSellSchedule({
     subscriber,
     trade,
-    apiKey,
     steps,
     copyTradeWallet,
-    scheduleKey
+    scheduleKey,
+    executionProvider
   }).catch((error) => {
     console.warn(`Trailing sell schedule failed for ${subscriber.chatId}: ${errorMessage(error)}`);
   });
@@ -1379,17 +1956,17 @@ function trailingSellScheduleKey({ subscriber, trade }: { subscriber: Subscriber
 async function runTrailingSellSchedule({
   subscriber,
   trade,
-  apiKey,
   steps,
   copyTradeWallet,
-  scheduleKey
+  scheduleKey,
+  executionProvider
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
-  apiKey: string;
   steps: Array<{ delayMs: number; request: PumpPortalLightningTradeRequest }>;
   copyTradeWallet: WatchedWallet;
   scheduleKey: string;
+  executionProvider: TradeExecutionProvider;
 }): Promise<void> {
   const startedAt = Date.now();
   const seenSellSignatures = new Set<string>();
@@ -1406,12 +1983,12 @@ async function runTrailingSellSchedule({
       const result = await buildAndNotifyTrailingSell({
         subscriber,
         trade,
-        apiKey,
         request: step.request,
         stepIndex,
         totalSteps: steps.length,
         copyTradeWallet,
-        seenSellSignatures
+        seenSellSignatures,
+        executionProvider
       });
 
       if (result.ok && result.signature) {
@@ -1426,22 +2003,22 @@ async function runTrailingSellSchedule({
 async function buildAndNotifyTrailingSell({
   subscriber,
   trade,
-  apiKey,
   request,
   stepIndex,
   totalSteps,
   copyTradeWallet,
-  seenSellSignatures
+  seenSellSignatures,
+  executionProvider
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
-  apiKey: string;
   request: PumpPortalLightningTradeRequest;
   stepIndex: number;
   totalSteps: number;
   copyTradeWallet: WatchedWallet;
   seenSellSignatures: Set<string>;
-}): Promise<PumpPortalLightningTradeResult> {
+  executionProvider: TradeExecutionProvider;
+}): Promise<CopyTradeExecutionResult> {
   const latencyTracker = createCopyTradeLatencyTracker({
     chatId: subscriber.chatId,
     sourceWallet: copyTradeWallet.address,
@@ -1458,7 +2035,7 @@ async function buildAndNotifyTrailingSell({
     reason: requestRiskBlockedReason
   });
 
-  const liveBlockedReason = copyTradeLiveExecutionBlockedReason(copyTradeExecutionModeConfig());
+  const liveBlockedReason = copyTradeSubmissionBlockedReason(executionProvider);
   latencyTracker.mark("live_gate_checked", {
     status: liveBlockedReason ? "blocked" : "ok",
     reason: liveBlockedReason
@@ -1466,13 +2043,17 @@ async function buildAndNotifyTrailingSell({
 
   const blockedReason = liveBlockedReason || requestRiskBlockedReason;
   if (blockedReason) {
-    const result: PumpPortalLightningTradeResult = {
-      ok: false,
-      status: null,
-      signature: null,
-      errorText: `Trailing sell skipped: ${blockedReason}`,
-      raw: null
-    };
+    const result = tradeExecutionSkippedResult({
+      provider: executionProvider,
+      route: isDirectTradeExecutionProvider(executionProvider)
+        ? executionProvider === "direct-pumpswap"
+          ? "pumpswap-amm"
+          : executionProvider === "direct-pump"
+            ? "pump-bonding-curve"
+            : "auto"
+        : "pumpportal-lightning",
+      reason: `Trailing sell skipped: ${blockedReason}`
+    });
 
     latencyTracker.skip(blockedReason, { status: "skipped" });
     logCopyTradeLatency(latencyTracker);
@@ -1493,16 +2074,18 @@ async function buildAndNotifyTrailingSell({
   }
 
   latencyTracker.mark("submit_started");
-  const { result, duplicateSignature } = await executeTrailingSellWithDuplicateRetry({
-    apiKey,
+  const { result, duplicateSignature } = await executeCopyTradeSell({
+    subscriber,
+    trade,
     request,
+    provider: executionProvider,
     seenSellSignatures
   });
   const trailingSellSkipped = Boolean(result.errorText?.startsWith("Trailing sell skipped:"));
   latencyTracker.mark("submit_finished", {
-    status: result.ok ? "submitted" : trailingSellSkipped ? "skipped" : "failed",
-    reason: result.ok ? null : result.errorText,
-    signature: result.signature
+    status: resultOk(result) ? (isProviderNeutralResult(result) ? result.status : "submitted") : trailingSellSkipped ? "skipped" : "failed",
+    reason: resultOk(result) ? null : result.errorText,
+    signature: resultSignature(result)
   });
   logCopyTradeLatency(latencyTracker);
 
@@ -1531,8 +2114,8 @@ async function buildAndNotifyTrailingSell({
     replyMarkup: buildWalletTradeReplyMarkup(trade)
   });
 
-  if (result.ok && result.signature && !duplicateSignature) {
-    seenSellSignatures.add(result.signature);
+  if (resultOk(result) && resultSignature(result) && !duplicateSignature) {
+    seenSellSignatures.add(resultSignature(result) || "");
   }
 
   return result;
@@ -1670,7 +2253,7 @@ async function recordCopyTradeExecution({
   copyTradeWallet: WatchedWallet;
   tradingWalletPublicKey: string;
   request: PumpPortalLightningTradeRequest;
-  result: PumpPortalLightningTradeResult;
+  result: CopyTradeExecutionResult;
   trailingSellStepIndex?: number | null;
   trailingSellTotalSteps?: number | null;
 }): Promise<void> {
@@ -1687,13 +2270,22 @@ async function recordCopyTradeExecution({
     action: request.action,
     amount: request.amount,
     denominatedInSol: request.denominatedInSol,
-    status: result.ok ? "submitted" : "failed",
-    signature: result.signature,
+    status: isProviderNeutralResult(result) ? result.status : result.ok ? "submitted" : "failed",
+    signature: resultSignature(result),
     errorText: result.errorText,
-    httpStatus: result.status,
+    httpStatus: isProviderNeutralResult(result) ? null : result.status,
     observedTrade: trade,
     request,
-    response: result.raw,
+    response: isProviderNeutralResult(result)
+      ? {
+          status: result.status,
+          provider: result.provider,
+          route: result.route,
+          metadata: result.metadata,
+          platformFee: result.platformFee || null,
+          raw: result.raw
+        }
+      : result.raw,
     trailingSellStepIndex,
     trailingSellTotalSteps
   };

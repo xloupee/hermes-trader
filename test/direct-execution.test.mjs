@@ -1,0 +1,470 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { Keypair, SystemProgram } from "@solana/web3.js";
+import { buildDirectAutoTransactionPayload } from "../dist/direct-auto.js";
+import { buildDirectPumpTransaction } from "../dist/direct-pump.js";
+import { buildDirectPumpSwapTransaction } from "../dist/direct-pumpswap.js";
+import { sendDirectTransaction } from "../dist/direct-sender.js";
+import { sendSolanaDirectTransaction } from "../dist/direct-solana.js";
+import { maxQuoteLamportsForSlippageCap } from "../dist/direct-budget.js";
+import { tradeExecutionSkippedResult } from "../dist/trade-execution.js";
+
+const baseRequest = {
+  action: "buy",
+  mint: "Mint111111111111111111111111111111111111111",
+  amount: 990_000_000n,
+  amountBasis: "sol",
+  slippagePercent: 10,
+  priorityFeeSol: 0.00005,
+  walletPublicKey: "Wallet111111111111111111111111111111111111"
+};
+
+const liveGate = {
+  provider: "direct-pump",
+  copyTradeEnabled: true,
+  copyTradeDryRun: false,
+  directExecutionEnabled: true,
+  directExecutionLiveEnabled: true
+};
+
+test("direct Pump builder wraps injected SDK buy instructions and route metadata", async () => {
+  const calls = [];
+  const result = await buildDirectPumpTransaction({
+    sdk: {
+      buyInstructions: (input) => {
+        calls.push(input);
+        return [{ kind: "pump-buy", mint: input.mint, amount: input.amount }];
+      }
+    },
+    request: {
+      ...baseRequest,
+      platformFeeInstruction: { kind: "system-transfer", lamports: 10_000_000n }
+    },
+    loadState: () => ({ ok: true, state: { bondingCurve: "curve-1" } })
+  });
+
+  assert.equal(result.provider, "direct-pump");
+  assert.equal(result.route.route, "pump-bonding-curve");
+  assert.equal(result.instructions.length, 2);
+  assert.equal(result.instructions[0].kind, "system-transfer");
+  assert.equal(result.instructions[1].kind, "pump-buy");
+  assert.equal(calls[0].slippagePercent, 10);
+  assert.equal(calls[0].state.bondingCurve, "curve-1");
+});
+
+test("direct Pump builder safely skips when bonding-curve state is missing", async () => {
+  const result = await buildDirectPumpTransaction({
+    sdk: {
+      buyInstructions: () => [{ kind: "pump-buy" }]
+    },
+    request: baseRequest,
+    loadState: () => ({ ok: false, reason: "bonding curve account not found" })
+  });
+
+  assert.equal(result.status, "skipped");
+  assert.match(result.errorText, /bonding curve account not found/);
+});
+
+test("direct Pump builder maps injected SDK errors to failed provider-neutral results", async () => {
+  const result = await buildDirectPumpTransaction({
+    sdk: {
+      buyInstructions: () => {
+        throw new Error("invalid mint");
+      }
+    },
+    request: baseRequest
+  });
+
+  assert.equal(result.status, "failed");
+  assert.match(result.errorText, /invalid mint/);
+});
+
+test("direct PumpSwap builder safely skips missing canonical pool", async () => {
+  const result = await buildDirectPumpSwapTransaction({
+    sdk: {
+      buyQuoteInput: () => [{ kind: "pumpswap-buy" }]
+    },
+    request: baseRequest,
+    loadPool: () => ({ ok: false, reason: "pool not found" })
+  });
+
+  assert.equal(result.status, "skipped");
+  assert.match(result.errorText, /pool not found/);
+});
+
+test("direct PumpSwap builder records pool metadata and WSOL handling instructions", async () => {
+  const calls = [];
+  const result = await buildDirectPumpSwapTransaction({
+    sdk: {
+      sellBaseInput: (input) => {
+        calls.push(input);
+        return [{ kind: "pumpswap-sell", poolAddress: input.poolAddress }];
+      }
+    },
+    request: {
+      ...baseRequest,
+      action: "sell",
+      amount: "25%",
+      amountBasis: "percent"
+    },
+    loadPool: () => ({
+      ok: true,
+      pool: {
+        poolAddress: "Pool1111111111111111111111111111111111111",
+        state: { feeBps: 30 },
+        needsWrappedSolAccount: true
+      }
+    })
+  });
+
+  assert.equal(result.provider, "direct-pumpswap");
+  assert.equal(result.route.route, "pumpswap-amm");
+  assert.equal(result.route.poolAddress, "Pool1111111111111111111111111111111111111");
+  assert.deepEqual(result.instructions.map((instruction) => instruction.kind), [
+    "create-wsol-account",
+    "sync-wsol-account",
+    "pumpswap-sell",
+    "close-wsol-account"
+  ]);
+  assert.equal(calls[0].state.feeBps, 30);
+  assert.equal(calls[0].amountBasis, "percent");
+});
+
+function payload(overrides = {}) {
+  return {
+    provider: "direct-pump",
+    route: {
+      provider: "direct-pump",
+      route: "pump-bonding-curve",
+      mint: baseRequest.mint,
+      walletPublicKey: baseRequest.walletPublicKey,
+      poolAddress: null,
+      priorityFeeSol: 0.00005,
+      slippagePercent: 10,
+      amount: "990000000",
+      amountBasis: "sol"
+    },
+    instructions: [{ kind: "pump-buy" }],
+    signers: [],
+    metadata: { idempotencyKey: "chat:wallet:mint:buy" },
+    ...overrides
+  };
+}
+
+function signer(overrides = {}) {
+  return {
+    publicKey: baseRequest.walletPublicKey,
+    signTransaction: (transaction) => ({
+      ...transaction,
+      serialize: () => new Uint8Array([1, 2, 3])
+    }),
+    ...overrides
+  };
+}
+
+test("direct-auto probes PumpSwap before falling back to Pump", async () => {
+  const attempts = [];
+  const result = await buildDirectAutoTransactionPayload({
+    attempts: [
+      {
+        provider: "direct-pumpswap",
+        build: async () => {
+          attempts.push("direct-pumpswap");
+          return tradeExecutionSkippedResult({
+            provider: "direct-pumpswap",
+            route: "pumpswap-amm",
+            reason: "pool not found"
+          });
+        }
+      },
+      {
+        provider: "direct-pump",
+        build: async () => {
+          attempts.push("direct-pump");
+          return payload();
+        }
+      }
+    ]
+  });
+
+  assert.deepEqual(attempts, ["direct-pumpswap", "direct-pump"]);
+  assert.equal(result.provider, "direct-pump");
+  assert.equal(result.route.route, "pump-bonding-curve");
+});
+
+test("direct-auto records thrown route-builder failures and continues to the next route", async () => {
+  const attempts = [];
+  const result = await buildDirectAutoTransactionPayload({
+    attempts: [
+      {
+        provider: "direct-pumpswap",
+        build: async () => {
+          attempts.push("direct-pumpswap");
+          throw new Error("invalid mint");
+        }
+      },
+      {
+        provider: "direct-pump",
+        build: async () => {
+          attempts.push("direct-pump");
+          return payload();
+        }
+      }
+    ]
+  });
+
+  assert.deepEqual(attempts, ["direct-pumpswap", "direct-pump"]);
+  assert.equal(result.provider, "direct-pump");
+});
+
+test("direct sender fails closed when direct live gates are missing", async () => {
+  const result = await sendDirectTransaction({
+    connection: {},
+    signer: signer(),
+    payload: payload(),
+    config: {
+      gate: {
+        provider: "direct-pump",
+        copyTradeEnabled: false,
+        copyTradeDryRun: true
+      }
+    }
+  });
+
+  assert.equal(result.status, "skipped");
+  assert.match(result.errorText, /COPY_TRADE_ENABLED is not true/);
+});
+
+test("direct sender blocks simulation failures before signing or sending", async () => {
+  let signed = false;
+  let sent = false;
+  const result = await sendDirectTransaction({
+    connection: {
+      getLatestBlockhash: () => ({ blockhash: "blockhash-1", lastValidBlockHeight: 123 }),
+      simulateTransaction: () => ({ err: { InstructionError: [0, "Custom"] }, logs: ["failed"] }),
+      sendRawTransaction: () => {
+        sent = true;
+        return "signature-1";
+      }
+    },
+    signer: signer({
+      signTransaction: () => {
+        signed = true;
+        throw new Error("should not sign");
+      }
+    }),
+    payload: payload(),
+    config: { gate: liveGate }
+  });
+
+  assert.equal(result.status, "failed");
+  assert.match(result.errorText, /simulation failed/);
+  assert.equal(signed, false);
+  assert.equal(sent, false);
+});
+
+test("direct sender surfaces local signing failures", async () => {
+  const result = await sendDirectTransaction({
+    connection: {
+      simulateTransaction: () => ({ err: null }),
+      sendRawTransaction: () => "signature-1"
+    },
+    signer: signer({
+      signTransaction: () => {
+        throw new Error("signer locked");
+      }
+    }),
+    payload: payload(),
+    config: { gate: liveGate }
+  });
+
+  assert.equal(result.status, "failed");
+  assert.match(result.errorText, /signer locked/);
+});
+
+test("direct sender confirms successful direct submissions", async () => {
+  const sent = [];
+  const result = await sendDirectTransaction({
+    connection: {
+      getLatestBlockhash: () => ({ blockhash: "blockhash-1", lastValidBlockHeight: 123 }),
+      simulateTransaction: () => ({ err: null, unitsConsumed: 42 }),
+      sendRawTransaction: (serializedTransaction, options) => {
+        sent.push({ serializedTransaction: [...serializedTransaction], options });
+        return "signature-1";
+      },
+      confirmTransaction: (signature, blockhashContext) => {
+        assert.equal(signature, "signature-1");
+        assert.equal(blockhashContext.blockhash, "blockhash-1");
+        return { err: null, slot: 55 };
+      }
+    },
+    signer: signer(),
+    payload: payload(),
+    config: {
+      gate: liveGate,
+      skipPreflight: false,
+      maxRetries: 3,
+      nowMs: (() => {
+        let now = 1000;
+        return () => (now += 10);
+      })()
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.signature, "signature-1");
+  assert.equal(result.slot, 55);
+  assert.equal(result.metadata.idempotencyKey, "chat:wallet:mint:buy");
+  assert.deepEqual(sent[0].serializedTransaction, [1, 2, 3]);
+  assert.deepEqual(sent[0].options, { skipPreflight: false, maxRetries: 3 });
+});
+
+test("Solana direct sender signs, simulates, sends, and confirms a versioned transaction payload", async () => {
+  const solanaSigner = Keypair.generate();
+  const payload = {
+    provider: "direct-pump",
+    route: {
+      provider: "direct-pump",
+      route: "pump-bonding-curve",
+      mint: baseRequest.mint,
+      walletPublicKey: solanaSigner.publicKey.toBase58(),
+      poolAddress: null,
+      priorityFeeSol: 0.00005,
+      slippagePercent: 10,
+      amount: "990000000",
+      amountBasis: "sol"
+    },
+    instructions: [
+      SystemProgram.transfer({
+        fromPubkey: solanaSigner.publicKey,
+        toPubkey: solanaSigner.publicKey,
+        lamports: 0
+      })
+    ],
+    signers: [],
+    metadata: { idempotencyKey: "chat:wallet:mint:buy" }
+  };
+  const seen = {
+    simulated: false,
+    serializedBytes: 0,
+    confirmationSignature: null
+  };
+  const result = await sendSolanaDirectTransaction({
+    connection: {
+      getLatestBlockhash: () => ({
+        blockhash: "11111111111111111111111111111111",
+        lastValidBlockHeight: 123
+      }),
+      simulateTransaction: () => {
+        seen.simulated = true;
+        return { value: { err: null, unitsConsumed: 42 } };
+      },
+      sendRawTransaction: (serializedTransaction) => {
+        seen.serializedBytes = serializedTransaction.length;
+        return "signature-1";
+      },
+      confirmTransaction: ({ signature }) => {
+        seen.confirmationSignature = signature;
+        return { value: { err: null } };
+      }
+    },
+    signer: solanaSigner,
+    payload,
+    config: {
+      gate: liveGate,
+      nowMs: (() => {
+        let now = 1000;
+        return () => (now += 10);
+      })()
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.signature, "signature-1");
+  assert.equal(seen.simulated, true);
+  assert.equal(seen.serializedBytes > 0, true);
+  assert.equal(seen.confirmationSignature, "signature-1");
+});
+
+test("direct sender preserves signature when confirmation lookup throws after send", async () => {
+  const result = await sendDirectTransaction({
+    connection: {
+      getLatestBlockhash: () => ({ blockhash: "blockhash-1", lastValidBlockHeight: 123 }),
+      simulateTransaction: () => ({ err: null }),
+      sendRawTransaction: () => "signature-submitted",
+      confirmTransaction: () => {
+        throw new Error("confirmation rpc timeout");
+      }
+    },
+    signer: signer(),
+    payload: payload(),
+    config: { gate: liveGate }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "submitted");
+  assert.equal(result.signature, "signature-submitted");
+  assert.equal(result.metadata.confirmationError, "confirmation rpc timeout");
+});
+
+test("direct sender surfaces send and confirmation failures", async () => {
+  const sendFail = await sendDirectTransaction({
+    connection: {
+      simulateTransaction: () => ({ err: null }),
+      sendRawTransaction: () => {
+        throw new Error("rpc send failed");
+      }
+    },
+    signer: signer(),
+    payload: payload(),
+    config: { gate: liveGate }
+  });
+
+  assert.equal(sendFail.status, "failed");
+  assert.match(sendFail.errorText, /rpc send failed/);
+
+  const confirmFail = await sendDirectTransaction({
+    connection: {
+      simulateTransaction: () => ({ err: null }),
+      sendRawTransaction: () => "signature-2",
+      confirmTransaction: () => ({ err: "not finalized", slot: 66 })
+    },
+    signer: signer(),
+    payload: payload(),
+    config: { gate: liveGate }
+  });
+
+  assert.equal(confirmFail.status, "failed");
+  assert.equal(confirmFail.signature, "signature-2");
+  assert.match(confirmFail.errorText, /not finalized/);
+  assert.equal(confirmFail.slot, 66);
+});
+
+test("direct quote cap keeps SDK slippage-inclusive max spend within the trade budget", () => {
+  const tradeBudgetLamports = 990_000_000n;
+  const quoteLamports = maxQuoteLamportsForSlippageCap(tradeBudgetLamports, 10);
+  const slippageInclusiveMax = (quoteLamports * 1_100_000_000n) / 1_000_000_000n;
+
+  assert.equal(quoteLamports, 900_000_000n);
+  assert.equal(slippageInclusiveMax <= tradeBudgetLamports, true);
+  assert.equal(maxQuoteLamportsForSlippageCap(tradeBudgetLamports, 0), tradeBudgetLamports);
+});
+
+test("direct sender emergency stop blocks even otherwise-live direct config", async () => {
+  const result = await sendDirectTransaction({
+    connection: {},
+    signer: signer(),
+    payload: payload(),
+    config: {
+      gate: {
+        ...liveGate,
+        emergencyStopped: true
+      }
+    }
+  });
+
+  assert.equal(result.status, "skipped");
+  assert.match(result.errorText, /emergency stop/);
+});

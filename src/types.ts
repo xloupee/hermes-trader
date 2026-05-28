@@ -72,6 +72,7 @@ export interface BotConfig extends MigrationFormatConfig {
   shutdownReason?: string;
   copyTradeEnabled: boolean;
   copyTradeDryRun: boolean;
+  copyTradeExecutionProvider: "pumpportal-lightning" | "direct-pump" | "direct-pumpswap" | "direct-auto";
   copyTradeSlippage: number;
   copyTradePriorityFee: number;
   copyTradePool: PumpPortalTradePool;
@@ -89,6 +90,17 @@ export interface BotConfig extends MigrationFormatConfig {
   copyTradeTrailingSellTrailPercent: number;
   copyTradeTrailingSellIntervalMs: number;
   copyTradeTrailingSellMaxBuilds: number;
+  directExecutionEnabled: boolean;
+  directExecutionLiveEnabled: boolean;
+  directExecutionBuildOnly: boolean;
+  directExecutionSimulateOnly: boolean;
+  directExecutionSkipPreflight: boolean;
+  directExecutionMaxRetries: number;
+  directExecutionCanaryChatIds: string[];
+  directExecutionCanaryWallets: string[];
+  platformFeeEnabled: boolean;
+  platformFeeBps: number;
+  platformFeeTreasury?: string;
 }
 
 export interface LegacyBotConfig extends MigrationFormatConfig {
@@ -225,8 +237,13 @@ export interface SubscriberRecord {
 
 export interface TradingWallet {
   publicKey: string;
+  provider?: "pumpportal-lightning" | "local-solana";
+  kind?: "pumpportal-lightning" | "local-solana";
   encryptedApiKey: string;
   apiKeyLast4: string;
+  encryptedSecretKey?: string;
+  secretKeyFormat?: "base64";
+  keyLast4?: string;
   label: string | null;
   createdAt: string;
   updatedAt: string;
@@ -316,7 +333,7 @@ export interface PumpPortalLightningTradeResult {
 }
 
 export type CopyTradeExecutionAction = "buy" | "sell";
-export type CopyTradeExecutionStatus = "submitted" | "failed";
+export type CopyTradeExecutionStatus = "submitted" | "failed" | "skipped" | "simulated" | "confirmed" | "expired";
 
 export interface CopyTradeExecutionRecord {
   chatId: string;
@@ -325,14 +342,14 @@ export interface CopyTradeExecutionRecord {
   tradingWalletPublicKey: string;
   mint: string;
   action: CopyTradeExecutionAction;
-  amount: number | `${number}%`;
+  amount: number | string;
   denominatedInSol: "true" | "false";
   status: CopyTradeExecutionStatus;
   signature: string | null;
   errorText: string | null;
   httpStatus: number | null;
   observedTrade: WalletTradeData;
-  request: PumpPortalLightningTradeRequest;
+  request: unknown;
   response: unknown;
   trailingSellStepIndex?: number | null;
   trailingSellTotalSteps?: number | null;

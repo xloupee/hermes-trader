@@ -8,6 +8,7 @@ import type {
   WalletTradeAsset,
   WalletTradeData
 } from "./types.js";
+import type { TradeExecutionResult } from "./trade-execution.js";
 
 const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -260,7 +261,24 @@ export function formatCopyTradeSimulationMessage(
   ].join("\n");
 }
 
-function formatPumpPortalLightningTradeStatus(result: PumpPortalLightningTradeResult): string {
+type FormattableTradeResult = PumpPortalLightningTradeResult | TradeExecutionResult;
+
+function isProviderNeutralTradeResult(result: FormattableTradeResult): result is TradeExecutionResult {
+  return typeof result.status === "string";
+}
+
+function formatTradeResultStatus(result: FormattableTradeResult): string {
+  if (isProviderNeutralTradeResult(result)) {
+    if (result.ok) {
+      return result.signature ? `<b>Tx:</b> <code>${escapeHtml(result.signature)}</code>` : `<b>Status:</b> ${escapeHtml(result.status)}`;
+    }
+
+    const detail = result.errorText?.trim();
+    return detail
+      ? `<b>Trade failed:</b> ${escapeHtml(result.status)} - ${escapeHtml(detail)}`
+      : `<b>Trade failed:</b> ${escapeHtml(result.status)}`;
+  }
+
   if (result.ok) {
     return result.signature ? `<b>Tx:</b> <code>${escapeHtml(result.signature)}</code>` : "<b>Tx:</b> Submitted";
   }
@@ -279,7 +297,7 @@ export function formatAutoCopyBuyMessage({
   trade: WalletTradeData;
   tradingWalletPublicKey: string;
   copyAmountSol: number;
-  result: PumpPortalLightningTradeResult;
+  result: FormattableTradeResult;
 }): string | null {
   if (!trade.mint || !isCopyableSolToTokenBuy(trade)) {
     return null;
@@ -293,11 +311,12 @@ export function formatAutoCopyBuyMessage({
     `<b>🎯 Target:</b> ${escapeHtml(walletName)}`,
     `<b>👛 Trading Wallet:</b> <code>${escapeHtml(tradingWalletPublicKey)}</code>`,
     `<b>💰 Copy Amount:</b> ${formatNumber(copyAmountSol)} SOL`,
+    ...formatPlatformFeeLines(result),
     "",
     "<b>🪙 Contract Address</b>",
     `<code>${escapeHtml(trade.mint)}</code>`,
     "",
-    formatPumpPortalLightningTradeStatus(result)
+    formatTradeResultStatus(result)
   ];
 
   if (!trade.label) {
@@ -305,6 +324,17 @@ export function formatAutoCopyBuyMessage({
   }
 
   return lines.join("\n");
+}
+
+function formatPlatformFeeLines(result: FormattableTradeResult): string[] {
+  if (!isProviderNeutralTradeResult(result) || !result.platformFee?.enabled || result.platformFee.feeLamports === 0n) {
+    return [];
+  }
+
+  return [
+    `<b>🏦 Platform Fee:</b> ${formatNumber(Number(result.platformFee.feeLamports) / 1_000_000_000)} SOL`,
+    `<b>📈 Trade Amount:</b> ${formatNumber(Number(result.platformFee.tradeLamports) / 1_000_000_000)} SOL`
+  ];
 }
 
 function formatPumpPortalBuildStatus(result?: PumpPortalLocalTradeBuildResult | null): string {
@@ -394,7 +424,7 @@ export function formatCopyTradeTrailingSellResultMessage({
   stepIndex: number;
   totalSteps: number;
   request: { mint: string; amount: number | `${number}%` };
-  result: PumpPortalLightningTradeResult;
+  result: FormattableTradeResult;
   duplicateSignature?: boolean;
 }): string {
   const walletName = trade.label || shortenAddress(trade.targetWallet);
@@ -412,8 +442,8 @@ export function formatCopyTradeTrailingSellResultMessage({
     `<code>${escapeHtml(request.mint)}</code>`,
     "",
     duplicateSignature
-      ? `${formatPumpPortalLightningTradeStatus(result)}\n\nThis step returned a transaction signature that was already used earlier in this trailing sell schedule.`
-      : formatPumpPortalLightningTradeStatus(result)
+      ? `${formatTradeResultStatus(result)}\n\nThis step returned a transaction signature that was already used earlier in this trailing sell schedule.`
+      : formatTradeResultStatus(result)
   ].join("\n");
 }
 

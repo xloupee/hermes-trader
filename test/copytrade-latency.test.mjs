@@ -67,7 +67,7 @@ test("index runtime wires Helius receipt and normalization timestamps into copy 
   );
   assert.match(
     indexSource,
-    /if \(result\.ok\) \{[\s\S]*scheduleCopyTradeTrailingSellsAfterConfirmation\([\s\S]*buySignature: result\.signature/
+    /if \(resultOk\(result\) && resultSignature\(result\)\) \{[\s\S]*scheduleCopyTradeTrailingSellsAfterConfirmation\([\s\S]*buySignature: resultSignature\(result\)/
   );
   assert.doesNotMatch(
     indexSource,

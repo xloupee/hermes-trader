@@ -171,15 +171,26 @@ export function normalizeTradingWallet(value: unknown, fallbackNow = new Date().
   const record = asRecord(value);
   const publicKey = stringValue(record.publicKey || record.public_key || record.wallet || record.address)?.trim();
   const encryptedApiKey = stringValue(record.encryptedApiKey || record.encrypted_api_key)?.trim();
+  const encryptedSecretKey = stringValue(record.encryptedSecretKey || record.encrypted_secret_key)?.trim();
+  const provider = record.provider === "local-solana" || (!record.provider && encryptedSecretKey && !encryptedApiKey)
+    ? "local-solana"
+    : "pumpportal-lightning";
+  const kind = record.kind === "local-solana" || record.kind === "pumpportal-lightning" ? record.kind : provider;
+  const secretKeyFormat = record.secretKeyFormat === "base64" || record.secret_key_format === "base64" ? "base64" : undefined;
 
-  if (!publicKey || !encryptedApiKey) {
+  if (!publicKey || (!encryptedApiKey && !encryptedSecretKey)) {
     return null;
   }
 
   return {
     publicKey,
-    encryptedApiKey,
-    apiKeyLast4: stringValue(record.apiKeyLast4 || record.api_key_last4)?.trim() || "****",
+    provider,
+    kind,
+    encryptedApiKey: encryptedApiKey || "",
+    apiKeyLast4: stringValue(record.apiKeyLast4 || record.api_key_last4)?.trim() || stringValue(record.keyLast4 || record.key_last4)?.trim() || "****",
+    encryptedSecretKey: encryptedSecretKey || undefined,
+    secretKeyFormat,
+    keyLast4: stringValue(record.keyLast4 || record.key_last4)?.trim() || undefined,
     label: stringValue(record.label || record.nickname)?.trim() || null,
     createdAt: typeof record.createdAt === "string" ? record.createdAt : fallbackNow,
     updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : fallbackNow

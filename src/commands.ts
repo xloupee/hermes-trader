@@ -327,10 +327,11 @@ export function tradingWalletCreationBlockedText(chatType?: string | null): stri
 
 export function tradingWalletBackupWarningText(): string {
   return [
-    "<b>Hot-wallet/private-key warning</b>",
-    "This creates a hot wallet for copy buys.",
+    "<b>🔐 Hot-wallet/private-key warning</b>",
+    "This is a hot wallet the bot can use for copy buys.",
     "The private key or secret key is shown once. Back it up somewhere private before depositing SOL.",
-    "Anyone who sees it can spend the wallet, and the bot cannot recover it later."
+    "Anyone with that key can spend the wallet.",
+    "The bot cannot recover it later."
   ].join("\n");
 }
 
@@ -345,18 +346,18 @@ export function formatTradingWalletCreateConfirmText({
 
   if (!existingPublicKey) {
     return [
-      "<b>Create Trading Wallet?</b>",
+      "<b>✨ Create Trading Wallet?</b>",
       "",
-      `This creates a ${walletType} and makes it your active copytrade wallet.`,
+      `This creates a <b>${walletType}</b> and makes it your active wallet for copy buys.`,
       "",
       tradingWalletBackupWarningText()
     ].join("\n");
   }
 
   return [
-    "<b>Create New Trading Wallet?</b>",
+    "<b>✨ Create New Trading Wallet?</b>",
     "",
-    `This creates a fresh ${walletType} and makes it your active copytrade wallet.`,
+    `This creates a fresh <b>${walletType}</b> and makes it your active wallet for copy buys.`,
     "",
     "<b>Current wallet</b>",
     `<code>${escapeHtml(existingPublicKey)}</code>`,
@@ -1067,6 +1068,36 @@ export function createTelegramCommandPoller({
     if (data.startsWith("mywallets:select:")) {
       const walletIndex = Number(data.slice("mywallets:select:".length));
       await selectTradingWalletByIndex(chatId, walletIndex);
+      return;
+    }
+
+    if (data === "mywallets:remove" || data === "mywallets:remove_picker") {
+      const dashboard = myWalletRemovePicker(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data.startsWith("mywallets:remove_one:")) {
+      const walletIndex = Number(data.slice("mywallets:remove_one:".length));
+      const dashboard = myWalletRemoveConfirm(chatId, walletIndex);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data.startsWith("mywallets:remove_confirm:")) {
+      const walletIndex = Number(data.slice("mywallets:remove_confirm:".length));
+      await removeTradingWalletByIndex(chatId, walletIndex);
+      return;
+    }
+
+    if (data === "mywallets:remove_all") {
+      const dashboard = myWalletRemoveAllConfirm(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data === "mywallets:remove_all_confirm") {
+      await removeAllTradingWallets(chatId);
       return;
     }
 
@@ -1904,6 +1935,7 @@ export function createTelegramCommandPoller({
           { text: "🧭 New Local", callback_data: "mywallets:new_local" },
           { text: "🔁 Switch Wallet", callback_data: "mywallets:switch" }
         ],
+        [{ text: "🗑️ Remove Wallet", callback_data: "mywallets:remove" }],
         [{ text: "📊 Status", callback_data: "mywallets:dashboard" }]
       ]
     };
@@ -1965,6 +1997,142 @@ export function createTelegramCommandPoller({
 
     const dashboard = myWalletDashboard(chatId);
     await reply(chatId, `<b>Active trading wallet updated:</b> ${formatTradingWalletButtonLabel(wallet)}\n\n${dashboard.text}`, dashboard.replyMarkup);
+  }
+
+  function myWalletRemovePicker(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
+    const wallets = subscribers?.listTradingWallets(chatId) || [];
+    const activeWallet = subscribers?.getTradingWallet(chatId) || null;
+
+    if (wallets.length === 0) {
+      return {
+        text: "No trading wallets to remove yet.",
+        replyMarkup: {
+          inline_keyboard: [
+            [{ text: "🚀 Create PumpPortal", callback_data: "mywallets:create" }],
+            [{ text: "🧭 Create Local", callback_data: "mywallets:create_local" }],
+            [{ text: "↩️ Back", callback_data: "mywallets:dashboard" }]
+          ]
+        }
+      };
+    }
+
+    return {
+      text: [
+        "<b>🗑️ Remove Trading Wallet</b>",
+        "",
+        "Choose a saved trading wallet to remove from this bot."
+      ].join("\n"),
+      replyMarkup: {
+        inline_keyboard: [
+          ...wallets.map((wallet, index) => [
+            {
+              text: `🗑️ ${wallet.publicKey === activeWallet?.publicKey ? "Active " : ""}${formatTradingWalletButtonLabel(wallet)}`,
+              callback_data: `mywallets:remove_one:${index}`
+            }
+          ]),
+          [{ text: "🗑️ Remove All", callback_data: "mywallets:remove_all" }],
+          [{ text: "↩️ Back", callback_data: "mywallets:dashboard" }]
+        ]
+      }
+    };
+  }
+
+  function myWalletRemoveConfirm(chatId: TelegramChatId, walletIndex: number): { text: string; replyMarkup: TelegramReplyMarkup } {
+    const wallets = subscribers?.listTradingWallets(chatId) || [];
+    const wallet = Number.isInteger(walletIndex) && walletIndex >= 0 ? wallets[walletIndex] : null;
+    const activeWallet = subscribers?.getTradingWallet(chatId) || null;
+
+    if (!wallet) {
+      const picker = myWalletRemovePicker(chatId);
+      return {
+        text: `That trading wallet is no longer available.\n\n${picker.text}`,
+        replyMarkup: picker.replyMarkup
+      };
+    }
+
+    const removesActiveWallet = wallet.publicKey === activeWallet?.publicKey;
+    const remainingCount = Math.max(0, wallets.length - 1);
+    return {
+      text: [
+        "<b>Confirm removal</b>",
+        `Remove ${formatTradingWalletButtonLabel(wallet)}?`,
+        "",
+        "This removes the saved encrypted key from the bot only.",
+        "It does not move SOL, tokens, or close the on-chain wallet.",
+        removesActiveWallet && remainingCount > 0 ? "The next saved wallet will become active." : null,
+        removesActiveWallet && remainingCount === 0 ? "Copy buys will be inactive until you create another trading wallet." : null
+      ].filter((line): line is string => line !== null).join("\n"),
+      replyMarkup: {
+        inline_keyboard: [
+          [{ text: "✅ Confirm Remove", callback_data: `mywallets:remove_confirm:${walletIndex}` }],
+          [{ text: "↩️ Back", callback_data: "mywallets:remove_picker" }]
+        ]
+      }
+    };
+  }
+
+  function myWalletRemoveAllConfirm(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
+    const walletCount = subscribers?.listTradingWallets(chatId).length || 0;
+
+    if (walletCount === 0) {
+      return myWalletRemovePicker(chatId);
+    }
+
+    return {
+      text: [
+        "<b>Confirm remove all</b>",
+        `Remove all ${walletCount} saved trading wallet${walletCount === 1 ? "" : "s"} from this bot?`,
+        "",
+        "This removes encrypted keys from the bot only.",
+        "It does not move SOL, tokens, or close any on-chain wallet.",
+        "Copy buys will be inactive until you create another trading wallet."
+      ].join("\n"),
+      replyMarkup: {
+        inline_keyboard: [
+          [{ text: "✅ Confirm Remove All", callback_data: "mywallets:remove_all_confirm" }],
+          [{ text: "↩️ Back", callback_data: "mywallets:remove_picker" }]
+        ]
+      }
+    };
+  }
+
+  async function removeTradingWalletByIndex(chatId: TelegramChatId, walletIndex: number): Promise<void> {
+    const wallets = subscribers?.listTradingWallets(chatId) || [];
+    const wallet = Number.isInteger(walletIndex) && walletIndex >= 0 ? wallets[walletIndex] : null;
+
+    if (!wallet) {
+      const picker = myWalletRemovePicker(chatId);
+      await reply(chatId, `That trading wallet is no longer available.\n\n${picker.text}`, picker.replyMarkup);
+      return;
+    }
+
+    const removed = await subscribers?.removeTradingWallet(chatId, wallet.publicKey);
+
+    if (!removed) {
+      const picker = myWalletRemovePicker(chatId);
+      await reply(chatId, `That trading wallet is no longer available.\n\n${picker.text}`, picker.replyMarkup);
+      return;
+    }
+
+    const dashboard = myWalletDashboard(chatId);
+    await reply(chatId, `<b>Removed trading wallet:</b> ${formatTradingWalletButtonLabel(wallet)}\n\n${dashboard.text}`, dashboard.replyMarkup);
+  }
+
+  async function removeAllTradingWallets(chatId: TelegramChatId): Promise<void> {
+    const removedCount = await subscribers?.removeAllTradingWallets(chatId);
+
+    if (!removedCount) {
+      const picker = myWalletRemovePicker(chatId);
+      await reply(chatId, picker.text, picker.replyMarkup);
+      return;
+    }
+
+    const dashboard = myWalletDashboard(chatId);
+    await reply(
+      chatId,
+      `<b>Removed ${removedCount} trading wallet${removedCount === 1 ? "" : "s"}.</b>\n\n${dashboard.text}`,
+      dashboard.replyMarkup
+    );
   }
 
   function formatTradingWalletButtonLabel(wallet: TradingWallet): string {
@@ -2098,13 +2266,14 @@ export function createTelegramCommandPoller({
     await reply(
       chatId,
       [
-        replaceExisting ? "<b>New trading wallet created.</b>" : "<b>Trading wallet created.</b>",
+        replaceExisting ? "<b>✨ New trading wallet created</b>" : "<b>✨ Trading wallet created</b>",
         "",
-        "<b>Deposit SOL here:</b>",
+        "<b>💰 Deposit SOL here</b>",
         `<code>${result.wallet.publicKey}</code>`,
         "",
-        "<b>Save this private key now.</b>",
-        "The bot does not store it and cannot show it again.",
+        "<b>🔐 Save this private key now</b>",
+        "This is the only time it will be shown.",
+        "The bot does not store it and cannot recover it later.",
         "",
         "<b>Private key</b>",
         `<code>${escapeWalletLabel(result.wallet.privateKey)}</code>`,
@@ -2116,7 +2285,7 @@ export function createTelegramCommandPoller({
               ""
             ]
           : []),
-        "Auto copy buys can use this wallet after you deposit SOL and set /copytrade."
+        "🟢 Auto copy buys can use this wallet after you deposit SOL and set /copytrade."
       ].join("\n"),
       myWalletDashboardReplyMarkup(result.wallet.publicKey)
     );
@@ -2177,13 +2346,14 @@ export function createTelegramCommandPoller({
     await reply(
       chatId,
       [
-        replaceExisting ? "<b>New local signing wallet created.</b>" : "<b>Local signing wallet created.</b>",
+        replaceExisting ? "<b>✨ New local signing wallet created</b>" : "<b>✨ Local signing wallet created</b>",
         "",
-        "<b>Deposit SOL here:</b>",
+        "<b>💰 Deposit SOL here</b>",
         `<code>${wallet.publicKey}</code>`,
         "",
-        "<b>Save this secret key now.</b>",
-        "The bot stores only an encrypted copy and cannot show it again.",
+        "<b>🔐 Save this secret key now</b>",
+        "This is the only time it will be shown.",
+        "The bot stores only an encrypted copy and cannot recover it later.",
         "",
         `<b>Secret key (${wallet.secretKeyFormat})</b>`,
         `<code>${escapeWalletLabel(wallet.secretKey)}</code>`,
@@ -2195,7 +2365,7 @@ export function createTelegramCommandPoller({
               ""
             ]
           : []),
-        "Direct execution can use this wallet after it has SOL and local signing is enabled."
+        "🟢 Direct execution can use this wallet after it has SOL and local signing is enabled."
       ].join("\n"),
       myWalletDashboardReplyMarkup(wallet.publicKey)
     );

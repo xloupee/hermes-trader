@@ -63,6 +63,41 @@ export interface TradeExecutionResult {
   platformFee?: TradeExecutionPlatformFee | null;
 }
 
+export interface DirectExecutionTimingMetadata {
+  stages: Array<{ stage: string; atMs: number; [key: string]: unknown }>;
+  atMs: Record<string, number>;
+  startedAtMs: number | null;
+  finishedAtMs: number | null;
+  blockhashStartedAtMs: number | null;
+  blockhashFinishedAtMs: number | null;
+  signStartedAtMs: number | null;
+  signFinishedAtMs: number | null;
+  simulationStartedAtMs: number | null;
+  simulationFinishedAtMs: number | null;
+  rawSendStartedAtMs: number | null;
+  rawSendFinishedAtMs: number | null;
+  signatureReturnedAtMs: number | null;
+  confirmationStartedAtMs: number | null;
+  confirmationFinishedAtMs: number | null;
+  totalMs: number | null;
+  timeToSignatureMs: number | null;
+  signatureToConfirmationMs: number | null;
+  blockhashMs: number | null;
+  signingMs: number | null;
+  simulationMs: number | null;
+  rawSendMs: number | null;
+  confirmationMs: number | null;
+  timeToConfirmationMs: number | null;
+  simulateBeforeSend: boolean | null;
+  skipPreflight: boolean | null;
+  maxRetries: number | null;
+  instructionCount: number | null;
+  txBytes: number | null;
+  unitsConsumed: number | null;
+  blockhash: string | null;
+  lastValidBlockHeight: number | null;
+}
+
 export interface DirectExecutionGateConfig {
   provider: TradeExecutionProvider;
   copyTradeEnabled: boolean;
@@ -272,6 +307,20 @@ export function formatTradeExecutionResultLog(result: TradeExecutionResult): str
       `budgetLamports=${result.platformFee.budgetLamports.toString()}`,
       `platformFeeTreasury=${result.platformFee.treasury || "none"}`
     );
+  }
+
+  const timing = result.metadata.directSolanaTiming;
+  if (timing && typeof timing === "object" && !Array.isArray(timing)) {
+    const durations = (timing as { timeToSignatureMs?: unknown; confirmationMs?: unknown; timeToConfirmationMs?: unknown });
+    if (typeof durations.timeToSignatureMs === "number") {
+      parts.push(`timeToSignatureMs=${durations.timeToSignatureMs}`);
+    }
+    if (typeof durations.confirmationMs === "number") {
+      parts.push(`confirmationMs=${durations.confirmationMs}`);
+    }
+    if (typeof durations.timeToConfirmationMs === "number") {
+      parts.push(`timeToConfirmationMs=${durations.timeToConfirmationMs}`);
+    }
   }
 
   if (result.errorText) {

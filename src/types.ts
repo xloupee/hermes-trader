@@ -95,6 +95,7 @@ export interface BotConfig extends MigrationFormatConfig {
   directExecutionBuildOnly: boolean;
   directExecutionSimulateOnly: boolean;
   directExecutionSkipPreflight: boolean;
+  directExecutionConfirmationMode: "inline" | "background";
   directExecutionMaxRetries: number;
   directExecutionCanaryChatIds: string[];
   directExecutionCanaryWallets: string[];
@@ -199,6 +200,8 @@ export interface SubscriberStore {
   setTradingWallet: (chatId: TelegramChatId, wallet: TradingWallet) => Promise<boolean>;
   renameTradingWallet: (chatId: TelegramChatId, label: string | null) => Promise<boolean>;
   setActiveTradingWallet: (chatId: TelegramChatId, publicKey: string) => Promise<boolean>;
+  removeTradingWallet: (chatId: TelegramChatId, publicKey: string) => Promise<boolean>;
+  removeAllTradingWallets: (chatId: TelegramChatId) => Promise<number>;
   getTradingWallet: (chatId: TelegramChatId) => TradingWallet | null;
   listTradingWallets: (chatId: TelegramChatId) => TradingWallet[];
   setCopyWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
@@ -243,7 +246,7 @@ export interface TradingWallet {
   encryptedApiKey: string;
   apiKeyLast4: string;
   encryptedSecretKey?: string;
-  secretKeyFormat?: "base64";
+  secretKeyFormat?: "base58" | "base64";
   keyLast4?: string;
   label: string | null;
   createdAt: string;
@@ -355,6 +358,17 @@ export interface CopyTradeExecutionRecord {
   trailingSellStepIndex?: number | null;
   trailingSellTotalSteps?: number | null;
   createdAt?: string;
+}
+
+export interface CopyTradeExecutionStatusUpdate {
+  chatId: string;
+  action: CopyTradeExecutionAction;
+  signature: string;
+  status: CopyTradeExecutionStatus;
+  errorText?: string | null;
+  response?: unknown;
+  trailingSellStepIndex?: number | null;
+  trailingSellTotalSteps?: number | null;
 }
 
 export interface TransactionAccountChange {

@@ -1,13 +1,17 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { Keypair } from "@solana/web3.js";
+import bs58 from "bs58";
 
 const ENVELOPE_VERSION = "v1";
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 const MIN_SECRET_LENGTH = 32;
-const LOCAL_SOLANA_SECRET_KEY_FORMAT = "base64";
+const LOCAL_SOLANA_SECRET_KEY_FORMAT = "base58";
+const LEGACY_LOCAL_SOLANA_SECRET_KEY_FORMAT = "base64";
 
-export type LocalSolanaSecretKeyFormat = typeof LOCAL_SOLANA_SECRET_KEY_FORMAT;
+export type LocalSolanaSecretKeyFormat =
+  | typeof LOCAL_SOLANA_SECRET_KEY_FORMAT
+  | typeof LEGACY_LOCAL_SOLANA_SECRET_KEY_FORMAT;
 
 export interface LocalSolanaHotWallet {
   publicKey: string;
@@ -58,7 +62,7 @@ export function generateLocalSolanaHotWallet(): LocalSolanaHotWallet {
 
   return {
     publicKey: keypair.publicKey.toBase58(),
-    secretKey: Buffer.from(keypair.secretKey).toString(LOCAL_SOLANA_SECRET_KEY_FORMAT),
+    secretKey: bs58.encode(keypair.secretKey),
     secretKeyFormat: LOCAL_SOLANA_SECRET_KEY_FORMAT
   };
 }
@@ -72,11 +76,14 @@ export function decryptLocalSolanaKeypair({
   encryptionSecret: string;
   secretKeyFormat?: LocalSolanaSecretKeyFormat;
 }): Keypair {
-  if (secretKeyFormat !== LOCAL_SOLANA_SECRET_KEY_FORMAT) {
+  if (secretKeyFormat !== LOCAL_SOLANA_SECRET_KEY_FORMAT && secretKeyFormat !== LEGACY_LOCAL_SOLANA_SECRET_KEY_FORMAT) {
     throw new Error(`Unsupported local Solana secret key format: ${secretKeyFormat}`);
   }
 
-  const secretKey = Buffer.from(decryptSecret(encryptedSecretKey, encryptionSecret), LOCAL_SOLANA_SECRET_KEY_FORMAT);
+  const decryptedSecretKey = decryptSecret(encryptedSecretKey, encryptionSecret);
+  const secretKey = secretKeyFormat === LOCAL_SOLANA_SECRET_KEY_FORMAT
+    ? bs58.decode(decryptedSecretKey)
+    : Buffer.from(decryptedSecretKey, LEGACY_LOCAL_SOLANA_SECRET_KEY_FORMAT);
 
   return Keypair.fromSecretKey(secretKey);
 }

@@ -176,7 +176,12 @@ export function normalizeTradingWallet(value: unknown, fallbackNow = new Date().
     ? "local-solana"
     : "pumpportal-lightning";
   const kind = record.kind === "local-solana" || record.kind === "pumpportal-lightning" ? record.kind : provider;
-  const secretKeyFormat = record.secretKeyFormat === "base64" || record.secret_key_format === "base64" ? "base64" : undefined;
+  const secretKeyFormat =
+    record.secretKeyFormat === "base58" || record.secret_key_format === "base58"
+      ? "base58"
+      : record.secretKeyFormat === "base64" || record.secret_key_format === "base64"
+        ? "base64"
+        : undefined;
 
   if (!publicKey || (!encryptedApiKey && !encryptedSecretKey)) {
     return null;
@@ -755,6 +760,59 @@ export function createSubscriberStore({
       });
       await save();
       return true;
+    },
+    async removeTradingWallet(chatId, publicKey) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const tradingWallets = dedupeTradingWallets(existing.tradingWallets?.length ? existing.tradingWallets : existing.tradingWallet ? [existing.tradingWallet] : []);
+      const nextWallets = tradingWallets.filter((wallet) => wallet.publicKey !== publicKey);
+
+      if (nextWallets.length === tradingWallets.length) {
+        return false;
+      }
+
+      const activeWallet = existing.tradingWallet && existing.tradingWallet.publicKey !== publicKey
+        ? nextWallets.find((wallet) => wallet.publicKey === existing.tradingWallet?.publicKey) || nextWallets[0] || null
+        : nextWallets[0] || null;
+
+      subscribers.set(normalized, {
+        ...existing,
+        tradingWallet: activeWallet,
+        tradingWallets: nextWallets,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return true;
+    },
+    async removeAllTradingWallets(chatId) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return 0;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const tradingWallets = dedupeTradingWallets(existing.tradingWallets?.length ? existing.tradingWallets : existing.tradingWallet ? [existing.tradingWallet] : []);
+
+      if (tradingWallets.length === 0) {
+        return 0;
+      }
+
+      subscribers.set(normalized, {
+        ...existing,
+        tradingWallet: null,
+        tradingWallets: [],
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return tradingWallets.length;
     },
     getTradingWallet(chatId) {
       return subscribers.get(String(chatId))?.tradingWallet || null;

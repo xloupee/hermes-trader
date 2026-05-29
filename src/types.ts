@@ -170,6 +170,7 @@ export interface TelegramReplyMarkup {
 
 export interface TelegramInlineKeyboardButton {
   text: string;
+  url?: string;
   callback_data?: string;
   copy_text?: {
     text: string;
@@ -369,6 +370,12 @@ export interface TransactionAnalysis {
   senders: TransactionAccountChange[];
 }
 
+export interface TokenSocialLinks {
+  twitterUrl: string | null;
+  telegramUrl: string | null;
+  websiteUrl: string | null;
+}
+
 export interface MigrationData {
   observedAt: string;
   eventType: string | null;
@@ -400,6 +407,7 @@ export interface MigrationData {
   pumpFunUrl: string | null;
   solscanTokenUrl: string | null;
   solscanTxUrl: string | null;
+  socialLinks: TokenSocialLinks;
   metadata: LooseRecord;
   tokenInfo: LooseRecord;
   raw: LooseRecord;

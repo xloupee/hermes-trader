@@ -432,8 +432,10 @@ test("copytrade settings callback toggles buy-pressure sells and saves timeout",
   const toggleReplies = await runUpdates([callbackUpdate("copytrade:settings:buy_pressure_toggle")]);
   assert.equal(subscribers.get("chat-1")?.copyTradeBuyPressureSellEnabled, true);
   assert.match(toggleReplies.at(-1).text, /Buy-pressure sell is now on/);
-  assert.match(toggleReplies.at(-1).text, /Status: On/);
-  assert.match(toggleReplies.at(-1).text, /Timeout: Inherited 5s/);
+  assert.match(toggleReplies.at(-1).text, /<b>📈 Buy-Pressure Sell<\/b>\n├ Status: On/);
+  assert.match(toggleReplies.at(-1).text, /├ Status: On/);
+  assert.match(toggleReplies.at(-1).text, /├ Timeout: Inherited 5s/);
+  assert.match(toggleReplies.at(-1).text, /└ Bot gate: Enabled/);
   assert.deepEqual(
     toggleReplies.at(-1).reply_markup.inline_keyboard.some((row) =>
       row.some((button) => button.text === "☑ Enabled")
@@ -456,14 +458,15 @@ test("copytrade settings callback toggles buy-pressure sells and saves timeout",
   ]);
   assert.equal(subscribers.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, 5000);
   assert.match(timeoutReplies.at(-1).text, /Buy-pressure timeout saved:<\/b> 5s/);
-  assert.match(timeoutReplies.at(-1).text, /Timeout: Custom 5s/);
+  assert.match(timeoutReplies.at(-1).text, /├ Timeout: Custom 5s/);
 
   const resetReplies = await runUpdates([callbackUpdate("copytrade:settings:reset", 20)]);
   assert.equal(subscribers.get("chat-1")?.copyTradeBuyPressureSellEnabled, false);
   assert.equal(subscribers.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, null);
   assert.match(resetReplies.at(-1).text, /Execution settings reset to inherited defaults/);
-  assert.match(resetReplies.at(-1).text, /Status: Off/);
-  assert.match(resetReplies.at(-1).text, /Timeout: Inherited 5s/);
+  assert.match(resetReplies.at(-1).text, /├ Status: Off/);
+  assert.match(resetReplies.at(-1).text, /├ Timeout: Inherited 5s/);
+  assert.match(resetReplies.at(-1).text, /└ Bot gate: Enabled/);
 });
 
 test("PumpPortal Lightning wallet helpers parse, encrypt, and execute requests", async () => {

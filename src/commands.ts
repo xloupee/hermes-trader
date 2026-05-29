@@ -2810,12 +2810,8 @@ export function createTelegramCommandPoller({
           { text: "⚙️ Settings", callback_data: "copytrade:settings" }
         ],
         [
-          { text: "⏹️ Stop Copy Trading", callback_data: "copytrade:stop" },
+          { text: "⏹️ Stops", callback_data: "copytrade:stop" },
           { text: "📋 List Wallets", callback_data: "copytrade:wallets" }
-        ],
-        [
-          { text: "🚨 Emergency Stop", callback_data: "copytrade:emergency_stop" },
-          { text: "🟢 Clear Stop", callback_data: "copytrade:emergency_resume" }
         ]
       ]
     };
@@ -2910,10 +2906,9 @@ export function createTelegramCommandPoller({
       : "Custom";
     const text = [
       "<b>📈 Buy-Pressure Sell</b>",
-      "",
-      `Status: ${subscriber?.copyTradeBuyPressureSellEnabled ? "On" : "Off"}`,
-      `Timeout: ${timeoutSource} ${formatDuration(timeoutMs)}`,
-      `Bot gate: ${config.copyTradeBuyPressureSellEnabled ? "Enabled" : "Disabled"}`,
+      `├ Status: ${subscriber?.copyTradeBuyPressureSellEnabled ? "On" : "Off"}`,
+      `├ Timeout: ${timeoutSource} ${formatDuration(timeoutMs)}`,
+      `└ Bot gate: ${config.copyTradeBuyPressureSellEnabled ? "Enabled" : "Disabled"}`,
       "",
       "When enabled, the bot watches copied tokens after entry and can sell on buy pressure or timeout."
     ].join("\n");
@@ -3016,25 +3011,40 @@ export function createTelegramCommandPoller({
 
   function copyTradeStopPicker(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
     const wallets = subscribers?.listCopyTradeWallets(chatId) || [];
+    const liveStopControls = [
+      [
+        { text: "🚨 Emergency Stop", callback_data: "copytrade:emergency_stop" },
+        { text: "🟢 Clear Stop", callback_data: "copytrade:emergency_resume" }
+      ]
+    ];
 
     if (wallets.length === 0) {
       return {
-        text: "Copy trading is already stopped. Add a Copytrade Wallet to turn it back on.",
+        text: [
+          "<b>⏹️ Stop Controls</b>",
+          "",
+          "No Copytrade Wallets are active.",
+          "Use Emergency Stop to pause live submissions without changing saved setup."
+        ].join("\n"),
         replyMarkup: {
-          inline_keyboard: [[{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]]
+          inline_keyboard: [
+            ...liveStopControls,
+            [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]
+          ]
         }
       };
     }
 
     return {
       text: [
-        "<b>⏹️ Stop Copy Trading</b>",
+        "<b>⏹️ Stop Controls</b>",
         "",
-        "Choose the target wallet you want to stop copytrading.",
-        "Your trading wallet, amount, and execution settings stay saved."
+        "Use Emergency Stop to pause live submissions without changing saved setup.",
+        "Or choose a target wallet to stop copytrading that wallet only."
       ].join("\n"),
       replyMarkup: {
         inline_keyboard: [
+          ...liveStopControls,
           ...wallets.map((wallet, index) => [
             {
               text: `⏹️ ${formatCopyTradeWalletSummary(wallet)}`,

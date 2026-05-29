@@ -248,6 +248,7 @@ const config: BotConfig = {
   transactionFlowEnabled: process.env.TRANSACTION_FLOW_ENABLED === "true",
   transactionAccountLabels: process.env.TRANSACTION_ACCOUNT_LABELS,
   shutdownReason: process.env.BOT_SHUTDOWN_REASON,
+  notifyOnShutdown: process.env.BOT_NOTIFY_ON_SHUTDOWN === "true",
   copyTradeEnabled: process.env.COPY_TRADE_ENABLED === "true",
   copyTradeDryRun: process.env.COPY_TRADE_DRY_RUN !== "false",
   copyTradeExecutionProvider: parseTradeExecutionProvider(rawCopyTradeExecutionProvider),
@@ -1598,7 +1599,8 @@ async function sendCopyTradeSimulationAlert(
             mint: trade.mint,
             amountSol,
             provider: trade.provider,
-            request
+            request,
+            retryFailed: subscriber.copyTradeRetryFailedBuys
           });
         } catch (error) {
           const reason = `copy buy idempotency claim failed: ${errorMessage(error)}`;
@@ -1615,10 +1617,19 @@ async function sendCopyTradeSimulationAlert(
 
         if (!idempotencyClaim.claimed) {
           const existing = idempotencyClaim.existing;
-          const reason = existing
-            ? `copy buy coin was already handled (${existing.status})`
-            : "copy buy coin was already handled";
+          const reason = existing?.status === "failed" && !subscriber.copyTradeRetryFailedBuys
+            ? "copy buy coin was already handled (failed); enable Retry failed copy buys in /copytrade settings to retry failed same-token buys"
+            : existing
+              ? `copy buy coin was already handled (${existing.status})`
+              : "copy buy coin was already handled";
           skipWithLatencyLog(reason);
+          await notifySkippedAutoCopyBuy({
+            subscriber,
+            trade,
+            copyTradeWallet,
+            request,
+            reason
+          });
           console.warn(
             `Skipping duplicate auto copy buy for ${subscriber.chatId}:${trade.mint}: coin already handled`
           );
@@ -1816,7 +1827,8 @@ async function sendCopyTradeSimulationAlert(
           mint,
           amountSol,
           provider: trade.provider,
-          request
+          request,
+          retryFailed: subscriber.copyTradeRetryFailedBuys
         }).then(async (idempotencyClaim) => {
           if (!idempotencyClaim.claimed) {
             console.warn(
@@ -2785,10 +2797,14 @@ async function notifySubscribers(text: string): Promise<void> {
 
 function shutdownMessage(): string {
   if (config.shutdownReason === "deploy") {
-    return "<b>Bot stopped for an update, please restart the bot.</b>";
+    return "<b>Bot is restarting for an update.</b>";
   }
 
   return "<b>Bot stopped.</b>";
+}
+
+function shouldNotifySubscribersOnShutdown(): boolean {
+  return config.notifyOnShutdown;
 }
 
 async function getTransactionAnalysis(event: LooseRecord): Promise<TransactionAnalysis | null> {
@@ -3127,7 +3143,7 @@ async function shutdown(): Promise<void> {
   trailingSellTimers.clear();
   await heliusWebhookServer.stop();
 
-  if (config.telegramToken && subscribers.count() > 0) {
+  if (shouldNotifySubscribersOnShutdown() && config.telegramToken && subscribers.count() > 0) {
     await notifySubscribers(shutdownMessage());
   }
 

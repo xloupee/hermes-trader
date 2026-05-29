@@ -26,6 +26,7 @@ COPYFILE_DISABLE=1 tar \
   --exclude='logs' \
   --exclude='data' \
   --exclude='.DS_Store' \
+  --exclude='jito-shredstream-keypair.json' \
   -czf - . |
   ssh "$VPS_HOST" "
     set -euo pipefail

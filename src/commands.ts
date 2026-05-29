@@ -405,6 +405,7 @@ export function formatCopyTradeDashboardText({
   buyPriorityFeeSol = DEFAULT_COPY_TRADE_PRIORITY_FEE,
   sellSlippagePercent = DEFAULT_COPY_TRADE_SLIPPAGE,
   sellPriorityFeeSol = DEFAULT_COPY_TRADE_PRIORITY_FEE,
+  retryFailedCopyBuys = false,
   now = new Date()
 }: {
   tradingWalletPublicKey: string | null;
@@ -414,6 +415,7 @@ export function formatCopyTradeDashboardText({
   buyPriorityFeeSol?: number;
   sellSlippagePercent?: number;
   sellPriorityFeeSol?: number;
+  retryFailedCopyBuys?: boolean;
   now?: Date;
 }): string {
   const ready = Boolean(tradingWalletPublicKey && copyAmountSol && copyTradeWallets.length > 0);
@@ -437,6 +439,7 @@ export function formatCopyTradeDashboardText({
     `<b>💰 Copy Amount:</b> ${copyAmountSol ? `${formatSolAmount(copyAmountSol)} SOL` : "Not set"}`,
     `<b>⚙️ Buy:</b> ${formatPercent(buySlippagePercent)}% slip / ${formatSolAmount(buyPriorityFeeSol)} SOL priority`,
     `<b>⚙️ Sell:</b> ${formatPercent(sellSlippagePercent)}% slip / ${formatSolAmount(sellPriorityFeeSol)} SOL priority`,
+    `<b>🔁 Retry Failed Buys:</b> ${retryFailedCopyBuys ? "On" : "Off"}`,
     "",
     `<b>🎯 Copytrade Wallets:</b> ${copyTradeWallets.length}`,
     ...walletLines,
@@ -1172,6 +1175,41 @@ export function createTelegramCommandPoller({
 
       const dashboard = copyTradeSettingsDashboard(chatId);
       await reply(chatId, `<b>Execution settings reset to inherited defaults.</b>\n\n${dashboard.text}`, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data === "copytrade:settings:retry_failed_buys") {
+      const subscriber = subscribers?.get(chatId) || null;
+      const enabled = !(subscriber?.copyTradeRetryFailedBuys === true);
+      let updated = false;
+
+      try {
+        updated = await subscribers?.setCopyTradeRetryFailedBuys(chatId, enabled) || false;
+      } catch (error) {
+        console.warn(`Could not save retry failed copy buys setting for ${chatId}: ${errorMessage(error)}`);
+        await reply(
+          chatId,
+          [
+            "<b>Retry failed copy buys could not be saved.</b>",
+            "",
+            "Apply the latest Supabase migration and refresh the schema cache, then try again.",
+            `<code>${escapeHtml(errorMessage(error))}</code>`
+          ].join("\n")
+        );
+        return;
+      }
+
+      if (!updated) {
+        await reply(chatId, verificationPrompt());
+        return;
+      }
+
+      const dashboard = copyTradeSettingsDashboard(chatId);
+      await reply(
+        chatId,
+        `<b>Retry failed copy buys is now ${enabled ? "on" : "off"}.</b>\n\n${dashboard.text}`,
+        dashboard.replyMarkup
+      );
       return;
     }
 
@@ -2651,7 +2689,8 @@ export function createTelegramCommandPoller({
       buySlippagePercent: effectiveBuySlippage(subscriber, config),
       buyPriorityFeeSol: effectiveBuyPriorityFee(subscriber, config),
       sellSlippagePercent: effectiveSellSlippage(subscriber, config),
-      sellPriorityFeeSol: effectiveSellPriorityFee(subscriber, config)
+      sellPriorityFeeSol: effectiveSellPriorityFee(subscriber, config),
+      retryFailedCopyBuys: subscriber?.copyTradeRetryFailedBuys === true
     });
 
     return {
@@ -2711,6 +2750,9 @@ export function createTelegramCommandPoller({
       `├ Slippage: ${formatPercent(effectiveSellSlippage(subscriber, config))}% (${settingSource(subscriber?.copyTradeSellSlippagePercent)})`,
       `└ Priority: ${formatSolAmount(effectiveSellPriorityFee(subscriber, config))} SOL (${settingSource(subscriber?.copyTradeSellPriorityFeeSol)})`,
       "",
+      "<b>🔁 Retry Failed Buys</b>",
+      `└ Failed same-token retries: ${subscriber?.copyTradeRetryFailedBuys ? "On" : "Off"}`,
+      "",
       `🕒 Last updated: ${formatDashboardTime(new Date())}`
     ].join("\n");
 
@@ -2725,6 +2767,12 @@ export function createTelegramCommandPoller({
           [
             { text: "🔴 Sell Slippage", callback_data: "copytrade:settings:sell_slippage" },
             { text: "🔴 Sell Priority", callback_data: "copytrade:settings:sell_priority" }
+          ],
+          [
+            {
+              text: `${subscriber?.copyTradeRetryFailedBuys ? "☑" : "☐"} Retry Failed Buys`,
+              callback_data: "copytrade:settings:retry_failed_buys"
+            }
           ],
           [{ text: "♻️ Reset Defaults", callback_data: "copytrade:settings:reset" }],
           [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]

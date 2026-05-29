@@ -35,6 +35,7 @@ export interface SubscriberRow {
   copy_trade_buy_priority_fee_sol?: string | number | null;
   copy_trade_sell_slippage_percent?: string | number | null;
   copy_trade_sell_priority_fee_sol?: string | number | null;
+  copy_trade_retry_failed_buys?: boolean | null;
   copy_target_wallet_address: string | null;
   active_trading_wallet_public_key?: string | null;
   verified_at: string;
@@ -131,8 +132,11 @@ function numericValue(value: string | number | null): number | null {
   return Number.isFinite(number) ? number : null;
 }
 
-function subscriberRow(record: SubscriberRecord): Omit<SubscriberRow, "telegram_watched_wallets"> {
-  return {
+function subscriberRow(
+  record: SubscriberRecord,
+  { includeRetryFailedBuys = true }: { includeRetryFailedBuys?: boolean } = {}
+): Omit<SubscriberRow, "telegram_watched_wallets"> {
+  const row: Omit<SubscriberRow, "telegram_watched_wallets"> = {
     chat_id: record.chatId,
     mode: record.mode,
     copy_wallet_address: null,
@@ -142,11 +146,18 @@ function subscriberRow(record: SubscriberRecord): Omit<SubscriberRow, "telegram_
     copy_trade_buy_priority_fee_sol: record.copyTradeBuyPriorityFeeSol,
     copy_trade_sell_slippage_percent: record.copyTradeSellSlippagePercent,
     copy_trade_sell_priority_fee_sol: record.copyTradeSellPriorityFeeSol,
+    copy_trade_retry_failed_buys: record.copyTradeRetryFailedBuys,
     copy_target_wallet_address: record.copyTargetWalletAddress,
     active_trading_wallet_public_key: record.tradingWallet?.publicKey || null,
     verified_at: record.verifiedAt,
     updated_at: record.updatedAt
   };
+
+  if (!includeRetryFailedBuys) {
+    delete row.copy_trade_retry_failed_buys;
+  }
+
+  return row;
 }
 
 function watchedWalletRow(chatId: string, wallet: WatchedWallet): WatchedWalletRow {
@@ -373,6 +384,7 @@ export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
     copyTradeBuyPriorityFeeSol: numericValue(row.copy_trade_buy_priority_fee_sol ?? null),
     copyTradeSellSlippagePercent: numericValue(row.copy_trade_sell_slippage_percent ?? null),
     copyTradeSellPriorityFeeSol: numericValue(row.copy_trade_sell_priority_fee_sol ?? null),
+    copyTradeRetryFailedBuys: row.copy_trade_retry_failed_buys === true,
     copyTargetWalletAddress: legacyCopyTarget,
     verifiedAt: row.verified_at,
     updatedAt: row.updated_at
@@ -458,9 +470,9 @@ export function createSupabaseSubscriberRepository({
   return {
     async listSubscribers() {
       const subscriberSelect =
-        "chat_id,mode,copy_wallet_address,copy_wallet_addresses,copy_amount_sol,copy_trade_buy_slippage_percent,copy_trade_buy_priority_fee_sol,copy_trade_sell_slippage_percent,copy_trade_sell_priority_fee_sol,copy_target_wallet_address,active_trading_wallet_public_key,verified_at,updated_at";
+        "chat_id,mode,copy_wallet_address,copy_wallet_addresses,copy_amount_sol,copy_trade_buy_slippage_percent,copy_trade_buy_priority_fee_sol,copy_trade_sell_slippage_percent,copy_trade_sell_priority_fee_sol,copy_trade_retry_failed_buys,copy_target_wallet_address,active_trading_wallet_public_key,verified_at,updated_at";
       const legacySubscriberSelect =
-        "chat_id,mode,copy_wallet_address,copy_wallet_addresses,copy_amount_sol,copy_trade_buy_slippage_percent,copy_trade_buy_priority_fee_sol,copy_trade_sell_slippage_percent,copy_trade_sell_priority_fee_sol,copy_target_wallet_address,verified_at,updated_at";
+        "chat_id,mode,copy_wallet_address,copy_wallet_addresses,copy_amount_sol,copy_trade_buy_slippage_percent,copy_trade_buy_priority_fee_sol,copy_trade_sell_slippage_percent,copy_trade_sell_priority_fee_sol,copy_target_wallet_address,active_trading_wallet_public_key,verified_at,updated_at";
       const subscriberResult = await client
         .from("telegram_subscribers")
         .select(subscriberSelect)
@@ -527,7 +539,20 @@ export function createSupabaseSubscriberRepository({
         .sort((left, right) => left.chatId.localeCompare(right.chatId));
     },
     async upsertSubscriber(subscriber) {
-      const { error } = await client.from("telegram_subscribers").upsert(subscriberRow(subscriber), { onConflict: "chat_id" });
+      let { error } = await client.from("telegram_subscribers").upsert(subscriberRow(subscriber), { onConflict: "chat_id" });
+
+      if (isMissingSupabaseColumn(error)) {
+        if (subscriber.copyTradeRetryFailedBuys) {
+          const formattedError = formatSupabaseError(error);
+          throw formattedError || new Error("Supabase subscriber store request failed");
+        }
+
+        const fallbackResult = await client
+          .from("telegram_subscribers")
+          .upsert(subscriberRow(subscriber, { includeRetryFailedBuys: false }), { onConflict: "chat_id" });
+        error = fallbackResult.error;
+      }
+
       const formattedError = formatSupabaseError(error);
 
       if (formattedError) {
@@ -1244,6 +1269,24 @@ export function createSupabaseSubscriberStore({
       subscribers.set(normalized, next);
       return true;
     },
+    async setCopyTradeRetryFailedBuys(chatId, enabled) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const next = {
+        ...(subscribers.get(normalized) || makeSubscriber(normalized, null)),
+        copyTradeRetryFailedBuys: enabled,
+        updatedAt: new Date().toISOString()
+      };
+
+      await repository.upsertSubscriber(next);
+      subscribers.set(normalized, next);
+      return true;
+    },
     async resetCopyTradeExecutionSettings(chatId) {
       await load();
       const normalized = normalizeChatId(chatId);
@@ -1258,6 +1301,7 @@ export function createSupabaseSubscriberStore({
         copyTradeBuyPriorityFeeSol: null,
         copyTradeSellSlippagePercent: null,
         copyTradeSellPriorityFeeSol: null,
+        copyTradeRetryFailedBuys: false,
         updatedAt: new Date().toISOString()
       };
 

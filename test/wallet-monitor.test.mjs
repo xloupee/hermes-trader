@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   commandFromMessage,
+  createTelegramCommandPoller,
   formatCopyTradeDashboardText,
   formatStartDashboardText,
   helpText,
@@ -209,6 +210,7 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
   assert.match(dashboard, /💰 Copy Amount:<\/b> 0.5 SOL/);
   assert.match(dashboard, /⚙️ Buy:<\/b> 10% slip \/ 0.00005 SOL priority/);
   assert.match(dashboard, /⚙️ Sell:<\/b> 10% slip \/ 0.00005 SOL priority/);
+  assert.match(dashboard, /🔁 Retry Failed Buys:<\/b> Off/);
   assert.match(dashboard, /🎯 Copytrade Wallets:<\/b> 1/);
   assert.match(dashboard, /└ cented/);
   assert.doesNotMatch(dashboard, new RegExp(wallet));
@@ -231,13 +233,114 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
     buyPriorityFeeSol: 0.00012,
     sellSlippagePercent: 20,
     sellPriorityFeeSol: 0.0002,
+    retryFailedCopyBuys: true,
     now: new Date("2026-05-23T14:48:25.107Z")
   });
 
   assert.match(missing, /└ 39azUY\.\.\.5jUJjg/);
   assert.match(missing, /⚙️ Buy:<\/b> 12.5% slip \/ 0.00012 SOL priority/);
   assert.match(missing, /⚙️ Sell:<\/b> 20% slip \/ 0.0002 SOL priority/);
+  assert.match(missing, /🔁 Retry Failed Buys:<\/b> On/);
   assert.match(missing, /🔴 Setup is <b>inactive<\/b>/);
+});
+
+test("copytrade settings callback toggles retry failed buys and reset clears it", async () => {
+  const subscribers = createSubscriberStore({});
+  await subscribers.init();
+  await subscribers.add("chat-1");
+
+  async function runCallback(data) {
+    const originalFetch = globalThis.fetch;
+    const replies = [];
+    let updateServed = false;
+    let poller;
+
+    globalThis.fetch = async (url, init) => {
+      const href = String(url);
+
+      if (href.includes("/getMe")) {
+        return new Response(JSON.stringify({ ok: true, result: { username: "copybot" } }), { status: 200 });
+      }
+
+      if (href.includes("/deleteWebhook") || href.includes("/setMyCommands") || href.includes("/answerCallbackQuery")) {
+        return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+      }
+
+      if (href.includes("/getUpdates")) {
+        if (updateServed) {
+          poller?.stop();
+          return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+        }
+
+        updateServed = true;
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            result: [
+              {
+                update_id: 1,
+                callback_query: {
+                  id: "callback-1",
+                  data,
+                  message: {
+                    chat: {
+                      id: "chat-1",
+                      type: "private"
+                    }
+                  }
+                }
+              }
+            ]
+          }),
+          { status: 200 }
+        );
+      }
+
+      if (href.includes("/sendMessage")) {
+        replies.push(JSON.parse(String(init?.body)));
+        poller?.stop();
+        return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+      }
+
+      throw new Error(`Unexpected Telegram request: ${href}`);
+    };
+
+    try {
+      poller = createTelegramCommandPoller({
+        config: {
+          ...config,
+          telegramToken: "token"
+        },
+        testMessage: () => "",
+        subscribers
+      });
+      await poller.start();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    return replies;
+  }
+
+  const toggleReplies = await runCallback("copytrade:settings:retry_failed_buys");
+  assert.equal(subscribers.get("chat-1")?.copyTradeRetryFailedBuys, true);
+  assert.match(toggleReplies[0].text, /Retry failed copy buys is now on/);
+  assert.deepEqual(
+    toggleReplies[0].reply_markup.inline_keyboard.some((row) =>
+      row.some((button) => button.text === "☑ Retry Failed Buys")
+    ),
+    true
+  );
+
+  const resetReplies = await runCallback("copytrade:settings:reset");
+  assert.equal(subscribers.get("chat-1")?.copyTradeRetryFailedBuys, false);
+  assert.match(resetReplies[0].text, /Execution settings reset to inherited defaults/);
+  assert.deepEqual(
+    resetReplies[0].reply_markup.inline_keyboard.some((row) =>
+      row.some((button) => button.text === "☐ Retry Failed Buys")
+    ),
+    true
+  );
 });
 
 test("PumpPortal Lightning wallet helpers parse, encrypt, and execute requests", async () => {
@@ -379,8 +482,10 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(await store.setCopyTradeBuyPriorityFee("chat-1", 0.00012), true);
     assert.equal(await store.setCopyTradeSellSlippage("chat-1", 20), true);
     assert.equal(await store.setCopyTradeSellPriorityFee("chat-1", 0.0002), true);
+    assert.equal(await store.setCopyTradeRetryFailedBuys("chat-1", true), true);
     assert.equal(await store.setCopyTradeBuySlippage("chat-2", 12.5), false);
     assert.equal(await store.setCopyTradeSellPriorityFee("chat-2", 0.0002), false);
+    assert.equal(await store.setCopyTradeRetryFailedBuys("chat-2", true), false);
     assert.equal(store.get("chat-1")?.copyWalletAddress, otherWallet);
     assert.deepEqual(store.get("chat-1")?.copyWalletAddresses, [otherWallet, wallet]);
     assert.deepEqual(store.listCopyWallets("chat-1"), [otherWallet, wallet]);
@@ -389,6 +494,7 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(store.get("chat-1")?.copyTradeBuyPriorityFeeSol, 0.00012);
     assert.equal(store.get("chat-1")?.copyTradeSellSlippagePercent, 20);
     assert.equal(store.get("chat-1")?.copyTradeSellPriorityFeeSol, 0.0002);
+    assert.equal(store.get("chat-1")?.copyTradeRetryFailedBuys, true);
     assert.equal(store.getTradingWallet("chat-1")?.publicKey, otherWallet);
     assert.equal(store.getTradingWallet("chat-1")?.label, "Main Wallet");
     assert.equal(decryptSecret(store.getTradingWallet("chat-1")?.encryptedApiKey || "", encryptionSecret), "pump-key-alpha");
@@ -413,6 +519,7 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(reloaded.get("chat-1")?.copyTradeBuyPriorityFeeSol, 0.00012);
     assert.equal(reloaded.get("chat-1")?.copyTradeSellSlippagePercent, 20);
     assert.equal(reloaded.get("chat-1")?.copyTradeSellPriorityFeeSol, 0.0002);
+    assert.equal(reloaded.get("chat-1")?.copyTradeRetryFailedBuys, true);
     assert.equal(reloaded.getTradingWallet("chat-1")?.publicKey, otherWallet);
     assert.equal(reloaded.getTradingWallet("chat-1")?.label, "Main Wallet");
     assert.equal(await reloaded.renameTradingWallet("chat-1", null), true);
@@ -430,6 +537,7 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(reloaded.get("chat-1")?.copyTradeBuyPriorityFeeSol, null);
     assert.equal(reloaded.get("chat-1")?.copyTradeSellSlippagePercent, null);
     assert.equal(reloaded.get("chat-1")?.copyTradeSellPriorityFeeSol, null);
+    assert.equal(reloaded.get("chat-1")?.copyTradeRetryFailedBuys, false);
     assert.equal(await reloaded.resetCopyTradeExecutionSettings("chat-2"), false);
 
     assert.equal(await reloaded.unwatchWallet("chat-1", wallet), true);

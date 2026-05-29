@@ -207,10 +207,10 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
   assert.match(dashboard, /Automatically mirror trades from selected wallets in real time\./);
   assert.match(dashboard, /👛 Trading Wallet:/);
   assert.match(dashboard, /62qc2C\.\.\.fafNgV/);
-  assert.match(dashboard, /💰 Copy Amount:<\/b> 0.5 SOL/);
-  assert.match(dashboard, /⚙️ Buy:<\/b> 10% slip \/ 0.00005 SOL priority/);
-  assert.match(dashboard, /⚙️ Sell:<\/b> 10% slip \/ 0.00005 SOL priority/);
-  assert.match(dashboard, /🔁 Retry Failed Buys:<\/b> Off/);
+  assert.match(dashboard, /⚙️ Copy Settings<\/b>\n├ Copy Amount: 0.5 SOL/);
+  assert.match(dashboard, /├ Buy: 10% slip \/ 0.00005 SOL priority/);
+  assert.match(dashboard, /├ Sell: 10% slip \/ 0.00005 SOL priority/);
+  assert.match(dashboard, /└ Retry Failed Buys: Off/);
   assert.match(dashboard, /🎯 Copytrade Wallets:<\/b> 1/);
   assert.match(dashboard, /└ cented/);
   assert.doesNotMatch(dashboard, new RegExp(wallet));
@@ -238,9 +238,10 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
   });
 
   assert.match(missing, /└ 39azUY\.\.\.5jUJjg/);
-  assert.match(missing, /⚙️ Buy:<\/b> 12.5% slip \/ 0.00012 SOL priority/);
-  assert.match(missing, /⚙️ Sell:<\/b> 20% slip \/ 0.0002 SOL priority/);
-  assert.match(missing, /🔁 Retry Failed Buys:<\/b> On/);
+  assert.match(missing, /├ Copy Amount: Not set/);
+  assert.match(missing, /├ Buy: 12.5% slip \/ 0.00012 SOL priority/);
+  assert.match(missing, /├ Sell: 20% slip \/ 0.0002 SOL priority/);
+  assert.match(missing, /└ Retry Failed Buys: On/);
   assert.match(missing, /🔴 Setup is <b>inactive<\/b>/);
 });
 
@@ -334,6 +335,8 @@ test("copytrade settings callback toggles retry failed buys and reset clears it"
 
   const resetReplies = await runCallback("copytrade:settings:reset");
   assert.equal(subscribers.get("chat-1")?.copyTradeRetryFailedBuys, false);
+  assert.equal(subscribers.get("chat-1")?.copyTradeBuyPressureSellEnabled, false);
+  assert.equal(subscribers.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, null);
   assert.match(resetReplies[0].text, /Execution settings reset to inherited defaults/);
   assert.deepEqual(
     resetReplies[0].reply_markup.inline_keyboard.some((row) =>
@@ -341,6 +344,130 @@ test("copytrade settings callback toggles retry failed buys and reset clears it"
     ),
     true
   );
+});
+
+test("copytrade settings callback toggles buy-pressure sells and saves timeout", async () => {
+  const subscribers = createSubscriberStore({});
+  await subscribers.init();
+  await subscribers.add("chat-1");
+
+  async function runUpdates(updates, configOverrides = {}) {
+    const originalFetch = globalThis.fetch;
+    const replies = [];
+    let updateIndex = 0;
+    let poller;
+
+    globalThis.fetch = async (url, init) => {
+      const href = String(url);
+
+      if (href.includes("/getMe")) {
+        return new Response(JSON.stringify({ ok: true, result: { username: "copybot" } }), { status: 200 });
+      }
+
+      if (href.includes("/deleteWebhook") || href.includes("/setMyCommands") || href.includes("/answerCallbackQuery")) {
+        return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+      }
+
+      if (href.includes("/getUpdates")) {
+        if (updateIndex >= updates.length) {
+          poller?.stop();
+          return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+        }
+
+        const update = updates[updateIndex++];
+        return new Response(JSON.stringify({ ok: true, result: [update] }), { status: 200 });
+      }
+
+      if (href.includes("/sendMessage")) {
+        replies.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+      }
+
+      throw new Error(`Unexpected Telegram request: ${href}`);
+    };
+
+    try {
+      poller = createTelegramCommandPoller({
+        config: {
+          ...config,
+          copyTradeBuyPressureSellEnabled: true,
+          copyTradeBuyPressureSellTimeoutMs: 5000,
+          telegramToken: "token",
+          ...configOverrides
+        },
+        testMessage: () => "",
+        subscribers
+      });
+      await poller.start();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    return replies;
+  }
+
+  const callbackUpdate = (data, updateId = 1) => ({
+    update_id: updateId,
+    callback_query: {
+      id: `callback-${updateId}`,
+      data,
+      message: {
+        chat: {
+          id: "chat-1",
+          type: "private"
+        }
+      }
+    }
+  });
+  const messageUpdate = (text, updateId = 1) => ({
+    update_id: updateId,
+    message: {
+      text,
+      chat: {
+        id: "chat-1",
+        type: "private"
+      }
+    }
+  });
+
+  const toggleReplies = await runUpdates([callbackUpdate("copytrade:settings:buy_pressure_toggle")]);
+  assert.equal(subscribers.get("chat-1")?.copyTradeBuyPressureSellEnabled, true);
+  assert.match(toggleReplies.at(-1).text, /Buy-pressure sell is now on/);
+  assert.match(toggleReplies.at(-1).text, /<b>📈 Buy-Pressure Sell<\/b>\n├ Status: On/);
+  assert.match(toggleReplies.at(-1).text, /├ Status: On/);
+  assert.match(toggleReplies.at(-1).text, /├ Timeout: Inherited 5s/);
+  assert.match(toggleReplies.at(-1).text, /└ Bot gate: Enabled/);
+  assert.deepEqual(
+    toggleReplies.at(-1).reply_markup.inline_keyboard.some((row) =>
+      row.some((button) => button.text === "☑ Enabled")
+    ),
+    true
+  );
+
+  const settingsReplies = await runUpdates([callbackUpdate("copytrade:settings", 5)]);
+  assert.deepEqual(
+    settingsReplies.at(-1).reply_markup.inline_keyboard.some((row) =>
+      row.some((button) => button.text === "☑ Buy-Pressure Sell · 5s")
+    ),
+    true
+  );
+
+  const timeoutReplies = await runUpdates([
+    callbackUpdate("copytrade:settings:buy_pressure_timeout", 10),
+    messageUpdate("5", 11),
+    callbackUpdate("copytrade:confirm_pending", 12)
+  ]);
+  assert.equal(subscribers.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, 5000);
+  assert.match(timeoutReplies.at(-1).text, /Buy-pressure timeout saved:<\/b> 5s/);
+  assert.match(timeoutReplies.at(-1).text, /├ Timeout: Custom 5s/);
+
+  const resetReplies = await runUpdates([callbackUpdate("copytrade:settings:reset", 20)]);
+  assert.equal(subscribers.get("chat-1")?.copyTradeBuyPressureSellEnabled, false);
+  assert.equal(subscribers.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, null);
+  assert.match(resetReplies.at(-1).text, /Execution settings reset to inherited defaults/);
+  assert.match(resetReplies.at(-1).text, /├ Status: Off/);
+  assert.match(resetReplies.at(-1).text, /├ Timeout: Inherited 5s/);
+  assert.match(resetReplies.at(-1).text, /└ Bot gate: Enabled/);
 });
 
 test("PumpPortal Lightning wallet helpers parse, encrypt, and execute requests", async () => {
@@ -483,9 +610,13 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(await store.setCopyTradeSellSlippage("chat-1", 20), true);
     assert.equal(await store.setCopyTradeSellPriorityFee("chat-1", 0.0002), true);
     assert.equal(await store.setCopyTradeRetryFailedBuys("chat-1", true), true);
+    assert.equal(await store.setCopyTradeBuyPressureSellEnabled("chat-1", true), true);
+    assert.equal(await store.setCopyTradeBuyPressureSellTimeoutMs("chat-1", 5000), true);
     assert.equal(await store.setCopyTradeBuySlippage("chat-2", 12.5), false);
     assert.equal(await store.setCopyTradeSellPriorityFee("chat-2", 0.0002), false);
     assert.equal(await store.setCopyTradeRetryFailedBuys("chat-2", true), false);
+    assert.equal(await store.setCopyTradeBuyPressureSellEnabled("chat-2", true), false);
+    assert.equal(await store.setCopyTradeBuyPressureSellTimeoutMs("chat-2", 5000), false);
     assert.equal(store.get("chat-1")?.copyWalletAddress, otherWallet);
     assert.deepEqual(store.get("chat-1")?.copyWalletAddresses, [otherWallet, wallet]);
     assert.deepEqual(store.listCopyWallets("chat-1"), [otherWallet, wallet]);
@@ -495,6 +626,8 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(store.get("chat-1")?.copyTradeSellSlippagePercent, 20);
     assert.equal(store.get("chat-1")?.copyTradeSellPriorityFeeSol, 0.0002);
     assert.equal(store.get("chat-1")?.copyTradeRetryFailedBuys, true);
+    assert.equal(store.get("chat-1")?.copyTradeBuyPressureSellEnabled, true);
+    assert.equal(store.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, 5000);
     assert.equal(store.getTradingWallet("chat-1")?.publicKey, otherWallet);
     assert.equal(store.getTradingWallet("chat-1")?.label, "Main Wallet");
     assert.equal(decryptSecret(store.getTradingWallet("chat-1")?.encryptedApiKey || "", encryptionSecret), "pump-key-alpha");
@@ -520,6 +653,8 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(reloaded.get("chat-1")?.copyTradeSellSlippagePercent, 20);
     assert.equal(reloaded.get("chat-1")?.copyTradeSellPriorityFeeSol, 0.0002);
     assert.equal(reloaded.get("chat-1")?.copyTradeRetryFailedBuys, true);
+    assert.equal(reloaded.get("chat-1")?.copyTradeBuyPressureSellEnabled, true);
+    assert.equal(reloaded.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, 5000);
     assert.equal(reloaded.getTradingWallet("chat-1")?.publicKey, otherWallet);
     assert.equal(reloaded.getTradingWallet("chat-1")?.label, "Main Wallet");
     assert.equal(await reloaded.renameTradingWallet("chat-1", null), true);
@@ -538,6 +673,8 @@ test("subscriber store persists per-chat watched wallets with labels", async () 
     assert.equal(reloaded.get("chat-1")?.copyTradeSellSlippagePercent, null);
     assert.equal(reloaded.get("chat-1")?.copyTradeSellPriorityFeeSol, null);
     assert.equal(reloaded.get("chat-1")?.copyTradeRetryFailedBuys, false);
+    assert.equal(reloaded.get("chat-1")?.copyTradeBuyPressureSellEnabled, false);
+    assert.equal(reloaded.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, null);
     assert.equal(await reloaded.resetCopyTradeExecutionSettings("chat-2"), false);
 
     assert.equal(await reloaded.unwatchWallet("chat-1", wallet), true);

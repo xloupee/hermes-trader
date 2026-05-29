@@ -91,6 +91,12 @@ export interface BotConfig extends MigrationFormatConfig {
   copyTradeTrailingSellTrailPercent: number;
   copyTradeTrailingSellIntervalMs: number;
   copyTradeTrailingSellMaxBuilds: number;
+  copyTradeBuyPressureSellEnabled: boolean;
+  copyTradeBuyPressureSellPercent: number;
+  copyTradeBuyPressureSellTimeoutMs: number;
+  copyTradeBuyPressureSellMinBuys: number;
+  copyTradeBuyPressureSellMinTotalSol: number;
+  copyTradeBuyPressureSellStatePath: string;
   directExecutionEnabled: boolean;
   directExecutionLiveEnabled: boolean;
   directExecutionBuildOnly: boolean;
@@ -131,6 +137,8 @@ export interface LegacyBotConfig extends MigrationFormatConfig {
   copyTradeAllowedSources?: string[];
   copyTradeMaxSlippage?: number;
   copyTradeMaxPriorityFee?: number;
+  copyTradeBuyPressureSellEnabled?: boolean;
+  copyTradeBuyPressureSellTimeoutMs?: number;
   getModeLabel?: () => string;
   pumpPortalSubscriptionMethod?: string;
 }
@@ -213,6 +221,8 @@ export interface SubscriberStore {
   setCopyTradeSellSlippage: (chatId: TelegramChatId, percent: number) => Promise<boolean>;
   setCopyTradeSellPriorityFee: (chatId: TelegramChatId, sol: number) => Promise<boolean>;
   setCopyTradeRetryFailedBuys: (chatId: TelegramChatId, enabled: boolean) => Promise<boolean>;
+  setCopyTradeBuyPressureSellEnabled: (chatId: TelegramChatId, enabled: boolean) => Promise<boolean>;
+  setCopyTradeBuyPressureSellTimeoutMs: (chatId: TelegramChatId, timeoutMs: number | null) => Promise<boolean>;
   resetCopyTradeExecutionSettings: (chatId: TelegramChatId) => Promise<boolean>;
   setCopyTargetWallet: (chatId: TelegramChatId, address: string | null) => Promise<boolean>;
   listWatchedWallets: (chatId: TelegramChatId) => WatchedWallet[];
@@ -237,6 +247,8 @@ export interface SubscriberRecord {
   copyTradeSellSlippagePercent: number | null;
   copyTradeSellPriorityFeeSol: number | null;
   copyTradeRetryFailedBuys: boolean;
+  copyTradeBuyPressureSellEnabled: boolean;
+  copyTradeBuyPressureSellTimeoutMs: number | null;
   copyTargetWalletAddress: string | null;
   verifiedAt: string;
   updatedAt: string;

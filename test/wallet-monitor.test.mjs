@@ -436,7 +436,15 @@ test("copytrade settings callback toggles buy-pressure sells and saves timeout",
   assert.match(toggleReplies.at(-1).text, /Timeout: Inherited 5s/);
   assert.deepEqual(
     toggleReplies.at(-1).reply_markup.inline_keyboard.some((row) =>
-      row.some((button) => button.text === "☑ Buy-Pressure Sell")
+      row.some((button) => button.text === "☑ Enabled")
+    ),
+    true
+  );
+
+  const settingsReplies = await runUpdates([callbackUpdate("copytrade:settings", 5)]);
+  assert.deepEqual(
+    settingsReplies.at(-1).reply_markup.inline_keyboard.some((row) =>
+      row.some((button) => button.text === "☑ Buy-Pressure Sell · 5s")
     ),
     true
   );

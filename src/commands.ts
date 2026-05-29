@@ -1178,6 +1178,12 @@ export function createTelegramCommandPoller({
       return;
     }
 
+    if (data === "copytrade:settings:buy_pressure") {
+      const dashboard = copyTradeBuyPressureSettingsDashboard(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
     if (data === "copytrade:settings:buy_pressure_toggle") {
       const subscriber = subscribers?.get(chatId) || null;
       const enabled = !(subscriber?.copyTradeBuyPressureSellEnabled === true);
@@ -1204,7 +1210,7 @@ export function createTelegramCommandPoller({
         return;
       }
 
-      const dashboard = copyTradeSettingsDashboard(chatId);
+      const dashboard = copyTradeBuyPressureSettingsDashboard(chatId);
       await reply(
         chatId,
         `<b>Buy-pressure sell is now ${enabled ? "on" : "off"}.</b>\n\n${dashboard.text}`,
@@ -2572,7 +2578,7 @@ export function createTelegramCommandPoller({
       return { text: verificationPrompt() };
     }
 
-    const dashboard = copyTradeSettingsDashboard(chatId);
+    const dashboard = copyTradeBuyPressureSettingsDashboard(chatId);
     return {
       text: `<b>Buy-pressure timeout saved:</b> ${formatDuration(timeoutMs)}\n\n${dashboard.text}`,
       replyMarkup: dashboard.replyMarkup
@@ -2875,13 +2881,55 @@ export function createTelegramCommandPoller({
           ],
           [
             {
-              text: `${subscriber?.copyTradeBuyPressureSellEnabled ? "☑" : "☐"} Buy-Pressure Sell`,
-              callback_data: "copytrade:settings:buy_pressure_toggle"
-            },
-            { text: "⏱️ Sell Timeout", callback_data: "copytrade:settings:buy_pressure_timeout" }
+              text: `${subscriber?.copyTradeBuyPressureSellEnabled ? "☑" : "☐"} Buy-Pressure Sell · ${formatDuration(buyPressureTimeoutMs)}`,
+              callback_data: "copytrade:settings:buy_pressure"
+            }
           ],
           [{ text: "♻️ Reset Defaults", callback_data: "copytrade:settings:reset" }],
           [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]
+        ]
+      }
+    };
+  }
+
+  function copyTradeBuyPressureSettingsDashboard(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return {
+        text: gate,
+        replyMarkup: copyTradeDashboardReplyMarkup()
+      };
+    }
+
+    const subscriber = subscribers?.get(chatId) || null;
+    const timeoutMs = effectiveBuyPressureTimeoutMs(subscriber, config);
+    const timeoutSource = subscriber?.copyTradeBuyPressureSellTimeoutMs === null ||
+      subscriber?.copyTradeBuyPressureSellTimeoutMs === undefined
+      ? "Inherited"
+      : "Custom";
+    const text = [
+      "<b>📈 Buy-Pressure Sell</b>",
+      "",
+      `Status: ${subscriber?.copyTradeBuyPressureSellEnabled ? "On" : "Off"}`,
+      `Timeout: ${timeoutSource} ${formatDuration(timeoutMs)}`,
+      `Bot gate: ${config.copyTradeBuyPressureSellEnabled ? "Enabled" : "Disabled"}`,
+      "",
+      "When enabled, the bot watches copied tokens after entry and can sell on buy pressure or timeout."
+    ].join("\n");
+
+    return {
+      text,
+      replyMarkup: {
+        inline_keyboard: [
+          [
+            {
+              text: subscriber?.copyTradeBuyPressureSellEnabled ? "☑ Enabled" : "☐ Enabled",
+              callback_data: "copytrade:settings:buy_pressure_toggle"
+            }
+          ],
+          [{ text: `⏱️ Timeout · ${formatDuration(timeoutMs)}`, callback_data: "copytrade:settings:buy_pressure_timeout" }],
+          [{ text: "↩️ Back", callback_data: "copytrade:settings" }]
         ]
       }
     };

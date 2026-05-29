@@ -27,6 +27,7 @@ import {
 } from "./copytrade-idempotency.js";
 import { createCopyTradeLatencyClock, createCopyTradeLatencyTracker } from "./copytrade-latency.js";
 import { buildDirectSolanaPayload, sendSolanaDirectTransaction, simulateSolanaDirectTransaction } from "./direct-solana.js";
+import type { DirectSolanaSendStage } from "./direct-solana.js";
 import type { DirectTransactionPayload } from "./direct-pump.js";
 import { createHeliusWebhookServer, missingHeliusConfigWarning, syncHeliusWebhook } from "./helius.js";
 import { heliusEventMentionsWatchedWallet, isHeliusSwapEvent, normalizeHeliusSwapData } from "./helius-swaps.js";
@@ -75,6 +76,7 @@ import type {
   AlertModeValue,
   BotConfig,
   CopyTradeExecutionRecord,
+  CopyTradeExecutionStatus,
   LooseRecord,
   MigrationData,
   PumpPortalLightningTradeRequest,
@@ -87,7 +89,7 @@ import type {
   WalletTradeData,
   WatchedWallet
 } from "./types.js";
-import type { CopyTradeLatencyMilestoneDetails, CopyTradeLatencyTracker } from "./copytrade-latency.js";
+import type { CopyTradeLatencyMilestone, CopyTradeLatencyMilestoneDetails, CopyTradeLatencyTracker } from "./copytrade-latency.js";
 
 function numberFromEnv(value: string | undefined, fallback: number): number {
   const number = Number(value);
@@ -143,6 +145,67 @@ function pumpPortalPoolFromEnv(value: string | undefined): PumpPortalTradePool {
     value === "bonk"
     ? value
     : "auto";
+}
+
+function directExecutionConfirmationModeFromEnv(value: string | undefined): BotConfig["directExecutionConfirmationMode"] {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "background" || normalized === "async" ? "background" : "inline";
+}
+
+function copyTradeLatencyMilestoneForDirectStage(stage: DirectSolanaSendStage): CopyTradeLatencyMilestone | null {
+  if (stage === "transaction_build_started") {
+    return "direct_build_started";
+  }
+
+  if (stage === "transaction_built") {
+    return "direct_build_finished";
+  }
+
+  if (stage === "blockhash_started") {
+    return "direct_blockhash_started";
+  }
+
+  if (stage === "blockhash_received") {
+    return "direct_blockhash_received";
+  }
+
+  if (stage === "signing_started") {
+    return "direct_signing_started";
+  }
+
+  if (stage === "signing_finished") {
+    return "direct_signing_finished";
+  }
+
+  if (stage === "simulation_started") {
+    return "direct_simulate_started";
+  }
+
+  if (stage === "simulation_finished") {
+    return "direct_simulate_finished";
+  }
+
+  if (stage === "raw_send_started") {
+    return "direct_raw_send_started";
+  }
+
+  if (stage === "signature_returned") {
+    return "direct_raw_signature_returned";
+  }
+
+  if (stage === "raw_send_failed") {
+    return "direct_raw_send_failed";
+  }
+
+  if (stage === "confirmation_started") {
+    return "direct_confirmation_started";
+  }
+
+  if (stage === "confirmation_finished") {
+    return "direct_confirmation_finished";
+  }
+
+  return null;
 }
 
 const rawCopyTradeExecutionProvider = process.env.COPY_TRADE_EXECUTION_PROVIDER || process.env.TRADE_EXECUTION_PROVIDER;
@@ -205,6 +268,7 @@ const config: BotConfig = {
   directExecutionBuildOnly: process.env.DIRECT_EXECUTION_BUILD_ONLY === "true",
   directExecutionSimulateOnly: process.env.DIRECT_EXECUTION_SIMULATE_ONLY === "true",
   directExecutionSkipPreflight: process.env.DIRECT_EXECUTION_SKIP_PREFLIGHT === "true",
+  directExecutionConfirmationMode: directExecutionConfirmationModeFromEnv(process.env.DIRECT_EXECUTION_CONFIRMATION_MODE),
   directExecutionMaxRetries: Math.floor(nonNegativeNumberFromEnv(process.env.DIRECT_EXECUTION_MAX_RETRIES, 3)),
   directExecutionCanaryChatIds: rawListFromEnv(process.env.DIRECT_EXECUTION_CANARY_CHAT_IDS),
   directExecutionCanaryWallets: rawListFromEnv(process.env.DIRECT_EXECUTION_CANARY_WALLETS),
@@ -221,6 +285,7 @@ const tokenInfoCache = new Map<string, LooseRecord | null>();
 const trailingSellTimers = new Set<NodeJS.Timeout>();
 const activeTrailingSellSchedules = new Set<string>();
 const copyBuySubmissionGuard = createCopyBuySubmissionGuard();
+const copyBuySemanticSubmissionGuard = createCopyBuySubmissionGuard();
 const copyTradeDailySolBudget = createInMemoryCopyTradeDailySolBudget();
 let isShuttingDown = false;
 let copyTradeEmergencyStopped = false;
@@ -257,6 +322,9 @@ const copyTradeBuyIdempotency =
     : createJsonCopyTradeBuyIdempotencyStore({
         path: copyTradeBuyIdempotencyPath
       });
+let platformFeeTreasuryWarmup: Promise<string | null> | null = null;
+let platformFeeTreasuryVerified: string | null = null;
+let platformFeeTreasuryBlockedReason: string | null = null;
 
 const baseSubscriptionMethods: PumpPortalSubscription[] = ["subscribeNewToken", "subscribeMigration"];
 
@@ -313,6 +381,9 @@ function legacyResultFromExecution(result: CopyTradeExecutionResult): PumpPortal
       status: result.status,
       provider: result.provider,
       route: result.route,
+      submittedAtMs: result.submittedAtMs,
+      confirmedAtMs: result.confirmedAtMs,
+      slot: result.slot,
       metadata: result.metadata,
       raw: result.raw
     }
@@ -466,6 +537,61 @@ function withPlatformFeeResult(
   return split?.enabled ? { ...result, platformFee: platformFeeResultFields(split) } : result;
 }
 
+async function verifyPlatformFeeTreasuryAccount({
+  connection,
+  treasury
+}: {
+  connection: Connection;
+  treasury: string;
+}): Promise<string | null> {
+  if (platformFeeTreasuryVerified === treasury) {
+    return null;
+  }
+
+  if (!platformFeeTreasuryWarmup) {
+    platformFeeTreasuryWarmup = (async () => {
+      try {
+        const treasuryInfo = await connection.getAccountInfo(new PublicKey(treasury), "confirmed");
+        if (!treasuryInfo) {
+          platformFeeTreasuryBlockedReason =
+            "PLATFORM_FEE_TREASURY account is not initialized on-chain; fund it once before collecting tiny platform fees";
+          return platformFeeTreasuryBlockedReason;
+        }
+
+        platformFeeTreasuryVerified = treasury;
+        platformFeeTreasuryBlockedReason = null;
+        return null;
+      } catch (error) {
+        const reason = `could not verify PLATFORM_FEE_TREASURY account: ${errorMessage(error)}`;
+        platformFeeTreasuryBlockedReason = reason;
+        return reason;
+      } finally {
+        platformFeeTreasuryWarmup = null;
+      }
+    })();
+  }
+
+  return platformFeeTreasuryWarmup;
+}
+
+function warmPlatformFeeTreasuryAccount(): void {
+  if (!config.platformFeeEnabled || !config.platformFeeTreasury) {
+    return;
+  }
+
+  const connection = new Connection(config.solanaRpcUrl, "confirmed");
+  verifyPlatformFeeTreasuryAccount({
+    connection,
+    treasury: config.platformFeeTreasury
+  }).then((reason) => {
+    if (reason) {
+      console.warn(`Platform fee treasury warmup failed: ${reason}`);
+    }
+  }).catch((error) => {
+    console.warn(`Platform fee treasury warmup failed: ${errorMessage(error)}`);
+  });
+}
+
 function percentAmountToBasisPoints(amount: number | string): bigint | null {
   if (typeof amount === "number") {
     return null;
@@ -498,6 +624,7 @@ function logCopyTradeExecutionState(): void {
       `live=${config.directExecutionLiveEnabled ? "true" : "false"}`,
       `buildOnly=${config.directExecutionBuildOnly ? "true" : "false"}`,
       `simulateOnly=${config.directExecutionSimulateOnly ? "true" : "false"}`,
+      `confirmationMode=${config.directExecutionConfirmationMode}`,
       `canaryChats=${config.directExecutionCanaryChatIds.length || "none"}`,
       `canaryWallets=${config.directExecutionCanaryWallets.length || "none"}`,
       `platformFee=${config.platformFeeEnabled ? `${config.platformFeeBps}bps` : "disabled"}`
@@ -984,7 +1111,8 @@ async function executeDirectCopyTrade({
   amountLamports,
   amountBasis,
   platformFee = null,
-  metadata = {}
+  metadata = {},
+  onLatencyMilestone
 }: {
   subscriber: SubscriberRecord;
   provider: DirectTradeExecutionProvider;
@@ -993,6 +1121,7 @@ async function executeDirectCopyTrade({
   amountBasis: "sol" | "percent" | "token";
   platformFee?: ReturnType<typeof calculatePlatformFeeSplit> | null;
   metadata?: Record<string, unknown>;
+  onLatencyMilestone?: (milestone: CopyTradeLatencyMilestone, details?: CopyTradeLatencyMilestoneDetails) => void;
 }): Promise<TradeExecutionResult> {
   const tradingWallet = subscriber.tradingWallet;
 
@@ -1048,6 +1177,8 @@ async function executeDirectCopyTrade({
     });
   }
   const connection = new Connection(config.solanaRpcUrl, "confirmed");
+
+  onLatencyMilestone?.("direct_build_started");
   const built = await buildDirectSolanaPayload({
     connection,
     request: {
@@ -1062,6 +1193,10 @@ async function executeDirectCopyTrade({
       platformFee,
       metadata
     }
+  });
+  onLatencyMilestone?.("direct_build_finished", {
+    status: isDirectPayload(built) ? "built" : built.status,
+    reason: isDirectPayload(built) ? null : built.errorText
   });
 
   if (!isDirectPayload(built)) {
@@ -1095,6 +1230,30 @@ async function executeDirectCopyTrade({
     }), platformFee);
   }
 
+  if (config.directExecutionConfirmationMode === "background" && request.action === "buy") {
+    return withPlatformFeeResult(await sendSolanaDirectTransaction({
+      connection,
+      signer,
+      payload: built,
+      config: {
+        gate: directExecutionGate(provider),
+        skipPreflight: config.directExecutionSkipPreflight,
+        confirmationMode: "background",
+        maxRetries: config.directExecutionMaxRetries,
+        onStage: (stage, details) => {
+          const milestone = copyTradeLatencyMilestoneForDirectStage(stage);
+          if (milestone) {
+            onLatencyMilestone?.(milestone, {
+              status: details.status,
+              reason: details.errorText,
+              signature: details.signature || null
+            });
+          }
+        }
+      }
+    }), platformFee);
+  }
+
   return withPlatformFeeResult(await sendSolanaDirectTransaction({
     connection,
     signer,
@@ -1102,7 +1261,18 @@ async function executeDirectCopyTrade({
     config: {
       gate: directExecutionGate(provider),
       skipPreflight: config.directExecutionSkipPreflight,
-      maxRetries: config.directExecutionMaxRetries
+      confirmationMode: "inline",
+      maxRetries: config.directExecutionMaxRetries,
+      onStage: (stage, details) => {
+        const milestone = copyTradeLatencyMilestoneForDirectStage(stage);
+        if (milestone) {
+          onLatencyMilestone?.(milestone, {
+            status: details.status,
+            reason: details.errorText,
+            signature: details.signature || null
+          });
+        }
+      }
     }
   }), platformFee);
 }
@@ -1112,13 +1282,15 @@ async function executeCopyTradeBuy({
   trade,
   request,
   provider,
-  platformFee
+  platformFee,
+  onLatencyMilestone
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
   request: PumpPortalLightningTradeRequest;
   provider: TradeExecutionProvider;
   platformFee: ReturnType<typeof calculatePlatformFeeSplit>;
+  onLatencyMilestone?: (milestone: CopyTradeLatencyMilestone, details?: CopyTradeLatencyMilestoneDetails) => void;
 }): Promise<CopyTradeExecutionResult> {
   if (!isDirectTradeExecutionProvider(provider)) {
     if (platformFee.enabled) {
@@ -1155,6 +1327,7 @@ async function executeCopyTradeBuy({
     amountLamports: platformFee.tradeLamports,
     amountBasis: "sol",
     platformFee,
+    onLatencyMilestone,
     metadata: {
       observedSignature: trade.signature,
       sourceWallet: trade.targetWallet,
@@ -1277,11 +1450,15 @@ async function sendCopyTradeSimulationAlert(
     observedSignature: trade.signature
   });
   let copyBuyReserved = false;
+  let copyBuySemanticReserved = false;
+  let copyBuySemanticKey: string | null = null;
   let durableCopyBuyClaimKey: string | null = null;
+  let deferredDurableCopyBuyClaimKey: string | null = null;
   let result: CopyTradeExecutionResult | null = null;
 
   try {
     const executionProvider = resolveExecutionProviderForTrade(trade);
+    const fastDirectCopyBuyPath = isDirectTradeExecutionProvider(executionProvider);
     const executionSettings = copyTradeBuyExecutionSettings(subscriber);
     const request = buildPumpPortalLightningBuyRequest({
       trade,
@@ -1375,44 +1552,60 @@ async function sendCopyTradeSimulationAlert(
         return;
       }
 
-      let idempotencyClaim;
-      try {
-        idempotencyClaim = await copyTradeBuyIdempotency.claimBuy({
-          key: durableCopyBuyKey,
-          chatId: subscriber.chatId,
-          sourceWalletAddress: copyTradeWallet.address,
-          tradingWalletPublicKey: subscriber.tradingWallet.publicKey,
-          observedSignature: trade.signature,
-          mint: trade.mint,
-          amountSol,
-          provider: trade.provider,
-          request
-        });
-      } catch (error) {
-        const reason = `copy buy idempotency claim failed: ${errorMessage(error)}`;
-        skipWithLatencyLog(reason);
-        await notifySkippedAutoCopyBuy({
-          subscriber,
-          trade,
-          copyTradeWallet,
-          request,
-          reason
-        });
-        return;
-      }
+      if (fastDirectCopyBuyPath) {
+        copyBuySemanticKey = durableCopyBuyKey;
 
-      if (!idempotencyClaim.claimed) {
-        const existing = idempotencyClaim.existing;
-        const reason = existing
-          ? `copy buy coin was already handled (${existing.status})`
-          : "copy buy coin was already handled";
-        skipWithLatencyLog(reason);
-        console.warn(
-          `Skipping duplicate auto copy buy for ${subscriber.chatId}:${trade.mint}: coin already handled`
-        );
-        return;
+        if (!copyBuySemanticSubmissionGuard.reserve(copyBuySemanticKey)) {
+          const reason = "copy buy coin is already in flight or was handled in this bot process";
+          skipWithLatencyLog(reason);
+          console.warn(
+            `Skipping duplicate fast-path auto copy buy for ${subscriber.chatId}:${trade.mint}: coin already handled in memory`
+          );
+          return;
+        }
+
+        copyBuySemanticReserved = true;
+        deferredDurableCopyBuyClaimKey = durableCopyBuyKey;
+      } else {
+        let idempotencyClaim;
+        try {
+          idempotencyClaim = await copyTradeBuyIdempotency.claimBuy({
+            key: durableCopyBuyKey,
+            chatId: subscriber.chatId,
+            sourceWalletAddress: copyTradeWallet.address,
+            tradingWalletPublicKey: subscriber.tradingWallet.publicKey,
+            observedSignature: trade.signature,
+            mint: trade.mint,
+            amountSol,
+            provider: trade.provider,
+            request
+          });
+        } catch (error) {
+          const reason = `copy buy idempotency claim failed: ${errorMessage(error)}`;
+          skipWithLatencyLog(reason);
+          await notifySkippedAutoCopyBuy({
+            subscriber,
+            trade,
+            copyTradeWallet,
+            request,
+            reason
+          });
+          return;
+        }
+
+        if (!idempotencyClaim.claimed) {
+          const existing = idempotencyClaim.existing;
+          const reason = existing
+            ? `copy buy coin was already handled (${existing.status})`
+            : "copy buy coin was already handled";
+          skipWithLatencyLog(reason);
+          console.warn(
+            `Skipping duplicate auto copy buy for ${subscriber.chatId}:${trade.mint}: coin already handled`
+          );
+          return;
+        }
+        durableCopyBuyClaimKey = durableCopyBuyKey;
       }
-      durableCopyBuyClaimKey = durableCopyBuyKey;
     }
 
     const dailyBudgetKey = copyTradeDailyBudgetKey({
@@ -1574,11 +1767,9 @@ async function sendCopyTradeSimulationAlert(
       trade,
       request,
       provider: executionProvider,
-      platformFee
+      platformFee,
+      onLatencyMilestone: (milestone, details) => latencyTracker.mark(milestone, details)
     });
-    if (durableCopyBuyClaimKey) {
-      await safelyCompleteCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, legacyResultFromExecution(result));
-    }
     latencyTracker.mark("submit_finished", {
       status: resultOk(result) ? (isProviderNeutralResult(result) ? result.status : "submitted") : "failed",
       reason: resultOk(result) ? null : result.errorText,
@@ -1587,16 +1778,40 @@ async function sendCopyTradeSimulationAlert(
     logLatencyOnce();
     console.log(`Copy trade execution result: ${isProviderNeutralResult(result) ? formatTradeExecutionResultLog(result) : JSON.stringify(result)}`);
 
-    if (resultOk(result) && resultSignature(result)) {
-      scheduleCopyTradeTrailingSellsAfterConfirmation({
-        subscriber,
-        trade,
-        copyTradeWallet,
-        buySignature: resultSignature(result),
-        executionProvider
-      }).catch((error) => {
-        console.warn(`Could not prepare trailing sells after copy buy confirmation: ${errorMessage(error)}`);
-      });
+    const legacyResult = legacyResultFromExecution(result);
+    if (deferredDurableCopyBuyClaimKey) {
+      const deferredKey = deferredDurableCopyBuyClaimKey;
+      const observedSignature = trade.signature;
+      const mint = trade.mint;
+
+      if (!observedSignature || !mint) {
+        console.warn(`Could not persist fast-path copy buy idempotency for ${subscriber.chatId}: missing observed signature or mint`);
+      } else {
+        copyTradeBuyIdempotency.claimBuy({
+          key: deferredKey,
+          chatId: subscriber.chatId,
+          sourceWalletAddress: copyTradeWallet.address,
+          tradingWalletPublicKey: subscriber.tradingWallet.publicKey,
+          observedSignature,
+          mint,
+          amountSol,
+          provider: trade.provider,
+          request
+        }).then(async (idempotencyClaim) => {
+          if (!idempotencyClaim.claimed) {
+            console.warn(
+              `Fast-path copy buy ${subscriber.chatId}:${mint} submitted before durable duplicate check completed; existing status=${idempotencyClaim.existing?.status || "unknown"}`
+            );
+            return;
+          }
+
+          await safelyCompleteCopyTradeBuyIdempotency(copyTradeBuyIdempotency, deferredKey, legacyResult);
+        }).catch((error) => {
+          console.warn(`Could not persist fast-path copy buy idempotency for ${subscriber.chatId}:${mint}: ${errorMessage(error)}`);
+        });
+      }
+    } else if (durableCopyBuyClaimKey) {
+      safelyCompleteCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, legacyResult);
     }
 
     await recordCopyTradeExecution({
@@ -1606,7 +1821,34 @@ async function sendCopyTradeSimulationAlert(
       tradingWalletPublicKey: subscriber.tradingWallet.publicKey,
       request,
       result
+    }).catch((error) => {
+      console.warn(`Could not record copy buy execution for ${subscriber.chatId}: ${errorMessage(error)}`);
     });
+
+    if (resultOk(result) && resultSignature(result)) {
+      const submittedFirst = isProviderNeutralResult(result) &&
+        result.status === "submitted" &&
+        config.directExecutionConfirmationMode === "background";
+      const postSubmission = submittedFirst
+        ? watchSubmittedCopyTradeBuy({
+            subscriber,
+            trade,
+            copyTradeWallet,
+            buySignature: resultSignature(result),
+            executionProvider
+          })
+        : scheduleCopyTradeTrailingSellsAfterConfirmation({
+            subscriber,
+            trade,
+            copyTradeWallet,
+            buySignature: resultSignature(result),
+            executionProvider
+          });
+
+      postSubmission.catch((error) => {
+        console.warn(`Could not prepare copy buy post-confirmation work: ${errorMessage(error)}`);
+      });
+    }
 
     const message = formatAutoCopyBuyMessage({
       trade,
@@ -1621,6 +1863,8 @@ async function sendCopyTradeSimulationAlert(
         chatId: subscriber.chatId,
         text: message,
         replyMarkup: buildWalletTradeReplyMarkup(trade)
+      }).catch((error) => {
+        console.warn(`Could not send auto copy buy alert to ${subscriber.chatId}: ${errorMessage(error)}`);
       });
     }
 
@@ -1632,6 +1876,9 @@ async function sendCopyTradeSimulationAlert(
     logLatencyOnce();
     console.warn(`Could not execute auto copy buy for ${subscriber.chatId}: ${errorMessage(error)}`);
   } finally {
+    if (copyBuySemanticReserved && !(result && resultOk(result))) {
+      copyBuySemanticSubmissionGuard.release(copyBuySemanticKey);
+    }
     if (copyBuyReserved) {
       copyBuySubmissionGuard.release(copyBuyKey);
     }
@@ -1676,6 +1923,137 @@ async function scheduleCopyTradeTrailingSellsAfterConfirmation({
     copyTradeWallet,
     executionProvider
   });
+}
+
+async function updateRecordedCopyTradeBuyStatus({
+  subscriber,
+  trade,
+  buySignature,
+  status,
+  errorText = null
+}: {
+  subscriber: SubscriberRecord;
+  trade: WalletTradeData;
+  buySignature: string;
+  status: Extract<CopyTradeExecutionStatus, "confirmed" | "expired" | "failed">;
+  errorText?: string | null;
+}): Promise<void> {
+  if (!copyTradeRecorder?.updateCopyTradeExecutionStatus) {
+    return;
+  }
+
+  try {
+    await copyTradeRecorder.updateCopyTradeExecutionStatus({
+      chatId: subscriber.chatId,
+      action: "buy",
+      signature: buySignature,
+      status,
+      errorText
+    });
+  } catch (error) {
+    console.warn(`Could not update copy buy confirmation status for ${subscriber.chatId}:${buySignature}: ${errorMessage(error)}`);
+  }
+}
+
+async function watchSubmittedCopyTradeBuy({
+  subscriber,
+  trade,
+  copyTradeWallet,
+  buySignature,
+  executionProvider
+}: {
+  subscriber: SubscriberRecord;
+  trade: WalletTradeData;
+  copyTradeWallet: WatchedWallet;
+  buySignature: string | null;
+  executionProvider: TradeExecutionProvider;
+}): Promise<void> {
+  if (!buySignature) {
+    await notifySkippedTrailingSellSchedule({
+      subscriber,
+      trade,
+      reason: "copy buy did not return a transaction signature"
+    });
+    return;
+  }
+
+  const confirmed = await waitForSignatureConfirmation(buySignature);
+  if (!confirmed) {
+    console.warn(`Submitted copy buy did not confirm before timeout: ${buySignature}`);
+    await updateRecordedCopyTradeBuyStatus({
+      subscriber,
+      trade,
+      buySignature,
+      status: "expired",
+      errorText: "copy buy was not confirmed before trailing sell scheduling timeout"
+    });
+    await sendCopyTradeBuyConfirmationUpdate({
+      subscriber,
+      trade,
+      buySignature,
+      confirmed: false
+    });
+    return;
+  }
+
+  await updateRecordedCopyTradeBuyStatus({
+    subscriber,
+    trade,
+    buySignature,
+    status: "confirmed"
+  });
+
+  await sendCopyTradeBuyConfirmationUpdate({
+    subscriber,
+    trade,
+    buySignature,
+    confirmed: true
+  });
+
+  await scheduleCopyTradeTrailingSells({
+    subscriber,
+    trade,
+    copyTradeWallet,
+    executionProvider
+  });
+}
+
+async function sendCopyTradeBuyConfirmationUpdate({
+  subscriber,
+  trade,
+  buySignature,
+  confirmed
+}: {
+  subscriber: SubscriberRecord;
+  trade: WalletTradeData;
+  buySignature: string;
+  confirmed: boolean;
+}): Promise<void> {
+  if (!trade.mint) {
+    return;
+  }
+
+  const statusLine = confirmed ? "🟢 Buy confirmed" : "🟡 Confirmation timed out";
+  const lines = [
+    "<b>⚡ Auto Copy Buy</b>",
+    statusLine,
+    "",
+    "<b>🪙 Contract Address</b>",
+    `<code>${trade.mint}</code>`,
+    "",
+    `<b>Tx:</b> <code>${buySignature}</code>`
+  ];
+
+  try {
+    await sendTelegramMessage({
+      token: config.telegramToken,
+      chatId: subscriber.chatId,
+      text: lines.join("\n"),
+      replyMarkup: buildWalletTradeReplyMarkup(trade)
+    });
+  } catch (error) {
+    console.warn(`Could not send copy buy confirmation update to ${subscriber.chatId}: ${errorMessage(error)}`);
+  }
 }
 
 async function notifySkippedTrailingSellSchedule({
@@ -2228,7 +2606,6 @@ async function waitForSignatureConfirmation(signature: string, timeoutMs = 30000
       }
     } catch (error) {
       console.warn(`Could not check trailing sell confirmation for ${signature}: ${errorMessage(error)}`);
-      return false;
     }
 
     await trackedDelay(pollMs);
@@ -2281,6 +2658,10 @@ async function recordCopyTradeExecution({
           status: result.status,
           provider: result.provider,
           route: result.route,
+          signature: result.signature,
+          submittedAtMs: result.submittedAtMs,
+          confirmedAtMs: result.confirmedAtMs,
+          slot: result.slot,
           metadata: result.metadata,
           platformFee: result.platformFee || null,
           raw: result.raw
@@ -2752,6 +3133,7 @@ await loadCopyTradeEmergencyStop();
 console.log(`Using ${subscriberStoreLabel} subscriber storage`);
 console.log(`Loaded ${subscribers.count()} verified Telegram subscriber(s)`);
 logCopyTradeExecutionState();
+warmPlatformFeeTreasuryAccount();
 // Supabase-backed subscribers load at startup, so compute account-trade
 // subscriptions after init rather than from the empty pre-init store.
 migrationListener.setSubscriptionMethods(activePumpPortalSubscriptions());

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Keypair, SystemProgram } from "@solana/web3.js";
+import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { buildDirectAutoTransactionPayload } from "../dist/direct-auto.js";
 import { buildDirectPumpTransaction } from "../dist/direct-pump.js";
 import { buildDirectPumpSwapTransaction } from "../dist/direct-pumpswap.js";
 import { sendDirectTransaction } from "../dist/direct-sender.js";
-import { sendSolanaDirectTransaction } from "../dist/direct-solana.js";
+import { resolveMintTokenProgram, sendSolanaDirectTransaction } from "../dist/direct-solana.js";
 import { maxQuoteLamportsForSlippageCap } from "../dist/direct-budget.js";
 import { tradeExecutionSkippedResult } from "../dist/trade-execution.js";
 
@@ -347,8 +348,10 @@ test("Solana direct sender signs, simulates, sends, and confirms a versioned tra
   };
   const seen = {
     simulated: false,
+    simulationOptions: null,
     serializedBytes: 0,
-    confirmationSignature: null
+    confirmationSignature: null,
+    stages: []
   };
   const result = await sendSolanaDirectTransaction({
     connection: {
@@ -356,8 +359,9 @@ test("Solana direct sender signs, simulates, sends, and confirms a versioned tra
         blockhash: "11111111111111111111111111111111",
         lastValidBlockHeight: 123
       }),
-      simulateTransaction: () => {
+      simulateTransaction: (_transaction, options) => {
         seen.simulated = true;
+        seen.simulationOptions = options;
         return { value: { err: null, unitsConsumed: 42 } };
       },
       sendRawTransaction: (serializedTransaction) => {
@@ -373,6 +377,9 @@ test("Solana direct sender signs, simulates, sends, and confirms a versioned tra
     payload,
     config: {
       gate: liveGate,
+      onStage: (stage, details) => {
+        seen.stages.push({ stage, ...details });
+      },
       nowMs: (() => {
         let now = 1000;
         return () => (now += 10);
@@ -384,8 +391,141 @@ test("Solana direct sender signs, simulates, sends, and confirms a versioned tra
   assert.equal(result.status, "confirmed");
   assert.equal(result.signature, "signature-1");
   assert.equal(seen.simulated, true);
+  assert.deepEqual(seen.simulationOptions, {
+    replaceRecentBlockhash: true,
+    sigVerify: false
+  });
   assert.equal(seen.serializedBytes > 0, true);
   assert.equal(seen.confirmationSignature, "signature-1");
+  assert.deepEqual(seen.stages.map((stage) => stage.stage), [
+    "transaction_build_started",
+    "blockhash_started",
+    "blockhash_received",
+    "signing_started",
+    "signing_finished",
+    "transaction_built",
+    "simulation_started",
+    "simulation_finished",
+    "raw_send_started",
+    "signature_returned",
+    "confirmation_started",
+    "confirmation_finished"
+  ]);
+  assert.equal(result.submittedAtMs, 1100);
+  assert.equal(result.confirmedAtMs, 1120);
+  assert.equal(result.metadata.directSolanaTiming.signatureReturnedAtMs, 1100);
+  assert.equal(result.metadata.directSolanaTiming.confirmationFinishedAtMs, 1120);
+  assert.equal(result.metadata.directSolanaTiming.timeToSignatureMs, 90);
+  assert.equal(result.metadata.directSolanaTiming.confirmationMs, 10);
+  assert.equal(result.metadata.directSolanaTiming.unitsConsumed, 42);
+  assert.equal(result.metadata.directSolanaTiming.simulateBeforeSend, true);
+});
+
+test("Solana direct sender background mode returns after signature without confirmation wait", async () => {
+  const solanaSigner = Keypair.generate();
+  const payload = {
+    provider: "direct-pump",
+    route: {
+      provider: "direct-pump",
+      route: "pump-bonding-curve",
+      mint: baseRequest.mint,
+      walletPublicKey: solanaSigner.publicKey.toBase58(),
+      poolAddress: null,
+      priorityFeeSol: 0.00005,
+      slippagePercent: 10,
+      amount: "990000000",
+      amountBasis: "sol"
+    },
+    instructions: [
+      SystemProgram.transfer({
+        fromPubkey: solanaSigner.publicKey,
+        toPubkey: solanaSigner.publicKey,
+        lamports: 0
+      })
+    ],
+    signers: [],
+    metadata: { idempotencyKey: "chat:wallet:mint:buy" }
+  };
+  let confirmationCalls = 0;
+  const result = await sendSolanaDirectTransaction({
+    connection: {
+      getLatestBlockhash: () => ({
+        blockhash: "11111111111111111111111111111111",
+        lastValidBlockHeight: 123
+      }),
+      simulateTransaction: () => ({ value: { err: null, unitsConsumed: 42 } }),
+      sendRawTransaction: () => "signature-background",
+      confirmTransaction: () => {
+        confirmationCalls += 1;
+        throw new Error("confirmation should be backgrounded");
+      }
+    },
+    signer: solanaSigner,
+    payload,
+    config: {
+      gate: liveGate,
+      confirmationMode: "background",
+      nowMs: (() => {
+        let now = 2000;
+        return () => (now += 10);
+      })()
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "submitted");
+  assert.equal(result.signature, "signature-background");
+  assert.equal(result.submittedAtMs, 2100);
+  assert.equal(result.confirmedAtMs, null);
+  assert.equal(confirmationCalls, 0);
+  assert.equal(result.metadata.confirmationMode, "background");
+  assert.equal(result.metadata.directSolanaTiming.signatureReturnedAtMs, 2100);
+  assert.equal(result.metadata.directSolanaTiming.confirmationStartedAtMs, null);
+  assert.equal(result.metadata.directSolanaTiming.timeToSignatureMs, 90);
+});
+
+test("Solana direct builder resolves legacy and Token-2022 mint programs", async () => {
+  const mint = Keypair.generate().publicKey;
+
+  const legacyProgram = await resolveMintTokenProgram({
+    connection: {
+      getAccountInfo: () => ({ owner: TOKEN_PROGRAM_ID })
+    },
+    mint
+  });
+  assert.equal(legacyProgram.toBase58(), TOKEN_PROGRAM_ID.toBase58());
+
+  const token2022Program = await resolveMintTokenProgram({
+    connection: {
+      getAccountInfo: () => ({ owner: TOKEN_2022_PROGRAM_ID })
+    },
+    mint
+  });
+  assert.equal(token2022Program.toBase58(), TOKEN_2022_PROGRAM_ID.toBase58());
+});
+
+test("Solana direct builder rejects missing or non-token mint accounts", async () => {
+  const mint = Keypair.generate().publicKey;
+
+  await assert.rejects(
+    resolveMintTokenProgram({
+      connection: {
+        getAccountInfo: () => null
+      },
+      mint
+    }),
+    /mint account not found/
+  );
+
+  await assert.rejects(
+    resolveMintTokenProgram({
+      connection: {
+        getAccountInfo: () => ({ owner: SystemProgram.programId })
+      },
+      mint
+    }),
+    /not owned by SPL Token or Token-2022/
+  );
 });
 
 test("direct sender preserves signature when confirmation lookup throws after send", async () => {

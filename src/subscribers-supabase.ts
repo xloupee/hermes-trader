@@ -13,6 +13,7 @@ import {
 import type {
   AlertModeValue,
   CopyTradeExecutionRecord,
+  CopyTradeExecutionStatusUpdate,
   SubscriberRecord,
   SubscriberStore,
   TelegramChatId,
@@ -103,10 +104,13 @@ export interface SupabaseSubscriberRepository {
   deleteCopyTradeWallet: (chatId: string, address: string) => Promise<void>;
   deleteAllCopyTradeWallets: (chatId: string) => Promise<void>;
   upsertTradingWallet: (chatId: string, wallet: TradingWallet) => Promise<void>;
+  deleteTradingWallet: (chatId: string, publicKey: string) => Promise<void>;
+  deleteAllTradingWallets: (chatId: string) => Promise<void>;
 }
 
 export interface SupabaseCopyTradeRecorder {
   recordCopyTradeExecution: (record: CopyTradeExecutionRecord) => Promise<void>;
+  updateCopyTradeExecutionStatus?: (update: CopyTradeExecutionStatusUpdate) => Promise<void>;
 }
 
 function formatSupabaseError(error: SupabaseErrorLike | null): Error | null {
@@ -397,6 +401,42 @@ export function createSupabaseCopyTradeRecorder({
       if (formattedError) {
         throw formattedError;
       }
+    },
+    async updateCopyTradeExecutionStatus(update) {
+      const values: Record<string, unknown> = {
+        status: update.status,
+        error_text: update.errorText ?? null
+      };
+
+      if ("response" in update) {
+        values.response = redactSensitivePayload(update.response ?? null);
+      }
+
+      let query = client
+        .from("telegram_copytrade_executions")
+        .update(values)
+        .eq("chat_id", update.chatId)
+        .eq("action", update.action)
+        .eq("signature", update.signature);
+
+      if (typeof update.trailingSellStepIndex === "number") {
+        query = query.eq("trailing_sell_step_index", update.trailingSellStepIndex);
+      } else {
+        query = query.is("trailing_sell_step_index", null);
+      }
+
+      if (typeof update.trailingSellTotalSteps === "number") {
+        query = query.eq("trailing_sell_total_steps", update.trailingSellTotalSteps);
+      } else {
+        query = query.is("trailing_sell_total_steps", null);
+      }
+
+      const { error } = await query;
+      const formattedError = formatSupabaseError(error);
+
+      if (formattedError) {
+        throw formattedError;
+      }
     }
   };
 }
@@ -550,6 +590,22 @@ export function createSupabaseSubscriberRepository({
       const { error } = await client
         .from("telegram_trading_wallets")
         .upsert(tradingWalletRow(chatId, wallet), { onConflict: "chat_id,public_key" });
+      const formattedError = formatSupabaseError(error);
+
+      if (formattedError) {
+        throw formattedError;
+      }
+    },
+    async deleteTradingWallet(chatId, publicKey) {
+      const { error } = await client.from("telegram_trading_wallets").delete().eq("chat_id", chatId).eq("public_key", publicKey);
+      const formattedError = formatSupabaseError(error);
+
+      if (formattedError) {
+        throw formattedError;
+      }
+    },
+    async deleteAllTradingWallets(chatId) {
+      const { error } = await client.from("telegram_trading_wallets").delete().eq("chat_id", chatId);
       const formattedError = formatSupabaseError(error);
 
       if (formattedError) {
@@ -985,6 +1041,64 @@ export function createSupabaseSubscriberStore({
       await repository.upsertTradingWallet(normalized, wallet);
       subscribers.set(normalized, next);
       return true;
+    },
+    async removeTradingWallet(chatId, publicKey) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const tradingWallets = dedupeTradingWallets(existing.tradingWallets?.length ? existing.tradingWallets : existing.tradingWallet ? [existing.tradingWallet] : []);
+      const nextWallets = tradingWallets.filter((wallet) => wallet.publicKey !== publicKey);
+
+      if (nextWallets.length === tradingWallets.length) {
+        return false;
+      }
+
+      const activeWallet = existing.tradingWallet && existing.tradingWallet.publicKey !== publicKey
+        ? nextWallets.find((wallet) => wallet.publicKey === existing.tradingWallet?.publicKey) || nextWallets[0] || null
+        : nextWallets[0] || null;
+      const next = {
+        ...existing,
+        tradingWallet: activeWallet,
+        tradingWallets: nextWallets,
+        updatedAt: new Date().toISOString()
+      };
+
+      await repository.deleteTradingWallet(normalized, publicKey);
+      await repository.upsertSubscriber(next);
+      subscribers.set(normalized, next);
+      return true;
+    },
+    async removeAllTradingWallets(chatId) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return 0;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const tradingWallets = dedupeTradingWallets(existing.tradingWallets?.length ? existing.tradingWallets : existing.tradingWallet ? [existing.tradingWallet] : []);
+
+      if (tradingWallets.length === 0) {
+        return 0;
+      }
+
+      const next = {
+        ...existing,
+        tradingWallet: null,
+        tradingWallets: [],
+        updatedAt: new Date().toISOString()
+      };
+
+      await repository.deleteAllTradingWallets(normalized);
+      await repository.upsertSubscriber(next);
+      subscribers.set(normalized, next);
+      return tradingWallets.length;
     },
     getTradingWallet(chatId) {
       return subscribers.get(String(chatId))?.tradingWallet || null;

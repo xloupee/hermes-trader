@@ -44,7 +44,7 @@ test("local Solana wallet helpers generate and decrypt a Keypair without seriali
     secretKeyFormat: wallet?.secretKeyFormat
   });
 
-  assert.equal(generated.secretKeyFormat, "base64");
+  assert.equal(generated.secretKeyFormat, "base58");
   assert.equal(decrypted.publicKey.toBase58(), generated.publicKey);
   assert.equal(decryptSecret(encryptedSecretKey, encryptionSecret), generated.secretKey);
   assert.equal(wallet?.provider, "local-solana");
@@ -52,6 +52,23 @@ test("local Solana wallet helpers generate and decrypt a Keypair without seriali
   assert.equal(wallet?.encryptedApiKey, "");
   assert.equal(wallet?.encryptedSecretKey, encryptedSecretKey);
   assert.equal(JSON.stringify(wallet).includes(generated.secretKey), false);
+});
+
+test("local Solana wallet decryption keeps legacy base64 secrets working", () => {
+  const generated = generateLocalSolanaHotWallet();
+  const keypair = decryptLocalSolanaKeypair({
+    encryptedSecretKey: encryptSecret(generated.secretKey, encryptionSecret),
+    encryptionSecret,
+    secretKeyFormat: generated.secretKeyFormat
+  });
+  const legacyBase64Secret = Buffer.from(keypair.secretKey).toString("base64");
+  const decrypted = decryptLocalSolanaKeypair({
+    encryptedSecretKey: encryptSecret(legacyBase64Secret, encryptionSecret),
+    encryptionSecret,
+    secretKeyFormat: "base64"
+  });
+
+  assert.equal(decrypted.publicKey.toBase58(), generated.publicKey);
 });
 
 test("local Solana wallet decryption fails closed for missing or malformed key material", () => {

@@ -147,6 +147,18 @@ class MemorySubscriberRepository {
       ...walletRecord
     });
   }
+
+  async deleteTradingWallet(chatId, publicKey) {
+    this.tradingWallets.delete(`${chatId}:${publicKey}`);
+  }
+
+  async deleteAllTradingWallets(chatId) {
+    for (const key of this.tradingWallets.keys()) {
+      if (key.startsWith(`${chatId}:`)) {
+        this.tradingWallets.delete(key);
+      }
+    }
+  }
 }
 
 function subscriber(overrides = {}) {
@@ -370,7 +382,7 @@ test("Supabase subscriber store persists local Solana custody metadata", async (
       encryptedApiKey: "",
       apiKeyLast4: "3cr3",
       encryptedSecretKey: "encrypted-secret-key",
-      secretKeyFormat: "base64",
+      secretKeyFormat: "base58",
       keyLast4: "3cr3",
       label: "Local One",
       createdAt: "2026-05-28T00:00:00.000Z",
@@ -386,7 +398,7 @@ test("Supabase subscriber store persists local Solana custody metadata", async (
   assert.equal(walletRecord?.provider, "local-solana");
   assert.equal(walletRecord?.kind, "local-solana");
   assert.equal(walletRecord?.encryptedSecretKey, "encrypted-secret-key");
-  assert.equal(walletRecord?.secretKeyFormat, "base64");
+  assert.equal(walletRecord?.secretKeyFormat, "base58");
   assert.equal(walletRecord?.keyLast4, "3cr3");
   assert.equal(walletRecord?.label, "Local One");
 });
@@ -405,7 +417,7 @@ test("Supabase subscriber store persists multiple trading wallets and active sel
     encryptedApiKey: "",
     apiKeyLast4: "1111",
     encryptedSecretKey: "encrypted-secret-key-1",
-    secretKeyFormat: "base64",
+    secretKeyFormat: "base58",
     keyLast4: "1111",
     label: "Local One",
     createdAt: "2026-05-28T00:00:00.000Z",
@@ -418,7 +430,7 @@ test("Supabase subscriber store persists multiple trading wallets and active sel
     encryptedApiKey: "",
     apiKeyLast4: "2222",
     encryptedSecretKey: "encrypted-secret-key-2",
-    secretKeyFormat: "base64",
+    secretKeyFormat: "base58",
     keyLast4: "2222",
     label: "Local Two",
     createdAt: "2026-05-28T00:01:00.000Z",
@@ -438,8 +450,26 @@ test("Supabase subscriber store persists multiple trading wallets and active sel
   assert.deepEqual(reloaded.listTradingWallets("chat-1").map((entry) => entry.publicKey), [wallet, otherWallet]);
   assert.equal(reloaded.getTradingWallet("chat-1")?.publicKey, wallet);
 
+  assert.equal(await reloaded.removeTradingWallet("chat-1", "missing-wallet"), false);
+  assert.equal(await reloaded.removeTradingWallet("chat-1", otherWallet), true);
+  assert.deepEqual(reloaded.listTradingWallets("chat-1").map((entry) => entry.publicKey), [wallet]);
+  assert.equal(reloaded.getTradingWallet("chat-1")?.publicKey, wallet);
+
+  assert.equal(await reloaded.setTradingWallet("chat-1", secondWallet), true);
+  assert.equal(reloaded.getTradingWallet("chat-1")?.publicKey, otherWallet);
+  assert.equal(await reloaded.removeTradingWallet("chat-1", otherWallet), true);
+  assert.deepEqual(reloaded.listTradingWallets("chat-1").map((entry) => entry.publicKey), [wallet]);
+  assert.equal(reloaded.getTradingWallet("chat-1")?.publicKey, wallet);
+
+  assert.equal(await reloaded.removeAllTradingWallets("chat-1"), 1);
+  assert.deepEqual(reloaded.listTradingWallets("chat-1"), []);
+  assert.equal(reloaded.getTradingWallet("chat-1"), null);
+  assert.equal(await reloaded.removeAllTradingWallets("chat-1"), 0);
+
   const stored = await repository.listSubscribers();
   assert.equal(stored[0].copyTargetWalletAddress, null);
+  assert.deepEqual(stored[0].tradingWallets, []);
+  assert.equal(stored[0].tradingWallet, null);
 });
 
 test("subscriberFromRow maps legacy PumpPortal and local Solana trading wallet rows", () => {
@@ -483,7 +513,7 @@ test("subscriberFromRow maps legacy PumpPortal and local Solana trading wallet r
         provider: "local-solana",
         kind: "local-solana",
         encrypted_secret_key: "encrypted-secret-key",
-        secret_key_format: "base64",
+        secret_key_format: "base58",
         key_last4: "3cr3",
         created_at: "2026-05-28T00:00:00.000Z",
         updated_at: "2026-05-28T00:00:00.000Z"
@@ -495,7 +525,7 @@ test("subscriberFromRow maps legacy PumpPortal and local Solana trading wallet r
   assert.equal(legacy.tradingWallet?.encryptedApiKey, "encrypted-api-key");
   assert.equal(local.tradingWallet?.provider, "local-solana");
   assert.equal(local.tradingWallet?.encryptedSecretKey, "encrypted-secret-key");
-  assert.equal(local.tradingWallet?.secretKeyFormat, "base64");
+  assert.equal(local.tradingWallet?.secretKeyFormat, "base58");
 });
 
 test("Supabase subscriber store migrates legacy copy target out of watched wallets", async () => {

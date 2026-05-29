@@ -36,6 +36,8 @@ export interface SubscriberRow {
   copy_trade_sell_slippage_percent?: string | number | null;
   copy_trade_sell_priority_fee_sol?: string | number | null;
   copy_trade_retry_failed_buys?: boolean | null;
+  copy_trade_buy_pressure_sell_enabled?: boolean | null;
+  copy_trade_buy_pressure_sell_timeout_ms?: string | number | null;
   copy_target_wallet_address: string | null;
   active_trading_wallet_public_key?: string | null;
   verified_at: string;
@@ -134,7 +136,10 @@ function numericValue(value: string | number | null): number | null {
 
 function subscriberRow(
   record: SubscriberRecord,
-  { includeRetryFailedBuys = true }: { includeRetryFailedBuys?: boolean } = {}
+  {
+    includeRetryFailedBuys = true,
+    includeBuyPressureSell = true
+  }: { includeRetryFailedBuys?: boolean; includeBuyPressureSell?: boolean } = {}
 ): Omit<SubscriberRow, "telegram_watched_wallets"> {
   const row: Omit<SubscriberRow, "telegram_watched_wallets"> = {
     chat_id: record.chatId,
@@ -147,6 +152,8 @@ function subscriberRow(
     copy_trade_sell_slippage_percent: record.copyTradeSellSlippagePercent,
     copy_trade_sell_priority_fee_sol: record.copyTradeSellPriorityFeeSol,
     copy_trade_retry_failed_buys: record.copyTradeRetryFailedBuys,
+    copy_trade_buy_pressure_sell_enabled: record.copyTradeBuyPressureSellEnabled,
+    copy_trade_buy_pressure_sell_timeout_ms: record.copyTradeBuyPressureSellTimeoutMs,
     copy_target_wallet_address: record.copyTargetWalletAddress,
     active_trading_wallet_public_key: record.tradingWallet?.publicKey || null,
     verified_at: record.verifiedAt,
@@ -155,6 +162,11 @@ function subscriberRow(
 
   if (!includeRetryFailedBuys) {
     delete row.copy_trade_retry_failed_buys;
+  }
+
+  if (!includeBuyPressureSell) {
+    delete row.copy_trade_buy_pressure_sell_enabled;
+    delete row.copy_trade_buy_pressure_sell_timeout_ms;
   }
 
   return row;
@@ -385,6 +397,8 @@ export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
     copyTradeSellSlippagePercent: numericValue(row.copy_trade_sell_slippage_percent ?? null),
     copyTradeSellPriorityFeeSol: numericValue(row.copy_trade_sell_priority_fee_sol ?? null),
     copyTradeRetryFailedBuys: row.copy_trade_retry_failed_buys === true,
+    copyTradeBuyPressureSellEnabled: row.copy_trade_buy_pressure_sell_enabled === true,
+    copyTradeBuyPressureSellTimeoutMs: numericValue(row.copy_trade_buy_pressure_sell_timeout_ms ?? null),
     copyTargetWalletAddress: legacyCopyTarget,
     verifiedAt: row.verified_at,
     updatedAt: row.updated_at
@@ -470,7 +484,7 @@ export function createSupabaseSubscriberRepository({
   return {
     async listSubscribers() {
       const subscriberSelect =
-        "chat_id,mode,copy_wallet_address,copy_wallet_addresses,copy_amount_sol,copy_trade_buy_slippage_percent,copy_trade_buy_priority_fee_sol,copy_trade_sell_slippage_percent,copy_trade_sell_priority_fee_sol,copy_trade_retry_failed_buys,copy_target_wallet_address,active_trading_wallet_public_key,verified_at,updated_at";
+        "chat_id,mode,copy_wallet_address,copy_wallet_addresses,copy_amount_sol,copy_trade_buy_slippage_percent,copy_trade_buy_priority_fee_sol,copy_trade_sell_slippage_percent,copy_trade_sell_priority_fee_sol,copy_trade_retry_failed_buys,copy_trade_buy_pressure_sell_enabled,copy_trade_buy_pressure_sell_timeout_ms,copy_target_wallet_address,active_trading_wallet_public_key,verified_at,updated_at";
       const legacySubscriberSelect =
         "chat_id,mode,copy_wallet_address,copy_wallet_addresses,copy_amount_sol,copy_trade_buy_slippage_percent,copy_trade_buy_priority_fee_sol,copy_trade_sell_slippage_percent,copy_trade_sell_priority_fee_sol,copy_target_wallet_address,active_trading_wallet_public_key,verified_at,updated_at";
       const subscriberResult = await client
@@ -542,14 +556,18 @@ export function createSupabaseSubscriberRepository({
       let { error } = await client.from("telegram_subscribers").upsert(subscriberRow(subscriber), { onConflict: "chat_id" });
 
       if (isMissingSupabaseColumn(error)) {
-        if (subscriber.copyTradeRetryFailedBuys) {
+        if (
+          subscriber.copyTradeRetryFailedBuys ||
+          subscriber.copyTradeBuyPressureSellEnabled ||
+          subscriber.copyTradeBuyPressureSellTimeoutMs !== null
+        ) {
           const formattedError = formatSupabaseError(error);
           throw formattedError || new Error("Supabase subscriber store request failed");
         }
 
         const fallbackResult = await client
           .from("telegram_subscribers")
-          .upsert(subscriberRow(subscriber, { includeRetryFailedBuys: false }), { onConflict: "chat_id" });
+          .upsert(subscriberRow(subscriber, { includeRetryFailedBuys: false, includeBuyPressureSell: false }), { onConflict: "chat_id" });
         error = fallbackResult.error;
       }
 
@@ -1287,6 +1305,42 @@ export function createSupabaseSubscriberStore({
       subscribers.set(normalized, next);
       return true;
     },
+    async setCopyTradeBuyPressureSellEnabled(chatId, enabled) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const next = {
+        ...(subscribers.get(normalized) || makeSubscriber(normalized, null)),
+        copyTradeBuyPressureSellEnabled: enabled,
+        updatedAt: new Date().toISOString()
+      };
+
+      await repository.upsertSubscriber(next);
+      subscribers.set(normalized, next);
+      return true;
+    },
+    async setCopyTradeBuyPressureSellTimeoutMs(chatId, timeoutMs) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const next = {
+        ...(subscribers.get(normalized) || makeSubscriber(normalized, null)),
+        copyTradeBuyPressureSellTimeoutMs: timeoutMs,
+        updatedAt: new Date().toISOString()
+      };
+
+      await repository.upsertSubscriber(next);
+      subscribers.set(normalized, next);
+      return true;
+    },
     async resetCopyTradeExecutionSettings(chatId) {
       await load();
       const normalized = normalizeChatId(chatId);
@@ -1302,6 +1356,8 @@ export function createSupabaseSubscriberStore({
         copyTradeSellSlippagePercent: null,
         copyTradeSellPriorityFeeSol: null,
         copyTradeRetryFailedBuys: false,
+        copyTradeBuyPressureSellEnabled: false,
+        copyTradeBuyPressureSellTimeoutMs: null,
         updatedAt: new Date().toISOString()
       };
 

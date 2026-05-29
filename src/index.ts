@@ -1839,7 +1839,7 @@ async function sendCopyTradeSimulationAlert(
       }
     }
 
-    if (config.copyTradeBuyPressureSellEnabled && trade.mint) {
+    if (copyTradeBuyPressureSellEnabledForSubscriber(subscriber) && trade.mint) {
       preBuyTokenBalance = await getTokenBalanceForWalletMint({
         owner: subscriber.tradingWallet.publicKey,
         mint: trade.mint
@@ -2036,7 +2036,7 @@ async function scheduleCopyTradePostConfirmationExits({
   preBuyTokenBalance: number | null;
   executionProvider: TradeExecutionProvider;
 }): Promise<void> {
-  const postBuyTokenBalance = config.copyTradeBuyPressureSellEnabled && trade.mint
+  const postBuyTokenBalance = copyTradeBuyPressureSellEnabledForSubscriber(subscriber) && trade.mint
     ? await getTokenBalanceForWalletMint({
         owner: subscriber.tradingWallet?.publicKey || "",
         mint: trade.mint
@@ -2318,6 +2318,18 @@ function copyTradeBuyPressureSellConfig() {
   };
 }
 
+function copyTradeBuyPressureSellEnabledForSubscriber(subscriber: SubscriberRecord): boolean {
+  return config.copyTradeBuyPressureSellEnabled && subscriber.copyTradeBuyPressureSellEnabled === true;
+}
+
+function copyTradeBuyPressureSellConfigForSubscriber(subscriber: SubscriberRecord) {
+  return {
+    ...copyTradeBuyPressureSellConfig(),
+    enabled: copyTradeBuyPressureSellEnabledForSubscriber(subscriber),
+    timeoutMs: subscriber.copyTradeBuyPressureSellTimeoutMs ?? config.copyTradeBuyPressureSellTimeoutMs
+  };
+}
+
 function copyTradeRouteForProvider(provider: TradeExecutionProvider): TradeExecutionResult["route"] {
   return isDirectTradeExecutionProvider(provider) ? routeForDirectProvider(provider) : "pumpportal-lightning";
 }
@@ -2478,7 +2490,7 @@ async function startCopyTradeBuyPressureSellWatcher({
   executionProvider: TradeExecutionProvider;
 }): Promise<boolean> {
   const watcher = createCopyTradeBuyPressureSellWatcher({
-    config: copyTradeBuyPressureSellConfig(),
+    config: copyTradeBuyPressureSellConfigForSubscriber(subscriber),
     subscriber,
     trade,
     copyTradeWallet,

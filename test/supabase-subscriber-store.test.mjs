@@ -183,6 +183,8 @@ function subscriber(overrides = {}) {
     copyTradeSellSlippagePercent: null,
     copyTradeSellPriorityFeeSol: null,
     copyTradeRetryFailedBuys: false,
+    copyTradeBuyPressureSellEnabled: false,
+    copyTradeBuyPressureSellTimeoutMs: null,
     copyTargetWalletAddress: null,
     verifiedAt: "2026-05-22T00:00:00.000Z",
     updatedAt: "2026-05-22T00:00:00.000Z",
@@ -284,9 +286,13 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
   assert.equal(await store.setCopyTradeSellSlippage("chat-1", 20), true);
   assert.equal(await store.setCopyTradeSellPriorityFee("chat-1", 0.0002), true);
   assert.equal(await store.setCopyTradeRetryFailedBuys("chat-1", true), true);
+  assert.equal(await store.setCopyTradeBuyPressureSellEnabled("chat-1", true), true);
+  assert.equal(await store.setCopyTradeBuyPressureSellTimeoutMs("chat-1", 5000), true);
   assert.equal(await store.setCopyTradeBuySlippage("chat-2", 12.5), false);
   assert.equal(await store.setCopyTradeSellPriorityFee("chat-2", 0.0002), false);
   assert.equal(await store.setCopyTradeRetryFailedBuys("chat-2", true), false);
+  assert.equal(await store.setCopyTradeBuyPressureSellEnabled("chat-2", true), false);
+  assert.equal(await store.setCopyTradeBuyPressureSellTimeoutMs("chat-2", 5000), false);
   assert.equal(await store.watchCopyTradeWallet("chat-2", wallet, "Unverified"), false);
   assert.equal(store.get("chat-1")?.mode, "newtokens");
   assert.equal(store.get("chat-1")?.copyWalletAddress, otherWallet);
@@ -298,6 +304,8 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
   assert.equal(store.get("chat-1")?.copyTradeSellSlippagePercent, 20);
   assert.equal(store.get("chat-1")?.copyTradeSellPriorityFeeSol, 0.0002);
   assert.equal(store.get("chat-1")?.copyTradeRetryFailedBuys, true);
+  assert.equal(store.get("chat-1")?.copyTradeBuyPressureSellEnabled, true);
+  assert.equal(store.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, 5000);
   assert.equal(store.getTradingWallet("chat-1")?.publicKey, otherWallet);
   assert.equal(store.getTradingWallet("chat-1")?.apiKeyLast4, "ikey");
   assert.equal(store.getTradingWallet("chat-1")?.label, "Main Wallet");
@@ -323,6 +331,8 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
   assert.equal(reloaded.get("chat-1")?.copyTradeSellSlippagePercent, 20);
   assert.equal(reloaded.get("chat-1")?.copyTradeSellPriorityFeeSol, 0.0002);
   assert.equal(reloaded.get("chat-1")?.copyTradeRetryFailedBuys, true);
+  assert.equal(reloaded.get("chat-1")?.copyTradeBuyPressureSellEnabled, true);
+  assert.equal(reloaded.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, 5000);
   assert.equal(reloaded.getTradingWallet("chat-1")?.publicKey, otherWallet);
   assert.equal(reloaded.getTradingWallet("chat-1")?.label, "Main Wallet");
   assert.equal(await reloaded.renameTradingWallet("chat-1", null), true);
@@ -340,6 +350,8 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
   assert.equal(reloaded.get("chat-1")?.copyTradeSellSlippagePercent, null);
   assert.equal(reloaded.get("chat-1")?.copyTradeSellPriorityFeeSol, null);
   assert.equal(reloaded.get("chat-1")?.copyTradeRetryFailedBuys, false);
+  assert.equal(reloaded.get("chat-1")?.copyTradeBuyPressureSellEnabled, false);
+  assert.equal(reloaded.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, null);
   assert.equal(await reloaded.resetCopyTradeExecutionSettings("chat-2"), false);
 
   assert.equal(await reloaded.unwatchWallet("chat-1", wallet), true);
@@ -377,6 +389,34 @@ test("Supabase subscriber store does not pretend retry toggle persisted when col
     /copy_trade_retry_failed_buys/
   );
   assert.equal(store.get("chat-1")?.copyTradeRetryFailedBuys, false);
+});
+
+test("Supabase subscriber store does not pretend buy-pressure settings persisted when columns are missing", async () => {
+  class MissingBuyPressureColumnsRepository extends MemorySubscriberRepository {
+    async upsertSubscriber(record) {
+      if (record.copyTradeBuyPressureSellEnabled || record.copyTradeBuyPressureSellTimeoutMs !== null) {
+        throw new Error("Could not find the 'copy_trade_buy_pressure_sell_enabled' column in the schema cache");
+      }
+
+      return super.upsertSubscriber(record);
+    }
+  }
+
+  const repository = new MissingBuyPressureColumnsRepository();
+  const store = createSupabaseSubscriberStore({ repository });
+
+  await store.init();
+  await store.add("chat-1");
+  await assert.rejects(
+    () => store.setCopyTradeBuyPressureSellEnabled("chat-1", true),
+    /copy_trade_buy_pressure_sell_enabled/
+  );
+  await assert.rejects(
+    () => store.setCopyTradeBuyPressureSellTimeoutMs("chat-1", 5000),
+    /copy_trade_buy_pressure_sell_enabled/
+  );
+  assert.equal(store.get("chat-1")?.copyTradeBuyPressureSellEnabled, false);
+  assert.equal(store.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, null);
 });
 
 test("importSubscribersToSupabase upserts subscribers and watched wallets", async () => {
@@ -508,6 +548,8 @@ test("subscriberFromRow maps legacy PumpPortal and local Solana trading wallet r
     copy_wallet_address: null,
     copy_wallet_addresses: [],
     copy_amount_sol: null,
+    copy_trade_buy_pressure_sell_enabled: true,
+    copy_trade_buy_pressure_sell_timeout_ms: 5000,
     copy_target_wallet_address: null,
     verified_at: "2026-05-28T00:00:00.000Z",
     updated_at: "2026-05-28T00:00:00.000Z",
@@ -552,6 +594,8 @@ test("subscriberFromRow maps legacy PumpPortal and local Solana trading wallet r
 
   assert.equal(legacy.tradingWallet?.provider, "pumpportal-lightning");
   assert.equal(legacy.tradingWallet?.encryptedApiKey, "encrypted-api-key");
+  assert.equal(legacy.copyTradeBuyPressureSellEnabled, true);
+  assert.equal(legacy.copyTradeBuyPressureSellTimeoutMs, 5000);
   assert.equal(local.tradingWallet?.provider, "local-solana");
   assert.equal(local.tradingWallet?.encryptedSecretKey, "encrypted-secret-key");
   assert.equal(local.tradingWallet?.secretKeyFormat, "base58");

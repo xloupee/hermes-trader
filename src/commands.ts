@@ -51,6 +51,7 @@ type PendingCopyInputAction =
   | "buy_priority_fee"
   | "sell_slippage"
   | "sell_priority_fee"
+  | "buy_pressure_timeout"
   | "trailing_step"
   | "trailing_steps"
   | "trailing_formula";
@@ -157,6 +158,10 @@ function effectiveSellPriorityFee(subscriber: SubscriberRecord | null | undefine
   return subscriber?.copyTradeSellPriorityFeeSol ?? config.copyTradePriorityFee ?? DEFAULT_COPY_TRADE_PRIORITY_FEE;
 }
 
+function effectiveBuyPressureTimeoutMs(subscriber: SubscriberRecord | null | undefined, config: LegacyBotConfig): number {
+  return subscriber?.copyTradeBuyPressureSellTimeoutMs ?? config.copyTradeBuyPressureSellTimeoutMs ?? 120_000;
+}
+
 function capEnabled(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
@@ -193,10 +198,18 @@ function copyTradeInputLabel(action: PendingCopyInputAction): string {
     return "Sell priority fee";
   }
 
+  if (action === "buy_pressure_timeout") {
+    return "Buy-pressure timeout";
+  }
+
   return "Copy trade setting";
 }
 
 function formatCopyTradeInputValue(action: PendingCopyInputAction, value: number): string {
+  if (action === "buy_pressure_timeout") {
+    return formatDuration(value);
+  }
+
   if (action === "copy_amount" || action === "buy_priority_fee" || action === "sell_priority_fee") {
     return `${formatSolAmount(value)} SOL`;
   }
@@ -1162,6 +1175,47 @@ export function createTelegramCommandPoller({
           ? `Send sell priority fee in SOL up to <code>${formatSolAmount(config.copyTradeMaxPriorityFee)}</code>, for example <code>0.00005</code>.`
           : "Send sell priority fee in SOL, for example <code>0.00005</code>."
       );
+      return;
+    }
+
+    if (data === "copytrade:settings:buy_pressure_toggle") {
+      const subscriber = subscribers?.get(chatId) || null;
+      const enabled = !(subscriber?.copyTradeBuyPressureSellEnabled === true);
+      let updated = false;
+
+      try {
+        updated = await subscribers?.setCopyTradeBuyPressureSellEnabled(chatId, enabled) || false;
+      } catch (error) {
+        console.warn(`Could not save buy-pressure sell setting for ${chatId}: ${errorMessage(error)}`);
+        await reply(
+          chatId,
+          [
+            "<b>Buy-pressure sell setting could not be saved.</b>",
+            "",
+            "Apply the latest Supabase migration and refresh the schema cache, then try again.",
+            `<code>${escapeHtml(errorMessage(error))}</code>`
+          ].join("\n")
+        );
+        return;
+      }
+
+      if (!updated) {
+        await reply(chatId, verificationPrompt());
+        return;
+      }
+
+      const dashboard = copyTradeSettingsDashboard(chatId);
+      await reply(
+        chatId,
+        `<b>Buy-pressure sell is now ${enabled ? "on" : "off"}.</b>\n\n${dashboard.text}`,
+        dashboard.replyMarkup
+      );
+      return;
+    }
+
+    if (data === "copytrade:settings:buy_pressure_timeout") {
+      setPendingCopyInput(chatId, "buy_pressure_timeout");
+      await reply(chatId, "Send buy-pressure timeout in seconds, for example <code>5</code>, <code>30</code>, or <code>120</code>.");
       return;
     }
 
@@ -2472,6 +2526,10 @@ export function createTelegramCommandPoller({
       return saveCopyTradeExecutionSetting(chatId, pending.action, pending.confirmValue);
     }
 
+    if (pending.action === "buy_pressure_timeout") {
+      return saveCopyTradeBuyPressureTimeout(chatId, pending.confirmValue);
+    }
+
     return {
       text: "That copy trade setup step cannot be confirmed from here. Send /copytrade to start again.",
       replyMarkup: copyTradeDashboardReplyMarkup()
@@ -2500,6 +2558,23 @@ export function createTelegramCommandPoller({
     const formatted = isSlippageInputAction(action) ? `${formatPercent(value)}%` : `${formatSolAmount(value)} SOL`;
     return {
       text: `<b>${copyTradeInputLabel(action)} saved:</b> ${formatted}\n\n${dashboard.text}`,
+      replyMarkup: dashboard.replyMarkup
+    };
+  }
+
+  async function saveCopyTradeBuyPressureTimeout(
+    chatId: TelegramChatId,
+    timeoutMs: number
+  ): Promise<{ text: string; replyMarkup?: TelegramReplyMarkup }> {
+    const updated = await subscribers?.setCopyTradeBuyPressureSellTimeoutMs(chatId, timeoutMs);
+
+    if (!updated) {
+      return { text: verificationPrompt() };
+    }
+
+    const dashboard = copyTradeSettingsDashboard(chatId);
+    return {
+      text: `<b>Buy-pressure timeout saved:</b> ${formatDuration(timeoutMs)}\n\n${dashboard.text}`,
       replyMarkup: dashboard.replyMarkup
     };
   }
@@ -2616,16 +2691,30 @@ export function createTelegramCommandPoller({
       pending.action === "buy_slippage" ||
       pending.action === "sell_slippage" ||
       pending.action === "buy_priority_fee" ||
-      pending.action === "sell_priority_fee"
+      pending.action === "sell_priority_fee" ||
+      pending.action === "buy_pressure_timeout"
     ) {
       const isSlippage = pending.action === "buy_slippage" || pending.action === "sell_slippage";
-      const parsed = isSlippage ? parseSlippageInput(value) : parsePriorityFeeInput(value);
+      const isBuyPressureTimeout = pending.action === "buy_pressure_timeout";
+      const parsed = isBuyPressureTimeout
+        ? parseDurationMs(value)
+        : isSlippage
+          ? parseSlippageInput(value)
+          : parsePriorityFeeInput(value);
 
       if (parsed === null) {
         return {
-          text: isSlippage
-            ? "That slippage is not valid. Send a percent from <code>0.1</code> to <code>100</code>, like <code>10%</code>."
-            : "That priority fee is not valid. Send a SOL amount greater than <code>0</code> and no more than <code>1</code>, like <code>0.00005</code>."
+          text: isBuyPressureTimeout
+            ? "That timeout is not valid. Send a positive number of seconds, like <code>5</code>, <code>30</code>, or <code>120</code>."
+            : isSlippage
+              ? "That slippage is not valid. Send a percent from <code>0.1</code> to <code>100</code>, like <code>10%</code>."
+              : "That priority fee is not valid. Send a SOL amount greater than <code>0</code> and no more than <code>1</code>, like <code>0.00005</code>."
+        };
+      }
+
+      if (isBuyPressureTimeout && parsed <= 0) {
+        return {
+          text: "That timeout is not valid. Send a positive number of seconds, like <code>5</code>, <code>30</code>, or <code>120</code>."
         };
       }
 
@@ -2737,6 +2826,11 @@ export function createTelegramCommandPoller({
     }
 
     const subscriber = subscribers?.get(chatId) || null;
+    const buyPressureTimeoutMs = effectiveBuyPressureTimeoutMs(subscriber, config);
+    const buyPressureTimeoutSource = subscriber?.copyTradeBuyPressureSellTimeoutMs === null ||
+      subscriber?.copyTradeBuyPressureSellTimeoutMs === undefined
+      ? "Inherited"
+      : "Custom";
     const text = [
       "<b>⚙️ Execution Settings</b>",
       "",
@@ -2752,6 +2846,11 @@ export function createTelegramCommandPoller({
       "",
       "<b>🔁 Retry Failed Buys</b>",
       `└ Failed same-token retries: ${subscriber?.copyTradeRetryFailedBuys ? "On" : "Off"}`,
+      "",
+      "<b>📈 Buy-Pressure Sell</b>",
+      `├ Status: ${subscriber?.copyTradeBuyPressureSellEnabled ? "On" : "Off"}`,
+      `├ Timeout: ${buyPressureTimeoutSource} ${formatDuration(buyPressureTimeoutMs)}`,
+      `└ Bot gate: ${config.copyTradeBuyPressureSellEnabled ? "Enabled" : "Disabled"}`,
       "",
       `🕒 Last updated: ${formatDashboardTime(new Date())}`
     ].join("\n");
@@ -2773,6 +2872,13 @@ export function createTelegramCommandPoller({
               text: `${subscriber?.copyTradeRetryFailedBuys ? "☑" : "☐"} Retry Failed Buys`,
               callback_data: "copytrade:settings:retry_failed_buys"
             }
+          ],
+          [
+            {
+              text: `${subscriber?.copyTradeBuyPressureSellEnabled ? "☑" : "☐"} Buy-Pressure Sell`,
+              callback_data: "copytrade:settings:buy_pressure_toggle"
+            },
+            { text: "⏱️ Sell Timeout", callback_data: "copytrade:settings:buy_pressure_timeout" }
           ],
           [{ text: "♻️ Reset Defaults", callback_data: "copytrade:settings:reset" }],
           [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]

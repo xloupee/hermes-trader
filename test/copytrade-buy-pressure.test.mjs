@@ -67,6 +67,8 @@ function subscriber(overrides = {}) {
     copyTradeSellSlippagePercent: null,
     copyTradeSellPriorityFeeSol: null,
     copyTradeRetryFailedBuys: false,
+    copyTradeBuyPressureSellEnabled: overrides.copyTradeBuyPressureSellEnabled ?? false,
+    copyTradeBuyPressureSellTimeoutMs: overrides.copyTradeBuyPressureSellTimeoutMs ?? null,
     copyTargetWalletAddress: null,
     verifiedAt: "now",
     updatedAt: "now"
@@ -291,7 +293,9 @@ test("index integration keeps buy-pressure sells confirmation-gated and live-gat
     source,
     /const confirmed = await waitForSignatureConfirmation\(buySignature\);[\s\S]*await scheduleCopyTradePostConfirmationExits/
   );
-  assert.match(source, /preBuyTokenBalance = await getTokenBalanceForWalletMint/);
+  assert.match(source, /function copyTradeBuyPressureSellEnabledForSubscriber\(subscriber/);
+  assert.match(source, /copyTradeBuyPressureSellEnabledForSubscriber\(subscriber\) && trade\.mint/);
+  assert.match(source, /timeoutMs: subscriber\.copyTradeBuyPressureSellTimeoutMs \?\? config\.copyTradeBuyPressureSellTimeoutMs/);
   assert.match(source, /await copyTradePositionBalanceBlockedReason\(watcher\)/);
   assert.match(source, /activeBuyPressureSellWatchers\.set\(watcher\.id, claimedWatcher\);[\s\S]*await persistActiveBuyPressureSellWatchers\(\);/);
   assert.match(source, /copyTradeSubmissionBlockedReason\(watcher\.executionProvider\)/);

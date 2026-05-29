@@ -81,6 +81,8 @@ export function makeSubscriber(chatId: string, mode: AlertModeValue | null, now 
     copyTradeSellSlippagePercent: null,
     copyTradeSellPriorityFeeSol: null,
     copyTradeRetryFailedBuys: false,
+    copyTradeBuyPressureSellEnabled: false,
+    copyTradeBuyPressureSellTimeoutMs: null,
     copyTargetWalletAddress: null,
     verifiedAt: now,
     updatedAt: now
@@ -163,6 +165,8 @@ export function mergeSubscriber(
     copyTradeSellSlippagePercent: finiteNumber(existing?.copyTradeSellSlippagePercent),
     copyTradeSellPriorityFeeSol: finiteNumber(existing?.copyTradeSellPriorityFeeSol),
     copyTradeRetryFailedBuys: existing?.copyTradeRetryFailedBuys === true,
+    copyTradeBuyPressureSellEnabled: existing?.copyTradeBuyPressureSellEnabled === true,
+    copyTradeBuyPressureSellTimeoutMs: finiteNumber(existing?.copyTradeBuyPressureSellTimeoutMs),
     copyTargetWalletAddress: stringValue(existing?.copyTargetWalletAddress) || null,
     verifiedAt: typeof verifiedAt === "string" ? verifiedAt : existing?.verifiedAt || now,
     updatedAt: typeof updatedAt === "string" ? updatedAt : existing?.updatedAt || now
@@ -286,6 +290,11 @@ function loadSubscriberRecordInto(subscribers: Map<string, SubscriberRecord>, va
       copyTradeSellSlippagePercent: finiteNumber(record.copyTradeSellSlippagePercent ?? record.copy_trade_sell_slippage_percent) ?? existing.copyTradeSellSlippagePercent,
       copyTradeSellPriorityFeeSol: finiteNumber(record.copyTradeSellPriorityFeeSol ?? record.copy_trade_sell_priority_fee_sol) ?? existing.copyTradeSellPriorityFeeSol,
       copyTradeRetryFailedBuys: record.copyTradeRetryFailedBuys === true || record.copy_trade_retry_failed_buys === true,
+      copyTradeBuyPressureSellEnabled:
+        record.copyTradeBuyPressureSellEnabled === true || record.copy_trade_buy_pressure_sell_enabled === true,
+      copyTradeBuyPressureSellTimeoutMs:
+        finiteNumber(record.copyTradeBuyPressureSellTimeoutMs ?? record.copy_trade_buy_pressure_sell_timeout_ms) ??
+          existing.copyTradeBuyPressureSellTimeoutMs,
       copyTargetWalletAddress: legacyCopyTarget || existing.copyTargetWalletAddress
     });
   }
@@ -971,6 +980,40 @@ export function createSubscriberStore({
       await save();
       return true;
     },
+    async setCopyTradeBuyPressureSellEnabled(chatId, enabled) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      subscribers.set(normalized, {
+        ...existing,
+        copyTradeBuyPressureSellEnabled: enabled,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return true;
+    },
+    async setCopyTradeBuyPressureSellTimeoutMs(chatId, timeoutMs) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      subscribers.set(normalized, {
+        ...existing,
+        copyTradeBuyPressureSellTimeoutMs: timeoutMs,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return true;
+    },
     async resetCopyTradeExecutionSettings(chatId) {
       await load();
       const normalized = normalizeChatId(chatId);
@@ -987,6 +1030,8 @@ export function createSubscriberStore({
         copyTradeSellSlippagePercent: null,
         copyTradeSellPriorityFeeSol: null,
         copyTradeRetryFailedBuys: false,
+        copyTradeBuyPressureSellEnabled: false,
+        copyTradeBuyPressureSellTimeoutMs: null,
         updatedAt: new Date().toISOString()
       });
       await save();

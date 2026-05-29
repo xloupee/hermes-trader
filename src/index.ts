@@ -26,7 +26,12 @@ import {
   safelyFailCopyTradeBuyIdempotency
 } from "./copytrade-idempotency.js";
 import { createCopyTradeLatencyClock, createCopyTradeLatencyTracker } from "./copytrade-latency.js";
-import { buildDirectSolanaPayload, sendSolanaDirectTransaction, simulateSolanaDirectTransaction } from "./direct-solana.js";
+import {
+  buildDirectSolanaPayload,
+  sendSolanaDirectTransaction,
+  simulateSolanaDirectTransaction,
+  warmDirectSolanaSdk
+} from "./direct-solana.js";
 import type { DirectSolanaSendStage } from "./direct-solana.js";
 import type { DirectTransactionPayload } from "./direct-pump.js";
 import { createHeliusWebhookServer, missingHeliusConfigWarning, syncHeliusWebhook } from "./helius.js";
@@ -154,11 +159,11 @@ function directExecutionConfirmationModeFromEnv(value: string | undefined): BotC
 
 function copyTradeLatencyMilestoneForDirectStage(stage: DirectSolanaSendStage): CopyTradeLatencyMilestone | null {
   if (stage === "transaction_build_started") {
-    return "direct_build_started";
+    return null;
   }
 
   if (stage === "transaction_built") {
-    return "direct_build_finished";
+    return null;
   }
 
   if (stage === "blockhash_started") {
@@ -287,6 +292,7 @@ const activeTrailingSellSchedules = new Set<string>();
 const copyBuySubmissionGuard = createCopyBuySubmissionGuard();
 const copyBuySemanticSubmissionGuard = createCopyBuySubmissionGuard();
 const copyTradeDailySolBudget = createInMemoryCopyTradeDailySolBudget();
+const directSolanaConnection = new Connection(config.solanaRpcUrl, "confirmed");
 let isShuttingDown = false;
 let copyTradeEmergencyStopped = false;
 const pumpFunCoinInfoRetryDelaysMs = [0, 750, 1500, 3000, 6000];
@@ -579,9 +585,8 @@ function warmPlatformFeeTreasuryAccount(): void {
     return;
   }
 
-  const connection = new Connection(config.solanaRpcUrl, "confirmed");
   verifyPlatformFeeTreasuryAccount({
-    connection,
+    connection: directSolanaConnection,
     treasury: config.platformFeeTreasury
   }).then((reason) => {
     if (reason) {
@@ -589,6 +594,21 @@ function warmPlatformFeeTreasuryAccount(): void {
     }
   }).catch((error) => {
     console.warn(`Platform fee treasury warmup failed: ${errorMessage(error)}`);
+  });
+}
+
+function warmDirectExecutionHotPath(): void {
+  if (!isDirectTradeExecutionProvider(config.copyTradeExecutionProvider)) {
+    return;
+  }
+
+  warmDirectSolanaSdk({
+    connection: directSolanaConnection,
+    provider: config.copyTradeExecutionProvider
+  }).then(() => {
+    console.log(`Direct execution hot path warmed: provider=${config.copyTradeExecutionProvider}`);
+  }).catch((error) => {
+    console.warn(`Direct execution hot path warmup failed: ${errorMessage(error)}`);
   });
 }
 
@@ -1176,7 +1196,7 @@ async function executeDirectCopyTrade({
       platformFee: platformFee ? platformFeeResultFields(platformFee) : null
     });
   }
-  const connection = new Connection(config.solanaRpcUrl, "confirmed");
+  const connection = directSolanaConnection;
 
   onLatencyMilestone?.("direct_build_started");
   const built = await buildDirectSolanaPayload({
@@ -3134,6 +3154,7 @@ console.log(`Using ${subscriberStoreLabel} subscriber storage`);
 console.log(`Loaded ${subscribers.count()} verified Telegram subscriber(s)`);
 logCopyTradeExecutionState();
 warmPlatformFeeTreasuryAccount();
+warmDirectExecutionHotPath();
 // Supabase-backed subscribers load at startup, so compute account-trade
 // subscriptions after init rather than from the empty pre-init store.
 migrationListener.setSubscriptionMethods(activePumpPortalSubscriptions());

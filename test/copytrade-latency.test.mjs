@@ -59,6 +59,18 @@ test("index runtime wires Helius receipt and normalization timestamps into copy 
   );
   assert.match(
     indexSource,
+    /warmDirectExecutionHotPath\(\);/
+  );
+  assert.doesNotMatch(
+    indexSource,
+    /stage === "transaction_build_started"[\s\S]{0,120}return "direct_build_started"/
+  );
+  assert.doesNotMatch(
+    indexSource,
+    /stage === "transaction_built"[\s\S]{0,120}return "direct_build_finished"/
+  );
+  assert.match(
+    indexSource,
     /await Promise\.all\(copyTradeEntries\.map\(\(entry\) =>[\s\S]*sendCopyTradeSimulationAlert/
   );
   assert.match(

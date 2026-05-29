@@ -39,9 +39,20 @@ const DIRECT_SIMULATION_CONFIG = {
 
 type PumpSdkModule = typeof import("@pump-fun/pump-sdk");
 type PumpSwapSdkModule = typeof import("@pump-fun/pump-swap-sdk");
+type OnlinePumpSdkInstance = InstanceType<PumpSdkModule["OnlinePumpSdk"]>;
+type OnlinePumpAmmSdkInstance = InstanceType<PumpSwapSdkModule["OnlinePumpAmmSdk"]>;
+type PumpGlobal = Awaited<ReturnType<OnlinePumpSdkInstance["fetchGlobal"]>>;
+type PumpFeeConfig = Awaited<ReturnType<OnlinePumpSdkInstance["fetchFeeConfig"]>>;
 
 let pumpSdkModule: PumpSdkModule | null = null;
 let pumpSwapSdkModule: PumpSwapSdkModule | null = null;
+const pumpSdkByConnection = new WeakMap<Connection, OnlinePumpSdkInstance>();
+const pumpAmmSdkByConnection = new WeakMap<Connection, OnlinePumpAmmSdkInstance>();
+const PUMP_CONFIG_CACHE_MS = 60_000;
+let pumpGlobalCache: { value: PumpGlobal; expiresAtMs: number } | null = null;
+let pumpGlobalInflight: Promise<PumpGlobal> | null = null;
+let pumpFeeConfigCache: { value: PumpFeeConfig | null; expiresAtMs: number } | null = null;
+let pumpFeeConfigInflight: Promise<PumpFeeConfig | null> | null = null;
 
 function loadPumpSdk(): PumpSdkModule {
   pumpSdkModule ||= require("@pump-fun/pump-sdk") as PumpSdkModule;
@@ -51,6 +62,87 @@ function loadPumpSdk(): PumpSdkModule {
 function loadPumpSwapSdk(): PumpSwapSdkModule {
   pumpSwapSdkModule ||= require("@pump-fun/pump-swap-sdk") as PumpSwapSdkModule;
   return pumpSwapSdkModule;
+}
+
+function getOnlinePumpSdk(connection: Connection, module = loadPumpSdk()): OnlinePumpSdkInstance {
+  const cached = pumpSdkByConnection.get(connection);
+  if (cached) {
+    return cached;
+  }
+
+  const sdk = new module.OnlinePumpSdk(connection);
+  pumpSdkByConnection.set(connection, sdk);
+  return sdk;
+}
+
+function getOnlinePumpAmmSdk(connection: Connection, module = loadPumpSwapSdk()): OnlinePumpAmmSdkInstance {
+  const cached = pumpAmmSdkByConnection.get(connection);
+  if (cached) {
+    return cached;
+  }
+
+  const sdk = new module.OnlinePumpAmmSdk(connection);
+  pumpAmmSdkByConnection.set(connection, sdk);
+  return sdk;
+}
+
+async function fetchCachedPumpGlobal(sdk: OnlinePumpSdkInstance): Promise<PumpGlobal> {
+  const now = Date.now();
+  if (pumpGlobalCache && pumpGlobalCache.expiresAtMs > now) {
+    return pumpGlobalCache.value;
+  }
+
+  pumpGlobalInflight ||= sdk.fetchGlobal().then((value) => {
+    pumpGlobalCache = { value, expiresAtMs: Date.now() + PUMP_CONFIG_CACHE_MS };
+    return value;
+  }).finally(() => {
+    pumpGlobalInflight = null;
+  });
+
+  return pumpGlobalInflight;
+}
+
+async function fetchCachedPumpFeeConfig(sdk: OnlinePumpSdkInstance): Promise<PumpFeeConfig | null> {
+  const now = Date.now();
+  if (pumpFeeConfigCache && pumpFeeConfigCache.expiresAtMs > now) {
+    return pumpFeeConfigCache.value;
+  }
+
+  pumpFeeConfigInflight ||= sdk.fetchFeeConfig().catch(() => null).then((value) => {
+    pumpFeeConfigCache = { value, expiresAtMs: Date.now() + PUMP_CONFIG_CACHE_MS };
+    return value;
+  }).finally(() => {
+    pumpFeeConfigInflight = null;
+  });
+
+  return pumpFeeConfigInflight;
+}
+
+export async function warmDirectSolanaSdk({
+  connection,
+  provider
+}: {
+  connection: Connection;
+  provider: DirectTradeExecutionProvider;
+}): Promise<void> {
+  const warmups: Promise<unknown>[] = [];
+
+  if (provider === "direct-pump" || provider === "direct-auto") {
+    const pumpModule = loadPumpSdk();
+    const pumpSdk = getOnlinePumpSdk(connection, pumpModule);
+    warmups.push(fetchCachedPumpGlobal(pumpSdk), fetchCachedPumpFeeConfig(pumpSdk));
+  }
+
+  if (provider === "direct-pumpswap" || provider === "direct-auto") {
+    const pumpSwapModule = loadPumpSwapSdk();
+    getOnlinePumpAmmSdk(connection, pumpSwapModule);
+  }
+
+  const results = await Promise.allSettled(warmups);
+  const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (rejected) {
+    throw rejected.reason;
+  }
 }
 
 export interface DirectSolanaBuildRequest {
@@ -334,13 +426,13 @@ async function buildDirectPumpSolanaPayload({
 }): Promise<TradeExecutionResult | DirectTransactionPayload> {
   const mint = publicKey(request.mint, "mint");
   const user = publicKey(request.walletPublicKey, "walletPublicKey");
+  const pumpModule = loadPumpSdk();
   const {
     getBuyTokenAmountFromSolAmount,
     getSellSolAmountFromTokenAmount,
-    OnlinePumpSdk,
     PUMP_SDK
-  } = loadPumpSdk();
-  const sdk = new OnlinePumpSdk(connection);
+  } = pumpModule;
+  const sdk = getOnlinePumpSdk(connection, pumpModule);
   const route = buildDirectRouteMetadata({
     provider: "direct-pump",
     mint: request.mint,
@@ -354,8 +446,8 @@ async function buildDirectPumpSolanaPayload({
   try {
     const [tokenProgram, global, feeConfig] = await Promise.all([
       resolveMintTokenProgram({ connection, mint }),
-      sdk.fetchGlobal(),
-      sdk.fetchFeeConfig().catch(() => null)
+      fetchCachedPumpGlobal(sdk),
+      fetchCachedPumpFeeConfig(sdk)
     ]);
     const instructions = [...computeBudgetInstructions(request.priorityFeeSol), ...platformFeeInstruction({
       split: request.platformFee,
@@ -524,13 +616,13 @@ async function buildDirectPumpSwapSolanaPayload({
 }): Promise<TradeExecutionResult | DirectTransactionPayload> {
   const mint = publicKey(request.mint, "mint");
   const user = publicKey(request.walletPublicKey, "walletPublicKey");
+  const pumpSwapModule = loadPumpSwapSdk();
   const {
     canonicalPumpPoolPda,
-    OnlinePumpAmmSdk,
     PUMP_AMM_SDK
-  } = loadPumpSwapSdk();
+  } = pumpSwapModule;
   const pool = canonicalPumpPoolPda(mint, NATIVE_MINT);
-  const sdk = new OnlinePumpAmmSdk(connection);
+  const sdk = getOnlinePumpAmmSdk(connection, pumpSwapModule);
   const route = buildDirectRouteMetadata({
     provider: "direct-pumpswap",
     mint: request.mint,

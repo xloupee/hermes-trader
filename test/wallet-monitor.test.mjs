@@ -207,10 +207,10 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
   assert.match(dashboard, /Automatically mirror trades from selected wallets in real time\./);
   assert.match(dashboard, /👛 Trading Wallet:/);
   assert.match(dashboard, /62qc2C\.\.\.fafNgV/);
-  assert.match(dashboard, /💰 Copy Amount:<\/b> 0.5 SOL/);
-  assert.match(dashboard, /⚙️ Buy:<\/b> 10% slip \/ 0.00005 SOL priority/);
-  assert.match(dashboard, /⚙️ Sell:<\/b> 10% slip \/ 0.00005 SOL priority/);
-  assert.match(dashboard, /🔁 Retry Failed Buys:<\/b> Off/);
+  assert.match(dashboard, /⚙️ Copy Settings<\/b>\n├ Copy Amount: 0.5 SOL/);
+  assert.match(dashboard, /├ Buy: 10% slip \/ 0.00005 SOL priority/);
+  assert.match(dashboard, /├ Sell: 10% slip \/ 0.00005 SOL priority/);
+  assert.match(dashboard, /└ Retry Failed Buys: Off/);
   assert.match(dashboard, /🎯 Copytrade Wallets:<\/b> 1/);
   assert.match(dashboard, /└ cented/);
   assert.doesNotMatch(dashboard, new RegExp(wallet));
@@ -238,9 +238,10 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
   });
 
   assert.match(missing, /└ 39azUY\.\.\.5jUJjg/);
-  assert.match(missing, /⚙️ Buy:<\/b> 12.5% slip \/ 0.00012 SOL priority/);
-  assert.match(missing, /⚙️ Sell:<\/b> 20% slip \/ 0.0002 SOL priority/);
-  assert.match(missing, /🔁 Retry Failed Buys:<\/b> On/);
+  assert.match(missing, /├ Copy Amount: Not set/);
+  assert.match(missing, /├ Buy: 12.5% slip \/ 0.00012 SOL priority/);
+  assert.match(missing, /├ Sell: 20% slip \/ 0.0002 SOL priority/);
+  assert.match(missing, /└ Retry Failed Buys: On/);
   assert.match(missing, /🔴 Setup is <b>inactive<\/b>/);
 });
 

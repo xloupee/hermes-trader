@@ -42,6 +42,7 @@ export interface CopyTradeBuyIdempotencyClaimInput {
   amountSol: number;
   provider: WalletTradeData["provider"];
   request: PumpPortalLightningTradeRequest;
+  retryFailed?: boolean;
   now?: string;
 }
 
@@ -105,6 +106,11 @@ interface SupabaseCopyTradeBuyIdempotencyRow {
   updated_at: string;
   completed_at: string | null;
 }
+
+type SupabaseClientLike = {
+  // Supabase's generated table types are not available in this repo, so this stays deliberately loose.
+  from: (table: string) => any;
+};
 
 function baseRecord(input: CopyTradeBuyIdempotencyClaimInput): CopyTradeBuyIdempotencyRecord {
   const now = input.now || new Date().toISOString();
@@ -253,6 +259,20 @@ function sameSemanticBuy(record: CopyTradeBuyIdempotencyRecord, input: CopyTrade
   return record.chatId === input.chatId && record.mint === input.mint && record.action === (input.action || "buy");
 }
 
+function retryClaimedRecord(
+  existing: CopyTradeBuyIdempotencyRecord,
+  input: CopyTradeBuyIdempotencyClaimInput
+): CopyTradeBuyIdempotencyRecord {
+  const now = input.now || new Date().toISOString();
+
+  return {
+    ...baseRecord({ ...input, now }),
+    key: existing.key,
+    claimedAt: now,
+    updatedAt: now
+  };
+}
+
 async function readLocalFile(path: string): Promise<StoredCopyTradeBuyIdempotencyFile> {
   try {
     const parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
@@ -307,6 +327,18 @@ export function createJsonCopyTradeBuyIdempotencyStore({
         const existing = data.records.find((record) => record.key === input.key || sameSemanticBuy(record, input)) || null;
 
         if (existing) {
+          if (input.retryFailed && existing.status === "failed") {
+            data.records = data.records.map((record) =>
+              record.key === existing.key ? retryClaimedRecord(existing, input) : record
+            );
+            await writeLocalFile(path, data);
+
+            return {
+              claimed: true,
+              existing: null
+            };
+          }
+
           return {
             claimed: false,
             existing
@@ -365,13 +397,19 @@ function formatSupabaseError(error: SupabaseErrorLike | null): Error | null {
 export function createSupabaseCopyTradeBuyIdempotencyStore({
   url,
   serviceRoleKey,
-  fallback
+  fallback,
+  client: providedClient
 }: {
-  url: string;
-  serviceRoleKey: string;
+  url?: string;
+  serviceRoleKey?: string;
   fallback?: CopyTradeBuyIdempotencyStore;
+  client?: SupabaseClientLike;
 }): CopyTradeBuyIdempotencyStore {
-  const client = createClient(url, serviceRoleKey, {
+  if (!providedClient && (!url || !serviceRoleKey)) {
+    throw new Error("Supabase copy trade idempotency store requires url and serviceRoleKey");
+  }
+
+  const client: SupabaseClientLike = providedClient || createClient(url || "", serviceRoleKey || "", {
     auth: {
       persistSession: false,
       autoRefreshToken: false
@@ -433,6 +471,43 @@ export function createSupabaseCopyTradeBuyIdempotencyStore({
     return bySemantic.data ? recordFromSupabaseRow(bySemantic.data as SupabaseCopyTradeBuyIdempotencyRow) : null;
   }
 
+  async function reclaimFailed(input: CopyTradeBuyIdempotencyClaimInput, existing: CopyTradeBuyIdempotencyRecord) {
+    if (!input.retryFailed || existing.status !== "failed") {
+      return null;
+    }
+
+    const retryRecord = retryClaimedRecord(existing, input);
+    const { data, error } = await client
+      .from("telegram_copytrade_buy_idempotency")
+      .update({
+        source_wallet_address: retryRecord.sourceWalletAddress,
+        trading_wallet_public_key: retryRecord.tradingWalletPublicKey,
+        observed_signature: retryRecord.observedSignature,
+        amount_sol: retryRecord.amountSol,
+        provider: retryRecord.provider,
+        request: retryRecord.request,
+        status: retryRecord.status,
+        result_signature: retryRecord.resultSignature,
+        error_text: retryRecord.errorText,
+        http_status: retryRecord.httpStatus,
+        response: retryRecord.response,
+        claimed_at: retryRecord.claimedAt,
+        updated_at: retryRecord.updatedAt,
+        completed_at: retryRecord.completedAt
+      })
+      .eq("idempotency_key", existing.key)
+      .eq("status", "failed")
+      .select("*")
+      .maybeSingle();
+    const formattedError = formatSupabaseError(error);
+
+    if (formattedError) {
+      throw formattedError;
+    }
+
+    return data ? recordFromSupabaseRow(data as SupabaseCopyTradeBuyIdempotencyRow) : null;
+  }
+
   return {
     async claimBuy(input) {
       if (useFallback && fallback) {
@@ -452,9 +527,19 @@ export function createSupabaseCopyTradeBuyIdempotencyStore({
       }
 
       if (isUniqueViolation(error)) {
+        const existing = await readExisting(input);
+        const retried = existing ? await reclaimFailed(input, existing) : null;
+
+        if (retried) {
+          return {
+            claimed: true,
+            existing: null
+          };
+        }
+
         return {
           claimed: false,
-          existing: await readExisting(input)
+          existing: existing || await readExisting(input)
         };
       }
 

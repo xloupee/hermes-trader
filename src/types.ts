@@ -70,6 +70,7 @@ export interface BotConfig extends MigrationFormatConfig {
   transactionAccountLabels?: string;
   alertModeLabel?: string;
   shutdownReason?: string;
+  notifyOnShutdown: boolean;
   copyTradeEnabled: boolean;
   copyTradeDryRun: boolean;
   copyTradeExecutionProvider: "pumpportal-lightning" | "direct-pump" | "direct-pumpswap" | "direct-auto";
@@ -211,6 +212,7 @@ export interface SubscriberStore {
   setCopyTradeBuyPriorityFee: (chatId: TelegramChatId, sol: number) => Promise<boolean>;
   setCopyTradeSellSlippage: (chatId: TelegramChatId, percent: number) => Promise<boolean>;
   setCopyTradeSellPriorityFee: (chatId: TelegramChatId, sol: number) => Promise<boolean>;
+  setCopyTradeRetryFailedBuys: (chatId: TelegramChatId, enabled: boolean) => Promise<boolean>;
   resetCopyTradeExecutionSettings: (chatId: TelegramChatId) => Promise<boolean>;
   setCopyTargetWallet: (chatId: TelegramChatId, address: string | null) => Promise<boolean>;
   listWatchedWallets: (chatId: TelegramChatId) => WatchedWallet[];
@@ -234,6 +236,7 @@ export interface SubscriberRecord {
   copyTradeBuyPriorityFeeSol: number | null;
   copyTradeSellSlippagePercent: number | null;
   copyTradeSellPriorityFeeSol: number | null;
+  copyTradeRetryFailedBuys: boolean;
   copyTargetWalletAddress: string | null;
   verifiedAt: string;
   updatedAt: string;

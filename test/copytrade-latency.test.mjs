@@ -39,6 +39,18 @@ test("index runtime wires Helius receipt and normalization timestamps into copy 
   );
   assert.match(
     indexSource,
+    /notifyOnShutdown: process\.env\.BOT_NOTIFY_ON_SHUTDOWN === "true"/
+  );
+  assert.match(
+    indexSource,
+    /if \(shouldNotifySubscribersOnShutdown\(\) && config\.telegramToken && subscribers\.count\(\) > 0\)/
+  );
+  assert.doesNotMatch(
+    indexSource,
+    /please restart the bot/
+  );
+  assert.match(
+    indexSource,
     /async function handleHeliusWebhookEvents[\s\S]*const receivedAtMs = Date\.now\(\);[\s\S]*await handleHeliusSwap\(event, \{ receivedAtMs \}\);/
   );
   assert.match(
@@ -51,11 +63,19 @@ test("index runtime wires Helius receipt and normalization timestamps into copy 
   );
   assert.match(
     indexSource,
-    /fastDirectCopyBuyPath[\s\S]*copyBuySemanticSubmissionGuard\.reserve\(copyBuySemanticKey\)[\s\S]*deferredDurableCopyBuyClaimKey = durableCopyBuyKey;/
+    /directSemanticGuardEnabled[\s\S]*copyBuySemanticSubmissionGuard\.reserve\(copyBuySemanticKey\)[\s\S]*idempotencyClaim = await copyTradeBuyIdempotency\.claimBuy\([\s\S]*retryFailed: subscriber\.copyTradeRetryFailedBuys/
   );
   assert.match(
     indexSource,
-    /latencyTracker\.mark\("submit_finished"[\s\S]*deferredDurableCopyBuyClaimKey[\s\S]*copyTradeBuyIdempotency\.claimBuy/
+    /latencyTracker\.mark\("submit_finished"[\s\S]*if \(durableCopyBuyClaimKey\) \{[\s\S]*safelyCompleteCopyTradeBuyIdempotency/
+  );
+  assert.doesNotMatch(
+    indexSource,
+    /deferredDurableCopyBuyClaimKey/
+  );
+  assert.match(
+    indexSource,
+    /if \(copyBuySemanticReserved && !\(result && resultOk\(result\)\)\) \{[\s\S]*copyBuySemanticSubmissionGuard\.release\(copyBuySemanticKey\);/
   );
   assert.match(
     indexSource,

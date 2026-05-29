@@ -80,6 +80,7 @@ export function makeSubscriber(chatId: string, mode: AlertModeValue | null, now 
     copyTradeBuyPriorityFeeSol: null,
     copyTradeSellSlippagePercent: null,
     copyTradeSellPriorityFeeSol: null,
+    copyTradeRetryFailedBuys: false,
     copyTargetWalletAddress: null,
     verifiedAt: now,
     updatedAt: now
@@ -161,6 +162,7 @@ export function mergeSubscriber(
     copyTradeBuyPriorityFeeSol: finiteNumber(existing?.copyTradeBuyPriorityFeeSol),
     copyTradeSellSlippagePercent: finiteNumber(existing?.copyTradeSellSlippagePercent),
     copyTradeSellPriorityFeeSol: finiteNumber(existing?.copyTradeSellPriorityFeeSol),
+    copyTradeRetryFailedBuys: existing?.copyTradeRetryFailedBuys === true,
     copyTargetWalletAddress: stringValue(existing?.copyTargetWalletAddress) || null,
     verifiedAt: typeof verifiedAt === "string" ? verifiedAt : existing?.verifiedAt || now,
     updatedAt: typeof updatedAt === "string" ? updatedAt : existing?.updatedAt || now
@@ -283,6 +285,7 @@ function loadSubscriberRecordInto(subscribers: Map<string, SubscriberRecord>, va
       copyTradeBuyPriorityFeeSol: finiteNumber(record.copyTradeBuyPriorityFeeSol ?? record.copy_trade_buy_priority_fee_sol) ?? existing.copyTradeBuyPriorityFeeSol,
       copyTradeSellSlippagePercent: finiteNumber(record.copyTradeSellSlippagePercent ?? record.copy_trade_sell_slippage_percent) ?? existing.copyTradeSellSlippagePercent,
       copyTradeSellPriorityFeeSol: finiteNumber(record.copyTradeSellPriorityFeeSol ?? record.copy_trade_sell_priority_fee_sol) ?? existing.copyTradeSellPriorityFeeSol,
+      copyTradeRetryFailedBuys: record.copyTradeRetryFailedBuys === true || record.copy_trade_retry_failed_buys === true,
       copyTargetWalletAddress: legacyCopyTarget || existing.copyTargetWalletAddress
     });
   }
@@ -951,6 +954,23 @@ export function createSubscriberStore({
       await save();
       return true;
     },
+    async setCopyTradeRetryFailedBuys(chatId, enabled) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      subscribers.set(normalized, {
+        ...existing,
+        copyTradeRetryFailedBuys: enabled,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return true;
+    },
     async resetCopyTradeExecutionSettings(chatId) {
       await load();
       const normalized = normalizeChatId(chatId);
@@ -966,6 +986,7 @@ export function createSubscriberStore({
         copyTradeBuyPriorityFeeSol: null,
         copyTradeSellSlippagePercent: null,
         copyTradeSellPriorityFeeSol: null,
+        copyTradeRetryFailedBuys: false,
         updatedAt: new Date().toISOString()
       });
       await save();

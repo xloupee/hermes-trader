@@ -484,6 +484,121 @@ test("Solana direct sender background mode returns after signature without confi
   assert.equal(result.metadata.directSolanaTiming.timeToSignatureMs, 90);
 });
 
+test("Solana direct sender reuses a warm blockhash cache", async () => {
+  const solanaSigner = Keypair.generate();
+  const payload = {
+    provider: "direct-pump",
+    route: {
+      provider: "direct-pump",
+      route: "pump-bonding-curve",
+      mint: baseRequest.mint,
+      walletPublicKey: solanaSigner.publicKey.toBase58(),
+      poolAddress: null,
+      priorityFeeSol: 0.00005,
+      slippagePercent: 10,
+      amount: "990000000",
+      amountBasis: "sol"
+    },
+    instructions: [
+      SystemProgram.transfer({
+        fromPubkey: solanaSigner.publicKey,
+        toPubkey: solanaSigner.publicKey,
+        lamports: 0
+      })
+    ],
+    signers: [],
+    metadata: {}
+  };
+  let blockhashCalls = 0;
+  let sendCalls = 0;
+  const connection = {
+    getLatestBlockhash: () => {
+      blockhashCalls += 1;
+      return {
+        blockhash: "11111111111111111111111111111111",
+        lastValidBlockHeight: 123
+      };
+    },
+    simulateTransaction: () => ({ value: { err: null, unitsConsumed: 42 } }),
+    sendRawTransaction: () => `signature-${++sendCalls}`,
+    confirmTransaction: () => ({ value: { err: null } })
+  };
+  const seen = [];
+  const config = {
+    gate: liveGate,
+    confirmationMode: "background",
+    blockhashCacheMs: 30_000,
+    onStage: (stage, details) => {
+      if (stage === "blockhash_received") {
+        seen.push(details.status);
+      }
+    }
+  };
+
+  const first = await sendSolanaDirectTransaction({ connection, signer: solanaSigner, payload, config });
+  const second = await sendSolanaDirectTransaction({ connection, signer: solanaSigner, payload, config });
+
+  assert.equal(first.signature, "signature-1");
+  assert.equal(second.signature, "signature-2");
+  assert.equal(blockhashCalls, 1);
+  assert.deepEqual(seen, ["fresh", "cached"]);
+  assert.equal(second.metadata.directSolanaTiming.blockhashCacheMs, 30_000);
+});
+
+test("Solana direct sender clamps excessive blockhash cache windows", async () => {
+  const solanaSigner = Keypair.generate();
+  const payload = {
+    provider: "direct-pump",
+    route: {
+      provider: "direct-pump",
+      route: "pump-bonding-curve",
+      mint: baseRequest.mint,
+      walletPublicKey: solanaSigner.publicKey.toBase58(),
+      poolAddress: null,
+      priorityFeeSol: 0.00005,
+      slippagePercent: 10,
+      amount: "990000000",
+      amountBasis: "sol"
+    },
+    instructions: [
+      SystemProgram.transfer({
+        fromPubkey: solanaSigner.publicKey,
+        toPubkey: solanaSigner.publicKey,
+        lamports: 0
+      })
+    ],
+    signers: [],
+    metadata: {}
+  };
+  let blockhashCalls = 0;
+  const connection = {
+    getLatestBlockhash: () => {
+      blockhashCalls += 1;
+      return {
+        blockhash: "11111111111111111111111111111111",
+        lastValidBlockHeight: 123
+      };
+    },
+    simulateTransaction: () => ({ value: { err: null, unitsConsumed: 42 } }),
+    sendRawTransaction: () => "signature-clamped",
+    confirmTransaction: () => ({ value: { err: null } })
+  };
+  const result = await sendSolanaDirectTransaction({
+    connection,
+    signer: solanaSigner,
+    payload,
+    config: {
+      gate: liveGate,
+      confirmationMode: "background",
+      blockhashCacheMs: 999_999
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(blockhashCalls, 1);
+  assert.equal(result.metadata.directSolanaTiming.blockhashCacheMs, 30_000);
+});
+
 test("Solana direct builder resolves legacy and Token-2022 mint programs", async () => {
   const mint = Keypair.generate().publicKey;
 

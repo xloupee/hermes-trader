@@ -43,16 +43,27 @@ type OnlinePumpSdkInstance = InstanceType<PumpSdkModule["OnlinePumpSdk"]>;
 type OnlinePumpAmmSdkInstance = InstanceType<PumpSwapSdkModule["OnlinePumpAmmSdk"]>;
 type PumpGlobal = Awaited<ReturnType<OnlinePumpSdkInstance["fetchGlobal"]>>;
 type PumpFeeConfig = Awaited<ReturnType<OnlinePumpSdkInstance["fetchFeeConfig"]>>;
+type LatestBlockhash = Awaited<ReturnType<Connection["getLatestBlockhash"]>>;
 
 let pumpSdkModule: PumpSdkModule | null = null;
 let pumpSwapSdkModule: PumpSwapSdkModule | null = null;
 const pumpSdkByConnection = new WeakMap<Connection, OnlinePumpSdkInstance>();
 const pumpAmmSdkByConnection = new WeakMap<Connection, OnlinePumpAmmSdkInstance>();
 const PUMP_CONFIG_CACHE_MS = 60_000;
+const MAX_BLOCKHASH_CACHE_MS = 30_000;
+const latestBlockhashByConnection = new WeakMap<Connection, {
+  value: LatestBlockhash | null;
+  expiresAtMs: number;
+  inflight: Promise<LatestBlockhash> | null;
+}>();
 let pumpGlobalCache: { value: PumpGlobal; expiresAtMs: number } | null = null;
 let pumpGlobalInflight: Promise<PumpGlobal> | null = null;
 let pumpFeeConfigCache: { value: PumpFeeConfig | null; expiresAtMs: number } | null = null;
 let pumpFeeConfigInflight: Promise<PumpFeeConfig | null> | null = null;
+
+function blockhashCacheMsFromConfig(value: number | undefined): number {
+  return Math.min(Math.max(0, Math.floor(Number.isFinite(value) ? value || 0 : 0)), MAX_BLOCKHASH_CACHE_MS);
+}
 
 function loadPumpSdk(): PumpSdkModule {
   pumpSdkModule ||= require("@pump-fun/pump-sdk") as PumpSdkModule;
@@ -145,6 +156,63 @@ export async function warmDirectSolanaSdk({
   }
 }
 
+async function getLatestBlockhashForDirectSend({
+  connection,
+  cacheMs = 0
+}: {
+  connection: Connection;
+  cacheMs?: number;
+}): Promise<{ blockhash: LatestBlockhash; cacheHit: boolean }> {
+  const clampedCacheMs = blockhashCacheMsFromConfig(cacheMs);
+  if (clampedCacheMs <= 0) {
+    return {
+      blockhash: await connection.getLatestBlockhash("confirmed"),
+      cacheHit: false
+    };
+  }
+
+  const now = Date.now();
+  let entry = latestBlockhashByConnection.get(connection);
+  if (entry?.value && entry.expiresAtMs > now) {
+    return {
+      blockhash: entry.value,
+      cacheHit: true
+    };
+  }
+
+  if (!entry) {
+    entry = {
+      value: null,
+      expiresAtMs: 0,
+      inflight: null
+    };
+    latestBlockhashByConnection.set(connection, entry);
+  }
+
+  entry.inflight ||= Promise.resolve(connection.getLatestBlockhash("confirmed")).then((value) => {
+    entry.value = value;
+    entry.expiresAtMs = Date.now() + clampedCacheMs;
+    return value;
+  }).finally(() => {
+    entry.inflight = null;
+  });
+
+  return {
+    blockhash: await entry.inflight,
+    cacheHit: false
+  };
+}
+
+export async function warmDirectSolanaBlockhash({
+  connection,
+  cacheMs
+}: {
+  connection: Connection;
+  cacheMs: number;
+}): Promise<void> {
+  await getLatestBlockhashForDirectSend({ connection, cacheMs });
+}
+
 export interface DirectSolanaBuildRequest {
   provider: DirectTradeExecutionProvider;
   action: "buy" | "sell";
@@ -165,6 +233,7 @@ export interface SolanaDirectSendConfig {
   skipPreflight?: boolean;
   confirmationMode?: "inline" | "background";
   maxRetries?: number;
+  blockhashCacheMs?: number;
   nowMs?: () => number;
   onStage?: (stage: DirectSolanaSendStage, details: DirectSolanaSendStageDetails) => void;
 }
@@ -350,6 +419,7 @@ function directSolanaTimingMetadata(stages: DirectSolanaSendStageRecord[]): Dire
     simulateBeforeSend: null,
     skipPreflight: null,
     maxRetries: null,
+    blockhashCacheMs: null,
     instructionCount: stageDetail("transaction_build_started", "instructionCount") ?? null,
     txBytes: stageDetail("signature_returned", "txBytes") ?? stageDetail("raw_send_failed", "txBytes") ?? null,
     unitsConsumed: stageDetail("simulation_finished", "unitsConsumed") ?? null,
@@ -712,13 +782,18 @@ async function buildDirectPumpSwapSolanaPayload({
 async function transactionForPayload({
   connection,
   payer,
-  payload
+  payload,
+  blockhashCacheMs = 0
 }: {
   connection: Connection;
   payer: PublicKey;
   payload: DirectTransactionPayload;
-}): Promise<{ transaction: VersionedTransaction; blockhash: string; lastValidBlockHeight: number }> {
-  const blockhash = await connection.getLatestBlockhash("confirmed");
+  blockhashCacheMs?: number;
+}): Promise<{ transaction: VersionedTransaction; blockhash: string; lastValidBlockHeight: number; blockhashCacheHit: boolean }> {
+  const { blockhash, cacheHit } = await getLatestBlockhashForDirectSend({
+    connection,
+    cacheMs: blockhashCacheMs
+  });
   const message = new TransactionMessage({
     payerKey: payer,
     recentBlockhash: blockhash.blockhash,
@@ -727,7 +802,8 @@ async function transactionForPayload({
   return {
     transaction: new VersionedTransaction(message),
     blockhash: blockhash.blockhash,
-    lastValidBlockHeight: blockhash.lastValidBlockHeight
+    lastValidBlockHeight: blockhash.lastValidBlockHeight,
+    blockhashCacheHit: cacheHit
   };
 }
 
@@ -825,6 +901,7 @@ export async function sendSolanaDirectTransaction({
     timing.simulateBeforeSend = config.simulateBeforeSend !== false;
     timing.skipPreflight = config.skipPreflight ?? null;
     timing.maxRetries = config.maxRetries ?? null;
+    timing.blockhashCacheMs = blockhashCacheMsFromConfig(config.blockhashCacheMs);
 
     return {
       ...metadata,
@@ -840,14 +917,16 @@ export async function sendSolanaDirectTransaction({
     markStage("blockhash_started", {
       instructionCount: payload.instructions.length
     });
-    const { transaction, blockhash, lastValidBlockHeight } = await transactionForPayload({
+    const { transaction, blockhash, lastValidBlockHeight, blockhashCacheHit } = await transactionForPayload({
       connection,
       payer: signer.publicKey,
-      payload
+      payload,
+      blockhashCacheMs: config.blockhashCacheMs
     });
     markStage("blockhash_received", {
       blockhash,
-      lastValidBlockHeight
+      lastValidBlockHeight,
+      status: blockhashCacheHit ? "cached" : "fresh"
     });
     markStage("signing_started", {
       blockhash,

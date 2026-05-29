@@ -41,12 +41,14 @@ import {
   buildDirectSolanaPayload,
   sendSolanaDirectTransaction,
   simulateSolanaDirectTransaction,
+  warmDirectSolanaBlockhash,
   warmDirectSolanaSdk
 } from "./direct-solana.js";
 import type { DirectSolanaSendStage } from "./direct-solana.js";
 import type { DirectTransactionPayload } from "./direct-pump.js";
 import { createHeliusWebhookServer, missingHeliusConfigWarning, syncHeliusWebhook } from "./helius.js";
 import { heliusEventMentionsWatchedWallet, isHeliusSwapEvent, normalizeHeliusSwapData } from "./helius-swaps.js";
+import { createYellowstoneWalletMonitor } from "./yellowstone.js";
 import {
   buildPumpPortalLightningBuyRequest,
   buildPumpPortalLightningSellRequest,
@@ -102,6 +104,7 @@ import type {
   PumpPortalLightningTradeResult,
   PumpPortalTradePool,
   SubscriberRecord,
+  TradingWallet,
   TrailingSellConfig,
   TrailingSellStep,
   TransactionAnalysis,
@@ -169,6 +172,11 @@ function pumpPortalPoolFromEnv(value: string | undefined): PumpPortalTradePool {
 function directExecutionConfirmationModeFromEnv(value: string | undefined): BotConfig["directExecutionConfirmationMode"] {
   const normalized = value?.trim().toLowerCase();
   return normalized === "background" || normalized === "async" ? "background" : "inline";
+}
+
+function yellowstoneCommitmentFromEnv(value: string | undefined): BotConfig["yellowstoneCommitment"] {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "confirmed" || normalized === "finalized" ? normalized : "processed";
 }
 
 function copyTradeLatencyMilestoneForDirectStage(stage: DirectSolanaSendStage): CopyTradeLatencyMilestone | null {
@@ -255,6 +263,12 @@ const config: BotConfig = {
   heliusWebhookId: process.env.HELIUS_WEBHOOK_ID,
   heliusWebhookPublicUrl: process.env.HELIUS_WEBHOOK_PUBLIC_URL,
   heliusWebhookStatePath: process.env.HELIUS_WEBHOOK_STATE_PATH || "data/helius-webhook.json",
+  yellowstoneEnabled: process.env.YELLOWSTONE_ENABLED === "true",
+  yellowstoneEndpoint: process.env.YELLOWSTONE_ENDPOINT,
+  yellowstoneToken: process.env.YELLOWSTONE_TOKEN || process.env.QUICKNODE_YELLOWSTONE_TOKEN,
+  yellowstoneCommitment: yellowstoneCommitmentFromEnv(process.env.YELLOWSTONE_COMMITMENT),
+  yellowstoneShadowOnly: process.env.YELLOWSTONE_SHADOW_ONLY !== "false",
+  yellowstoneReconnectMs: positiveIntegerFromEnv(process.env.YELLOWSTONE_RECONNECT_MS, 2000),
   webhookPort: Number(process.env.WEBHOOK_PORT || 3000),
   pumpFunCoinApiBaseUrl: process.env.PUMPFUN_COIN_API_BASE_URL || "https://frontend-api-v3.pump.fun/coins",
   solUsdPriceUrl: process.env.SOL_USD_PRICE_URL || "https://api.coinbase.com/v2/prices/SOL-USD/spot",
@@ -296,6 +310,8 @@ const config: BotConfig = {
   directExecutionSkipPreflight: process.env.DIRECT_EXECUTION_SKIP_PREFLIGHT === "true",
   directExecutionConfirmationMode: directExecutionConfirmationModeFromEnv(process.env.DIRECT_EXECUTION_CONFIRMATION_MODE),
   directExecutionMaxRetries: Math.floor(nonNegativeNumberFromEnv(process.env.DIRECT_EXECUTION_MAX_RETRIES, 3)),
+  directExecutionBlockhashCacheMs: Math.floor(nonNegativeNumberFromEnv(process.env.DIRECT_EXECUTION_BLOCKHASH_CACHE_MS, 15_000)),
+  directExecutionBlockhashWarmIntervalMs: Math.floor(nonNegativeNumberFromEnv(process.env.DIRECT_EXECUTION_BLOCKHASH_WARM_INTERVAL_MS, 5_000)),
   directExecutionCanaryChatIds: rawListFromEnv(process.env.DIRECT_EXECUTION_CANARY_CHAT_IDS),
   directExecutionCanaryWallets: rawListFromEnv(process.env.DIRECT_EXECUTION_CANARY_WALLETS),
   platformFeeEnabled: process.env.PLATFORM_FEE_ENABLED === "true",
@@ -358,6 +374,8 @@ const copyTradeBuyPressureSellStore = createJsonCopyTradeBuyPressureSellStore({
 let platformFeeTreasuryWarmup: Promise<string | null> | null = null;
 let platformFeeTreasuryVerified: string | null = null;
 let platformFeeTreasuryBlockedReason: string | null = null;
+const localSolanaSignerCache = new Map<string, ReturnType<typeof decryptLocalSolanaKeypair>>();
+let directBlockhashWarmTimer: NodeJS.Timeout | null = null;
 
 const baseSubscriptionMethods: PumpPortalSubscription[] = ["subscribeNewToken", "subscribeMigration"];
 
@@ -639,6 +657,49 @@ function warmDirectExecutionHotPath(): void {
   });
 }
 
+function warmDirectExecutionBlockhashCache(): void {
+  if (!isDirectTradeExecutionProvider(config.copyTradeExecutionProvider) || config.directExecutionBlockhashCacheMs <= 0) {
+    return;
+  }
+
+  const warm = () => {
+    warmDirectSolanaBlockhash({
+      connection: directSolanaConnection,
+      cacheMs: config.directExecutionBlockhashCacheMs
+    }).catch((error) => {
+      console.warn(`Direct execution blockhash warmup failed: ${errorMessage(error)}`);
+    });
+  };
+
+  warm();
+
+  if (config.directExecutionBlockhashWarmIntervalMs > 0) {
+    directBlockhashWarmTimer = setInterval(warm, config.directExecutionBlockhashWarmIntervalMs);
+    directBlockhashWarmTimer.unref?.();
+  }
+}
+
+function cachedLocalSolanaSigner(tradingWallet: TradingWallet): ReturnType<typeof decryptLocalSolanaKeypair> {
+  const cacheKey = [
+    tradingWallet.publicKey,
+    tradingWallet.secretKeyFormat || "base58",
+    tradingWallet.encryptedSecretKey || ""
+  ].join(":");
+  const cached = localSolanaSignerCache.get(cacheKey);
+
+  if (cached) {
+    return cached;
+  }
+
+  const signer = decryptLocalSolanaKeypair({
+    encryptedSecretKey: tradingWallet.encryptedSecretKey || "",
+    encryptionSecret: config.pumpPortalWalletKeyEncryptionSecret || "",
+    secretKeyFormat: tradingWallet.secretKeyFormat
+  });
+  localSolanaSignerCache.set(cacheKey, signer);
+  return signer;
+}
+
 function percentAmountToBasisPoints(amount: number | string): bigint | null {
   if (typeof amount === "number") {
     return null;
@@ -672,6 +733,8 @@ function logCopyTradeExecutionState(): void {
       `buildOnly=${config.directExecutionBuildOnly ? "true" : "false"}`,
       `simulateOnly=${config.directExecutionSimulateOnly ? "true" : "false"}`,
       `confirmationMode=${config.directExecutionConfirmationMode}`,
+      `blockhashCacheMs=${config.directExecutionBlockhashCacheMs}`,
+      `blockhashWarmMs=${config.directExecutionBlockhashWarmIntervalMs}`,
       `canaryChats=${config.directExecutionCanaryChatIds.length || "none"}`,
       `canaryWallets=${config.directExecutionCanaryWallets.length || "none"}`,
       `platformFee=${config.platformFeeEnabled ? `${config.platformFeeBps}bps` : "disabled"}`
@@ -834,6 +897,12 @@ function rememberEvent(id: string | null): boolean {
   }
 
   return false;
+}
+
+function runAfterHotPath(label: string, work: Promise<unknown>): void {
+  work.catch((error) => {
+    console.warn(`${label} failed: ${errorMessage(error)}`);
+  });
 }
 
 async function handleMigration(event: LooseRecord): Promise<void> {
@@ -1033,9 +1102,6 @@ async function handlePumpPortalAccountTrade(event: LooseRecord): Promise<boolean
     return true;
   }
 
-  await writeWalletTradeLog(trade);
-  console.log(`Wallet trade event: ${JSON.stringify(trade)}`);
-
   const receivedAtMs = Date.now();
   await handleCopyTradeBuyPressureTrade(trade);
   await Promise.all(copyTradeEntries.map((entry) =>
@@ -1053,12 +1119,17 @@ async function handlePumpPortalAccountTrade(event: LooseRecord): Promise<boolean
     )
   ));
 
-  await Promise.all(entries.map((entry) =>
-    sendWalletTradeAlert(entry.subscriber, {
-      ...trade,
-      label: entry.label
-    })
-  ));
+  runAfterHotPath("PumpPortal wallet trade post-processing", (async () => {
+    await writeWalletTradeLog(trade);
+    console.log(`Wallet trade event: ${JSON.stringify(trade)}`);
+
+    await Promise.all(entries.map((entry) =>
+      sendWalletTradeAlert(entry.subscriber, {
+        ...trade,
+        label: entry.label
+      })
+    ));
+  })());
 
   return true;
 }
@@ -1154,6 +1225,63 @@ async function handleHeliusSwap(event: LooseRecord, { receivedAtMs = Date.now() 
   return true;
 }
 
+async function handleYellowstoneWalletTrade(
+  trade: WalletTradeData,
+  { receivedAtMs = Date.now(), normalizedAtMs = Date.now() }: { receivedAtMs?: number; normalizedAtMs?: number } = {}
+): Promise<void> {
+  if (config.yellowstoneShadowOnly) {
+    await writeWalletTradeLog(trade);
+    console.log(`Yellowstone shadow wallet trade event: ${JSON.stringify(trade)}`);
+    return;
+  }
+
+  const eventId = walletTradeSeenEventId(trade);
+  if (rememberEvent(eventId)) {
+    return;
+  }
+
+  await writeWalletTradeLog(trade);
+  console.log(`Wallet trade event: ${JSON.stringify(trade)}`);
+
+  await handleCopyTradeBuyPressureTrade(trade);
+
+  const copyTradeEntries = subscribers
+    .list()
+    .flatMap((subscriber) =>
+      (subscriber.copyTradeWallets || [])
+        .filter((wallet) => wallet.address === trade.targetWallet)
+        .map((wallet) => ({ subscriber, wallet, label: wallet.label }))
+    );
+  await Promise.all(copyTradeEntries.map((entry) =>
+    sendCopyTradeSimulationAlert(
+      entry.subscriber,
+      {
+        ...trade,
+        label: entry.label
+      },
+      entry.wallet,
+      {
+        receivedAtMs,
+        normalizedAtMs
+      }
+    )
+  ));
+
+  const entries = subscribers
+    .list()
+    .flatMap((subscriber) =>
+      (subscriber.watchedWallets || [])
+        .filter((wallet) => wallet.address === trade.targetWallet)
+        .map((wallet) => ({ subscriber, label: wallet.label }))
+    );
+  await Promise.all(entries.map((entry) =>
+    sendWalletTradeAlert(entry.subscriber, {
+      ...trade,
+      label: entry.label
+    })
+  ));
+}
+
 async function sendWalletTradeAlert(subscriber: SubscriberRecord, trade: WalletTradeData): Promise<void> {
   try {
     await sendTelegramMessage({
@@ -1229,11 +1357,7 @@ async function executeDirectCopyTrade({
 
   let signer: ReturnType<typeof decryptLocalSolanaKeypair>;
   try {
-    signer = decryptLocalSolanaKeypair({
-      encryptedSecretKey: tradingWallet.encryptedSecretKey,
-      encryptionSecret: config.pumpPortalWalletKeyEncryptionSecret || "",
-      secretKeyFormat: tradingWallet.secretKeyFormat
-    });
+    signer = cachedLocalSolanaSigner(tradingWallet);
   } catch (error) {
     return tradeExecutionSkippedResult({
       provider,
@@ -1307,6 +1431,7 @@ async function executeDirectCopyTrade({
         skipPreflight: config.directExecutionSkipPreflight,
         confirmationMode: "background",
         maxRetries: config.directExecutionMaxRetries,
+        blockhashCacheMs: config.directExecutionBlockhashCacheMs,
         onStage: (stage, details) => {
           const milestone = copyTradeLatencyMilestoneForDirectStage(stage);
           if (milestone) {
@@ -1330,6 +1455,7 @@ async function executeDirectCopyTrade({
       skipPreflight: config.directExecutionSkipPreflight,
       confirmationMode: "inline",
       maxRetries: config.directExecutionMaxRetries,
+      blockhashCacheMs: config.directExecutionBlockhashCacheMs,
       onStage: (stage, details) => {
         const milestone = copyTradeLatencyMilestoneForDirectStage(stage);
         if (milestone) {
@@ -3579,6 +3705,7 @@ const commandPoller = createTelegramCommandPoller({
   subscribers,
   onWalletWatchlistChange: () => {
     migrationListener.setSubscriptionMethods(activePumpPortalSubscriptions());
+    yellowstoneWalletMonitor.setWallets(watchedWalletAddresses());
     return syncHeliusWalletWebhook();
   },
   onCopyTradeEmergencyStop: (chatId) => {
@@ -3605,6 +3732,22 @@ const heliusWebhookServer = createHeliusWebhookServer({
   authHeader: config.heliusWebhookAuthHeader,
   port: config.webhookPort,
   onEvents: handleHeliusWebhookEvents
+});
+const yellowstoneWalletMonitor = createYellowstoneWalletMonitor({
+  enabled: config.yellowstoneEnabled,
+  endpoint: config.yellowstoneEndpoint,
+  token: config.yellowstoneToken,
+  commitment: config.yellowstoneCommitment,
+  reconnectMs: config.yellowstoneReconnectMs,
+  shadowOnly: config.yellowstoneShadowOnly,
+  wallets: watchedWalletAddresses(),
+  explorer: {
+    pumpFunBaseUrl: config.pumpFunBaseUrl,
+    solscanBaseUrl: config.solscanBaseUrl
+  },
+  onTrade: handleYellowstoneWalletTrade,
+  onStatus: (message) => console.log(message),
+  onError: (error) => console.error("Yellowstone gRPC error:", error.message)
 });
 
 async function syncHeliusWalletWebhook(): Promise<string | undefined> {
@@ -3646,7 +3789,12 @@ async function shutdown(): Promise<void> {
   isShuttingDown = true;
   console.log("Shutting down");
   commandPoller.stop();
+  yellowstoneWalletMonitor.stop();
   migrationListener.stop();
+  if (directBlockhashWarmTimer) {
+    clearInterval(directBlockhashWarmTimer);
+    directBlockhashWarmTimer = null;
+  }
   for (const timer of trailingSellTimers) {
     clearTimeout(timer);
   }
@@ -3686,9 +3834,11 @@ console.log(`Loaded ${subscribers.count()} verified Telegram subscriber(s)`);
 logCopyTradeExecutionState();
 warmPlatformFeeTreasuryAccount();
 warmDirectExecutionHotPath();
+warmDirectExecutionBlockhashCache();
 // Supabase-backed subscribers load at startup, so compute account-trade
 // subscriptions after init rather than from the empty pre-init store.
 migrationListener.setSubscriptionMethods(activePumpPortalSubscriptions());
+yellowstoneWalletMonitor.setWallets(watchedWalletAddresses());
 if (watchedWalletAddresses().length > 0) {
   await syncHeliusWalletWebhook();
 }
@@ -3697,5 +3847,6 @@ if (config.heliusWebhookAuthHeader) {
 } else {
   console.warn(missingHeliusConfigWarning());
 }
+yellowstoneWalletMonitor.start();
 migrationListener.start();
 await commandPoller.start();

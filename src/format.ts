@@ -1,5 +1,13 @@
 import { asRecord, stringValue } from "./types.js";
-import type { ExplorerConfig, LooseRecord, MigrationData, MigrationFormatConfig, TelegramReplyMarkup } from "./types.js";
+import type {
+  ExplorerConfig,
+  LooseRecord,
+  MigrationData,
+  MigrationFormatConfig,
+  TelegramInlineKeyboardButton,
+  TelegramReplyMarkup,
+  TokenSocialLinks
+} from "./types.js";
 
 interface ExplorerLinks {
   mint: string | null;
@@ -130,6 +138,76 @@ function link(label: string, url: string | null): string | null {
   return `<a href="${escapeHtml(url)}">${escapeHtml(label)}</a>`;
 }
 
+function normalizeHttpUrl(value: unknown): string | null {
+  const raw = stringValue(value)?.trim();
+
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const url = new URL(raw);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeTelegramUrl(value: unknown): string | null {
+  const raw = stringValue(value)?.trim();
+
+  if (!raw) {
+    return null;
+  }
+
+  if (raw.startsWith("@")) {
+    return normalizeHttpUrl(`https://t.me/${raw.slice(1)}`);
+  }
+
+  if (/^(t\.me|telegram\.me)\//i.test(raw)) {
+    return normalizeHttpUrl(`https://${raw}`);
+  }
+
+  return normalizeHttpUrl(raw);
+}
+
+function pickFirstNormalizedUrl(
+  object: LooseRecord | null | undefined,
+  keys: readonly string[],
+  normalize: (value: unknown) => string | null
+): string | null {
+  for (const key of keys) {
+    const normalized = normalize(object?.[key]);
+
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return null;
+}
+
+function extractTokenSocialLinks(metadata: LooseRecord, tokenInfo: LooseRecord): TokenSocialLinks {
+  const sources = [metadata, tokenInfo];
+  const pickSocialUrl = (keys: readonly string[], normalize: (value: unknown) => string | null = normalizeHttpUrl) => {
+    for (const source of sources) {
+      const normalized = pickFirstNormalizedUrl(source, keys, normalize);
+
+      if (normalized) {
+        return normalized;
+      }
+    }
+
+    return null;
+  };
+
+  return {
+    twitterUrl: pickSocialUrl(["twitter", "x", "twitterUrl", "xUrl"]),
+    telegramUrl: pickSocialUrl(["telegram", "telegramUrl"], normalizeTelegramUrl),
+    websiteUrl: pickSocialUrl(["website", "websiteUrl", "external_url", "externalUrl"])
+  };
+}
+
 function pickMetadataString(metadata: LooseRecord, keys: readonly string[]): string | null {
   return pickFirstString(metadata, keys);
 }
@@ -188,6 +266,7 @@ export function extractMigrationData(event: LooseRecord, config: MigrationFormat
   const links = buildExplorerLinks(event, config);
   const metadata = asRecord(config.metadata);
   const tokenInfo = asRecord(config.tokenInfo);
+  const socialLinks = extractTokenSocialLinks(metadata, tokenInfo);
   const marketCapSol = pickFirstObjectValue(event, ["marketCapSol", "marketCap"]);
   const tokenInfoMarketCapSol = pickFirstObjectValue(tokenInfo, ["market_cap_quote", "market_cap"]);
   const effectiveMarketCapSol = marketCapSol ?? tokenInfoMarketCapSol;
@@ -238,6 +317,7 @@ export function extractMigrationData(event: LooseRecord, config: MigrationFormat
     pumpFunUrl: links.pumpFunUrl,
     solscanTokenUrl: links.solscanTokenUrl,
     solscanTxUrl: links.solscanTxUrl,
+    socialLinks,
     metadata,
     tokenInfo,
     raw: readableWebsocketData(event)
@@ -403,17 +483,37 @@ export function buildMigrationReplyMarkup(event: LooseRecord, config: MigrationF
     return undefined;
   }
 
-  return {
-    inline_keyboard: [
-      [
-        {
-          text: "📋 Copy CA",
-          copy_text: {
-            text: migration.coinAddress
-          }
+  const socialButtons: TelegramInlineKeyboardButton[] = [];
+
+  if (migration.socialLinks.twitterUrl) {
+    socialButtons.push({ text: "X", url: migration.socialLinks.twitterUrl });
+  }
+
+  if (migration.socialLinks.telegramUrl) {
+    socialButtons.push({ text: "Telegram", url: migration.socialLinks.telegramUrl });
+  }
+
+  if (migration.socialLinks.websiteUrl) {
+    socialButtons.push({ text: "Website", url: migration.socialLinks.websiteUrl });
+  }
+
+  const inlineKeyboard: TelegramInlineKeyboardButton[][] = [
+    [
+      {
+        text: "📋 Copy CA",
+        copy_text: {
+          text: migration.coinAddress
         }
-      ]
+      }
     ]
+  ];
+
+  if (socialButtons.length > 0) {
+    inlineKeyboard.push(socialButtons);
+  }
+
+  return {
+    inline_keyboard: inlineKeyboard
   };
 }
 

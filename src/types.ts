@@ -62,6 +62,12 @@ export interface BotConfig extends MigrationFormatConfig {
   heliusWebhookId?: string;
   heliusWebhookPublicUrl?: string;
   heliusWebhookStatePath: string;
+  yellowstoneEnabled: boolean;
+  yellowstoneEndpoint?: string;
+  yellowstoneToken?: string;
+  yellowstoneCommitment: "processed" | "confirmed" | "finalized";
+  yellowstoneShadowOnly: boolean;
+  yellowstoneReconnectMs: number;
   webhookPort: number;
   pumpFunCoinApiBaseUrl: string;
   solUsdPriceUrl: string;
@@ -104,6 +110,8 @@ export interface BotConfig extends MigrationFormatConfig {
   directExecutionSkipPreflight: boolean;
   directExecutionConfirmationMode: "inline" | "background";
   directExecutionMaxRetries: number;
+  directExecutionBlockhashCacheMs: number;
+  directExecutionBlockhashWarmIntervalMs: number;
   directExecutionCanaryChatIds: string[];
   directExecutionCanaryWallets: string[];
   platformFeeEnabled: boolean;
@@ -278,7 +286,7 @@ export interface WalletTradeAsset {
 
 export interface WalletTradeData {
   observedAt: string;
-  provider: "pumpportal" | "helius";
+  provider: "pumpportal" | "helius" | "yellowstone";
   targetWallet: string;
   label: string | null;
   action: WalletTradeAction;

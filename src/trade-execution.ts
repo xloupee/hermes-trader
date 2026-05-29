@@ -91,6 +91,7 @@ export interface DirectExecutionTimingMetadata {
   simulateBeforeSend: boolean | null;
   skipPreflight: boolean | null;
   maxRetries: number | null;
+  blockhashCacheMs: number | null;
   instructionCount: number | null;
   txBytes: number | null;
   unitsConsumed: number | null;

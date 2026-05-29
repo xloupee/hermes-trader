@@ -21,13 +21,14 @@
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
     "@supabase/supabase-js": "^2.106.1",
+    "@triton-one/yellowstone-grpc": "^5.0.8",
     "bn.js": "^5.2.3",
     "bs58": "^6.0.0",
     "dotenv": "^16.4.7",
     "ws": "^8.18.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20.18"
   },
   "devDependencies": {
     "@types/bn.js": "^5.2.0",

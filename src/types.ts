@@ -91,6 +91,12 @@ export interface BotConfig extends MigrationFormatConfig {
   copyTradeTrailingSellTrailPercent: number;
   copyTradeTrailingSellIntervalMs: number;
   copyTradeTrailingSellMaxBuilds: number;
+  copyTradeBuyPressureSellEnabled: boolean;
+  copyTradeBuyPressureSellPercent: number;
+  copyTradeBuyPressureSellTimeoutMs: number;
+  copyTradeBuyPressureSellMinBuys: number;
+  copyTradeBuyPressureSellMinTotalSol: number;
+  copyTradeBuyPressureSellStatePath: string;
   directExecutionEnabled: boolean;
   directExecutionLiveEnabled: boolean;
   directExecutionBuildOnly: boolean;

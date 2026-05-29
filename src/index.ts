@@ -27,6 +27,17 @@ import {
 } from "./copytrade-idempotency.js";
 import { createCopyTradeLatencyClock, createCopyTradeLatencyTracker } from "./copytrade-latency.js";
 import {
+  applyCopyTradeBuyPressureTrade,
+  claimCopyTradeBuyPressureSellTrigger,
+  copyTradeBuyPressureTimeoutTrigger,
+  createCopyTradeBuyPressureSellWatcher,
+  createJsonCopyTradeBuyPressureSellStore
+} from "./copytrade-buy-pressure.js";
+import type {
+  CopyTradeBuyPressureSellTrigger,
+  CopyTradeBuyPressureSellWatcher
+} from "./copytrade-buy-pressure.js";
+import {
   buildDirectSolanaPayload,
   sendSolanaDirectTransaction,
   simulateSolanaDirectTransaction,
@@ -52,6 +63,7 @@ import {
   formatTradeExecutionResultLog,
   isDirectTradeExecutionProvider,
   parseTradeExecutionProvider,
+  routeForDirectProvider,
   tradeExecutionProviderConfigError,
   tradeExecutionSkippedResult
 } from "./trade-execution.js";
@@ -69,6 +81,8 @@ import { asRecord, errorMessage, isRecord, stringValue } from "./types.js";
 import {
   buildWalletTradeReplyMarkup,
   formatAutoCopyBuyMessage,
+  formatCopyTradeBuyPressureSellResultMessage,
+  formatCopyTradeBuyPressureSellScheduledMessage,
   formatCopyTradeSimulationMessage,
   formatCopyTradeTrailingSellResultMessage,
   formatCopyTradeTrailingSellSkippedMessage,
@@ -269,6 +283,12 @@ const config: BotConfig = {
   copyTradeTrailingSellTrailPercent: percentFromEnv(process.env.COPY_TRADE_TRAILING_SELL_TRAIL_PERCENT, 20),
   copyTradeTrailingSellIntervalMs: positiveIntegerFromEnv(process.env.COPY_TRADE_TRAILING_SELL_INTERVAL_MS, 2000),
   copyTradeTrailingSellMaxBuilds: positiveIntegerFromEnv(process.env.COPY_TRADE_TRAILING_SELL_MAX_BUILDS, 5),
+  copyTradeBuyPressureSellEnabled: process.env.COPY_TRADE_BUY_PRESSURE_SELL_ENABLED === "true",
+  copyTradeBuyPressureSellPercent: percentFromEnv(process.env.COPY_TRADE_BUY_PRESSURE_SELL_PERCENT, 100),
+  copyTradeBuyPressureSellTimeoutMs: positiveIntegerFromEnv(process.env.COPY_TRADE_BUY_PRESSURE_SELL_TIMEOUT_MS, 120_000),
+  copyTradeBuyPressureSellMinBuys: positiveIntegerFromEnv(process.env.COPY_TRADE_BUY_PRESSURE_SELL_MIN_BUYS, 1),
+  copyTradeBuyPressureSellMinTotalSol: nonNegativeNumberFromEnv(process.env.COPY_TRADE_BUY_PRESSURE_SELL_MIN_TOTAL_SOL, 0),
+  copyTradeBuyPressureSellStatePath: process.env.COPY_TRADE_BUY_PRESSURE_SELL_STATE_PATH || "data/copytrade-buy-pressure-sells.json",
   directExecutionEnabled: process.env.DIRECT_EXECUTION_ENABLED === "true",
   directExecutionLiveEnabled: process.env.DIRECT_EXECUTION_LIVE_ENABLED === "true",
   directExecutionBuildOnly: process.env.DIRECT_EXECUTION_BUILD_ONLY === "true",
@@ -290,6 +310,9 @@ const metadataCache = new Map<string, LooseRecord | null>();
 const tokenInfoCache = new Map<string, LooseRecord | null>();
 const trailingSellTimers = new Set<NodeJS.Timeout>();
 const activeTrailingSellSchedules = new Set<string>();
+const buyPressureSellTimers = new Map<string, NodeJS.Timeout>();
+const activeBuyPressureSellWatchers = new Map<string, CopyTradeBuyPressureSellWatcher>();
+const activeBuyPressureSellTriggers = new Set<string>();
 const copyBuySubmissionGuard = createCopyBuySubmissionGuard();
 const copyBuySemanticSubmissionGuard = createCopyBuySubmissionGuard();
 const copyTradeDailySolBudget = createInMemoryCopyTradeDailySolBudget();
@@ -329,6 +352,9 @@ const copyTradeBuyIdempotency =
     : createJsonCopyTradeBuyIdempotencyStore({
         path: copyTradeBuyIdempotencyPath
       });
+const copyTradeBuyPressureSellStore = createJsonCopyTradeBuyPressureSellStore({
+  path: config.copyTradeBuyPressureSellStatePath
+});
 let platformFeeTreasuryWarmup: Promise<string | null> | null = null;
 let platformFeeTreasuryVerified: string | null = null;
 let platformFeeTreasuryBlockedReason: string | null = null;
@@ -752,8 +778,13 @@ function copyTradeWalletAddresses(): string[] {
   ].sort();
 }
 
+function activeBuyPressureSellMints(): string[] {
+  return [...new Set([...activeBuyPressureSellWatchers.values()].map((watcher) => watcher.mint).filter(Boolean))].sort();
+}
+
 function activePumpPortalSubscriptions(): PumpPortalSubscription[] {
   const copyTradeWallets = copyTradeWalletAddresses();
+  const buyPressureMints = activeBuyPressureSellMints();
 
   return [
     ...baseSubscriptionMethods,
@@ -762,6 +793,14 @@ function activePumpPortalSubscriptions(): PumpPortalSubscription[] {
           {
             method: "subscribeAccountTrade",
             keys: copyTradeWallets
+          }
+        ]
+      : []),
+    ...(buyPressureMints.length > 0
+      ? [
+          {
+            method: "subscribeTokenTrade",
+            keys: buyPressureMints
           }
         ]
       : [])
@@ -969,8 +1008,12 @@ async function handlePumpPortalAccountTrade(event: LooseRecord): Promise<boolean
         .filter((wallet) => wallet.address === trader)
         .map((wallet) => ({ subscriber, wallet, label: wallet.label }))
     );
+  const mint = stringValue(event.mint || event.ca || event.token || event.tokenAddress || event.address);
+  const hasBuyPressureWatchers = Boolean(
+    mint && [...activeBuyPressureSellWatchers.values()].some((watcher) => watcher.mint === mint)
+  );
 
-  if (entries.length === 0 && copyTradeEntries.length === 0) {
+  if (entries.length === 0 && copyTradeEntries.length === 0 && !hasBuyPressureWatchers) {
     return false;
   }
 
@@ -994,6 +1037,7 @@ async function handlePumpPortalAccountTrade(event: LooseRecord): Promise<boolean
   console.log(`Wallet trade event: ${JSON.stringify(trade)}`);
 
   const receivedAtMs = Date.now();
+  await handleCopyTradeBuyPressureTrade(trade);
   await Promise.all(copyTradeEntries.map((entry) =>
     sendCopyTradeSimulationAlert(
       entry.subscriber,
@@ -1079,6 +1123,8 @@ async function handleHeliusSwap(event: LooseRecord, { receivedAtMs = Date.now() 
 
     await writeWalletTradeLog(loggedTrade);
     console.log(`Wallet trade event: ${JSON.stringify(loggedTrade)}`);
+
+    await handleCopyTradeBuyPressureTrade(loggedTrade);
 
     const copyTradeEntries = copyTradeSubscribersByWallet.get(targetWallet) || [];
     await Promise.all(copyTradeEntries.map((entry) =>
@@ -1475,6 +1521,7 @@ async function sendCopyTradeSimulationAlert(
   let copyBuySemanticKey: string | null = null;
   let durableCopyBuyClaimKey: string | null = null;
   let deferredDurableCopyBuyClaimKey: string | null = null;
+  let preBuyTokenBalance: number | null = null;
   let result: CopyTradeExecutionResult | null = null;
 
   try {
@@ -1792,6 +1839,17 @@ async function sendCopyTradeSimulationAlert(
       }
     }
 
+    if (config.copyTradeBuyPressureSellEnabled && trade.mint) {
+      preBuyTokenBalance = await getTokenBalanceForWalletMint({
+        owner: subscriber.tradingWallet.publicKey,
+        mint: trade.mint
+      });
+
+      if (preBuyTokenBalance === null) {
+        console.warn(`Could not snapshot pre-buy token balance for ${subscriber.chatId}:${trade.mint}`);
+      }
+    }
+
     latencyTracker.mark("submit_started");
     result = await executeCopyTradeBuy({
       subscriber,
@@ -1867,14 +1925,16 @@ async function sendCopyTradeSimulationAlert(
             trade,
             copyTradeWallet,
             buySignature: resultSignature(result),
-            executionProvider
+            executionProvider,
+            preBuyTokenBalance
           })
         : scheduleCopyTradeTrailingSellsAfterConfirmation({
             subscriber,
             trade,
             copyTradeWallet,
             buySignature: resultSignature(result),
-            executionProvider
+            executionProvider,
+            preBuyTokenBalance
           });
 
       postSubmission.catch((error) => {
@@ -1922,13 +1982,15 @@ async function scheduleCopyTradeTrailingSellsAfterConfirmation({
   trade,
   copyTradeWallet,
   buySignature,
-  executionProvider
+  executionProvider,
+  preBuyTokenBalance
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
   copyTradeWallet: WatchedWallet;
   buySignature: string | null;
   executionProvider: TradeExecutionProvider;
+  preBuyTokenBalance: number | null;
 }): Promise<void> {
   if (!buySignature) {
     await notifySkippedTrailingSellSchedule({
@@ -1946,6 +2008,51 @@ async function scheduleCopyTradeTrailingSellsAfterConfirmation({
       trade,
       reason: "copy buy was not confirmed before trailing sell scheduling timeout"
     });
+    return;
+  }
+
+  await scheduleCopyTradePostConfirmationExits({
+    subscriber,
+    trade,
+    copyTradeWallet,
+    buySignature,
+    preBuyTokenBalance,
+    executionProvider
+  });
+}
+
+async function scheduleCopyTradePostConfirmationExits({
+  subscriber,
+  trade,
+  copyTradeWallet,
+  buySignature,
+  preBuyTokenBalance,
+  executionProvider
+}: {
+  subscriber: SubscriberRecord;
+  trade: WalletTradeData;
+  copyTradeWallet: WatchedWallet;
+  buySignature: string;
+  preBuyTokenBalance: number | null;
+  executionProvider: TradeExecutionProvider;
+}): Promise<void> {
+  const postBuyTokenBalance = config.copyTradeBuyPressureSellEnabled && trade.mint
+    ? await getTokenBalanceForWalletMint({
+        owner: subscriber.tradingWallet?.publicKey || "",
+        mint: trade.mint
+      })
+    : null;
+  const buyPressureWatcherStarted = await startCopyTradeBuyPressureSellWatcher({
+    subscriber,
+    trade,
+    copyTradeWallet,
+    buySignature,
+    preBuyTokenBalance,
+    postBuyTokenBalance,
+    executionProvider
+  });
+
+  if (buyPressureWatcherStarted) {
     return;
   }
 
@@ -1992,13 +2099,15 @@ async function watchSubmittedCopyTradeBuy({
   trade,
   copyTradeWallet,
   buySignature,
-  executionProvider
+  executionProvider,
+  preBuyTokenBalance
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
   copyTradeWallet: WatchedWallet;
   buySignature: string | null;
   executionProvider: TradeExecutionProvider;
+  preBuyTokenBalance: number | null;
 }): Promise<void> {
   if (!buySignature) {
     await notifySkippedTrailingSellSchedule({
@@ -2042,10 +2151,12 @@ async function watchSubmittedCopyTradeBuy({
     confirmed: true
   });
 
-  await scheduleCopyTradeTrailingSells({
+  await scheduleCopyTradePostConfirmationExits({
     subscriber,
     trade,
     copyTradeWallet,
+    buySignature,
+    preBuyTokenBalance,
     executionProvider
   });
 }
@@ -2195,6 +2306,427 @@ function formatSkippedAutoCopyBuyMessage({
     `🟡 ${mode}; no copy order was submitted.`,
     `<b>Reason:</b> <code>${reason}</code>`
   ].join("\n");
+}
+
+function copyTradeBuyPressureSellConfig() {
+  return {
+    enabled: config.copyTradeBuyPressureSellEnabled,
+    sellPercent: config.copyTradeBuyPressureSellPercent,
+    timeoutMs: config.copyTradeBuyPressureSellTimeoutMs,
+    minBuys: config.copyTradeBuyPressureSellMinBuys,
+    minTotalSol: config.copyTradeBuyPressureSellMinTotalSol
+  };
+}
+
+function copyTradeRouteForProvider(provider: TradeExecutionProvider): TradeExecutionResult["route"] {
+  return isDirectTradeExecutionProvider(provider) ? routeForDirectProvider(provider) : "pumpportal-lightning";
+}
+
+function parsedTokenAccountUiAmount(value: unknown): number {
+  const record = asRecord(value);
+  const parsed = asRecord(record.parsed);
+  const info = asRecord(parsed.info);
+  const tokenAmount = asRecord(info.tokenAmount);
+  return finiteNumberValue(tokenAmount.uiAmountString) ?? finiteNumberValue(tokenAmount.uiAmount) ?? 0;
+}
+
+async function getTokenBalanceForWalletMint({
+  owner,
+  mint
+}: {
+  owner: string;
+  mint: string;
+}): Promise<number | null> {
+  try {
+    const response = await directSolanaConnection.getParsedTokenAccountsByOwner(
+      new PublicKey(owner),
+      {
+        mint: new PublicKey(mint)
+      },
+      "confirmed"
+    );
+
+    return response.value.reduce((sum, account) => sum + parsedTokenAccountUiAmount(account.account.data), 0);
+  } catch (error) {
+    console.warn(`Could not fetch token balance for ${owner}:${mint}: ${errorMessage(error)}`);
+    return null;
+  }
+}
+
+async function copyTradePositionBalanceBlockedReason(watcher: CopyTradeBuyPressureSellWatcher): Promise<string | null> {
+  const preBuyBalance = watcher.preBuyTokenBalance;
+  const postBuyBalance = watcher.postBuyTokenBalance;
+
+  if (preBuyBalance === null || postBuyBalance === null) {
+    return "copy buy token balance snapshot is unavailable";
+  }
+
+  const positionTokenAmount = postBuyBalance - preBuyBalance;
+  const tolerance = Math.max(Math.abs(positionTokenAmount) * 0.005, 0.000000001);
+
+  if (preBuyBalance > tolerance) {
+    return "trading wallet already held this mint before the copied buy";
+  }
+
+  if (positionTokenAmount <= tolerance) {
+    return "copy buy did not increase the trading wallet token balance";
+  }
+
+  const currentBalance = await getTokenBalanceForWalletMint({
+    owner: watcher.tradingWalletPublicKey,
+    mint: watcher.mint
+  });
+
+  if (currentBalance === null) {
+    return "could not verify current copied-position token balance";
+  }
+
+  if (currentBalance > positionTokenAmount + tolerance) {
+    return "trading wallet token balance changed after the copied buy";
+  }
+
+  if (currentBalance <= 0) {
+    return "copied-position token balance is already zero";
+  }
+
+  return null;
+}
+
+function refreshPumpPortalSubscriptions(): void {
+  migrationListener.setSubscriptionMethods(activePumpPortalSubscriptions());
+}
+
+function clearBuyPressureSellTimer(watcherId: string): void {
+  const timer = buyPressureSellTimers.get(watcherId);
+
+  if (timer) {
+    clearTimeout(timer);
+    buyPressureSellTimers.delete(watcherId);
+  }
+}
+
+async function persistActiveBuyPressureSellWatchers(): Promise<void> {
+  await copyTradeBuyPressureSellStore.save([...activeBuyPressureSellWatchers.values()]);
+}
+
+function scheduleBuyPressureSellTimeout(watcher: CopyTradeBuyPressureSellWatcher): void {
+  clearBuyPressureSellTimer(watcher.id);
+  const delayMs = Math.min(Math.max(0, watcher.expiresAtMs - Date.now()), 2_147_483_647);
+  const timer = setTimeout(() => {
+    buyPressureSellTimers.delete(watcher.id);
+    const activeWatcher = activeBuyPressureSellWatchers.get(watcher.id);
+
+    if (!activeWatcher) {
+      return;
+    }
+
+    const trigger = copyTradeBuyPressureTimeoutTrigger({ watcher: activeWatcher });
+    if (!trigger) {
+      return;
+    }
+
+    triggerCopyTradeBuyPressureSell({ watcher: activeWatcher, trigger }).catch((error) => {
+      console.warn(`Could not run buy-pressure timeout sell for ${watcher.id}: ${errorMessage(error)}`);
+    });
+  }, delayMs);
+  buyPressureSellTimers.set(watcher.id, timer);
+}
+
+async function loadCopyTradeBuyPressureSellWatchers(): Promise<void> {
+  const storedWatchers = await copyTradeBuyPressureSellStore.load();
+
+  if (!config.copyTradeBuyPressureSellEnabled) {
+    if (storedWatchers.length > 0) {
+      console.warn(
+        `COPY_TRADE_BUY_PRESSURE_SELL_ENABLED is not true; ${storedWatchers.length} persisted buy-pressure sell watcher(s) will not resume`
+      );
+    }
+    return;
+  }
+
+  for (const watcher of storedWatchers) {
+    if (watcher.triggeredAtMs) {
+      continue;
+    }
+
+    activeBuyPressureSellWatchers.set(watcher.id, watcher);
+    scheduleBuyPressureSellTimeout(watcher);
+  }
+
+  if (activeBuyPressureSellWatchers.size > 0) {
+    console.log(`Loaded ${activeBuyPressureSellWatchers.size} buy-pressure sell watcher(s)`);
+  }
+
+  await persistActiveBuyPressureSellWatchers();
+}
+
+async function startCopyTradeBuyPressureSellWatcher({
+  subscriber,
+  trade,
+  copyTradeWallet,
+  buySignature,
+  preBuyTokenBalance,
+  postBuyTokenBalance,
+  executionProvider
+}: {
+  subscriber: SubscriberRecord;
+  trade: WalletTradeData;
+  copyTradeWallet: WatchedWallet;
+  buySignature: string;
+  preBuyTokenBalance: number | null;
+  postBuyTokenBalance: number | null;
+  executionProvider: TradeExecutionProvider;
+}): Promise<boolean> {
+  const watcher = createCopyTradeBuyPressureSellWatcher({
+    config: copyTradeBuyPressureSellConfig(),
+    subscriber,
+    trade,
+    copyTradeWallet,
+    buySignature,
+    executionProvider,
+    preBuyTokenBalance,
+    postBuyTokenBalance
+  });
+
+  if (!watcher) {
+    return false;
+  }
+
+  if (activeBuyPressureSellWatchers.has(watcher.id)) {
+    return true;
+  }
+
+  activeBuyPressureSellWatchers.set(watcher.id, watcher);
+  scheduleBuyPressureSellTimeout(watcher);
+
+  try {
+    await persistActiveBuyPressureSellWatchers();
+  } catch (error) {
+    clearBuyPressureSellTimer(watcher.id);
+    activeBuyPressureSellWatchers.delete(watcher.id);
+    console.warn(`Could not persist buy-pressure sell watcher for ${subscriber.chatId}:${trade.mint}: ${errorMessage(error)}`);
+    return false;
+  }
+
+  refreshPumpPortalSubscriptions();
+  const message = formatCopyTradeBuyPressureSellScheduledMessage({ trade, watcher });
+
+  if (message) {
+    await sendTelegramMessage({
+      token: config.telegramToken,
+      chatId: subscriber.chatId,
+      text: message,
+      replyMarkup: buildWalletTradeReplyMarkup(trade)
+    }).catch((error) => {
+      console.warn(`Could not send buy-pressure sell watcher alert to ${subscriber.chatId}: ${errorMessage(error)}`);
+    });
+  }
+
+  return true;
+}
+
+async function handleCopyTradeBuyPressureTrade(trade: WalletTradeData): Promise<void> {
+  if (!config.copyTradeBuyPressureSellEnabled || activeBuyPressureSellWatchers.size === 0) {
+    return;
+  }
+
+  const triggers: Array<{ watcher: CopyTradeBuyPressureSellWatcher; trigger: CopyTradeBuyPressureSellTrigger }> = [];
+  let changed = false;
+
+  for (const watcher of activeBuyPressureSellWatchers.values()) {
+    const result = applyCopyTradeBuyPressureTrade({ watcher, trade });
+
+    if (!result.changed) {
+      continue;
+    }
+
+    changed = true;
+    activeBuyPressureSellWatchers.set(result.watcher.id, result.watcher);
+
+    if (result.trigger) {
+      triggers.push({ watcher: result.watcher, trigger: result.trigger });
+    }
+  }
+
+  if (changed && triggers.length === 0) {
+    await persistActiveBuyPressureSellWatchers();
+  }
+
+  for (const entry of triggers) {
+    await triggerCopyTradeBuyPressureSell(entry);
+  }
+}
+
+async function triggerCopyTradeBuyPressureSell({
+  watcher,
+  trigger
+}: {
+  watcher: CopyTradeBuyPressureSellWatcher;
+  trigger: CopyTradeBuyPressureSellTrigger;
+}): Promise<void> {
+  if (!activeBuyPressureSellWatchers.has(watcher.id) || activeBuyPressureSellTriggers.has(watcher.id)) {
+    return;
+  }
+
+  const claimedWatcher = claimCopyTradeBuyPressureSellTrigger({ watcher, trigger });
+  activeBuyPressureSellTriggers.add(watcher.id);
+  clearBuyPressureSellTimer(watcher.id);
+  activeBuyPressureSellWatchers.set(watcher.id, claimedWatcher);
+
+  try {
+    await persistActiveBuyPressureSellWatchers();
+  } catch (error) {
+    activeBuyPressureSellWatchers.set(watcher.id, watcher);
+    scheduleBuyPressureSellTimeout({ ...watcher, expiresAtMs: Date.now() + 5000 });
+    activeBuyPressureSellTriggers.delete(watcher.id);
+    console.warn(`Could not persist claimed buy-pressure sell watcher ${watcher.id}: ${errorMessage(error)}`);
+    return;
+  }
+
+  try {
+    await buildAndNotifyBuyPressureSell({
+      watcher: claimedWatcher,
+      trigger
+    });
+  } finally {
+    activeBuyPressureSellWatchers.delete(watcher.id);
+    try {
+      await persistActiveBuyPressureSellWatchers();
+    } catch (error) {
+      console.warn(`Could not persist completed buy-pressure sell watcher ${watcher.id}: ${errorMessage(error)}`);
+    }
+    refreshPumpPortalSubscriptions();
+    activeBuyPressureSellTriggers.delete(watcher.id);
+  }
+}
+
+async function buildAndNotifyBuyPressureSell({
+  watcher,
+  trigger
+}: {
+  watcher: CopyTradeBuyPressureSellWatcher;
+  trigger: CopyTradeBuyPressureSellTrigger;
+}): Promise<CopyTradeExecutionResult> {
+  const subscriber = subscribers.get(watcher.chatId);
+  const copyTradeWallet = subscriber?.copyTradeWallets.find((wallet) => wallet.address === watcher.sourceWalletAddress) || watcher.copyTradeWallet;
+  const executionSettings = subscriber
+    ? copyTradeSellExecutionSettings(subscriber)
+    : { slippage: config.copyTradeSlippage, priorityFee: config.copyTradePriorityFee };
+  const request = buildPumpPortalLightningSellRequest({
+    mint: watcher.mint,
+    amountPercent: watcher.sellPercent,
+    slippage: executionSettings.slippage,
+    priorityFee: executionSettings.priorityFee,
+    pool: config.copyTradePool
+  });
+  const fallbackRequest = request || {
+    action: "sell" as const,
+    mint: watcher.mint,
+    amount: `${watcher.sellPercent}%` as `${number}%`,
+    denominatedInSol: "false" as const,
+    slippage: executionSettings.slippage,
+    priorityFee: executionSettings.priorityFee,
+    pool: config.copyTradePool
+  };
+  const latencyTracker = createCopyTradeLatencyTracker({
+    chatId: watcher.chatId,
+    sourceWallet: watcher.sourceWalletAddress,
+    tradingWallet: watcher.tradingWalletPublicKey,
+    observedSignature: watcher.observedSignature,
+    mint: watcher.mint,
+    mode: copyTradeLatencyMode()
+  });
+  latencyTracker.mark("request_built", { status: request ? "ok" : "failed" });
+
+  const setupBlockedReason = !request
+    ? "could not build buy-pressure sell request"
+    : !subscriber
+      ? "subscriber no longer exists"
+      : subscriber.tradingWallet?.publicKey !== watcher.tradingWalletPublicKey
+        ? "active trading wallet changed before buy-pressure sell"
+        : null;
+  const requestRiskBlockedReason = request ? copyTradeRequestRiskBlockedReason({ config, request }) : null;
+  latencyTracker.mark("risk_checked", {
+    status: setupBlockedReason || requestRiskBlockedReason ? "blocked" : "ok",
+    reason: setupBlockedReason || requestRiskBlockedReason
+  });
+
+  const liveBlockedReason = request && !setupBlockedReason ? copyTradeSubmissionBlockedReason(watcher.executionProvider) : null;
+  latencyTracker.mark("live_gate_checked", {
+    status: liveBlockedReason ? "blocked" : "ok",
+    reason: liveBlockedReason
+  });
+  const positionBlockedReason = request && !setupBlockedReason && !requestRiskBlockedReason && !liveBlockedReason
+    ? await copyTradePositionBalanceBlockedReason(watcher)
+    : null;
+
+  const blockedReason = setupBlockedReason || liveBlockedReason || requestRiskBlockedReason || positionBlockedReason;
+  let result: CopyTradeExecutionResult;
+  let duplicateSignature = false;
+
+  if (blockedReason || !subscriber || !request) {
+    result = tradeExecutionSkippedResult({
+      provider: watcher.executionProvider,
+      route: copyTradeRouteForProvider(watcher.executionProvider),
+      reason: `Buy-pressure sell skipped: ${blockedReason || "sell request unavailable"}`,
+      metadata: {
+        triggerKind: trigger.kind,
+        triggerReason: trigger.reason,
+        observedSignature: watcher.observedSignature,
+        copyBuySignature: watcher.copyBuySignature
+      }
+    });
+    latencyTracker.skip(blockedReason || "sell request unavailable", { status: "skipped" });
+  } else {
+    latencyTracker.mark("submit_started");
+    const execution = await executeCopyTradeSell({
+      subscriber,
+      trade: watcher.trade,
+      request,
+      provider: watcher.executionProvider,
+      seenSellSignatures: new Set<string>()
+    });
+    result = execution.result;
+    duplicateSignature = execution.duplicateSignature;
+    latencyTracker.mark("submit_finished", {
+      status: resultOk(result) ? (isProviderNeutralResult(result) ? result.status : "submitted") : "failed",
+      reason: resultOk(result) ? null : result.errorText,
+      signature: resultSignature(result)
+    });
+  }
+
+  logCopyTradeLatency(latencyTracker);
+
+  if (subscriber && request) {
+    await recordCopyTradeExecution({
+      subscriber,
+      trade: watcher.trade,
+      copyTradeWallet,
+      tradingWalletPublicKey: watcher.tradingWalletPublicKey,
+      request,
+      result
+    });
+  }
+
+  await sendTelegramMessage({
+    token: config.telegramToken,
+    chatId: watcher.chatId,
+    text: formatCopyTradeBuyPressureSellResultMessage({
+      trade: watcher.trade,
+      trigger,
+      request: request || fallbackRequest,
+      result
+    }),
+    replyMarkup: buildWalletTradeReplyMarkup(watcher.trade)
+  }).catch((error) => {
+    console.warn(`Could not send buy-pressure sell result alert to ${watcher.chatId}: ${errorMessage(error)}`);
+  });
+
+  if (duplicateSignature) {
+    console.warn(`Buy-pressure sell returned duplicate signature for ${watcher.id}`);
+  }
+
+  return result;
 }
 
 function buildTrailingSellSchedule({
@@ -3141,6 +3673,10 @@ async function shutdown(): Promise<void> {
     clearTimeout(timer);
   }
   trailingSellTimers.clear();
+  for (const timer of buyPressureSellTimers.values()) {
+    clearTimeout(timer);
+  }
+  buyPressureSellTimers.clear();
   await heliusWebhookServer.stop();
 
   if (shouldNotifySubscribersOnShutdown() && config.telegramToken && subscribers.count() > 0) {
@@ -3166,6 +3702,7 @@ process.on("SIGTERM", () => {
 assertConfig();
 await subscribers.init();
 await loadCopyTradeEmergencyStop();
+await loadCopyTradeBuyPressureSellWatchers();
 console.log(`Using ${subscriberStoreLabel} subscriber storage`);
 console.log(`Loaded ${subscribers.count()} verified Telegram subscriber(s)`);
 logCopyTradeExecutionState();

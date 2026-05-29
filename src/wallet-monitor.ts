@@ -9,6 +9,10 @@ import type {
   WalletTradeData
 } from "./types.js";
 import type { TradeExecutionResult } from "./trade-execution.js";
+import type {
+  CopyTradeBuyPressureSellTrigger,
+  CopyTradeBuyPressureSellWatcher
+} from "./copytrade-buy-pressure.js";
 
 const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -444,6 +448,72 @@ export function formatCopyTradeTrailingSellResultMessage({
     duplicateSignature
       ? `${formatTradeResultStatus(result)}\n\nThis step returned a transaction signature that was already used earlier in this trailing sell schedule.`
       : formatTradeResultStatus(result)
+  ].join("\n");
+}
+
+export function formatCopyTradeBuyPressureSellScheduledMessage({
+  trade,
+  watcher
+}: {
+  trade: WalletTradeData;
+  watcher: CopyTradeBuyPressureSellWatcher;
+}): string | null {
+  if (!trade.mint) {
+    return null;
+  }
+
+  const walletName = trade.label || shortenAddress(trade.targetWallet);
+  const timeoutSeconds = Math.max(0, Math.round((watcher.expiresAtMs - watcher.createdAtMs) / 1000));
+  const buyThreshold = watcher.minTotalSol > 0
+    ? `${watcher.minBuys} buy${watcher.minBuys === 1 ? "" : "s"} and ${formatNumber(watcher.minTotalSol)} SOL`
+    : `${watcher.minBuys} buy${watcher.minBuys === 1 ? "" : "s"}`;
+
+  return [
+    "<b>📈 Buy-Pressure Sell</b>",
+    "🟢 Exit watcher armed",
+    "",
+    `<b>🎯 Target:</b> ${escapeHtml(walletName)}`,
+    `<b>💰 Sell Amount:</b> ${formatNumber(watcher.sellPercent)}%`,
+    `<b>📊 Buy Trigger:</b> ${escapeHtml(buyThreshold)}`,
+    `<b>⏱️ Timeout:</b> ${formatNumber(timeoutSeconds)}s`,
+    "",
+    "<b>🪙 Contract Address</b>",
+    `<code>${escapeHtml(trade.mint)}</code>`
+  ].join("\n");
+}
+
+export function formatCopyTradeBuyPressureSellResultMessage({
+  trade,
+  trigger,
+  request,
+  result
+}: {
+  trade: WalletTradeData;
+  trigger: CopyTradeBuyPressureSellTrigger;
+  request: { mint: string; amount: number | `${number}%` };
+  result: FormattableTradeResult;
+}): string {
+  const walletName = trade.label || shortenAddress(trade.targetWallet);
+  const skipped = !result.ok && result.errorText?.startsWith("Buy-pressure sell skipped:");
+  const statusLine = result.ok ? "🟢 Sell submitted" : skipped ? "🟡 Sell skipped" : "🔴 Sell failed";
+  const reasonLabel = trigger.kind === "buy_pressure" ? "Buy pressure" : "Timeout fallback";
+  const buyStats = trigger.buyCount > 0
+    ? `${trigger.buyCount} buy${trigger.buyCount === 1 ? "" : "s"} / ${formatNumber(trigger.buySol)} SOL`
+    : "No qualifying buys";
+
+  return [
+    "<b>📈 Buy-Pressure Sell</b>",
+    statusLine,
+    "",
+    `<b>🎯 Target:</b> ${escapeHtml(walletName)}`,
+    `<b>Why:</b> ${escapeHtml(reasonLabel)} - ${escapeHtml(trigger.reason)}`,
+    `<b>📊 Matched Buys:</b> ${escapeHtml(buyStats)}`,
+    `<b>💰 Sell Amount:</b> ${escapeHtml(String(request.amount))}`,
+    "",
+    "<b>🪙 Contract Address</b>",
+    `<code>${escapeHtml(request.mint)}</code>`,
+    "",
+    formatTradeResultStatus(result)
   ].join("\n");
 }
 

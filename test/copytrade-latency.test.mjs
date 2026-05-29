@@ -63,15 +63,15 @@ test("index runtime wires Helius receipt and normalization timestamps into copy 
   );
   assert.match(
     indexSource,
-    /directSemanticGuardEnabled[\s\S]*copyBuySemanticSubmissionGuard\.reserve\(copyBuySemanticKey\)[\s\S]*idempotencyClaim = await copyTradeBuyIdempotency\.claimBuy\([\s\S]*retryFailed: subscriber\.copyTradeRetryFailedBuys/
+    /fastDirectCopyBuyPath[\s\S]*copyBuySemanticSubmissionGuard\.reserve\(copyBuySemanticKey\)[\s\S]*deferredDurableCopyBuyClaimKey = durableCopyBuyKey;/
   );
   assert.match(
     indexSource,
-    /latencyTracker\.mark\("submit_finished"[\s\S]*if \(durableCopyBuyClaimKey\) \{[\s\S]*safelyCompleteCopyTradeBuyIdempotency/
+    /copyTradeBuyIdempotency\.claimBuy\([\s\S]*retryFailed: subscriber\.copyTradeRetryFailedBuys/
   );
-  assert.doesNotMatch(
+  assert.match(
     indexSource,
-    /deferredDurableCopyBuyClaimKey/
+    /latencyTracker\.mark\("submit_finished"[\s\S]*deferredDurableCopyBuyClaimKey[\s\S]*copyTradeBuyIdempotency\.claimBuy/
   );
   assert.match(
     indexSource,

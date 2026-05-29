@@ -339,6 +339,20 @@ test("Supabase copy buy idempotency retries only failed semantic records when en
   assert.equal(fake.rows[0].error_text, null);
   assert.equal(fake.rows[0].claimed_at, "2026-05-24T12:05:00.000Z");
 
+  const claimedFake = createFakeSupabaseIdempotencyClient([
+    snakeCaseClaimRow(claimInput(), "claimed")
+  ]);
+  const claimedStore = createSupabaseCopyTradeBuyIdempotencyStore({ client: claimedFake.client });
+  const claimedDuplicate = await claimedStore.claimBuy(claimInput({
+    observedSignature: "target-buy-signature-3",
+    retryFailed: true
+  }));
+
+  assert.equal(claimedDuplicate.claimed, false);
+  assert.equal(claimedDuplicate.existing?.status, "claimed");
+  assert.equal(claimedFake.rows.length, 1);
+  assert.equal(claimedFake.rows[0].observed_signature, "target-buy-signature-1");
+
   const submittedFake = createFakeSupabaseIdempotencyClient([
     {
       ...snakeCaseClaimRow(claimInput(), "submitted"),

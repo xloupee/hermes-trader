@@ -1,5 +1,5 @@
 import { asRecord, isRecord } from "./types.js";
-import type { TelegramBotInfo, TelegramChatId, TelegramReplyMarkup, TelegramUpdate } from "./types.js";
+import type { TelegramBotInfo, TelegramChatId, TelegramMessage, TelegramReplyMarkup, TelegramUpdate } from "./types.js";
 
 const TELEGRAM_API_BASE = "https://api.telegram.org";
 
@@ -59,17 +59,19 @@ interface SendTelegramMessageOptions {
   chatId?: TelegramChatId;
   text: string;
   replyMarkup?: TelegramReplyMarkup;
+  replyToMessageId?: number | null;
 }
 
 export async function sendTelegramMessage({
   token,
   chatId,
   text,
-  replyMarkup
-}: SendTelegramMessageOptions): Promise<TelegramApiResponse<unknown>> {
+  replyMarkup,
+  replyToMessageId
+}: SendTelegramMessageOptions): Promise<TelegramApiResponse<TelegramMessage>> {
   assertTelegramConfig({ token, chatId });
 
-  const body = await callTelegramApi({
+  const body = await callTelegramApi<TelegramMessage>({
     token,
     method: "sendMessage",
     payload: {
@@ -77,6 +79,8 @@ export async function sendTelegramMessage({
       text,
       parse_mode: "HTML",
       disable_web_page_preview: true,
+      reply_to_message_id: replyToMessageId || undefined,
+      allow_sending_without_reply: true,
       reply_markup: replyMarkup
     }
   });

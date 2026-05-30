@@ -51,6 +51,7 @@ const pumpSdkByConnection = new WeakMap<Connection, OnlinePumpSdkInstance>();
 const pumpAmmSdkByConnection = new WeakMap<Connection, OnlinePumpAmmSdkInstance>();
 const PUMP_CONFIG_CACHE_MS = 60_000;
 const MINT_TOKEN_PROGRAM_CACHE_MS = 10 * 60_000;
+const PUMP_FAST_BUY_STATE_CACHE_MS = 2 * 60_000;
 const MAX_BLOCKHASH_CACHE_MS = 30_000;
 const latestBlockhashByConnection = new WeakMap<Connection, {
   value: LatestBlockhash | null;
@@ -65,6 +66,56 @@ let pumpGlobalCache: { value: PumpGlobal; expiresAtMs: number } | null = null;
 let pumpGlobalInflight: Promise<PumpGlobal> | null = null;
 let pumpFeeConfigCache: { value: PumpFeeConfig | null; expiresAtMs: number } | null = null;
 let pumpFeeConfigInflight: Promise<PumpFeeConfig | null> | null = null;
+const directPumpFastBuyStateByMint = new Map<string, DirectPumpFastBuyStateCacheEntry>();
+
+export interface DirectPumpFastBuyStateInput {
+  mint: string;
+  creator: string;
+  tokenProgram: string;
+  virtualTokenReserves: string | bigint;
+  virtualQuoteReserves: string | bigint;
+  realTokenReserves: string | bigint;
+  realQuoteReserves: string | bigint;
+  tokenTotalSupply: string | bigint;
+  complete?: boolean | null;
+  isMayhemMode?: boolean | null;
+  isCashbackCoin?: boolean | null;
+  quoteMint?: string | null;
+  source?: string | null;
+  observedAtMs?: number;
+  cacheMs?: number;
+}
+
+export interface DirectPumpFastBuyStateReserveUpdate {
+  mint: string;
+  virtualTokenReserves: string | bigint;
+  virtualQuoteReserves: string | bigint;
+  source?: string | null;
+  observedAtMs?: number;
+  cacheMs?: number;
+}
+
+export interface DirectPumpFastBuyStateChainSnapshot extends DirectPumpFastBuyStateInput {
+  source: string;
+}
+
+interface DirectPumpFastBuyStateCacheEntry {
+  mint: PublicKey;
+  creator: PublicKey;
+  tokenProgram: PublicKey;
+  virtualTokenReserves: BN;
+  virtualQuoteReserves: BN;
+  realTokenReserves: BN;
+  realQuoteReserves: BN;
+  tokenTotalSupply: BN;
+  complete: boolean;
+  isMayhemMode: boolean;
+  isCashbackCoin: boolean;
+  quoteMint: PublicKey;
+  source: string | null;
+  observedAtMs: number;
+  expiresAtMs: number;
+}
 
 function blockhashCacheMsFromConfig(value: number | undefined): number {
   return Math.min(Math.max(0, Math.floor(Number.isFinite(value) ? value || 0 : 0)), MAX_BLOCKHASH_CACHE_MS);
@@ -102,9 +153,9 @@ function getOnlinePumpAmmSdk(connection: Connection, module = loadPumpSwapSdk())
   return sdk;
 }
 
-async function fetchCachedPumpGlobal(sdk: OnlinePumpSdkInstance): Promise<PumpGlobal> {
+async function fetchCachedPumpGlobal(sdk: OnlinePumpSdkInstance, { forceRefresh = false }: { forceRefresh?: boolean } = {}): Promise<PumpGlobal> {
   const now = Date.now();
-  if (pumpGlobalCache && pumpGlobalCache.expiresAtMs > now) {
+  if (!forceRefresh && pumpGlobalCache && pumpGlobalCache.expiresAtMs > now) {
     return pumpGlobalCache.value;
   }
 
@@ -118,9 +169,9 @@ async function fetchCachedPumpGlobal(sdk: OnlinePumpSdkInstance): Promise<PumpGl
   return pumpGlobalInflight;
 }
 
-async function fetchCachedPumpFeeConfig(sdk: OnlinePumpSdkInstance): Promise<PumpFeeConfig | null> {
+async function fetchCachedPumpFeeConfig(sdk: OnlinePumpSdkInstance, { forceRefresh = false }: { forceRefresh?: boolean } = {}): Promise<PumpFeeConfig | null> {
   const now = Date.now();
-  if (pumpFeeConfigCache && pumpFeeConfigCache.expiresAtMs > now) {
+  if (!forceRefresh && pumpFeeConfigCache && pumpFeeConfigCache.expiresAtMs > now) {
     return pumpFeeConfigCache.value;
   }
 
@@ -136,17 +187,22 @@ async function fetchCachedPumpFeeConfig(sdk: OnlinePumpSdkInstance): Promise<Pum
 
 export async function warmDirectSolanaSdk({
   connection,
-  provider
+  provider,
+  forceRefresh = false
 }: {
   connection: Connection;
   provider: DirectTradeExecutionProvider;
+  forceRefresh?: boolean;
 }): Promise<void> {
   const warmups: Promise<unknown>[] = [];
 
   if (provider === "direct-pump" || provider === "direct-auto") {
     const pumpModule = loadPumpSdk();
     const pumpSdk = getOnlinePumpSdk(connection, pumpModule);
-    warmups.push(fetchCachedPumpGlobal(pumpSdk), fetchCachedPumpFeeConfig(pumpSdk));
+    warmups.push(
+      fetchCachedPumpGlobal(pumpSdk, { forceRefresh }),
+      fetchCachedPumpFeeConfig(pumpSdk, { forceRefresh })
+    );
   }
 
   if (provider === "direct-pumpswap" || provider === "direct-auto") {
@@ -163,10 +219,12 @@ export async function warmDirectSolanaSdk({
 
 async function getLatestBlockhashForDirectSend({
   connection,
-  cacheMs = 0
+  cacheMs = 0,
+  forceRefresh = false
 }: {
   connection: Connection;
   cacheMs?: number;
+  forceRefresh?: boolean;
 }): Promise<{ blockhash: LatestBlockhash; cacheHit: boolean }> {
   const clampedCacheMs = blockhashCacheMsFromConfig(cacheMs);
   if (clampedCacheMs <= 0) {
@@ -178,7 +236,7 @@ async function getLatestBlockhashForDirectSend({
 
   const now = Date.now();
   let entry = latestBlockhashByConnection.get(connection);
-  if (entry?.value && entry.expiresAtMs > now) {
+  if (!forceRefresh && entry?.value && entry.expiresAtMs > now) {
     return {
       blockhash: entry.value,
       cacheHit: true
@@ -210,12 +268,14 @@ async function getLatestBlockhashForDirectSend({
 
 export async function warmDirectSolanaBlockhash({
   connection,
-  cacheMs
+  cacheMs,
+  forceRefresh = false
 }: {
   connection: Connection;
   cacheMs: number;
+  forceRefresh?: boolean;
 }): Promise<void> {
-  await getLatestBlockhashForDirectSend({ connection, cacheMs });
+  await getLatestBlockhashForDirectSend({ connection, cacheMs, forceRefresh });
 }
 
 export interface DirectSolanaBuildRequest {
@@ -264,8 +324,23 @@ export interface SolanaDirectSendConfig {
   confirmationMode?: "inline" | "background";
   maxRetries?: number;
   blockhashCacheMs?: number;
+  sendConnections?: DirectSolanaSendConnection[];
   nowMs?: () => number;
   onStage?: (stage: DirectSolanaSendStage, details: DirectSolanaSendStageDetails) => void;
+}
+
+export interface DirectSolanaSendConnection {
+  label: string;
+  url?: string | null;
+  connection: Pick<Connection, "sendRawTransaction"> & Partial<Pick<Connection, "getLatestBlockhash">>;
+}
+
+export interface DirectBuildTimingRecord {
+  stage: string;
+  atMs: number;
+  durationMs?: number;
+  status?: string;
+  [key: string]: unknown;
 }
 
 export type DirectSolanaSendStage =
@@ -293,10 +368,76 @@ export interface DirectSolanaSendStageDetails {
   instructionCount?: number;
   status?: string;
   errorText?: string;
+  rpcCount?: number;
+  sendRpcLabel?: string;
+  sendRpcUrl?: string | null;
+  sendRpcErrors?: Array<{ label: string; errorText: string }>;
 }
 
 interface DirectSolanaSendStageRecord extends DirectSolanaSendStageDetails {
   stage: DirectSolanaSendStage;
+}
+
+function uniqueSendRpcUrls(primaryUrl: string, urls: string[]): string[] {
+  const seen = new Set([primaryUrl.trim()]);
+  return urls
+    .map((url) => url.trim())
+    .filter((url) => {
+      if (!url || seen.has(url)) {
+        return false;
+      }
+      seen.add(url);
+      return true;
+    });
+}
+
+export function buildDirectSolanaSendConnections({
+  primaryConnection,
+  primaryUrl,
+  urls
+}: {
+  primaryConnection: Connection;
+  primaryUrl: string;
+  urls: string[];
+}): DirectSolanaSendConnection[] {
+  return [
+    {
+      label: "primary",
+      url: primaryUrl,
+      connection: primaryConnection
+    },
+    ...uniqueSendRpcUrls(primaryUrl, urls).map((url, index) => ({
+      label: `fanout-${index + 1}`,
+      url,
+      connection: new Connection(url, "confirmed")
+    }))
+  ];
+}
+
+function createBuildTimingTracker(nowMs = Date.now) {
+  const startedAtMs = nowMs();
+  let previousAtMs = startedAtMs;
+  const records: DirectBuildTimingRecord[] = [{ stage: "build_started", atMs: startedAtMs }];
+
+  return {
+    mark(stage: string, details: Record<string, unknown> = {}) {
+      const atMs = nowMs();
+      records.push({
+        stage,
+        atMs,
+        durationMs: Math.max(0, Math.round(atMs - previousAtMs)),
+        ...details
+      });
+      previousAtMs = atMs;
+    },
+    metadata() {
+      const finishedAtMs = records[records.length - 1]?.atMs ?? nowMs();
+      return {
+        stages: records.map((record) => ({ ...record })),
+        totalMs: Math.max(0, Math.round(finishedAtMs - startedAtMs))
+      };
+    }
+  };
 }
 
 function publicKey(value: string, label: string): PublicKey {
@@ -349,42 +490,155 @@ function bn(value: bigint): BN {
   return new BN(value.toString());
 }
 
-export async function resolveMintTokenProgram({
+function bnFromInteger(value: string | bigint): BN {
+  return new BN(value.toString());
+}
+
+function booleanValue(value: boolean | null | undefined, fallback = false): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+export function primeDirectPumpFastBuyState(input: DirectPumpFastBuyStateInput): boolean {
+  try {
+    const mint = publicKey(input.mint, "mint");
+    const creator = publicKey(input.creator, "creator");
+    const tokenProgram = publicKey(input.tokenProgram, "tokenProgram");
+    const quoteMint = input.quoteMint
+      ? publicKey(input.quoteMint, "quoteMint")
+      : NATIVE_MINT;
+
+    if (!tokenProgram.equals(TOKEN_PROGRAM_ID) && !tokenProgram.equals(TOKEN_2022_PROGRAM_ID)) {
+      return false;
+    }
+
+    const now = input.observedAtMs ?? Date.now();
+    const cacheMs = Math.max(0, input.cacheMs ?? PUMP_FAST_BUY_STATE_CACHE_MS);
+    directPumpFastBuyStateByMint.set(mint.toBase58(), {
+      mint,
+      creator,
+      tokenProgram,
+      virtualTokenReserves: bnFromInteger(input.virtualTokenReserves),
+      virtualQuoteReserves: bnFromInteger(input.virtualQuoteReserves),
+      realTokenReserves: bnFromInteger(input.realTokenReserves),
+      realQuoteReserves: bnFromInteger(input.realQuoteReserves),
+      tokenTotalSupply: bnFromInteger(input.tokenTotalSupply),
+      complete: booleanValue(input.complete),
+      isMayhemMode: booleanValue(input.isMayhemMode),
+      isCashbackCoin: booleanValue(input.isCashbackCoin),
+      quoteMint,
+      source: input.source || null,
+      observedAtMs: now,
+      expiresAtMs: now + cacheMs
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function refreshDirectPumpFastBuyStateReserves(input: DirectPumpFastBuyStateReserveUpdate): boolean {
+  const cached = directPumpFastBuyStateByMint.get(input.mint);
+  if (!cached) {
+    return false;
+  }
+
+  try {
+    const virtualTokenReserves = bnFromInteger(input.virtualTokenReserves);
+    const virtualQuoteReserves = bnFromInteger(input.virtualQuoteReserves);
+    const realTokenOffset = cached.virtualTokenReserves.sub(cached.realTokenReserves);
+    const realQuoteOffset = cached.virtualQuoteReserves.sub(cached.realQuoteReserves);
+    const now = input.observedAtMs ?? Date.now();
+    const cacheMs = Math.max(0, input.cacheMs ?? PUMP_FAST_BUY_STATE_CACHE_MS);
+    directPumpFastBuyStateByMint.set(input.mint, {
+      ...cached,
+      virtualTokenReserves,
+      virtualQuoteReserves,
+      realTokenReserves: BN.max(new BN(0), virtualTokenReserves.sub(realTokenOffset)),
+      realQuoteReserves: BN.max(new BN(0), virtualQuoteReserves.sub(realQuoteOffset)),
+      source: input.source || cached.source,
+      observedAtMs: now,
+      expiresAtMs: now + cacheMs
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function cachedDirectPumpFastBuyState(mint: PublicKey): DirectPumpFastBuyStateCacheEntry | null {
+  const cached = directPumpFastBuyStateByMint.get(mint.toBase58());
+  return cached && cached.expiresAtMs > Date.now() ? cached : null;
+}
+
+function cachedMintTokenProgram(connection: Connection, mint: PublicKey): PublicKey | null {
+  const cached = mintTokenProgramByConnection.get(connection)?.get(mint.toBase58());
+  return cached && cached.expiresAtMs > Date.now() ? cached.value : null;
+}
+
+function cacheMintTokenProgram({
   connection,
   mint,
+  tokenProgram,
   cacheMs = MINT_TOKEN_PROGRAM_CACHE_MS
 }: {
   connection: Connection;
   mint: PublicKey;
+  tokenProgram: PublicKey;
   cacheMs?: number;
-}): Promise<PublicKey> {
-  const mintAddress = mint.toBase58();
-  const now = Date.now();
-  let cache = mintTokenProgramByConnection.get(connection);
-  const cached = cache?.get(mintAddress);
-  if (cached && cached.expiresAtMs > now) {
-    return cached.value;
+}): void {
+  if (cacheMs <= 0) {
+    return;
   }
 
-  const mintInfo = await connection.getAccountInfo(mint, "confirmed");
+  let cache = mintTokenProgramByConnection.get(connection);
+  cache ||= new Map();
+  cache.set(mint.toBase58(), {
+    value: tokenProgram,
+    expiresAtMs: Date.now() + cacheMs
+  });
+  mintTokenProgramByConnection.set(connection, cache);
+}
 
+function mintTokenProgramFromAccountInfo({
+  mint,
+  mintInfo
+}: {
+  mint: PublicKey;
+  mintInfo: Awaited<ReturnType<Connection["getAccountInfo"]>>;
+}): PublicKey {
+  const mintAddress = mint.toBase58();
   if (!mintInfo) {
     throw new Error(`mint account not found: ${mintAddress}`);
   }
 
   if (mintInfo.owner.equals(TOKEN_PROGRAM_ID) || mintInfo.owner.equals(TOKEN_2022_PROGRAM_ID)) {
-    if (cacheMs > 0) {
-      cache ||= new Map();
-      cache.set(mintAddress, {
-        value: mintInfo.owner,
-        expiresAtMs: Date.now() + cacheMs
-      });
-      mintTokenProgramByConnection.set(connection, cache);
-    }
     return mintInfo.owner;
   }
 
   throw new Error(`mint account is not owned by SPL Token or Token-2022: ${mintAddress}`);
+}
+
+export async function resolveMintTokenProgram({
+  connection,
+  mint,
+  cacheMs = MINT_TOKEN_PROGRAM_CACHE_MS,
+  commitment = "confirmed"
+}: {
+  connection: Connection;
+  mint: PublicKey;
+  cacheMs?: number;
+  commitment?: "processed" | "confirmed" | "finalized";
+}): Promise<PublicKey> {
+  const cached = cachedMintTokenProgram(connection, mint);
+
+  if (cached) {
+    return cached;
+  }
+  const mintInfo = await connection.getAccountInfo(mint, commitment);
+  const tokenProgram = mintTokenProgramFromAccountInfo({ mint, mintInfo });
+
+  cacheMintTokenProgram({ connection, mint, tokenProgram, cacheMs });
+  return tokenProgram;
 }
 
 async function tokenBalanceRaw({
@@ -437,6 +691,127 @@ function platformFeeForProceeds(split: PlatformFeeSplit | null | undefined, proc
   };
 }
 
+export async function fetchDirectPumpBuyState({
+  connection,
+  pumpModule,
+  mint,
+  user
+}: {
+  connection: Connection;
+  pumpModule: PumpSdkModule;
+  mint: PublicKey;
+  user: PublicKey;
+}) {
+  const legacyAssociatedUser = getAssociatedTokenAddressSync(mint, user, true, TOKEN_PROGRAM_ID);
+  const token2022AssociatedUser = getAssociatedTokenAddressSync(mint, user, true, TOKEN_2022_PROGRAM_ID);
+  const [mintInfo, bondingCurveAccountInfo, legacyAssociatedUserAccountInfo, token2022AssociatedUserAccountInfo] = await connection.getMultipleAccountsInfo([
+    mint,
+    pumpModule.bondingCurvePda(mint),
+    legacyAssociatedUser,
+    token2022AssociatedUser
+  ]);
+  const tokenProgram = mintTokenProgramFromAccountInfo({ mint, mintInfo });
+
+  if (!bondingCurveAccountInfo) {
+    throw new Error(`Bonding curve account not found for mint: ${mint.toBase58()}`);
+  }
+  cacheMintTokenProgram({ connection, mint, tokenProgram });
+
+  return {
+    tokenProgram,
+    bondingCurveAccountInfo,
+    bondingCurve: pumpModule.PUMP_SDK.decodeBondingCurve(bondingCurveAccountInfo),
+    associatedUserAccountInfo: tokenProgram.equals(TOKEN_2022_PROGRAM_ID)
+      ? token2022AssociatedUserAccountInfo
+    : legacyAssociatedUserAccountInfo
+  };
+}
+
+export async function fetchDirectPumpFastBuyStateFromChain({
+  connection,
+  mint,
+  commitment = "processed"
+}: {
+  connection: Pick<Connection, "getMultipleAccountsInfo">;
+  mint: PublicKey;
+  commitment?: "processed" | "confirmed" | "finalized";
+}): Promise<DirectPumpFastBuyStateChainSnapshot> {
+  const pumpModule = loadPumpSdk();
+  const [mintInfo, bondingCurveAccountInfo] = await connection.getMultipleAccountsInfo([
+    mint,
+    pumpModule.bondingCurvePda(mint)
+  ], commitment);
+  const tokenProgram = mintTokenProgramFromAccountInfo({ mint, mintInfo });
+
+  if (!bondingCurveAccountInfo) {
+    throw new Error(`Bonding curve account not found for mint: ${mint.toBase58()}`);
+  }
+
+  const bondingCurve = pumpModule.PUMP_SDK.decodeBondingCurve(bondingCurveAccountInfo);
+  return {
+    mint: mint.toBase58(),
+    creator: bondingCurve.creator.toBase58(),
+    tokenProgram: tokenProgram.toBase58(),
+    virtualTokenReserves: bondingCurve.virtualTokenReserves.toString(),
+    virtualQuoteReserves: bondingCurve.virtualQuoteReserves.toString(),
+    realTokenReserves: bondingCurve.realTokenReserves.toString(),
+    realQuoteReserves: bondingCurve.realQuoteReserves.toString(),
+    tokenTotalSupply: bondingCurve.tokenTotalSupply.toString(),
+    complete: bondingCurve.complete,
+    isMayhemMode: bondingCurve.isMayhemMode,
+    isCashbackCoin: bondingCurve.isCashbackCoin,
+    quoteMint: bondingCurve.quoteMint.toBase58(),
+    source: "rpc-bonding-curve-prefetch"
+  };
+}
+
+function directPumpFastBuyState({
+  connection,
+  mint,
+  pumpModule
+}: {
+  connection: Connection;
+  mint: PublicKey;
+  pumpModule: PumpSdkModule;
+}) {
+  const cached = cachedDirectPumpFastBuyState(mint);
+  if (!cached) {
+    return null;
+  }
+
+  cacheMintTokenProgram({
+    connection,
+    mint,
+    tokenProgram: cached.tokenProgram
+  });
+
+  return {
+    tokenProgram: cached.tokenProgram,
+    bondingCurveAccountInfo: {
+      data: Buffer.alloc(0),
+      executable: false,
+      lamports: 0,
+      owner: pumpModule.PUMP_PROGRAM_ID,
+      rentEpoch: 0
+    },
+    bondingCurve: {
+      virtualTokenReserves: cached.virtualTokenReserves,
+      virtualQuoteReserves: cached.virtualQuoteReserves,
+      realTokenReserves: cached.realTokenReserves,
+      realQuoteReserves: cached.realQuoteReserves,
+      tokenTotalSupply: cached.tokenTotalSupply,
+      complete: cached.complete,
+      creator: cached.creator,
+      isMayhemMode: cached.isMayhemMode,
+      isCashbackCoin: cached.isCashbackCoin,
+      quoteMint: cached.quoteMint
+    },
+    associatedUserAccountInfo: null,
+    source: cached.source,
+    observedAtMs: cached.observedAtMs
+  };
+}
+
 function directSolanaTimingMetadata(stages: DirectSolanaSendStageRecord[]): DirectExecutionTimingMetadata {
   const atMs = Object.fromEntries(stages.map((stage) => [stage.stage, stage.atMs])) as Record<string, number>;
   const duration = (from: DirectSolanaSendStage, to: DirectSolanaSendStage): number | null => {
@@ -483,6 +858,9 @@ function directSolanaTimingMetadata(stages: DirectSolanaSendStageRecord[]): Dire
     skipPreflight: null,
     maxRetries: null,
     blockhashCacheMs: null,
+    rawSendRpcCount: stageDetail("raw_send_started", "rpcCount") ?? null,
+    rawSendWinner: stageDetail("signature_returned", "sendRpcLabel") ?? null,
+    rawSendErrors: stageDetail("signature_returned", "sendRpcErrors") ?? stageDetail("raw_send_failed", "sendRpcErrors") ?? null,
     instructionCount: stageDetail("transaction_build_started", "instructionCount") ?? null,
     txBytes: stageDetail("signature_returned", "txBytes") ?? stageDetail("raw_send_failed", "txBytes") ?? null,
     unitsConsumed: stageDetail("simulation_finished", "unitsConsumed") ?? null,
@@ -559,8 +937,10 @@ async function buildDirectPumpSolanaPayload({
   connection: Connection;
   request: DirectSolanaBuildRequest & { provider: "direct-pump" };
 }): Promise<TradeExecutionResult | DirectTransactionPayload> {
+  const buildTiming = createBuildTimingTracker();
   const mint = publicKey(request.mint, "mint");
   const user = publicKey(request.walletPublicKey, "walletPublicKey");
+  buildTiming.mark("keys_ready");
   const pumpModule = loadPumpSdk();
   const {
     getBuyTokenAmountFromSolAmount,
@@ -568,6 +948,7 @@ async function buildDirectPumpSolanaPayload({
     PUMP_SDK
   } = pumpModule;
   const sdk = getOnlinePumpSdk(connection, pumpModule);
+  buildTiming.mark("sdk_ready");
   const route = buildDirectRouteMetadata({
     provider: "direct-pump",
     mint: request.mint,
@@ -577,51 +958,81 @@ async function buildDirectPumpSolanaPayload({
     amount: request.amountLamports.toString(),
     amountBasis: request.amountBasis
   });
+  const metadataWithBuildTiming = (extra: Record<string, unknown> = {}) => ({
+    ...(request.metadata || {}),
+    ...extra,
+    directBuildTiming: buildTiming.metadata()
+  });
 
   try {
-    const [tokenProgram, global, feeConfig] = await Promise.all([
-      resolveMintTokenProgram({ connection, mint }),
-      fetchCachedPumpGlobal(sdk),
-      fetchCachedPumpFeeConfig(sdk)
-    ]);
     const instructions = [...computeBudgetInstructions(request.priorityFeeSol)];
     let appliedPlatformFee = request.platformFee;
+    let tokenProgram: PublicKey;
+    let global: PumpGlobal;
+    let feeConfig: PumpFeeConfig | null;
+    buildTiming.mark("compute_budget_ready", { instructionCount: instructions.length });
 
     if (request.action === "buy") {
       instructions.push(...platformFeeInstruction({
         split: request.platformFee,
         fromPubkey: user
       }));
+      buildTiming.mark("platform_fee_ready", { instructionCount: instructions.length });
 
       if (request.amountBasis !== "sol") {
+        buildTiming.mark("skipped", { status: "wrong_amount_basis" });
         return tradeExecutionSkippedResult({
           provider: "direct-pump",
           route: route.route,
           reason: `direct Pump buy requires SOL amount basis; got ${amountBasisLabel(request.amountBasis)}`,
           platformFee: platformFeeResult(request.platformFee),
-          metadata: { route }
+          metadata: metadataWithBuildTiming({ route })
         });
       }
 
-      const buyState = await sdk.fetchBuyState(mint, user, tokenProgram);
+      const fastBuyState = directPumpFastBuyState({ connection, mint, pumpModule });
+      const [buyState, cachedGlobal, cachedFeeConfig] = await Promise.all([
+        fastBuyState ?? fetchDirectPumpBuyState({
+          connection,
+          pumpModule,
+          mint,
+          user
+        }),
+        fetchCachedPumpGlobal(sdk),
+        fetchCachedPumpFeeConfig(sdk)
+      ]);
+      tokenProgram = buyState.tokenProgram;
+      global = cachedGlobal;
+      feeConfig = cachedFeeConfig;
+      buildTiming.mark("buy_accounts_ready", {
+        tokenProgram: tokenProgram.toBase58(),
+        source: fastBuyState ? "cache" : "rpc",
+        cachedStateSource: "source" in buyState ? buyState.source : null,
+        cachedStateAgeMs: "observedAtMs" in buyState ? Math.max(0, Date.now() - buyState.observedAtMs) : null,
+        feeConfigLoaded: Boolean(feeConfig),
+        associatedUserAccountExists: Boolean(buyState.associatedUserAccountInfo),
+        bondingCurveComplete: Boolean(buyState.bondingCurve.complete)
+      });
       if (buyState.bondingCurve.complete) {
+        buildTiming.mark("skipped", { status: "bonding_curve_complete" });
         return tradeExecutionSkippedResult({
           provider: "direct-pump",
           route: route.route,
           reason: "direct Pump bonding curve is complete/migrated; use direct-pumpswap",
           platformFee: platformFeeResult(request.platformFee),
-          metadata: { ...(request.metadata || {}), route }
+          metadata: metadataWithBuildTiming({ route })
         });
       }
 
       const sdkQuoteLamports = maxQuoteLamportsForSlippageCap(request.amountLamports, request.slippagePercent);
       if (sdkQuoteLamports <= 0n) {
+        buildTiming.mark("skipped", { status: "amount_too_small" });
         return tradeExecutionSkippedResult({
           provider: "direct-pump",
           route: route.route,
           reason: "direct Pump buy amount is too small after slippage cap",
           platformFee: platformFeeResult(request.platformFee),
-          metadata: { ...(request.metadata || {}), route }
+          metadata: metadataWithBuildTiming({ route })
         });
       }
 
@@ -633,6 +1044,10 @@ async function buildDirectPumpSolanaPayload({
         bondingCurve: buyState.bondingCurve,
         amount: solAmount,
         quoteMint: NATIVE_MINT
+      });
+      buildTiming.mark("quote_ready", {
+        sdkQuoteLamports: sdkQuoteLamports.toString(),
+        tokenAmount: amount.toString()
       });
       const buyInstructions = tokenProgram.equals(TOKEN_2022_PROGRAM_ID)
         ? PUMP_SDK.buyV2Instructions({
@@ -659,17 +1074,34 @@ async function buildDirectPumpSolanaPayload({
             solAmount,
             slippage: request.slippagePercent,
             tokenProgram
-          });
+      });
       instructions.push(...await buyInstructions);
+      buildTiming.mark("instructions_ready", { instructionCount: instructions.length });
     } else {
+      const [resolvedTokenProgram, cachedGlobal, cachedFeeConfig] = await Promise.all([
+        resolveMintTokenProgram({ connection, mint }),
+        fetchCachedPumpGlobal(sdk),
+        fetchCachedPumpFeeConfig(sdk)
+      ]);
+      tokenProgram = resolvedTokenProgram;
+      global = cachedGlobal;
+      feeConfig = cachedFeeConfig;
+      buildTiming.mark("config_ready", {
+        tokenProgram: tokenProgram.toBase58(),
+        feeConfigLoaded: Boolean(feeConfig)
+      });
       const sellState = await sdk.fetchSellState(mint, user, tokenProgram);
+      buildTiming.mark("sell_state_ready", {
+        bondingCurveComplete: Boolean(sellState.bondingCurve.complete)
+      });
       if (sellState.bondingCurve.complete) {
+        buildTiming.mark("skipped", { status: "bonding_curve_complete" });
         return tradeExecutionSkippedResult({
           provider: "direct-pump",
           route: route.route,
           reason: "direct Pump bonding curve is complete/migrated; use direct-pumpswap",
           platformFee: platformFeeResult(request.platformFee),
-          metadata: { ...(request.metadata || {}), route }
+          metadata: metadataWithBuildTiming({ route })
         });
       }
 
@@ -719,15 +1151,16 @@ async function buildDirectPumpSolanaPayload({
         split: appliedPlatformFee,
         fromPubkey: user
       }));
+      buildTiming.mark("instructions_ready", { instructionCount: instructions.length });
     }
+    buildTiming.mark("build_finished", { instructionCount: instructions.length });
 
     return {
       provider: "direct-pump",
       route,
       instructions,
       signers: [],
-      metadata: {
-        ...(request.metadata || {}),
+      metadata: metadataWithBuildTiming({
         route,
         ...(request.action === "buy"
           ? {
@@ -742,15 +1175,19 @@ async function buildDirectPumpSolanaPayload({
             }
           : {}),
         instructionCount: instructions.length
-      },
+      }),
       platformFee: appliedPlatformFee
     };
   } catch (error) {
+    buildTiming.mark("build_failed", {
+      status: "failed",
+      errorText: error instanceof Error ? error.message : String(error)
+    });
     return tradeExecutionFailedResult({
       provider: "direct-pump",
       route: route.route,
       errorText: error instanceof Error ? error.message : String(error),
-      metadata: { ...(request.metadata || {}), route },
+      metadata: metadataWithBuildTiming({ route }),
       platformFee: platformFeeResult(request.platformFee)
     });
   }
@@ -910,6 +1347,58 @@ async function transactionForPayload({
     lastValidBlockHeight: blockhash.lastValidBlockHeight,
     blockhashCacheHit: cacheHit
   };
+}
+
+async function sendRawTransactionFanout({
+  primaryConnection,
+  sendConnections = [],
+  serializedTransaction,
+  options
+}: {
+  primaryConnection: Connection;
+  sendConnections?: DirectSolanaSendConnection[];
+  serializedTransaction: Uint8Array;
+  options: { skipPreflight?: boolean; maxRetries?: number };
+}): Promise<{
+  signature: string;
+  winner: DirectSolanaSendConnection;
+  errors: Array<{ label: string; errorText: string }>;
+  rpcCount: number;
+}> {
+  const primary = sendConnections[0] ?? {
+    label: "primary",
+    url: null,
+    connection: primaryConnection
+  };
+  const attempts = sendConnections.length > 0 ? sendConnections : [primary];
+  const errors: Array<{ label: string; errorText: string }> = [];
+  const promises = attempts.map(async (candidate) => {
+    try {
+      return {
+        signature: await candidate.connection.sendRawTransaction(serializedTransaction, options),
+        winner: candidate
+      };
+    } catch (error) {
+      errors.push({
+        label: candidate.label,
+        errorText: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
+  });
+
+  try {
+    const result = await Promise.any(promises);
+    return {
+      ...result,
+      errors: [...errors],
+      rpcCount: attempts.length
+    };
+  } catch {
+    const error = new Error(errors.map((entry) => `${entry.label}: ${entry.errorText}`).join("; ") || "all direct send RPCs failed");
+    (error as Error & { sendRpcErrors?: Array<{ label: string; errorText: string }> }).sendRpcErrors = [...errors];
+    throw error;
+  }
 }
 
 export async function simulateSolanaDirectTransaction({
@@ -1100,23 +1589,37 @@ export async function sendSolanaDirectTransaction({
       markStage("raw_send_started", {
         blockhash,
         lastValidBlockHeight,
-        txBytes: serializedTransaction.length
+        txBytes: serializedTransaction.length,
+        rpcCount: config.sendConnections?.length || 1
       });
-      signature = await connection.sendRawTransaction(serializedTransaction, {
-        skipPreflight: config.skipPreflight,
-        maxRetries: config.maxRetries
+      const sendResult = await sendRawTransactionFanout({
+        primaryConnection: connection,
+        sendConnections: config.sendConnections,
+        serializedTransaction,
+        options: {
+          skipPreflight: config.skipPreflight,
+          maxRetries: config.maxRetries
+        }
       });
+      signature = sendResult.signature;
       markStage("signature_returned", {
         signature,
         blockhash,
         lastValidBlockHeight,
-        txBytes: serializedTransaction.length
+        txBytes: serializedTransaction.length,
+        rpcCount: sendResult.rpcCount,
+        sendRpcLabel: sendResult.winner.label,
+        sendRpcUrl: sendResult.winner.url ?? null,
+        sendRpcErrors: sendResult.errors
       });
     } catch (error) {
+      const sendRpcErrors = (error as Error & { sendRpcErrors?: Array<{ label: string; errorText: string }> }).sendRpcErrors;
       markStage("raw_send_failed", {
         blockhash,
         lastValidBlockHeight,
         txBytes: serializedTransaction.length,
+        rpcCount: config.sendConnections?.length || 1,
+        sendRpcErrors,
         status: "failed",
         errorText: error instanceof Error ? error.message : String(error)
       });

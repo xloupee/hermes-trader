@@ -66,6 +66,34 @@ export function copyTradeSignalSource(value: WalletTradeData["provider"]): CopyT
   return value === "pumpportal" || value === "geyser" ? value : null;
 }
 
+function normalizeSource(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toUpperCase();
+  return normalized ? normalized : null;
+}
+
+export function copyTradeSignalSourceBlockedReason({
+  trade,
+  allowedSources
+}: {
+  trade: WalletTradeData;
+  allowedSources: string[];
+}): string | null {
+  if (allowedSources.length === 0) {
+    return null;
+  }
+
+  const source = normalizeSource(trade.source || trade.pool);
+  const normalizedAllowedSources = allowedSources
+    .map((value) => normalizeSource(value))
+    .filter((value): value is string => Boolean(value));
+
+  if (!source || !normalizedAllowedSources.includes(source)) {
+    return `copy trade source ${source || "unknown"} is not in COPY_TRADE_ALLOWED_SOURCES=${normalizedAllowedSources.join(",")}`;
+  }
+
+  return null;
+}
+
 export function copyTradeSignalRaceKey(trade: WalletTradeData): string | null {
   const signature = trade.signature?.trim();
   const targetWallet = trade.targetWallet?.trim();

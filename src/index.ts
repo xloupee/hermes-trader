@@ -31,6 +31,7 @@ import {
   copyTradeSignalProviderAllows,
   copyTradeSignalRaceLogPayload,
   copyTradeSignalSource,
+  copyTradeSignalSourceBlockedReason,
   createCopyTradeSignalRaceTracker,
   parseCopyTradeSignalProvider
 } from "./copytrade-signal-race.js";
@@ -1035,19 +1036,35 @@ async function handleWalletTradeSignal(
     return false;
   }
 
-  const racesCopyTradeSignal = config.copyTradeSignalProvider === "parallel" &&
+  const canRaceCopyTradeSignal = config.copyTradeSignalProvider === "parallel" &&
     Boolean(signalSource) &&
     (copyTradeEntries.length > 0 || hasBuyPressureWatchers);
-  const raceAgeBlockedReason = racesCopyTradeSignal
+  const raceAgeBlockedReason = canRaceCopyTradeSignal
     ? copyTradeSignalAgeBlockedReason({
         trade,
         maxSignalAgeMs: config.copyTradeMaxSignalAgeMs,
         nowMs: receivedAtMs
       })
     : null;
+  const raceSourceBlockedReason = canRaceCopyTradeSignal && !raceAgeBlockedReason
+    ? copyTradeSignalSourceBlockedReason({
+        trade,
+        allowedSources: config.copyTradeAllowedSources
+      })
+    : null;
+  const raceBlockedReason = raceAgeBlockedReason || raceSourceBlockedReason;
+  const raceCopyableBlockedReason = canRaceCopyTradeSignal && !raceBlockedReason && !isCopyableSolToTokenBuy(trade)
+    ? "trade is not a copyable SOL-to-token buy"
+    : null;
+  const racesCopyTradeSignal = canRaceCopyTradeSignal && !raceCopyableBlockedReason;
 
-  if (raceAgeBlockedReason) {
-    logCopyTradeSignalRace(trade, "skipped", { reason: raceAgeBlockedReason });
+  if (raceBlockedReason) {
+    logCopyTradeSignalRace(trade, "skipped", { reason: raceBlockedReason });
+    return true;
+  }
+
+  if (raceCopyableBlockedReason) {
+    logCopyTradeSignalRace(trade, "skipped", { reason: raceCopyableBlockedReason });
   } else if (racesCopyTradeSignal) {
     const claim = copyTradeSignalRaceTracker.claim(trade, receivedAtMs);
 
@@ -1065,7 +1082,7 @@ async function handleWalletTradeSignal(
     });
   }
 
-  const eventId = raceAgeBlockedReason ? null : walletTradeSeenEventId(trade);
+  const eventId = walletTradeSeenEventId(trade);
 
   if (rememberEvent(eventId)) {
     return true;

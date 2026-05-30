@@ -7,6 +7,7 @@ import {
   copyTradeSignalProviderAllows,
   copyTradeSignalRaceKey,
   copyTradeSignalRaceLogPayload,
+  copyTradeSignalSourceBlockedReason,
   createCopyTradeSignalRaceTracker,
   parseCopyTradeSignalProvider
 } from "../dist/copytrade-signal-race.js";
@@ -134,6 +135,23 @@ test("stale signals are skipped before claiming the race", () => {
   );
 });
 
+test("source-blocked signals are skipped before claiming the race", () => {
+  assert.equal(
+    copyTradeSignalSourceBlockedReason({
+      trade: trade({ source: "PUMP_FUN" }),
+      allowedSources: ["PUMP_FUN"]
+    }),
+    null
+  );
+  assert.match(
+    copyTradeSignalSourceBlockedReason({
+      trade: trade({ provider: "geyser", source: "GEYSER_PUMP_BONDING_CURVE" }),
+      allowedSources: ["PUMP_FUN"]
+    }),
+    /COPY_TRADE_ALLOWED_SOURCES=PUMP_FUN/
+  );
+});
+
 test("emergency stop remains a provider-neutral live gate", () => {
   assert.equal(
     copyTradeLiveExecutionBlockedReason({
@@ -152,6 +170,10 @@ test("index wires PumpPortal and Geyser through the shared signal race path", ()
   assert.match(indexSource, /if \(!copyTradeSignalProviderAllows\(config\.copyTradeSignalProvider, "geyser"\)\)/);
   assert.match(indexSource, /return handleWalletTradeSignal\(trade, \{/);
   assert.match(indexSource, /copyTradeSignalAgeBlockedReason\(\{[\s\S]*maxSignalAgeMs: config\.copyTradeMaxSignalAgeMs/);
+  assert.match(indexSource, /copyTradeSignalSourceBlockedReason\(\{[\s\S]*allowedSources: config\.copyTradeAllowedSources/);
+  assert.match(indexSource, /if \(raceBlockedReason\) \{[\s\S]*return true;/);
+  assert.match(indexSource, /raceCopyableBlockedReason[\s\S]*trade is not a copyable SOL-to-token buy/);
+  assert.match(indexSource, /const racesCopyTradeSignal = canRaceCopyTradeSignal && !raceCopyableBlockedReason/);
   assert.match(indexSource, /copyTradeSignalRaceTracker\.claim\(trade, receivedAtMs\)/);
   assert.match(indexSource, /enabled: config\.geyserEnabled \|\| config\.copyTradeSignalProvider === "parallel"/);
 });

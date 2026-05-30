@@ -9,3 +9,4 @@ supabase/.temp/
 target/
 tools/copy-rs/target/
 jito-shredstream-keypair.json
+tools/shredstream-rs/target/

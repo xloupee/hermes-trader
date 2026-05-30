@@ -163,7 +163,10 @@ function summarize(rows) {
 
           return (row.latency.stagesMs?.received_to_normalized || 0) +
             (row.latency.stagesMs?.normalized_to_request_built || 0);
-        }))
+        })),
+        normalization: stats(group.map((row) => row.latency?.stagesMs?.received_to_normalized)),
+        directBuild: stats(group.map((row) => row.latency?.stagesMs?.direct_build_started_to_direct_build_finished)),
+        rawSend: stats(group.map((row) => row.latency?.stagesMs?.direct_raw_send_started_to_direct_raw_signature_returned))
       };
     });
 }
@@ -183,6 +186,9 @@ function latestRows(rows, count = 12) {
       signature: row.signature || null,
       totalMs: row.latency?.totalMs ?? null,
       submitMs: row.latency?.stagesMs?.submit_started_to_submit_finished ?? null,
+      normalizationMs: row.latency?.stagesMs?.received_to_normalized ?? null,
+      directBuildMs: row.latency?.stagesMs?.direct_build_started_to_direct_build_finished ?? null,
+      rawSendMs: row.latency?.stagesMs?.direct_raw_send_started_to_direct_raw_signature_returned ?? null,
       observedSignature: row.observedSignature,
       error: row.error_text || null
     }));
@@ -289,15 +295,22 @@ async function main() {
     console.log(`  total: ${formatMaybeStats(row.total)}`);
     console.log(`  submit: ${formatMaybeStats(row.submit)}`);
     console.log(`  receipt->build: ${formatMaybeStats(row.receiptToBuild)}`);
+    console.log(`  normalization: ${formatMaybeStats(row.normalization)}`);
+    console.log(`  direct build: ${formatMaybeStats(row.directBuild)}`);
+    console.log(`  raw send: ${formatMaybeStats(row.rawSend)}`);
   }
   console.log("");
   console.log("Latest rows:");
   for (const row of output.latest) {
     const total = row.totalMs === null ? "n/a" : `${row.totalMs}ms`;
     const submit = row.submitMs === null ? "n/a" : `${row.submitMs}ms`;
+    const normalization = row.normalizationMs === null ? "n/a" : `${row.normalizationMs}ms`;
+    const directBuild = row.directBuildMs === null ? "n/a" : `${row.directBuildMs}ms`;
+    const rawSend = row.rawSendMs === null ? "n/a" : `${row.rawSendMs}ms`;
     console.log(
       `  #${row.id} ${row.created_at} ${row.provider}/${row.status} amount=${row.amount} ` +
-      `total=${total} submit=${submit} sig=${row.signature || "none"}`
+      `total=${total} submit=${submit} normalize=${normalization} build=${directBuild} raw=${rawSend} ` +
+      `sig=${row.signature || "none"}`
     );
     if (row.error) {
       console.log(`    error=${row.error}`);

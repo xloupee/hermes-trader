@@ -759,19 +759,51 @@ test("Solana direct sender can fan out raw sends and returns the first RPC signa
   assert.equal(stages.find((stage) => stage.stage === "raw_send_started").rpcCount, 2);
 });
 
-test("Solana direct send connection builder dedupes primary and labels fanout RPCs", () => {
+test("Solana direct send connection builder dedupes primary and labels fanout/Jito RPCs", async () => {
   const primaryConnection = { sendRawTransaction: () => "signature-primary" };
   const connections = buildDirectSolanaSendConnections({
     primaryConnection,
     primaryUrl: "https://primary.example",
-    urls: ["https://primary.example", "https://fanout.example"]
+    urls: ["https://primary.example", "https://fanout.example"],
+    jitoUrls: ["https://frankfurt.mainnet.block-engine.jito.wtf"],
+    jitoAuthUuid: "uuid-for-test"
   });
 
-  assert.equal(connections.length, 2);
+  assert.equal(connections.length, 3);
   assert.equal(connections[0].label, "primary");
   assert.equal(connections[0].connection, primaryConnection);
   assert.equal(connections[1].label, "fanout-1");
   assert.equal(connections[1].url, "https://fanout.example");
+  assert.equal(connections[2].label, "jito-1");
+  assert.equal(connections[2].url, "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/transactions");
+
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url, init });
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: "signature-jito" }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+  try {
+    const signature = await connections[2].connection.sendRawTransaction(Buffer.from("tx"), {
+      skipPreflight: true,
+      maxRetries: 0
+    });
+    assert.equal(signature, "signature-jito");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/transactions");
+  assert.equal(requests[0].init.headers["x-jito-auth"], "uuid-for-test");
+  const body = JSON.parse(requests[0].init.body);
+  assert.equal(body.method, "sendTransaction");
+  assert.equal(body.params[1].encoding, "base64");
+  assert.equal(body.params[1].skipPreflight, true);
+  assert.equal(body.params[1].maxRetries, 0);
 });
 
 test("Solana direct sender clamps excessive blockhash cache windows", async () => {

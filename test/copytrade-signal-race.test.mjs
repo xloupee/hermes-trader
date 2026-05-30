@@ -5,6 +5,7 @@ import { copyTradeLiveExecutionBlockedReason } from "../dist/copytrade-execution
 import {
   copyTradeSignalAgeBlockedReason,
   copyTradeSignalProviderAllows,
+  copyTradeSignalProviderRaces,
   copyTradeSignalRaceKey,
   copyTradeSignalRaceLogPayload,
   copyTradeSignalSourceBlockedReason,
@@ -48,18 +49,33 @@ function trade(overrides = {}) {
   };
 }
 
-test("copy trade signal provider defaults to PumpPortal and parallel enables Geyser", () => {
+test("copy trade signal provider defaults to PumpPortal and supports explicit raw-feed modes", () => {
   assert.equal(parseCopyTradeSignalProvider(undefined), "pumpportal");
   assert.equal(parseCopyTradeSignalProvider(""), "pumpportal");
   assert.equal(parseCopyTradeSignalProvider("pumpportal"), "pumpportal");
   assert.equal(parseCopyTradeSignalProvider("parallel"), "parallel");
   assert.equal(parseCopyTradeSignalProvider("geyser"), "parallel");
+  assert.equal(parseCopyTradeSignalProvider("shredstream"), "shredstream");
+  assert.equal(parseCopyTradeSignalProvider("shred"), "shredstream");
+  assert.equal(parseCopyTradeSignalProvider("all"), "all");
   assert.equal(parseCopyTradeSignalProvider("unknown"), "pumpportal");
 
   assert.equal(copyTradeSignalProviderAllows("pumpportal", "pumpportal"), true);
   assert.equal(copyTradeSignalProviderAllows("pumpportal", "geyser"), false);
+  assert.equal(copyTradeSignalProviderAllows("pumpportal", "shredstream"), false);
   assert.equal(copyTradeSignalProviderAllows("parallel", "pumpportal"), true);
   assert.equal(copyTradeSignalProviderAllows("parallel", "geyser"), true);
+  assert.equal(copyTradeSignalProviderAllows("parallel", "shredstream"), false);
+  assert.equal(copyTradeSignalProviderAllows("shredstream", "pumpportal"), true);
+  assert.equal(copyTradeSignalProviderAllows("shredstream", "geyser"), false);
+  assert.equal(copyTradeSignalProviderAllows("shredstream", "shredstream"), true);
+  assert.equal(copyTradeSignalProviderAllows("all", "pumpportal"), true);
+  assert.equal(copyTradeSignalProviderAllows("all", "geyser"), true);
+  assert.equal(copyTradeSignalProviderAllows("all", "shredstream"), true);
+  assert.equal(copyTradeSignalProviderRaces("pumpportal"), false);
+  assert.equal(copyTradeSignalProviderRaces("parallel"), true);
+  assert.equal(copyTradeSignalProviderRaces("shredstream"), true);
+  assert.equal(copyTradeSignalProviderRaces("all"), true);
 });
 
 test("copy trade signal race lets PumpPortal first win and Geyser duplicate lose", () => {
@@ -154,6 +170,46 @@ test("copy trade signal race lets Geyser first win and PumpPortal duplicate lose
   assert.equal(duplicateLater.record.provider, "geyser");
 });
 
+test("copy trade signal race lets ShredStream win when promoted", () => {
+  const tracker = createCopyTradeSignalRaceTracker();
+  const shredstreamTrade = trade({ provider: "shredstream", source: "SHREDSTREAM_PUMP" });
+  const pumpPortalTrade = trade({ provider: "pumpportal" });
+
+  const first = tracker.claim(shredstreamTrade, nowMs);
+  const duplicate = tracker.claim(pumpPortalTrade, nowMs + 5);
+
+  assert.equal(first.outcome, "won");
+  assert.equal(first.record.provider, "shredstream");
+  assert.equal(duplicate.outcome, "duplicate");
+  assert.equal(duplicate.record.provider, "shredstream");
+  assert.deepEqual(copyTradeSignalRaceLogPayload({
+    mode: "shredstream",
+    trade: shredstreamTrade,
+    outcome: "won",
+    winner: first.record,
+    key: first.key,
+    receivedAtMs: nowMs + 1,
+    normalizedAtMs: nowMs + 2
+  }), {
+    event: "copy_trade_signal_race",
+    mode: "shredstream",
+    provider: "shredstream",
+    observedSignature: "ObservedSignature11111111111111111111111111",
+    targetWallet: "TargetWallet111111111111111111111111111111",
+    mint: "Mint111111111111111111111111111111111111111",
+    outcome: "won",
+    reason: null,
+    raceKey: copyTradeSignalRaceKey(shredstreamTrade),
+    winnerProvider: "shredstream",
+    winnerClaimedAtMs: nowMs,
+    receivedAtMs: nowMs + 1,
+    normalizedAtMs: nowMs + 2,
+    signalAgeMs: 1,
+    normalizedLagMs: 1,
+    winnerDeltaMs: 1
+  });
+});
+
 test("stale signals are skipped before claiming the race", () => {
   const staleTrade = trade({ timestamp: (nowMs - 61_000) / 1000 });
   const missingTimestampTrade = trade({ timestamp: null });
@@ -209,12 +265,39 @@ test("index wires PumpPortal and Geyser through the shared signal race path", ()
 
   assert.match(indexSource, /copyTradeSignalProvider: parseCopyTradeSignalProvider\(process\.env\.COPY_TRADE_SIGNAL_PROVIDER\)/);
   assert.match(indexSource, /if \(!copyTradeSignalProviderAllows\(config\.copyTradeSignalProvider, "geyser"\)\)/);
-  assert.match(indexSource, /return handleWalletTradeSignal\(trade, \{/);
+  assert.match(indexSource, /if \(!diagnostic && copyTradeSignalProviderAllows\(config\.copyTradeSignalProvider, "shredstream"\)\) \{[\s\S]*handleWalletTradeSignal\(observedTrade/);
+  assert.match(indexSource, /handleWalletTradeSignal\(trade, \{/);
+  assert.match(indexSource, /walletFeedDiagnosticWallets: diagnosticWalletsFromEnv\(process\.env\.WALLET_FEED_DIAGNOSTIC_WALLETS\)/);
+  assert.match(indexSource, /\.\.\.config\.walletFeedDiagnosticWallets/);
+  assert.match(indexSource, /raw: \{[\s\S]*diagnosticWallet: true/);
   assert.match(indexSource, /copyTradeSignalAgeBlockedReason\(\{[\s\S]*maxSignalAgeMs: config\.copyTradeMaxSignalAgeMs/);
   assert.match(indexSource, /copyTradeSignalSourceBlockedReason\(\{[\s\S]*allowedSources: config\.copyTradeAllowedSources/);
   assert.match(indexSource, /if \(raceBlockedReason\) \{[\s\S]*return true;/);
   assert.match(indexSource, /raceCopyableBlockedReason[\s\S]*trade is not a copyable SOL-to-token buy/);
   assert.match(indexSource, /const racesCopyTradeSignal = canRaceCopyTradeSignal && !raceCopyableBlockedReason/);
   assert.match(indexSource, /copyTradeSignalRaceTracker\.claim\(trade, receivedAtMs\)/);
-  assert.match(indexSource, /enabled: config\.geyserEnabled \|\| config\.copyTradeSignalProvider === "parallel"/);
+  assert.match(indexSource, /enabled: config\.geyserEnabled \|\| copyTradeSignalProviderAllows\(config\.copyTradeSignalProvider, "geyser"\)/);
+  assert.match(indexSource, /enabled: config\.shredstreamWalletObserverEnabled \|\| copyTradeSignalProviderAllows\(config\.copyTradeSignalProvider, "shredstream"\)/);
+});
+
+test("ShredStream copytrade hot path uses the dynamic active copytrade wallet set", () => {
+  const indexSource = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+
+  assert.match(
+    indexSource,
+    /function activeCopyTradeEntriesForTarget\(targetWallet: string\)[\s\S]*subscribers[\s\S]*\.list\(\)[\s\S]*subscriber\.copyTradeWallets[\s\S]*wallet\.address === targetWallet/
+  );
+  assert.match(
+    indexSource,
+    /const copyTradeEntries = activeCopyTradeEntriesForTarget\(trade\.targetWallet\)/
+  );
+  assert.match(
+    indexSource,
+    /Promise\.all\(copyTradeEntries\.map\(\(entry\) =>[\s\S]*sendCopyTradeSimulationAlert\([\s\S]*entry\.subscriber[\s\S]*entry\.wallet/
+  );
+  assert.match(
+    indexSource,
+    /activeCopyTradeEntriesForTarget\(observedTrade\.targetWallet\)\.length > 0[\s\S]*prefetchDirectPumpFastBuyStateForTrade\(observedTrade\)/
+  );
+  assert.doesNotMatch(indexSource, /A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS/);
 });

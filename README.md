@@ -103,6 +103,7 @@ npm run import-subscribers -- data/telegram-subscribers.json
 - Expose `WEBHOOK_PORT` through your reverse proxy at the exact `HELIUS_WEBHOOK_PUBLIC_URL`, and forward the `Authorization` header unchanged.
 - `GEYSER_ENABLED=true` starts an observe-only Yellowstone Geyser wallet feed using `GEYSER_GRPC_URL`. By default it writes parsed diagnostics to `WALLET_TRADE_LOG_PATH` and does not trigger copy buys, sells, Telegram alerts, or buy-pressure exits. `COPY_TRADE_SIGNAL_PROVIDER=parallel` races PumpPortal and Geyser watched-wallet buys through the same copy-buy handler; the first signature/target-wallet/mint signal wins and later duplicates are logged without submitting another buy attempt. Keep one bot instance so the shared Geyser stream stays well under the provider's stream limit.
 - Compare PumpPortal, Helius, and Geyser accepted wallet events with `npm run wallet-feed-report -- --path=logs/wallet-trades.jsonl`. Add `--since=2026-05-29T00:00:00Z` or `--limit=50` for a narrower report.
+- [VA RPC and Geyser runbook](docs/va-geyser-runbook.md) documents the VA endpoints, IP allowlisting, smoke tests, canary env, feed comparison, rollback paths, and the 20-stream Geyser limit.
 
 ## Direct trading SDK trust review
 
@@ -142,3 +143,4 @@ Compute Budget:     ComputeBudget111111111111111111111111111111
 ## Research
 
 - [Copy trading wallet research](docs/copy-trading-research.md) - technical plan for adding wallet trade monitoring, dry-run copy-trade planning, and guarded local execution.
+- [VA RPC and Geyser runbook](docs/va-geyser-runbook.md) - operator steps for the VA RPC endpoint, Geyser feed, parallel signal race mode, and rollback.

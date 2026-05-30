@@ -61,7 +61,7 @@ import {
   warmDirectSolanaBlockhash,
   warmDirectSolanaSdk
 } from "./direct-solana.js";
-import type { DirectSolanaSendStage } from "./direct-solana.js";
+import type { DirectSolanaReadConnection, DirectSolanaSendStage } from "./direct-solana.js";
 import type { DirectTransactionPayload } from "./direct-pump.js";
 import { createGeyserWalletTradeListener } from "./geyser.js";
 import type { GeyserWalletTradeReject } from "./geyser.js";
@@ -531,6 +531,12 @@ const directSolanaSendConnections = buildDirectSolanaSendConnections({
   jitoUrls: config.directExecutionJitoSendUrls,
   jitoAuthUuid: config.directExecutionJitoAuthUuid
 });
+const directSolanaReadConnections: DirectSolanaReadConnection[] = directSolanaSendConnections
+  .filter((candidate) => typeof candidate.connection.getMultipleAccountsInfo === "function")
+  .map((candidate) => ({
+    label: candidate.label,
+    connection: candidate.connection as DirectSolanaReadConnection["connection"]
+  }));
 let isShuttingDown = false;
 let copyTradeEmergencyStopped = false;
 const pumpFunCoinInfoRetryDelaysMs = [0, 750, 1500, 3000, 6000];
@@ -2010,7 +2016,8 @@ async function executeDirectCopyTrade({
       walletPublicKey: tradingWallet.publicKey,
       platformFee,
       metadata,
-      forceFreshBuyState
+      forceFreshBuyState,
+      readConnections: directSolanaReadConnections
     }
   });
   onLatencyMilestone?.("direct_build_finished", {
@@ -4355,6 +4362,50 @@ function logDirectPumpFastStatePrefetchStats({ force = false }: { force?: boolea
   console.log(`Direct Pump fast state prefetch stats | scheduled=${directPumpFastStatePrefetchStats.scheduled} | primed=${directPumpFastStatePrefetchStats.primed} | directPrimed=${directPumpFastStatePrefetchStats.directPrimed} | missed=${directPumpFastStatePrefetchStats.missed} | failed=${directPumpFastStatePrefetchStats.failed} | invalidMint=${directPumpFastStatePrefetchStats.invalidMint} | dropped=${directPumpFastStatePrefetchStats.dropped} | inFlight=${directPumpFastStatePrefetchInFlight} | queued=${directPumpFastStatePrefetchQueue.length}`);
 }
 
+function firstFulfilled<T>(tasks: Array<{ label: string; run: () => Promise<T> }>): Promise<{ label: string; value: T }> {
+  let pending = tasks.length;
+  const errors: string[] = [];
+
+  return new Promise((resolve, reject) => {
+    for (const task of tasks) {
+      task.run().then((value) => {
+        resolve({ label: task.label, value });
+      }).catch((error) => {
+        errors.push(`${task.label}: ${errorMessage(error)}`);
+        pending -= 1;
+        if (pending <= 0) {
+          reject(new Error(errors.join("; ")));
+        }
+      });
+    }
+  });
+}
+
+async function fetchDirectPumpFastBuyStateFromFastestReadConnection({
+  mint,
+  commitment
+}: {
+  mint: PublicKey;
+  commitment: "processed" | "confirmed" | "finalized";
+}) {
+  const candidates = directSolanaReadConnections.length > 0
+    ? directSolanaReadConnections
+    : [{ label: "primary", connection: directSolanaConnection }];
+  const winner = await firstFulfilled(candidates.map((candidate) => ({
+    label: candidate.label,
+    run: () => fetchDirectPumpFastBuyStateFromChain({
+      connection: candidate.connection,
+      mint,
+      commitment
+    })
+  })));
+
+  return {
+    ...winner.value,
+    source: `${winner.value.source}:${winner.label}`
+  };
+}
+
 async function prefetchDirectPumpFastStateForEvent({
   mint,
   event
@@ -4371,15 +4422,11 @@ async function prefetchDirectPumpFastStateForEvent({
     }
 
     try {
-      const chainSnapshot = await fetchDirectPumpFastBuyStateFromChain({
-        connection: directSolanaConnection,
+      const chainSnapshot = await fetchDirectPumpFastBuyStateFromFastestReadConnection({
         mint: mintPublicKey,
         commitment: "processed"
       });
-      const input = {
-        ...chainSnapshot,
-        source: "pumpportal-create-prefetch"
-      };
+      const input = chainSnapshot;
       if (input) {
         const primed = primeDirectPumpFastBuyState(input);
         if (primed) {

@@ -352,6 +352,12 @@ export function formatTradeExecutionResultLog(result: TradeExecutionResult): str
       if (typeof buyAccounts.cachedStateAgeMs === "number") {
         parts.push(`directBuyStateAgeMs=${buyAccounts.cachedStateAgeMs}`);
       }
+      if (typeof buyAccounts.creatorSource === "string") {
+        parts.push(`directCreatorSource=${buyAccounts.creatorSource}`);
+      }
+      if (typeof buyAccounts.creatorVerifiedAgeMs === "number") {
+        parts.push(`directCreatorAgeMs=${buyAccounts.creatorVerifiedAgeMs}`);
+      }
       if (typeof buyAccounts.tokenProgram === "string") {
         parts.push(`tokenProgram=${buyAccounts.tokenProgram}`);
       }

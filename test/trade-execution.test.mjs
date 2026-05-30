@@ -134,6 +134,8 @@ test("provider-neutral result log includes direct Pump buy-state timing", () => 
             source: "rpc",
             cachedStateSource: "rpc-bonding-curve-prefetch",
             cachedStateAgeMs: 12,
+            creatorSource: "rpc-bonding-curve-prefetch:fanout-1",
+            creatorVerifiedAgeMs: 24,
             tokenProgram: TOKEN_2022_PROGRAM_ID.toBase58(),
             forceFreshBuyState: true
           }
@@ -147,6 +149,8 @@ test("provider-neutral result log includes direct Pump buy-state timing", () => 
   assert.match(log, /directBuyState=rpc/);
   assert.match(log, /directBuyStateSource=rpc-bonding-curve-prefetch/);
   assert.match(log, /directBuyStateAgeMs=12/);
+  assert.match(log, /directCreatorSource=rpc-bonding-curve-prefetch:fanout-1/);
+  assert.match(log, /directCreatorAgeMs=24/);
   assert.match(log, new RegExp(`tokenProgram=${TOKEN_2022_PROGRAM_ID.toBase58()}`));
   assert.match(log, /forceFreshBuyState=true/);
 });

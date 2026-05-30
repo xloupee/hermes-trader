@@ -53,6 +53,7 @@ const PUMP_CONFIG_CACHE_MS = 60_000;
 const MINT_TOKEN_PROGRAM_CACHE_MS = 10 * 60_000;
 const PUMP_FAST_BUY_STATE_CACHE_MS = 2 * 60_000;
 const OBSERVED_BUY_FAST_STATE_MAX_AGE_MS = 1_000;
+const PUMP_TOKEN_2022_VERIFIED_CREATOR_CACHE_MS = 60_000;
 const MAX_BLOCKHASH_CACHE_MS = 30_000;
 const latestBlockhashByConnection = new WeakMap<Connection, {
   value: LatestBlockhash | null;
@@ -105,7 +106,10 @@ export interface DirectPumpFastBuyStateChainSnapshot extends DirectPumpFastBuySt
 interface DirectPumpFastBuyStateCacheEntry {
   mint: PublicKey;
   creator: PublicKey;
+  creatorVault: PublicKey;
   creatorVerified: boolean;
+  creatorVerifiedAtMs: number | null;
+  creatorSource: string | null;
   tokenProgram: PublicKey;
   virtualTokenReserves: BN;
   virtualQuoteReserves: BN;
@@ -294,6 +298,7 @@ export interface DirectSolanaBuildRequest {
   platformFee?: PlatformFeeSplit | null;
   metadata?: Record<string, unknown>;
   forceFreshBuyState?: boolean;
+  readConnections?: DirectSolanaReadConnection[];
 }
 
 export function directAutoProviderOrderForRequest(
@@ -337,7 +342,12 @@ export interface SolanaDirectSendConfig {
 export interface DirectSolanaSendConnection {
   label: string;
   url?: string | null;
-  connection: Pick<Connection, "sendRawTransaction"> & Partial<Pick<Connection, "getLatestBlockhash">>;
+  connection: Pick<Connection, "sendRawTransaction"> & Partial<Pick<Connection, "getLatestBlockhash" | "getMultipleAccountsInfo">>;
+}
+
+export interface DirectSolanaReadConnection {
+  label: string;
+  connection: Pick<Connection, "getMultipleAccountsInfo">;
 }
 
 export interface DirectBuildTimingRecord {
@@ -600,11 +610,20 @@ export function primeDirectPumpFastBuyState(input: DirectPumpFastBuyStateInput):
 
     const now = input.observedAtMs ?? Date.now();
     const cacheMs = Math.max(0, input.cacheMs ?? PUMP_FAST_BUY_STATE_CACHE_MS);
+    const existing = directPumpFastBuyStateByMint.get(mint.toBase58());
+    const verifiedByInput = input.creatorVerified === true;
+    const verifiedByExisting = existing?.creatorVerified === true;
+    const cachedCreator = !verifiedByInput && verifiedByExisting ? existing.creator : creator;
+    const cachedCreatorVault = loadPumpSdk().creatorVaultPda(cachedCreator);
+    const cachedTokenProgram = !verifiedByInput && verifiedByExisting ? existing.tokenProgram : tokenProgram;
     directPumpFastBuyStateByMint.set(mint.toBase58(), {
       mint,
-      creator,
-      creatorVerified: input.creatorVerified === true,
-      tokenProgram,
+      creator: cachedCreator,
+      creatorVault: cachedCreatorVault,
+      creatorVerified: verifiedByInput || verifiedByExisting,
+      creatorVerifiedAtMs: verifiedByInput ? now : existing?.creatorVerifiedAtMs ?? null,
+      creatorSource: verifiedByInput ? input.source || "chain-verified" : existing?.creatorSource ?? null,
+      tokenProgram: cachedTokenProgram,
       virtualTokenReserves: bnFromInteger(input.virtualTokenReserves),
       virtualQuoteReserves: bnFromInteger(input.virtualQuoteReserves),
       realTokenReserves: bnFromInteger(input.realTokenReserves),
@@ -659,7 +678,18 @@ function cachedDirectPumpFastBuyState(mint: PublicKey): DirectPumpFastBuyStateCa
     return null;
   }
 
-  return cached;
+  if (!cached.creatorVault.equals(loadPumpSdk().creatorVaultPda(cached.creator))) {
+    return null;
+  }
+
+  if (cached.tokenProgram.equals(TOKEN_PROGRAM_ID)) {
+    return cached;
+  }
+
+  const creatorVerifiedAgeMs = cached.creatorVerifiedAtMs === null
+    ? Number.POSITIVE_INFINITY
+    : Math.max(0, Date.now() - cached.creatorVerifiedAtMs);
+  return creatorVerifiedAgeMs <= PUMP_TOKEN_2022_VERIFIED_CREATOR_CACHE_MS ? cached : null;
 }
 
 function cachedMintTokenProgram(connection: Connection, mint: PublicKey): PublicKey | null {
@@ -819,6 +849,52 @@ export async function fetchDirectPumpBuyState({
   };
 }
 
+async function fetchDirectPumpBuyStateFromFastestConnection({
+  connection,
+  readConnections = [],
+  pumpModule,
+  mint,
+  user
+}: {
+  connection: Connection;
+  readConnections?: DirectSolanaReadConnection[];
+  pumpModule: PumpSdkModule;
+  mint: PublicKey;
+  user: PublicKey;
+}) {
+  const candidates = readConnections.length > 0
+    ? readConnections
+    : [{ label: "primary", connection }];
+  let pending = candidates.length;
+  const errors: string[] = [];
+
+  return new Promise<Awaited<ReturnType<typeof fetchDirectPumpBuyState>> & {
+    source: string;
+    observedAtMs: number;
+  }>((resolve, reject) => {
+    for (const candidate of candidates) {
+      fetchDirectPumpBuyState({
+        connection: candidate.connection as Connection,
+        pumpModule,
+        mint,
+        user
+      }).then((state) => {
+        resolve({
+          ...state,
+          source: `rpc:${candidate.label}`,
+          observedAtMs: Date.now()
+        });
+      }).catch((error) => {
+        errors.push(`${candidate.label}: ${error instanceof Error ? error.message : String(error)}`);
+        pending -= 1;
+        if (pending <= 0) {
+          reject(new Error(`all direct Pump buy-state RPCs failed: ${errors.join("; ")}`));
+        }
+      });
+    }
+  });
+}
+
 export async function fetchDirectPumpFastBuyStateFromChain({
   connection,
   mint,
@@ -954,6 +1030,9 @@ function directPumpFastBuyState({
     },
     associatedUserAccountInfo: null,
     creatorVerified: cached.creatorVerified,
+    creatorVerifiedAtMs: cached.creatorVerifiedAtMs,
+    creatorVerifiedAgeMs: cached.creatorVerifiedAtMs === null ? null : Math.max(0, Date.now() - cached.creatorVerifiedAtMs),
+    creatorSource: cached.creatorSource,
     source: cached.source,
     observedAtMs: cached.observedAtMs
   };
@@ -1156,8 +1235,9 @@ async function buildDirectPumpSolanaPayload({
         });
       }
       const [buyState, cachedGlobal, cachedFeeConfig] = await Promise.all([
-        fastBuyState ?? fetchDirectPumpBuyState({
+        fastBuyState ?? fetchDirectPumpBuyStateFromFastestConnection({
           connection,
+          readConnections: request.readConnections,
           pumpModule,
           mint,
           user
@@ -1174,6 +1254,8 @@ async function buildDirectPumpSolanaPayload({
         forceFreshBuyState: request.forceFreshBuyState === true,
         cachedStateSource: "source" in buyState ? buyState.source : null,
         cachedStateAgeMs: "observedAtMs" in buyState ? Math.max(0, Date.now() - buyState.observedAtMs) : null,
+        creatorSource: "creatorSource" in buyState ? buyState.creatorSource : null,
+        creatorVerifiedAgeMs: "creatorVerifiedAgeMs" in buyState ? buyState.creatorVerifiedAgeMs : null,
         creatorVerified: "creatorVerified" in buyState ? buyState.creatorVerified : true,
         feeConfigLoaded: Boolean(feeConfig),
         associatedUserAccountExists: Boolean(buyState.associatedUserAccountInfo),

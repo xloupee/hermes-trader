@@ -81,6 +81,15 @@ import type { PumpPortalSubscription } from "./pumpportal.js";
 import { decryptLocalSolanaKeypair, decryptSecret, encryptionSecretReady } from "./secrets.js";
 import { calculatePlatformFeeSplit, platformFeeConfigBlockedReason } from "./platform-fee.js";
 import {
+  buildCashbackAccrual,
+  buildCashbackExecutionKey,
+  cashbackConfigBlockedReason,
+  claimCashback,
+  createSupabaseCashbackStore,
+  parseCashbackConfig
+} from "./cashback.js";
+import type { CashbackConfig, CashbackStore } from "./cashback.js";
+import {
   formatTradeExecutionResultLog,
   isDirectTradeExecutionProvider,
   parseTradeExecutionProvider,
@@ -505,8 +514,15 @@ const config: BotConfig = {
   directExecutionCanaryWallets: rawListFromEnv(process.env.DIRECT_EXECUTION_CANARY_WALLETS),
   platformFeeEnabled: process.env.PLATFORM_FEE_ENABLED === "true",
   platformFeeBps: Math.floor(nonNegativeNumberFromEnv(process.env.PLATFORM_FEE_BPS, 100)),
-  platformFeeTreasury: process.env.PLATFORM_FEE_TREASURY
+  platformFeeTreasury: process.env.PLATFORM_FEE_TREASURY,
+  cashbackEnabled: process.env.CASHBACK_ENABLED === "true",
+  cashbackFeeShareBps: Math.floor(nonNegativeNumberFromEnv(process.env.CASHBACK_FEE_SHARE_BPS, 0)),
+  cashbackMinClaimSol: nonNegativeNumberFromEnv(process.env.CASHBACK_MIN_CLAIM_SOL, 0.005),
+  cashbackPayoutWalletPublicKey: process.env.CASHBACK_PAYOUT_WALLET_PUBLIC_KEY,
+  cashbackPayoutWalletSecretKey: process.env.CASHBACK_PAYOUT_WALLET_SECRET_KEY,
+  cashbackMaxPayoutSolPerDay: nonNegativeNumberFromEnv(process.env.CASHBACK_MAX_PAYOUT_SOL_PER_DAY, 0)
 };
+const cashbackConfig: CashbackConfig = parseCashbackConfig(process.env);
 
 const seenEvents = new Set<string>();
 const seenGeyserDiagnostics = new Set<string>();
@@ -549,6 +565,13 @@ const subscriberStoreLabel = config.supabaseUrl && config.supabaseServiceRoleKey
 const copyTradeRecorder =
   config.supabaseUrl && config.supabaseServiceRoleKey
     ? createSupabaseCopyTradeRecorderFromEnv({
+        url: config.supabaseUrl,
+        serviceRoleKey: config.supabaseServiceRoleKey
+      })
+    : null;
+const cashbackStore: CashbackStore | null =
+  config.supabaseUrl && config.supabaseServiceRoleKey
+    ? createSupabaseCashbackStore({
         url: config.supabaseUrl,
         serviceRoleKey: config.supabaseServiceRoleKey
       })
@@ -1075,7 +1098,8 @@ function logCopyTradeExecutionState(): void {
       `sendRpcFanout=${directSolanaSendConnections.length}`,
       `canaryChats=${config.directExecutionCanaryChatIds.length || "none"}`,
       `canaryWallets=${config.directExecutionCanaryWallets.length || "none"}`,
-      `platformFee=${config.platformFeeEnabled ? `${config.platformFeeBps}bps` : "disabled"}`
+      `platformFee=${config.platformFeeEnabled ? `${config.platformFeeBps}bps` : "disabled"}`,
+      `cashback=${cashbackConfig.enabled ? `${cashbackConfig.feeShareBps}bps` : "disabled"}`
     ].join(" | ")
   );
 
@@ -1087,6 +1111,15 @@ function logCopyTradeExecutionState(): void {
   });
   if (platformFeeBlockedReason) {
     console.warn(`Platform fee config blocks fee-enabled direct execution: ${platformFeeBlockedReason}`);
+  }
+
+  const cashbackBlockedReason = cashbackConfigBlockedReason(cashbackConfig);
+  if (cashbackBlockedReason) {
+    console.warn(`Cashback config blocks accrual and claims: ${cashbackBlockedReason}`);
+  }
+
+  if (cashbackConfig.enabled && !cashbackStore) {
+    console.warn("CASHBACK_ENABLED is true but Supabase is not configured; cashback accrual and claims are disabled.");
   }
 
   if (copyTradeExecutionProviderError) {
@@ -3107,7 +3140,8 @@ function formatSkippedAutoCopyBuyMessage({
     simulationMessage,
     "",
     `🟡 ${mode}; no copy order was submitted.`,
-    `<b>Reason:</b> <code>${reason}</code>`
+    "<b>Reason</b>",
+    `└ <code>${reason}</code>`
   ].join("\n");
 }
 
@@ -4098,8 +4132,67 @@ async function recordCopyTradeExecution({
 
   try {
     await copyTradeRecorder.recordCopyTradeExecution(record);
+    await accrueCashbackFromCopyTradeExecution({
+      record,
+      trade,
+      result,
+      trailingSellStepIndex,
+      trailingSellTotalSteps
+    });
   } catch (error) {
     console.warn(`Could not record copy trade execution for ${subscriber.chatId}: ${errorMessage(error)}`);
+  }
+}
+
+async function accrueCashbackFromCopyTradeExecution({
+  record,
+  trade,
+  result,
+  trailingSellStepIndex = null,
+  trailingSellTotalSteps = null
+}: {
+  record: CopyTradeExecutionRecord;
+  trade: WalletTradeData;
+  result: CopyTradeExecutionResult;
+  trailingSellStepIndex?: number | null;
+  trailingSellTotalSteps?: number | null;
+}): Promise<void> {
+  if (!cashbackStore || !isProviderNeutralResult(result) || !isDirectTradeExecutionProvider(result.provider)) {
+    return;
+  }
+
+  const executionKey = buildCashbackExecutionKey({
+    chatId: record.chatId,
+    tradingWalletPublicKey: record.tradingWalletPublicKey,
+    sourceSignature: trade.signature,
+    executionSignature: result.signature,
+    action: record.action,
+    trailingSellStepIndex,
+    trailingSellTotalSteps
+  });
+  const accrual = buildCashbackAccrual({
+    chatId: record.chatId,
+    tradingWalletPublicKey: record.tradingWalletPublicKey,
+    executionKey,
+    sourceSignature: trade.signature,
+    executionSignature: result.signature,
+    action: record.action,
+    status: record.status,
+    provider: result.provider,
+    platformFee: result.platformFee,
+    trailingSellStepIndex,
+    trailingSellTotalSteps,
+    config: cashbackConfig
+  });
+
+  if (!accrual) {
+    return;
+  }
+
+  try {
+    await cashbackStore.accrue(accrual);
+  } catch (error) {
+    console.warn(`Could not accrue cashback for ${record.chatId}:${executionKey}: ${errorMessage(error)}`);
   }
 }
 
@@ -4734,7 +4827,22 @@ const commandPoller = createTelegramCommandPoller({
   },
   onCopyTradeEmergencyResume: (chatId) => {
     return clearCopyTradeEmergencyStop(chatId);
-  }
+  },
+  cashback: cashbackConfig.enabled && cashbackStore
+    ? {
+        getSummary: ({ chatId, tradingWalletPublicKey, payoutWalletPublicKey }) =>
+          cashbackStore.getSummary({ chatId, tradingWalletPublicKey, payoutWalletPublicKey, config: cashbackConfig }),
+        claim: ({ chatId, tradingWalletPublicKey, payoutWalletPublicKey }) =>
+          claimCashback({
+            store: cashbackStore,
+            config: cashbackConfig,
+            connection: directSolanaConnection,
+            chatId,
+            tradingWalletPublicKey,
+            payoutWalletPublicKey
+          })
+      }
+    : undefined
 });
 const migrationListener = createPumpPortalMigrationListener({
   pumpPortalWsUrl: config.pumpPortalWsUrl,

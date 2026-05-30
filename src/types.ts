@@ -132,6 +132,12 @@ export interface BotConfig extends MigrationFormatConfig {
   platformFeeEnabled: boolean;
   platformFeeBps: number;
   platformFeeTreasury?: string;
+  cashbackEnabled: boolean;
+  cashbackFeeShareBps: number;
+  cashbackMinClaimSol: number;
+  cashbackPayoutWalletPublicKey?: string;
+  cashbackPayoutWalletSecretKey?: string;
+  cashbackMaxPayoutSolPerDay: number;
 }
 
 export interface LegacyBotConfig extends MigrationFormatConfig {
@@ -247,6 +253,7 @@ export interface SubscriberStore {
   setCopyTradeRetryFailedBuys: (chatId: TelegramChatId, enabled: boolean) => Promise<boolean>;
   setCopyTradeBuyPressureSellEnabled: (chatId: TelegramChatId, enabled: boolean) => Promise<boolean>;
   setCopyTradeBuyPressureSellTimeoutMs: (chatId: TelegramChatId, timeoutMs: number | null) => Promise<boolean>;
+  setCashbackPayoutWallet: (chatId: TelegramChatId, address: string | null) => Promise<boolean>;
   resetCopyTradeExecutionSettings: (chatId: TelegramChatId) => Promise<boolean>;
   setCopyTargetWallet: (chatId: TelegramChatId, address: string | null) => Promise<boolean>;
   listWatchedWallets: (chatId: TelegramChatId) => WatchedWallet[];
@@ -273,6 +280,7 @@ export interface SubscriberRecord {
   copyTradeRetryFailedBuys: boolean;
   copyTradeBuyPressureSellEnabled: boolean;
   copyTradeBuyPressureSellTimeoutMs: number | null;
+  cashbackPayoutWalletAddress: string | null;
   copyTargetWalletAddress: string | null;
   verifiedAt: string;
   updatedAt: string;

@@ -83,6 +83,7 @@ export function makeSubscriber(chatId: string, mode: AlertModeValue | null, now 
     copyTradeRetryFailedBuys: false,
     copyTradeBuyPressureSellEnabled: false,
     copyTradeBuyPressureSellTimeoutMs: null,
+    cashbackPayoutWalletAddress: null,
     copyTargetWalletAddress: null,
     verifiedAt: now,
     updatedAt: now
@@ -167,6 +168,7 @@ export function mergeSubscriber(
     copyTradeRetryFailedBuys: existing?.copyTradeRetryFailedBuys === true,
     copyTradeBuyPressureSellEnabled: existing?.copyTradeBuyPressureSellEnabled === true,
     copyTradeBuyPressureSellTimeoutMs: finiteNumber(existing?.copyTradeBuyPressureSellTimeoutMs),
+    cashbackPayoutWalletAddress: stringValue(existing?.cashbackPayoutWalletAddress) || null,
     copyTargetWalletAddress: stringValue(existing?.copyTargetWalletAddress) || null,
     verifiedAt: typeof verifiedAt === "string" ? verifiedAt : existing?.verifiedAt || now,
     updatedAt: typeof updatedAt === "string" ? updatedAt : existing?.updatedAt || now
@@ -295,6 +297,9 @@ function loadSubscriberRecordInto(subscribers: Map<string, SubscriberRecord>, va
       copyTradeBuyPressureSellTimeoutMs:
         finiteNumber(record.copyTradeBuyPressureSellTimeoutMs ?? record.copy_trade_buy_pressure_sell_timeout_ms) ??
           existing.copyTradeBuyPressureSellTimeoutMs,
+      cashbackPayoutWalletAddress:
+        stringValue(record.cashbackPayoutWalletAddress ?? record.cashback_payout_wallet_address)?.trim() ||
+          existing.cashbackPayoutWalletAddress,
       copyTargetWalletAddress: legacyCopyTarget || existing.copyTargetWalletAddress
     });
   }
@@ -1009,6 +1014,23 @@ export function createSubscriberStore({
       subscribers.set(normalized, {
         ...existing,
         copyTradeBuyPressureSellTimeoutMs: timeoutMs,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return true;
+    },
+    async setCashbackPayoutWallet(chatId, address) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      subscribers.set(normalized, {
+        ...existing,
+        cashbackPayoutWalletAddress: address,
         updatedAt: new Date().toISOString()
       });
       await save();

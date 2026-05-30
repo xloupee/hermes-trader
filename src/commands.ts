@@ -8,8 +8,14 @@ import {
 } from "./telegram.js";
 import { createPumpPortalLightningWallet } from "./pumpportal.js";
 import { encryptSecret, encryptionSecretReady, generateLocalSolanaHotWallet } from "./secrets.js";
+import {
+  cashbackSummaryReplyMarkup,
+  formatCashbackSummaryText,
+  formatCashbackSol
+} from "./cashback.js";
 import { errorMessage } from "./types.js";
 import { isValidSolanaAddress } from "./wallet-monitor.js";
+import type { CashbackClaimResult, CashbackSummary } from "./cashback.js";
 import type {
   AlertModeValue,
   LegacyBotConfig,
@@ -35,6 +41,7 @@ const telegramCommands = [
   { command: "trackwallets", description: "Open track wallet dashboard" },
   { command: "mywallets", description: "Open my wallets dashboard" },
   { command: "copytrade", description: "Open copy trade menu" },
+  { command: "cashback", description: "View and claim copytrade cashback" },
   { command: "help", description: "Show commands" }
 ];
 
@@ -61,7 +68,8 @@ type PendingWalletInputAction =
   | "unwatch_wallet"
   | "copytrade_wallet"
   | "rename_copytrade_wallet"
-  | "remove_copytrade_wallet";
+  | "remove_copytrade_wallet"
+  | "cashback_payout_wallet";
 type CopyTradeExecutionSettingInputAction = Extract<
   PendingCopyInputAction,
   "buy_slippage" | "buy_priority_fee" | "sell_slippage" | "sell_priority_fee"
@@ -92,6 +100,18 @@ interface CommandPollerOptions {
   onWalletWatchlistChange?: () => string | void | Promise<string | void>;
   onCopyTradeEmergencyStop?: (chatId: TelegramChatId) => string | void | Promise<string | void>;
   onCopyTradeEmergencyResume?: (chatId: TelegramChatId) => string | void | Promise<string | void>;
+  cashback?: {
+    getSummary: (input: {
+      chatId: TelegramChatId;
+      tradingWalletPublicKey: string | null;
+      payoutWalletPublicKey: string | null;
+    }) => Promise<CashbackSummary>;
+    claim: (input: {
+      chatId: TelegramChatId;
+      tradingWalletPublicKey: string | null;
+      payoutWalletPublicKey: string | null;
+    }) => Promise<CashbackClaimResult>;
+  };
 }
 
 interface TelegramCommandPoller {
@@ -735,7 +755,8 @@ function verificationPrompt(): string {
     "├ /alerts - Token alerts",
     "├ /trackwallets - Wallet tracking",
     "├ /mywallets - Trading wallet",
-    "└ /copytrade - Copy trading",
+    "├ /copytrade - Copy trading",
+    "└ /cashback - Copytrade cashback",
     "",
     `🕒 Last updated: ${formatDashboardTime(new Date())}`
   ].join("\n");
@@ -778,7 +799,8 @@ export function formatStartDashboardText(subscriber: SubscriberRecord): string {
     "├ /alerts - Token alerts",
     "├ /trackwallets - Wallet tracking",
     "├ /mywallets - Trading wallet",
-    "└ /copytrade - Copy trading",
+    "├ /copytrade - Copy trading",
+    "└ /cashback - Copytrade cashback",
     "",
     `🕒 Last updated: ${formatDashboardTime(new Date())}`
   ].join("\n");
@@ -802,10 +824,11 @@ export function helpText(_chatId?: TelegramChatId): string {
     "└ /trackwallets - Track wallets for normal trade alerts",
     "",
     "<b>👛 Trading Wallet</b>",
-    "└ /mywallets - Create or view your PumpPortal trading wallet",
+    "└ /mywallets - Create or view your local signing trading wallet",
     "",
     "<b>⚡ Copy Trading</b>",
-    "└ /copytrade - Configure copy amount, wallets, and trailing sells",
+    "├ /copytrade - Configure copy amount, wallets, and trailing sells",
+    "└ /cashback - View and claim platform-fee cashback",
     "",
     `🕒 Last updated: ${formatDashboardTime(new Date())}`
   ].join("\n");
@@ -817,7 +840,8 @@ export function createTelegramCommandPoller({
   subscribers,
   onWalletWatchlistChange,
   onCopyTradeEmergencyStop,
-  onCopyTradeEmergencyResume
+  onCopyTradeEmergencyResume,
+  cashback
 }: CommandPollerOptions): TelegramCommandPoller {
   let nextOffset: number | undefined;
   let shouldPoll = true;
@@ -921,6 +945,11 @@ export function createTelegramCommandPoller({
         await reply(chatId, dashboard.text, dashboard.replyMarkup);
         break;
       }
+      case "/cashback": {
+        const dashboard = await cashbackDashboard(chatId);
+        await reply(chatId, dashboard.text, dashboard.replyMarkup);
+        break;
+      }
       default:
         await reply(chatId, "Unknown command. Send /help to see the bot commands.");
     }
@@ -949,6 +978,30 @@ export function createTelegramCommandPoller({
     if (data === "alerts:dashboard") {
       const dashboard = alertDashboard(chatId);
       await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data === "cashback:dashboard") {
+      const dashboard = await cashbackDashboard(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data === "cashback:claim") {
+      const dashboard = await claimCashbackFromCallback(chatId, chatType || null);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data === "cashback:set_payout_wallet") {
+      setPendingWalletInput(chatId, "cashback_payout_wallet");
+      await reply(chatId, [
+        "<b>Set cashback payout wallet</b>",
+        "",
+        "Send the Solana wallet address where you want cashback paid.",
+        "",
+        "This can be different from your trading wallet."
+      ].join("\n"));
       return;
     }
 
@@ -1027,7 +1080,7 @@ export function createTelegramCommandPoller({
     }
 
     if (data === "mywallets:create") {
-      const dashboard = myWalletCreateConfirm(chatId, { chatType });
+      const dashboard = myWalletCreateConfirm(chatId, { chatType, provider: "local-solana" });
       await reply(chatId, dashboard.text, dashboard.replyMarkup);
       return;
     }
@@ -1039,7 +1092,7 @@ export function createTelegramCommandPoller({
     }
 
     if (data === "mywallets:create_confirm") {
-      await createTradingWallet(chatId, { chatType });
+      await createLocalTradingWallet(chatId, { chatType });
       return;
     }
 
@@ -1049,7 +1102,7 @@ export function createTelegramCommandPoller({
     }
 
     if (data === "mywallets:new") {
-      const dashboard = myWalletCreateConfirm(chatId, { replaceExisting: true, chatType });
+      const dashboard = myWalletCreateConfirm(chatId, { replaceExisting: true, chatType, provider: "local-solana" });
       await reply(chatId, dashboard.text, dashboard.replyMarkup);
       return;
     }
@@ -1061,7 +1114,7 @@ export function createTelegramCommandPoller({
     }
 
     if (data === "mywallets:new_confirm") {
-      await createTradingWallet(chatId, { replaceExisting: true, chatType });
+      await createLocalTradingWallet(chatId, { replaceExisting: true, chatType });
       return;
     }
 
@@ -1768,7 +1821,7 @@ export function createTelegramCommandPoller({
     if (pending.expiresAt < Date.now()) {
       pendingWalletInputs.delete(String(chatId));
       return {
-        text: "That wallet setup step expired. Send /trackwallets, /mywallets, or /copytrade to start again."
+        text: "That wallet setup step expired. Send /trackwallets, /mywallets, /copytrade, or /cashback to start again."
       };
     }
 
@@ -1778,7 +1831,27 @@ export function createTelegramCommandPoller({
 
     if (!wallet || !isValidSolanaAddress(wallet)) {
       return {
-        text: "That does not look like a Solana wallet address. Send a wallet address, or send /trackwallets, /mywallets, or /copytrade to restart."
+        text: "That does not look like a Solana wallet address. Send a wallet address, or send /trackwallets, /mywallets, /copytrade, or /cashback to restart."
+      };
+    }
+
+    if (pending.action === "cashback_payout_wallet") {
+      pendingWalletInputs.delete(String(chatId));
+      const updated = await subscribers?.setCashbackPayoutWallet(chatId, wallet);
+
+      if (!updated) {
+        return { text: verificationPrompt() };
+      }
+
+      const dashboard = await cashbackDashboard(chatId);
+      return {
+        text: [
+          "<b>Cashback payout wallet saved.</b>",
+          `<code>${wallet}</code>`,
+          "",
+          dashboard.text
+        ].join("\n"),
+        replyMarkup: dashboard.replyMarkup
       };
     }
 
@@ -1972,34 +2045,31 @@ export function createTelegramCommandPoller({
           "",
           "Deposit SOL here to enable auto copy buys.",
           "",
-          `<b>📚 Saved Wallets:</b> ${tradingWallets.length}`,
+          "<b>📚 Saved Wallets</b>",
+          `└ ${tradingWallets.length}`,
           "",
-          `<b>🏷️ Name:</b> ${tradingWallet.label ? escapeWalletLabel(tradingWallet.label) : "Not set"}`,
-          `<b>🧭 Type:</b> ${tradingWalletTypeLabel(tradingWallet)}`,
+          "<b>🧾 Active Wallet</b>",
+          `├ Name: ${tradingWallet.label ? escapeWalletLabel(tradingWallet.label) : "Not set"}`,
+          `└ Type: ${tradingWalletTypeLabel(tradingWallet)}`,
           "",
           "<b>📥 Deposit Address</b>",
-          `<code>${tradingWallet.publicKey}</code>`,
-          "",
-          tradingWallet.provider === "local-solana"
-            ? `<b>🔑 Secret key:</b> Encrypted, ending in <code>${tradingWallet.keyLast4 || tradingWallet.apiKeyLast4}</code>`
-            : `<b>🔑 API key:</b> Saved ending in <code>${tradingWallet.apiKeyLast4}</code>`,
-          "<b>🔐 Backup:</b> Shown once when created. The bot cannot recover it.",
-          "",
-          "🟢 Wallet is ready once it has SOL.",
-          otherWalletCount > 0 ? `🔁 ${otherWalletCount} other wallet${otherWalletCount === 1 ? "" : "s"} saved. Use Switch Wallet to change active wallets.` : null,
-          "",
-          `🕒 Last updated: ${formatDashboardTime(new Date())}`
+          `└ <code>${tradingWallet.publicKey}</code>`,
+          otherWalletCount > 0 ? "" : null,
+          otherWalletCount > 0 ? "<b>🔁 Other Wallets</b>" : null,
+          otherWalletCount > 0 ? `└ ${otherWalletCount} saved. Use Switch Wallet to change active wallets.` : null
         ].filter((line): line is string => line !== null).join("\n")
       : [
           "<b>👛 Trading Wallet</b>",
           "",
-          "No trading wallet yet.",
+          "<b>📚 Saved Wallets</b>",
+          "└ 0",
           "",
-          "Create a PumpPortal Lightning or local signing wallet to enable copy buys.",
+          "<b>🧾 Active Wallet</b>",
+          "├ Name: Not set",
+          "└ Type: Not created",
           "",
-          "🔴 Setup is <b>inactive</b>",
-          "",
-          `🕒 Last updated: ${formatDashboardTime(new Date())}`
+          "<b>📥 Deposit Address</b>",
+          "└ Create a wallet to get a deposit address."
         ].join("\n");
 
     return {
@@ -2012,8 +2082,7 @@ export function createTelegramCommandPoller({
     if (!publicKey) {
       return {
         inline_keyboard: [
-          [{ text: "🚀 Create PumpPortal", callback_data: "mywallets:create" }],
-          [{ text: "🧭 Create Local", callback_data: "mywallets:create_local" }]
+          [{ text: "➕ Create Wallet", callback_data: "mywallets:create_local" }]
         ]
       };
     }
@@ -2030,12 +2099,10 @@ export function createTelegramCommandPoller({
           { text: "✏️ Rename", callback_data: "mywallets:rename" }
         ],
         [
-          { text: "➕ New PumpPortal", callback_data: "mywallets:new" },
-          { text: "🧭 New Local", callback_data: "mywallets:new_local" },
+          { text: "➕ Create Wallet", callback_data: "mywallets:new_local" },
           { text: "🔁 Switch Wallet", callback_data: "mywallets:switch" }
         ],
-        [{ text: "🗑️ Remove Wallet", callback_data: "mywallets:remove" }],
-        [{ text: "📊 Status", callback_data: "mywallets:dashboard" }]
+        [{ text: "🗑️ Remove Wallet", callback_data: "mywallets:remove" }]
       ]
     };
   }
@@ -2049,8 +2116,7 @@ export function createTelegramCommandPoller({
         text: "No trading wallets yet.",
         replyMarkup: {
           inline_keyboard: [
-            [{ text: "🚀 Create PumpPortal", callback_data: "mywallets:create" }],
-            [{ text: "🧭 Create Local", callback_data: "mywallets:create_local" }],
+            [{ text: "➕ Create Wallet", callback_data: "mywallets:create_local" }],
             [{ text: "↩️ Back", callback_data: "mywallets:dashboard" }]
           ]
         }
@@ -2107,8 +2173,7 @@ export function createTelegramCommandPoller({
         text: "No trading wallets to remove yet.",
         replyMarkup: {
           inline_keyboard: [
-            [{ text: "🚀 Create PumpPortal", callback_data: "mywallets:create" }],
-            [{ text: "🧭 Create Local", callback_data: "mywallets:create_local" }],
+            [{ text: "➕ Create Wallet", callback_data: "mywallets:create_local" }],
             [{ text: "↩️ Back", callback_data: "mywallets:dashboard" }]
           ]
         }
@@ -2765,6 +2830,118 @@ export function createTelegramCommandPoller({
     };
   }
 
+  function activeTradingWalletPublicKey(chatId: TelegramChatId): string | null {
+    return subscribers?.getTradingWallet(chatId)?.publicKey || null;
+  }
+
+  function cashbackPayoutWalletPublicKey(chatId: TelegramChatId): string | null {
+    return subscribers?.get(chatId)?.cashbackPayoutWalletAddress || null;
+  }
+
+  async function cashbackDashboard(chatId: TelegramChatId): Promise<{ text: string; replyMarkup?: TelegramReplyMarkup }> {
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      return { text: gate };
+    }
+
+    if (!cashback) {
+      return {
+        text: [
+          "<b>Cashback</b>",
+          "",
+          "Cashback is not available in this bot process.",
+          "",
+          "It is funded only from this bot's collected direct-execution platform fee."
+        ].join("\n")
+      };
+    }
+
+    try {
+      const summary = await cashback.getSummary({
+        chatId,
+        tradingWalletPublicKey: activeTradingWalletPublicKey(chatId),
+        payoutWalletPublicKey: cashbackPayoutWalletPublicKey(chatId)
+      });
+
+      return {
+        text: formatCashbackSummaryText(summary),
+        replyMarkup: cashbackSummaryReplyMarkup(summary)
+      };
+    } catch (error) {
+      console.warn(`Could not load cashback dashboard for ${chatId}: ${errorMessage(error)}`);
+      return {
+        text: [
+          "<b>Cashback could not be loaded.</b>",
+          "",
+          "Apply the latest Supabase migration and refresh the schema cache, then try again.",
+          `<code>${escapeHtml(errorMessage(error))}</code>`
+        ].join("\n")
+      };
+    }
+  }
+
+  async function claimCashbackFromCallback(
+    chatId: TelegramChatId,
+    chatType: string | null
+  ): Promise<{ text: string; replyMarkup?: TelegramReplyMarkup }> {
+    if (chatType && chatType !== "private") {
+      const dashboard = await cashbackDashboard(chatId);
+      return {
+        text: [
+          "<b>Cashback claim blocked.</b>",
+          "",
+          "Open a private chat with the bot to claim cashback.",
+          "",
+          dashboard.text
+        ].join("\n"),
+        replyMarkup: dashboard.replyMarkup
+      };
+    }
+
+    const gate = requireVerified(chatId);
+    if (gate) {
+      return { text: gate };
+    }
+
+    if (!cashback) {
+      return {
+        text: "<b>Cashback is not available in this bot process.</b>"
+      };
+    }
+
+    try {
+      const result = await cashback.claim({
+        chatId,
+        tradingWalletPublicKey: activeTradingWalletPublicKey(chatId),
+        payoutWalletPublicKey: cashbackPayoutWalletPublicKey(chatId)
+      });
+      const prefix = result.ok
+        ? `<b>Cashback submitted.</b>\nTx: <code>${result.signature}</code>`
+        : result.status === "below_threshold"
+          ? `<b>Cashback is below the claim minimum.</b>`
+          : `<b>Cashback claim failed.</b>${result.errorText ? `\n<code>${escapeHtml(result.errorText)}</code>` : ""}`;
+      const paidLine = result.ok ? `\nPaid: ${formatCashbackSol(result.summary.lifetimePaidLamports)} SOL\n` : "\n";
+
+      return {
+        text: `${prefix}${paidLine}\n${formatCashbackSummaryText(result.summary)}`,
+        replyMarkup: cashbackSummaryReplyMarkup(result.summary)
+      };
+    } catch (error) {
+      console.warn(`Could not claim cashback for ${chatId}: ${errorMessage(error)}`);
+      const dashboard = await cashbackDashboard(chatId);
+      return {
+        text: [
+          "<b>Cashback claim failed.</b>",
+          `<code>${escapeHtml(errorMessage(error))}</code>`,
+          "",
+          dashboard.text
+        ].join("\n"),
+        replyMarkup: dashboard.replyMarkup
+      };
+    }
+  }
+
   function copyTradeDashboard(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
     const gate = requireVerified(chatId);
 
@@ -3340,7 +3517,7 @@ export function createTelegramCommandPoller({
       await clearTelegramWebhook({ token: config.telegramToken });
       await setTelegramCommands({ token: config.telegramToken, commands: telegramCommands });
       console.log(`Telegram bot ready: @${bot.username}`);
-      console.log("Polling for /start, /help, /verify, /stop, /alerts, /trackwallets, /mywallets, and /copytrade");
+      console.log("Polling for /start, /help, /verify, /stop, /alerts, /trackwallets, /mywallets, /copytrade, and /cashback");
 
       while (shouldPoll) {
         try {

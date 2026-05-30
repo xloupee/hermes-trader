@@ -291,6 +291,7 @@ export interface DirectSolanaBuildRequest {
   walletPublicKey: string;
   platformFee?: PlatformFeeSplit | null;
   metadata?: Record<string, unknown>;
+  forceFreshBuyState?: boolean;
 }
 
 export function directAutoProviderOrderForRequest(
@@ -570,7 +571,15 @@ export function refreshDirectPumpFastBuyStateReserves(input: DirectPumpFastBuySt
 
 function cachedDirectPumpFastBuyState(mint: PublicKey): DirectPumpFastBuyStateCacheEntry | null {
   const cached = directPumpFastBuyStateByMint.get(mint.toBase58());
-  return cached && cached.creatorVerified && cached.expiresAtMs > Date.now() ? cached : null;
+  if (!cached || !cached.creatorVerified || cached.expiresAtMs <= Date.now()) {
+    return null;
+  }
+
+  if (!cached.tokenProgram.equals(TOKEN_PROGRAM_ID)) {
+    return null;
+  }
+
+  return cached;
 }
 
 function cachedMintTokenProgram(connection: Connection, mint: PublicKey): PublicKey | null {
@@ -995,7 +1004,9 @@ async function buildDirectPumpSolanaPayload({
         });
       }
 
-      const fastBuyState = directPumpFastBuyState({ connection, mint, pumpModule });
+      const fastBuyState = request.forceFreshBuyState
+        ? null
+        : directPumpFastBuyState({ connection, mint, pumpModule });
       const [buyState, cachedGlobal, cachedFeeConfig] = await Promise.all([
         fastBuyState ?? fetchDirectPumpBuyState({
           connection,
@@ -1012,6 +1023,7 @@ async function buildDirectPumpSolanaPayload({
       buildTiming.mark("buy_accounts_ready", {
         tokenProgram: tokenProgram.toBase58(),
         source: fastBuyState ? "cache" : "rpc",
+        forceFreshBuyState: request.forceFreshBuyState === true,
         cachedStateSource: "source" in buyState ? buyState.source : null,
         cachedStateAgeMs: "observedAtMs" in buyState ? Math.max(0, Date.now() - buyState.observedAtMs) : null,
         creatorVerified: "creatorVerified" in buyState ? buyState.creatorVerified : true,

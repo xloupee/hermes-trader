@@ -296,7 +296,7 @@ test("index integration keeps buy-pressure sells confirmation-gated and live-gat
 
   assert.match(
     source,
-    /const confirmed = await waitForSignatureConfirmation\(buySignature\);[\s\S]*await scheduleCopyTradePostConfirmationExits/
+    /const confirmation = await waitForSignatureConfirmationResult\(buySignature\);[\s\S]*await scheduleCopyTradePostConfirmationExits/
   );
   assert.match(source, /function copyTradeBuyPressureSellEnabledForSubscriber\(subscriber/);
   assert.match(source, /copyTradeBuyPressureSellEnabledForSubscriber\(subscriber\) && trade\.mint/);

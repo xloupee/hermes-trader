@@ -2,7 +2,7 @@ import "dotenv/config";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Connection, PublicKey } from "@solana/web3.js";
-import { buildMigrationReplyMarkup, extractMigrationData, formatMigrationMessage, getEventId } from "./format.js";
+import { buildMigrationReplyMarkup, escapeHtml, extractMigrationData, formatMigrationMessage, getEventId } from "./format.js";
 import { createTelegramCommandPoller } from "./commands.js";
 import {
   copyTradeBuyRiskBlockedReason,
@@ -1781,6 +1781,7 @@ async function executeDirectCopyTrade({
   amountBasis,
   platformFee = null,
   metadata = {},
+  forceFreshBuyState = false,
   onLatencyMilestone
 }: {
   subscriber: SubscriberRecord;
@@ -1790,6 +1791,7 @@ async function executeDirectCopyTrade({
   amountBasis: "sol" | "percent" | "token";
   platformFee?: ReturnType<typeof calculatePlatformFeeSplit> | null;
   metadata?: Record<string, unknown>;
+  forceFreshBuyState?: boolean;
   onLatencyMilestone?: (milestone: CopyTradeLatencyMilestone, details?: CopyTradeLatencyMilestoneDetails) => void;
 }): Promise<TradeExecutionResult> {
   const tradingWallet = subscriber.tradingWallet;
@@ -1870,7 +1872,8 @@ async function executeDirectCopyTrade({
       priorityFeeSol: request.priorityFee,
       walletPublicKey: tradingWallet.publicKey,
       platformFee,
-      metadata
+      metadata,
+      forceFreshBuyState
     }
   });
   onLatencyMilestone?.("direct_build_finished", {
@@ -2010,6 +2013,10 @@ async function executeCopyTradeBuy({
   onLatencyMilestone?.("direct_buy_state_refreshed", {
     status: refreshedFastState ? "refreshed" : "skipped"
   });
+  const forceFreshBuyState = request.action === "buy" &&
+    trade.pool === "pump" &&
+    !refreshedFastState &&
+    trade.provider !== "pumpportal";
 
   return executeDirectCopyTrade({
     subscriber,
@@ -2018,12 +2025,14 @@ async function executeCopyTradeBuy({
     amountLamports: platformFee.tradeLamports,
     amountBasis: "sol",
     platformFee,
+    forceFreshBuyState,
     onLatencyMilestone,
     metadata: {
       observedSignature: trade.signature,
       sourceWallet: trade.targetWallet,
       observedPool: trade.pool || request.pool || null,
       observedSource: trade.source || null,
+      forceFreshBuyState,
       budgetLamports: platformFee.budgetLamports.toString()
     }
   });
@@ -2629,12 +2638,14 @@ async function scheduleCopyTradeTrailingSellsAfterConfirmation({
     return;
   }
 
-  const confirmed = await waitForSignatureConfirmation(buySignature);
-  if (!confirmed) {
+  const confirmation = await waitForSignatureConfirmationResult(buySignature);
+  if (!confirmation.confirmed) {
     await notifySkippedTrailingSellSchedule({
       subscriber,
       trade,
-      reason: "copy buy was not confirmed before trailing sell scheduling timeout",
+      reason: confirmation.errorText
+        ? `copy buy was not confirmed: ${confirmation.errorText}`
+        : "copy buy was not confirmed before trailing sell scheduling timeout",
       replyToMessageId
     });
     return;
@@ -2754,21 +2765,24 @@ async function watchSubmittedCopyTradeBuy({
     return;
   }
 
-  const confirmed = await waitForSignatureConfirmation(buySignature);
-  if (!confirmed) {
-    console.warn(`Submitted copy buy did not confirm before timeout: ${buySignature}`);
+  const confirmation = await waitForSignatureConfirmationResult(buySignature);
+  if (!confirmation.confirmed) {
+    const errorText = confirmation.errorText || "copy buy was not confirmed before trailing sell scheduling timeout";
+    console.warn(`Submitted copy buy did not confirm: ${buySignature}: ${errorText}`);
     await updateRecordedCopyTradeBuyStatus({
       subscriber,
       trade,
       buySignature,
-      status: "expired",
-      errorText: "copy buy was not confirmed before trailing sell scheduling timeout"
+      status: confirmation.timedOut ? "expired" : "failed",
+      errorText
     });
     await sendCopyTradeBuyConfirmationUpdate({
       subscriber,
       trade,
       buySignature,
       confirmed: false,
+      timedOut: confirmation.timedOut,
+      errorText,
       replyToMessageId
     });
     return;
@@ -2805,19 +2819,23 @@ async function sendCopyTradeBuyConfirmationUpdate({
   trade,
   buySignature,
   confirmed,
+  timedOut = false,
+  errorText = null,
   replyToMessageId = null
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
   buySignature: string;
   confirmed: boolean;
+  timedOut?: boolean;
+  errorText?: string | null;
   replyToMessageId?: number | null;
 }): Promise<void> {
   if (!trade.mint) {
     return;
   }
 
-  const statusLine = confirmed ? "🟢 Buy confirmed" : "🟡 Confirmation timed out";
+  const statusLine = confirmed ? "🟢 Buy confirmed" : timedOut ? "🟡 Confirmation timed out" : "🔴 Buy failed";
   const lines = [
     "<b>⚡ Auto Copy Buy</b>",
     statusLine,
@@ -2827,6 +2845,9 @@ async function sendCopyTradeBuyConfirmationUpdate({
     "",
     `<b>Tx:</b> <code>${buySignature}</code>`
   ];
+  if (!confirmed && errorText && !timedOut) {
+    lines.push("", `<b>Reason:</b> ${escapeHtml(errorText)}`);
+  }
 
   try {
     await sendTelegramMessage({
@@ -3828,7 +3849,17 @@ function trackedDelay(ms: number): Promise<void> {
   });
 }
 
-async function waitForSignatureConfirmation(signature: string, timeoutMs = 30000, pollMs = 2000): Promise<boolean> {
+type SignatureConfirmationResult = {
+  confirmed: boolean;
+  timedOut: boolean;
+  errorText: string | null;
+};
+
+async function waitForSignatureConfirmationResult(
+  signature: string,
+  timeoutMs = 30000,
+  pollMs = 2000
+): Promise<SignatureConfirmationResult> {
   const startedAt = Date.now();
 
   while (!isShuttingDown && Date.now() - startedAt < timeoutMs) {
@@ -3849,22 +3880,27 @@ async function waitForSignatureConfirmation(signature: string, timeoutMs = 30000
       const status = body.result?.value?.[0] || null;
 
       if (status?.err) {
-        console.warn(`Signature ${signature} landed with error: ${JSON.stringify(status.err)}`);
-        return false;
+        const errorText = `transaction landed with error: ${JSON.stringify(status.err)}`;
+        console.warn(`Signature ${signature} ${errorText}`);
+        return { confirmed: false, timedOut: false, errorText };
       }
 
       if (status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized") {
-        return true;
+        return { confirmed: true, timedOut: false, errorText: null };
       }
     } catch (error) {
-      console.warn(`Could not check trailing sell confirmation for ${signature}: ${errorMessage(error)}`);
+      console.warn(`Could not check signature confirmation for ${signature}: ${errorMessage(error)}`);
     }
 
     await trackedDelay(pollMs);
   }
 
-  console.warn(`Timed out waiting for trailing sell confirmation: ${signature}`);
-  return false;
+  console.warn(`Timed out waiting for signature confirmation: ${signature}`);
+  return { confirmed: false, timedOut: true, errorText: "confirmation timed out" };
+}
+
+async function waitForSignatureConfirmation(signature: string, timeoutMs = 30000, pollMs = 2000): Promise<boolean> {
+  return (await waitForSignatureConfirmationResult(signature, timeoutMs, pollMs)).confirmed;
 }
 
 async function recordCopyTradeExecution({

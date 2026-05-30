@@ -92,7 +92,7 @@ test("platform fee uses validation hook to block invalid treasury strings", () =
   assert.equal(buildPlatformFeeTransferInstruction({ split, fromPubkey: "Wallet" }), null);
 });
 
-test("platform fee never charges first-cut sell-side fees", () => {
+test("platform fee splits sell proceeds without reducing the requested sell basis", () => {
   const split = calculatePlatformFeeSplit({
     action: "sell",
     budgetLamports: 1_000_000_000n,
@@ -103,9 +103,15 @@ test("platform fee never charges first-cut sell-side fees", () => {
     }
   });
 
-  assert.equal(split.enabled, false);
-  assert.equal(split.feeLamports, 0n);
-  assert.equal(split.tradeLamports, 1_000_000_000n);
+  assert.equal(split.enabled, true);
+  assert.equal(split.feeLamports, 10_000_000n);
+  assert.equal(split.tradeLamports, 990_000_000n);
+  assert.deepEqual(buildPlatformFeeTransferInstruction({ split, fromPubkey: "Wallet111" }), {
+    kind: "system-transfer",
+    fromPubkey: "Wallet111",
+    toPubkey: "Treasury111111111111111111111111111111111",
+    lamports: 10_000_000n
+  });
 });
 
 test("platform fee validates bps and required treasury when enabled", () => {

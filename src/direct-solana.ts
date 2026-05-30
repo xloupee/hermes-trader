@@ -71,6 +71,7 @@ const directPumpFastBuyStateByMint = new Map<string, DirectPumpFastBuyStateCache
 export interface DirectPumpFastBuyStateInput {
   mint: string;
   creator: string;
+  creatorVerified?: boolean;
   tokenProgram: string;
   virtualTokenReserves: string | bigint;
   virtualQuoteReserves: string | bigint;
@@ -102,6 +103,7 @@ export interface DirectPumpFastBuyStateChainSnapshot extends DirectPumpFastBuySt
 interface DirectPumpFastBuyStateCacheEntry {
   mint: PublicKey;
   creator: PublicKey;
+  creatorVerified: boolean;
   tokenProgram: PublicKey;
   virtualTokenReserves: BN;
   virtualQuoteReserves: BN;
@@ -516,6 +518,7 @@ export function primeDirectPumpFastBuyState(input: DirectPumpFastBuyStateInput):
     directPumpFastBuyStateByMint.set(mint.toBase58(), {
       mint,
       creator,
+      creatorVerified: input.creatorVerified === true,
       tokenProgram,
       virtualTokenReserves: bnFromInteger(input.virtualTokenReserves),
       virtualQuoteReserves: bnFromInteger(input.virtualQuoteReserves),
@@ -567,7 +570,7 @@ export function refreshDirectPumpFastBuyStateReserves(input: DirectPumpFastBuySt
 
 function cachedDirectPumpFastBuyState(mint: PublicKey): DirectPumpFastBuyStateCacheEntry | null {
   const cached = directPumpFastBuyStateByMint.get(mint.toBase58());
-  return cached && cached.expiresAtMs > Date.now() ? cached : null;
+  return cached && cached.creatorVerified && cached.expiresAtMs > Date.now() ? cached : null;
 }
 
 function cachedMintTokenProgram(connection: Connection, mint: PublicKey): PublicKey | null {
@@ -751,6 +754,7 @@ export async function fetchDirectPumpFastBuyStateFromChain({
   return {
     mint: mint.toBase58(),
     creator: bondingCurve.creator.toBase58(),
+    creatorVerified: true,
     tokenProgram: tokenProgram.toBase58(),
     virtualTokenReserves: bondingCurve.virtualTokenReserves.toString(),
     virtualQuoteReserves: bondingCurve.virtualQuoteReserves.toString(),

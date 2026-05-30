@@ -4218,7 +4218,6 @@ function scheduleDirectPumpFastBuyStatePrime(event: LooseRecord): void {
   if (primeDirectPumpFastBuyStateFromEvent(event)) {
     directPumpFastStatePrefetchStats.directPrimed += 1;
     logDirectPumpFastStatePrefetchStats();
-    return;
   }
 
   const mint = pickEventMint(event);

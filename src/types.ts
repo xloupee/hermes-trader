@@ -72,6 +72,9 @@ export interface BotConfig extends MigrationFormatConfig {
   pumpFunCoinApiBaseUrl: string;
   solUsdPriceUrl: string;
   solanaRpcUrl: string;
+  geyserEnabled: boolean;
+  geyserGrpcUrl?: string;
+  geyserXToken?: string;
   transactionFlowEnabled: boolean;
   transactionAccountLabels?: string;
   alertModeLabel?: string;
@@ -286,7 +289,7 @@ export interface WalletTradeAsset {
 
 export interface WalletTradeData {
   observedAt: string;
-  provider: "pumpportal" | "helius" | "yellowstone";
+  provider: "pumpportal" | "helius" | "yellowstone" | "geyser";
   targetWallet: string;
   label: string | null;
   action: WalletTradeAction;

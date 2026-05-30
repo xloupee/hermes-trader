@@ -101,6 +101,8 @@ npm run import-subscribers -- data/telegram-subscribers.json
 - `DIRECT_EXECUTION_BLOCKHASH_CACHE_MS` and `DIRECT_EXECUTION_BLOCKHASH_WARM_INTERVAL_MS` keep a recent blockhash ready for live direct sends so each copy buy does not wait on a fresh blockhash RPC call.
 - `YELLOWSTONE_ENABLED=true` starts an optional Yellowstone gRPC watched-wallet stream. For a QuickNode trial, set `YELLOWSTONE_ENDPOINT` to the gRPC endpoint on port `10000` and `YELLOWSTONE_TOKEN` to the token from the original QuickNode RPC URL. Keep `YELLOWSTONE_SHADOW_ONLY=true` at first; shadow mode writes/logs Yellowstone candidates but does not trigger copy buys or Telegram alerts.
 - Expose `WEBHOOK_PORT` through your reverse proxy at the exact `HELIUS_WEBHOOK_PUBLIC_URL`, and forward the `Authorization` header unchanged.
+- `GEYSER_ENABLED=true` starts an observe-only Yellowstone Geyser wallet feed using `GEYSER_GRPC_URL`. It writes parsed diagnostics to `WALLET_TRADE_LOG_PATH` and does not trigger copy buys, sells, Telegram alerts, or buy-pressure exits. Keep one bot instance so the shared Geyser stream stays well under the provider's stream limit.
+- Compare PumpPortal, Helius, and Geyser accepted wallet events with `npm run wallet-feed-report -- --path=logs/wallet-trades.jsonl`. Add `--since=2026-05-29T00:00:00Z` or `--limit=50` for a narrower report.
 
 ## Direct trading SDK trust review
 

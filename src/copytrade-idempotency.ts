@@ -112,6 +112,10 @@ type SupabaseClientLike = {
   from: (table: string) => any;
 };
 
+function normalizeProvider(value: unknown): WalletTradeData["provider"] {
+  return value === "geyser" || value === "helius" || value === "pumpportal" ? value : "helius";
+}
+
 function baseRecord(input: CopyTradeBuyIdempotencyClaimInput): CopyTradeBuyIdempotencyRecord {
   const now = input.now || new Date().toISOString();
 
@@ -141,7 +145,7 @@ function normalizeRecord(value: unknown): CopyTradeBuyIdempotencyRecord | null {
   const record = asRecord(value);
   const amountSol = Number(record.amountSol ?? record.amount_sol);
   const status = record.status === "submitted" || record.status === "failed" ? record.status : "claimed";
-  const provider = record.provider === "pumpportal" ? "pumpportal" : "helius";
+  const provider = normalizeProvider(record.provider);
   const request = asRecord(record.request) as unknown as PumpPortalLightningTradeRequest;
 
   if (
@@ -188,7 +192,7 @@ function recordFromSupabaseRow(row: SupabaseCopyTradeBuyIdempotencyRow): CopyTra
     mint: row.mint,
     action: "buy",
     amountSol: Number(row.amount_sol),
-    provider: row.provider === "pumpportal" ? "pumpportal" : "helius",
+    provider: normalizeProvider(row.provider),
     request: asRecord(row.request) as unknown as PumpPortalLightningTradeRequest,
     status: row.status,
     resultSignature: row.result_signature,

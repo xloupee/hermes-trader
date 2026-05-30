@@ -46,6 +46,8 @@ import {
 } from "./direct-solana.js";
 import type { DirectSolanaSendStage } from "./direct-solana.js";
 import type { DirectTransactionPayload } from "./direct-pump.js";
+import { createGeyserWalletTradeListener } from "./geyser.js";
+import type { GeyserWalletTradeReject } from "./geyser.js";
 import { createHeliusWebhookServer, missingHeliusConfigWarning, syncHeliusWebhook } from "./helius.js";
 import { heliusEventMentionsWatchedWallet, isHeliusSwapEvent, normalizeHeliusSwapData } from "./helius-swaps.js";
 import { createYellowstoneWalletMonitor } from "./yellowstone.js";
@@ -273,6 +275,9 @@ const config: BotConfig = {
   pumpFunCoinApiBaseUrl: process.env.PUMPFUN_COIN_API_BASE_URL || "https://frontend-api-v3.pump.fun/coins",
   solUsdPriceUrl: process.env.SOL_USD_PRICE_URL || "https://api.coinbase.com/v2/prices/SOL-USD/spot",
   solanaRpcUrl: process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
+  geyserEnabled: process.env.GEYSER_ENABLED === "true",
+  geyserGrpcUrl: process.env.GEYSER_GRPC_URL,
+  geyserXToken: process.env.GEYSER_X_TOKEN,
   transactionFlowEnabled: process.env.TRANSACTION_FLOW_ENABLED === "true",
   transactionAccountLabels: process.env.TRANSACTION_ACCOUNT_LABELS,
   shutdownReason: process.env.BOT_SHUTDOWN_REASON,
@@ -320,6 +325,7 @@ const config: BotConfig = {
 };
 
 const seenEvents = new Set<string>();
+const seenGeyserDiagnostics = new Set<string>();
 let cachedSolUsdPrice: number | undefined;
 let cachedSolUsdPriceAt = 0;
 const metadataCache = new Map<string, LooseRecord | null>();
@@ -841,6 +847,18 @@ function copyTradeWalletAddresses(): string[] {
   ].sort();
 }
 
+function activeGeyserWallets(): WatchedWallet[] {
+  return [
+    ...new Map(
+      subscribers
+        .list()
+        .flatMap((subscriber) => [...(subscriber.watchedWallets || []), ...(subscriber.copyTradeWallets || [])])
+        .filter((wallet) => wallet.address)
+        .map((wallet) => [wallet.address, wallet])
+    ).values()
+  ].sort((a, b) => a.address.localeCompare(b.address));
+}
+
 function activeBuyPressureSellMints(): string[] {
   return [...new Set([...activeBuyPressureSellWatchers.values()].map((watcher) => watcher.mint).filter(Boolean))].sort();
 }
@@ -903,6 +921,56 @@ function runAfterHotPath(label: string, work: Promise<unknown>): void {
   work.catch((error) => {
     console.warn(`${label} failed: ${errorMessage(error)}`);
   });
+}
+
+function rememberGeyserDiagnostic(id: string | null): boolean {
+  if (!id) {
+    return false;
+  }
+
+  if (seenGeyserDiagnostics.has(id)) {
+    return true;
+  }
+
+  seenGeyserDiagnostics.add(id);
+
+  if (seenGeyserDiagnostics.size > 1000) {
+    const oldest = seenGeyserDiagnostics.values().next().value;
+    if (oldest) {
+      seenGeyserDiagnostics.delete(oldest);
+    }
+  }
+
+  return false;
+}
+
+function geyserDiagnosticEventId(trade: WalletTradeData): string | null {
+  return trade.signature
+    ? ["geyser-wallet-trade", trade.signature, trade.targetWallet].join(":")
+    : getWalletTradeEventId(trade);
+}
+
+async function handleGeyserWalletTrade(trade: WalletTradeData): Promise<void> {
+  const eventId = geyserDiagnosticEventId(trade);
+
+  if (rememberGeyserDiagnostic(eventId)) {
+    return;
+  }
+
+  await writeWalletTradeLog(trade);
+  console.log(`Geyser wallet trade diagnostic: ${JSON.stringify(trade)}`);
+}
+
+function handleGeyserWalletTradeReject(reject: GeyserWalletTradeReject): void {
+  const eventId = reject.signature
+    ? ["geyser-wallet-trade-reject", reject.signature, reject.targetWallet, reject.reason].join(":")
+    : ["geyser-wallet-trade-reject", reject.slot, reject.targetWallet, reject.reason].filter(Boolean).join(":");
+
+  if (rememberGeyserDiagnostic(eventId)) {
+    return;
+  }
+
+  console.log(`Geyser wallet trade reject: ${JSON.stringify(reject)}`);
 }
 
 async function handleMigration(event: LooseRecord): Promise<void> {
@@ -2500,6 +2568,10 @@ function refreshPumpPortalSubscriptions(): void {
   migrationListener.setSubscriptionMethods(activePumpPortalSubscriptions());
 }
 
+function refreshGeyserSubscriptions(): void {
+  geyserWalletTradeListener.setWallets(activeGeyserWallets());
+}
+
 function clearBuyPressureSellTimer(watcherId: string): void {
   const timer = buyPressureSellTimers.get(watcherId);
 
@@ -3704,8 +3776,9 @@ const commandPoller = createTelegramCommandPoller({
   testMessage: testMigrationMessage,
   subscribers,
   onWalletWatchlistChange: () => {
-    migrationListener.setSubscriptionMethods(activePumpPortalSubscriptions());
+    refreshPumpPortalSubscriptions();
     yellowstoneWalletMonitor.setWallets(watchedWalletAddresses());
+    refreshGeyserSubscriptions();
     return syncHeliusWalletWebhook();
   },
   onCopyTradeEmergencyStop: (chatId) => {
@@ -3726,6 +3799,18 @@ const migrationListener = createPumpPortalMigrationListener({
   },
   onStatus: (message: string) => console.log(message),
   onError: (error: Error) => console.error("PumpPortal websocket error:", error.message)
+});
+
+const geyserWalletTradeListener = createGeyserWalletTradeListener({
+  enabled: config.geyserEnabled,
+  endpoint: config.geyserGrpcUrl,
+  xToken: config.geyserXToken,
+  wallets: activeGeyserWallets(),
+  config,
+  onTrade: handleGeyserWalletTrade,
+  onReject: handleGeyserWalletTradeReject,
+  onStatus: (message: string) => console.log(message),
+  onError: (error: Error) => console.error("Geyser stream error:", error.message)
 });
 
 const heliusWebhookServer = createHeliusWebhookServer({
@@ -3795,6 +3880,7 @@ async function shutdown(): Promise<void> {
     clearInterval(directBlockhashWarmTimer);
     directBlockhashWarmTimer = null;
   }
+  geyserWalletTradeListener.stop();
   for (const timer of trailingSellTimers) {
     clearTimeout(timer);
   }
@@ -3835,10 +3921,11 @@ logCopyTradeExecutionState();
 warmPlatformFeeTreasuryAccount();
 warmDirectExecutionHotPath();
 warmDirectExecutionBlockhashCache();
-// Supabase-backed subscribers load at startup, so compute account-trade
-// subscriptions after init rather than from the empty pre-init store.
-migrationListener.setSubscriptionMethods(activePumpPortalSubscriptions());
+  // Supabase-backed subscribers load at startup, so compute account-trade
+  // subscriptions after init rather than from the empty pre-init store.
+refreshPumpPortalSubscriptions();
 yellowstoneWalletMonitor.setWallets(watchedWalletAddresses());
+refreshGeyserSubscriptions();
 if (watchedWalletAddresses().length > 0) {
   await syncHeliusWalletWebhook();
 }
@@ -3849,4 +3936,5 @@ if (config.heliusWebhookAuthHeader) {
 }
 yellowstoneWalletMonitor.start();
 migrationListener.start();
+geyserWalletTradeListener.start();
 await commandPoller.start();

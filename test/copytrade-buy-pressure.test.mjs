@@ -23,7 +23,7 @@ const mint = "DezXAZ8z7PnrnRJjz3n26VsZdrmRwNny4nBj9JkzjW7B";
 function trade(overrides = {}) {
   return {
     observedAt: "2026-05-29T12:00:00.000Z",
-    provider: "pumpportal",
+    provider: overrides.provider ?? "pumpportal",
     targetWallet: overrides.targetWallet || sourceWallet,
     label: overrides.label ?? "Copy Alpha",
     action: overrides.action || "buy",
@@ -224,13 +224,18 @@ test("json store persists active watchers for restart resume", async () => {
   const path = join(dir, "watchers.json");
   const store = createJsonCopyTradeBuyPressureSellStore({ path });
   const active = watcher({ minBuys: 2, minTotalSol: 0.25 });
+  const geyserActive = {
+    ...active,
+    trade: trade({ ...active.trade, provider: "geyser" })
+  };
 
   try {
-    await store.save([active]);
+    await store.save([geyserActive]);
     const loaded = await store.load();
 
     assert.equal(loaded.length, 1);
     assert.equal(loaded[0].id, active.id);
+    assert.equal(loaded[0].trade.provider, "geyser");
     assert.equal(loaded[0].mint, mint);
     assert.equal(loaded[0].minBuys, 2);
     assert.equal(loaded[0].minTotalSol, 0.25);

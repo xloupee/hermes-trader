@@ -101,11 +101,17 @@ npm run import-subscribers -- data/telegram-subscribers.json
 - `DIRECT_EXECUTION_BLOCKHASH_CACHE_MS` and `DIRECT_EXECUTION_BLOCKHASH_WARM_INTERVAL_MS` keep a recent blockhash ready for live direct sends so each copy buy does not wait on a fresh blockhash RPC call.
 - `DIRECT_EXECUTION_SDK_WARM_INTERVAL_MS` proactively refreshes direct Pump SDK global/fee config caches so a live copy buy does not pay the refresh cost.
 - `DIRECT_EXECUTION_SIMULATE_BEFORE_SEND=false` skips the bot's explicit pre-send simulation for lower latency. Keep it `true` until direct execution has proven clean in canary, then disable only if you accept that bad transactions may fail on-chain instead of being caught locally.
+- `DIRECT_EXECUTION_SKIP_PREFLIGHT=true` and `DIRECT_EXECUTION_MAX_RETRIES=0` are the fastest promoted ShredStream/direct-copy settings once canary direct execution is already clean. Keep higher retries while validating a new RPC provider, then lower them only when background confirmation and logs are being watched.
 - `DIRECT_EXECUTION_SEND_RPC_URLS` is an optional comma-separated list of extra RPC URLs for raw-send fanout. The bot signs once, sends the same transaction to the primary `SOLANA_RPC_URL` plus each fanout URL, and returns the first signature.
+- `DIRECT_EXECUTION_JITO_SEND_URLS` is an optional comma-separated list of Jito Block Engine base URLs, such as `https://frankfurt.mainnet.block-engine.jito.wtf` or `https://london.mainnet.block-engine.jito.wtf`, to race alongside normal raw-send RPCs through Jito `sendTransaction`. Set `DIRECT_EXECUTION_JITO_AUTH_UUID` if your Jito access uses UUID auth.
 - `YELLOWSTONE_ENABLED=true` starts an optional Yellowstone gRPC watched-wallet stream. For a QuickNode trial, set `YELLOWSTONE_ENDPOINT` to the gRPC endpoint on port `10000` and `YELLOWSTONE_TOKEN` to the token from the original QuickNode RPC URL. Keep `YELLOWSTONE_SHADOW_ONLY=true` at first; shadow mode writes/logs Yellowstone candidates but does not trigger copy buys or Telegram alerts.
 - Expose `WEBHOOK_PORT` through your reverse proxy at the exact `HELIUS_WEBHOOK_PUBLIC_URL`, and forward the `Authorization` header unchanged.
 - `GEYSER_ENABLED=true` starts an observe-only Yellowstone Geyser wallet feed using `GEYSER_GRPC_URL`. By default it writes parsed diagnostics to `WALLET_TRADE_LOG_PATH` and does not trigger copy buys, sells, Telegram alerts, or buy-pressure exits. `COPY_TRADE_SIGNAL_PROVIDER=parallel` races PumpPortal and Geyser watched-wallet buys through the same copy-buy handler; the first signature/target-wallet/mint signal wins and later duplicates are logged without submitting another buy attempt. Keep one bot instance so the shared Geyser stream stays well under the provider's stream limit.
-- Compare PumpPortal, Helius, and Geyser accepted wallet events with `npm run wallet-feed-report -- --path=logs/wallet-trades.jsonl`. Add `--since=2026-05-29T00:00:00Z` or `--limit=50` for a narrower report.
+- `SHREDSTREAM_WALLET_OBSERVER_ENABLED=true` starts an observe-only ShredStream watched-wallet feed using the same `SHREDSTREAM_SOURCE`, `SHREDSTREAM_GRPC_URL`, and optional `SHREDSTREAM_DECODER_CMD` settings as the discovery listener. It writes `provider="shredstream"` rows to `WALLET_TRADE_LOG_PATH` for matching watched/copytrade wallets and does not trigger copy buys, sells, Telegram alerts, or buy-pressure exits.
+- `SHREDSTREAM_WALLET_OBSERVER_STATS_INTERVAL_MS=60000` controls the observer stats log cadence. The stats line reports records read, parse errors, decoded Pump/PumpSwap buy/sell candidates, watched-wallet matches, diagnostic-vs-real wallet matches, and emitted ShredStream wallet rows.
+- `WALLET_FEED_DIAGNOSTIC_WALLETS=address[:label],...` adds operator-only wallets to PumpPortal/Geyser/ShredStream feed observation. Diagnostic wallets write rows to `WALLET_TRADE_LOG_PATH` with `raw.diagnosticWallet=true`, but they are not subscriber watchlists, do not send Telegram alerts, and do not submit copy trades. They remain ShredStream shadow-only even if `COPY_TRADE_SIGNAL_PROVIDER=shredstream` or `all`.
+- `COPY_TRADE_SIGNAL_PROVIDER=shredstream` promotes ShredStream into the same copy-trade signal race as PumpPortal while leaving Geyser diagnostic-only. `COPY_TRADE_SIGNAL_PROVIDER=all` allows PumpPortal, Geyser, and ShredStream to race. Keep `COPY_TRADE_SIGNAL_PROVIDER=pumpportal` or `parallel` until ShredStream wallet logs have proven coverage for your watched wallets.
+- Compare PumpPortal, Helius, Geyser, and ShredStream accepted wallet events with `npm run wallet-feed-report -- --path=logs/wallet-trades.jsonl`. Add `--since=2026-05-29T00:00:00Z`, `--copyable-only=true`, `--include-diagnostic=false`, or `--limit=50` for a narrower report. Use `npm run wallet-feed-readiness-report -- --role=copytrade --since=<ISO time>` to see the active real copytrade wallets and their provider evidence. Use `npm run shredstream-promotion-gate -- --since=<ISO time>` as the fail-closed gate before changing `COPY_TRADE_SIGNAL_PROVIDER` to `shredstream` or `all`.
 - [VA RPC and Geyser runbook](docs/va-geyser-runbook.md) documents the VA endpoints, IP allowlisting, smoke tests, canary env, feed comparison, rollback paths, and the 20-stream Geyser limit.
 
 ## ShredStream discovery prototype
@@ -144,6 +150,7 @@ Safety defaults:
 - `SHREDSTREAM_DISCOVERY_ENABLED=true` is required or the process exits without reading input.
 - The listener only writes normalized events to `SHREDSTREAM_EVENT_LOG_PATH`; it does not send Telegram messages or submit trades.
 - The decoder only emits Pump/PumpSwap events for the allowlisted program IDs and preserves unknown Pump instructions for later analysis.
+- ShredStream is not part of the copy-trade race in this cut. Use it to observe and compare before promoting it to a trigger.
 
 Run the prototype against a local Jito ShredStream proxy gRPC service:
 
@@ -170,7 +177,90 @@ npm run shredstream-decoder:check
 npm run shredstream-decoder:test
 ```
 
-Address lookup table accounts are not hydrated in this first bridge; emitted account keys are the transaction's static keys. Pump/PumpSwap launch traffic should still be visible when the relevant program and instruction accounts are static, but the live side-by-side run must measure missed/unknown events before this becomes a trading signal.
+Compare ShredStream against PumpPortal discovery timing by enabling the PumpPortal observation log on the main bot and running the standalone report:
+
+```bash
+SHREDSTREAM_COMPARE_ENABLED=true
+PUMPPORTAL_DISCOVERY_LOG_PATH=logs/pumpportal-discovery-events.jsonl
+```
+
+Then, after both logs have data:
+
+```bash
+npm run shredstream-latency-report -- \
+  --pumpportal logs/pumpportal-discovery-events.jsonl \
+  --shredstream logs/shred-pump-events.jsonl \
+  --comparisons-out logs/shredstream-latency-comparisons.jsonl
+```
+
+The report matches by signature/instruction when both feeds expose it, then by signature/mint, then by create mint within a short time window. Negative `shred_minus_pumpportal_ms` means ShredStream arrived first.
+
+The main bot can also run a passive watched-wallet ShredStream observer once the Jito proxy is available locally:
+
+```bash
+SHREDSTREAM_WALLET_OBSERVER_ENABLED=true
+SHREDSTREAM_WALLET_OBSERVER_STATS_INTERVAL_MS=60000
+WALLET_FEED_DIAGNOSTIC_WALLETS=HighVolumeWallet111111111111111111111111111:hv
+SHREDSTREAM_SOURCE=grpc
+SHREDSTREAM_GRPC_URL=127.0.0.1:9999
+SHREDSTREAM_DECODER_CMD="tools/shredstream-rs/target/release/shredstream-rs watch --grpc-url {grpcUrl}"
+```
+
+This observer only writes `provider="shredstream"` rows to `WALLET_TRADE_LOG_PATH`. Compare the observed wallet feed with:
+
+```bash
+npm run wallet-feed-report -- --path=logs/wallet-trades.jsonl
+npm run wallet-feed-report -- --path=logs/wallet-trades.jsonl --copyable-only=true --include-diagnostic=false
+npm run wallet-feed-readiness-report -- --role=copytrade --since=2026-05-30T00:00:00Z
+```
+
+Wallet-feed comparisons are grouped by signature, target wallet, and mint so duplicate providers for the same watched-wallet trade can be timed without turning ShredStream into a copytrade trigger yet.
+
+Backtest whether ShredStream would have seen existing PumpPortal/Geyser wallet rows with:
+
+```bash
+npm run shredstream-wallet-coverage-report -- \
+  --wallet logs/wallet-trades.jsonl \
+  --shredstream logs/shred-pump-events.jsonl
+```
+
+That coverage report also matches by signature, target wallet, and mint. Use `--since`, `--until`, `--providers=pumpportal,geyser`, and `--limit=50` to narrow the overlap window.
+
+Before promotion, the real-copytrade gate must pass:
+
+```bash
+npm run shredstream-promotion-gate -- --since=2026-05-30T00:00:00Z
+```
+
+The gate intentionally ignores ambient `GATE_*` env defaults. Use explicit CLI flags only if you are deliberately changing rollout criteria:
+
+```bash
+npm run shredstream-promotion-gate -- \
+  --since=2026-05-30T00:00:00Z \
+  --min-copyable-buys=3 \
+  --min-shredstream-copyable-buys=3 \
+  --min-matched-copyable-groups=3
+```
+
+Do not promote if the gate prints `Result=FAIL`. A healthy first promotion window should show at least one active real copytrade wallet, real copyable buys, ShredStream copyable buys for those wallets, and matched copyable groups against another provider. Diagnostic-wallet rows do not count.
+
+After the observed ShredStream wallet rows match the existing feed and the gate passes, promote it deliberately:
+
+```bash
+COPY_TRADE_SIGNAL_PROVIDER=shredstream
+```
+
+That mode races PumpPortal and ShredStream only. Use `COPY_TRADE_SIGNAL_PROVIDER=all` if you also want Geyser in the race. The race still applies age, allowed-source, copyable-buy, idempotency, emergency-stop, dry-run/live, and execution-provider gates before any copy buy can submit.
+
+Rollback is just the signal provider env:
+
+```bash
+COPY_TRADE_SIGNAL_PROVIDER=parallel
+# or the most conservative path:
+COPY_TRADE_SIGNAL_PROVIDER=pumpportal
+```
+
+Address lookup table accounts are hydrated by the ShredStream source before Node decoding when ALT lookups are present. The live side-by-side reports still need to keep measuring missed/unknown events before this becomes a trading signal.
 
 ## Direct trading SDK trust review
 

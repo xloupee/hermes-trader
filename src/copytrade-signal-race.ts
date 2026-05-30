@@ -1,7 +1,7 @@
 import type { WalletTradeData } from "./types.js";
 
-export type CopyTradeSignalProvider = "pumpportal" | "parallel";
-export type CopyTradeSignalSource = Extract<WalletTradeData["provider"], "pumpportal" | "geyser">;
+export type CopyTradeSignalProvider = "pumpportal" | "parallel" | "shredstream" | "all";
+export type CopyTradeSignalSource = Extract<WalletTradeData["provider"], "pumpportal" | "geyser" | "shredstream">;
 export type CopyTradeSignalRaceOutcome = "won" | "duplicate" | "skipped";
 
 export interface CopyTradeSignalRaceRecord {
@@ -54,6 +54,14 @@ export function parseCopyTradeSignalProvider(value: string | undefined): CopyTra
     return "parallel";
   }
 
+  if (normalized === "shredstream" || normalized === "shred") {
+    return "shredstream";
+  }
+
+  if (normalized === "all") {
+    return "all";
+  }
+
   return "pumpportal";
 }
 
@@ -61,11 +69,31 @@ export function copyTradeSignalProviderAllows(
   provider: CopyTradeSignalProvider,
   source: CopyTradeSignalSource
 ): boolean {
-  return provider === "parallel" || source === "pumpportal";
+  if (source === "pumpportal") {
+    return true;
+  }
+
+  if (provider === "all") {
+    return true;
+  }
+
+  if (provider === "parallel") {
+    return source === "geyser";
+  }
+
+  if (provider === "shredstream") {
+    return source === "shredstream";
+  }
+
+  return false;
 }
 
 export function copyTradeSignalSource(value: WalletTradeData["provider"]): CopyTradeSignalSource | null {
-  return value === "pumpportal" || value === "geyser" ? value : null;
+  return value === "pumpportal" || value === "geyser" || value === "shredstream" ? value : null;
+}
+
+export function copyTradeSignalProviderRaces(provider: CopyTradeSignalProvider): boolean {
+  return provider !== "pumpportal";
 }
 
 function normalizeSource(value: string | null | undefined): string | null {

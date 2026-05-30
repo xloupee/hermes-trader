@@ -29,6 +29,7 @@ import { createCopyTradeLatencyClock, createCopyTradeLatencyTracker } from "./co
 import {
   copyTradeSignalAgeBlockedReason,
   copyTradeSignalProviderAllows,
+  copyTradeSignalProviderRaces,
   copyTradeSignalRaceLogPayload,
   copyTradeSignalSource,
   copyTradeSignalSourceBlockedReason,
@@ -51,6 +52,7 @@ import {
   buildDirectSolanaSendConnections,
   buildDirectSolanaPayload,
   fetchDirectPumpFastBuyStateFromChain,
+  prefetchDirectPumpFastBuyStateFromChain,
   primeDirectPumpFastBuyState,
   refreshDirectPumpFastBuyStateReserves,
   resolveMintTokenProgram,
@@ -93,6 +95,8 @@ import type {
   TradeExecutionResult
 } from "./trade-execution.js";
 import { analyzeSolanaTransaction, getSolanaBalanceSol } from "./solana.js";
+import { normalizePumpPortalDiscoveryLatencyEvent } from "./shredstream-latency.js";
+import { createShredstreamWalletObserver } from "./shredstream-wallet-observer.js";
 import { createSubscriberStore } from "./subscribers.js";
 import { createSupabaseCopyTradeRecorderFromEnv, createSupabaseSubscriberStoreFromEnv } from "./subscribers-supabase.js";
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
@@ -164,6 +168,24 @@ function rawListFromEnv(value: string | undefined): string[] {
   return value
     ? [...new Set(value.split(",").map((entry) => entry.trim()).filter(Boolean))]
     : [];
+}
+
+function diagnosticWalletsFromEnv(value: string | undefined): WatchedWallet[] {
+  const now = new Date().toISOString();
+
+  return rawListFromEnv(value)
+    .map((entry) => {
+      const [address, ...labelParts] = entry.split(":");
+      const label = labelParts.join(":").trim();
+
+      return {
+        address: address.trim(),
+        label: label || "diagnostic",
+        addedAt: now,
+        updatedAt: now
+      };
+    })
+    .filter((wallet) => wallet.address);
 }
 
 function finiteNumberValue(value: unknown): number | null {
@@ -409,6 +431,11 @@ const config: BotConfig = {
   pumpFunBaseUrl: process.env.PUMPFUN_BASE_URL || "https://pump.fun",
   migrationLogPath: process.env.MIGRATION_LOG_PATH || "logs/migrations.jsonl",
   walletTradeLogPath: process.env.WALLET_TRADE_LOG_PATH || "logs/wallet-trades.jsonl",
+  pumpPortalDiscoveryLogPath: process.env.PUMPPORTAL_DISCOVERY_LOG_PATH || "logs/pumpportal-discovery-events.jsonl",
+  shredstreamCompareEnabled: process.env.SHREDSTREAM_COMPARE_ENABLED === "true",
+  shredstreamWalletObserverEnabled: process.env.SHREDSTREAM_WALLET_OBSERVER_ENABLED === "true",
+  shredstreamWalletObserverStatsIntervalMs: positiveIntegerFromEnv(process.env.SHREDSTREAM_WALLET_OBSERVER_STATS_INTERVAL_MS, 60_000),
+  walletFeedDiagnosticWallets: diagnosticWalletsFromEnv(process.env.WALLET_FEED_DIAGNOSTIC_WALLETS),
   copyTradeEmergencyStopPath: process.env.COPY_TRADE_EMERGENCY_STOP_PATH || "data/copytrade-emergency-stop.json",
   heliusApiKey: process.env.HELIUS_API_KEY,
   heliusApiBaseUrl: process.env.HELIUS_API_BASE_URL || "https://api-mainnet.helius-rpc.com",
@@ -472,6 +499,8 @@ const config: BotConfig = {
   directExecutionBlockhashWarmIntervalMs: Math.floor(nonNegativeNumberFromEnv(process.env.DIRECT_EXECUTION_BLOCKHASH_WARM_INTERVAL_MS, 5_000)),
   directExecutionSdkWarmIntervalMs: Math.floor(nonNegativeNumberFromEnv(process.env.DIRECT_EXECUTION_SDK_WARM_INTERVAL_MS, 30_000)),
   directExecutionSendRpcUrls: rawListFromEnv(process.env.DIRECT_EXECUTION_SEND_RPC_URLS),
+  directExecutionJitoSendUrls: rawListFromEnv(process.env.DIRECT_EXECUTION_JITO_SEND_URLS),
+  directExecutionJitoAuthUuid: process.env.DIRECT_EXECUTION_JITO_AUTH_UUID,
   directExecutionCanaryChatIds: rawListFromEnv(process.env.DIRECT_EXECUTION_CANARY_CHAT_IDS),
   directExecutionCanaryWallets: rawListFromEnv(process.env.DIRECT_EXECUTION_CANARY_WALLETS),
   platformFeeEnabled: process.env.PLATFORM_FEE_ENABLED === "true",
@@ -498,7 +527,9 @@ const directSolanaConnection = new Connection(config.solanaRpcUrl, "confirmed");
 const directSolanaSendConnections = buildDirectSolanaSendConnections({
   primaryConnection: directSolanaConnection,
   primaryUrl: config.solanaRpcUrl,
-  urls: config.directExecutionSendRpcUrls
+  urls: config.directExecutionSendRpcUrls,
+  jitoUrls: config.directExecutionJitoSendUrls,
+  jitoAuthUuid: config.directExecutionJitoAuthUuid
 });
 let isShuttingDown = false;
 let copyTradeEmergencyStopped = false;
@@ -1021,7 +1052,9 @@ function logCopyTradeExecutionState(): void {
       "Copy trade signal provider",
       `mode=${config.copyTradeSignalProvider}`,
       `pumpPortal=trigger`,
-      `geyser=${config.copyTradeSignalProvider === "parallel" ? "trigger" : "diagnostic"}`
+      `geyser=${copyTradeSignalProviderAllows(config.copyTradeSignalProvider, "geyser") ? "trigger" : "diagnostic"}`,
+      `shredstream=${copyTradeSignalProviderAllows(config.copyTradeSignalProvider, "shredstream") ? "trigger" : config.shredstreamWalletObserverEnabled ? "observe" : "off"}`,
+      `diagnosticWallets=${config.walletFeedDiagnosticWallets.length}`
     ].join(" | ")
   );
   console.log(
@@ -1033,6 +1066,8 @@ function logCopyTradeExecutionState(): void {
       `buildOnly=${config.directExecutionBuildOnly ? "true" : "false"}`,
       `simulateOnly=${config.directExecutionSimulateOnly ? "true" : "false"}`,
       `simulateBeforeSend=${config.directExecutionSimulateBeforeSend ? "true" : "false"}`,
+      `skipPreflight=${config.directExecutionSkipPreflight ? "true" : "false"}`,
+      `maxRetries=${config.directExecutionMaxRetries}`,
       `confirmationMode=${config.directExecutionConfirmationMode}`,
       `blockhashCacheMs=${config.directExecutionBlockhashCacheMs}`,
       `blockhashWarmMs=${config.directExecutionBlockhashWarmIntervalMs}`,
@@ -1123,10 +1158,12 @@ function logCopyTradeLatency(
 function watchedWalletAddresses(): string[] {
   return [
     ...new Set(
-      subscribers
-        .list()
-        .flatMap((subscriber) => [...(subscriber.watchedWallets || []), ...(subscriber.copyTradeWallets || [])])
-        .map((wallet) => wallet.address)
+      [
+        ...subscribers
+          .list()
+          .flatMap((subscriber) => [...(subscriber.watchedWallets || []), ...(subscriber.copyTradeWallets || [])]),
+        ...config.walletFeedDiagnosticWallets
+      ].map((wallet) => wallet.address)
         .filter(Boolean)
     )
   ].sort();
@@ -1147,13 +1184,25 @@ function copyTradeWalletAddresses(): string[] {
 function activeGeyserWallets(): WatchedWallet[] {
   return [
     ...new Map(
-      subscribers
-        .list()
-        .flatMap((subscriber) => [...(subscriber.watchedWallets || []), ...(subscriber.copyTradeWallets || [])])
+      [
+        ...subscribers
+          .list()
+          .flatMap((subscriber) => [...(subscriber.watchedWallets || []), ...(subscriber.copyTradeWallets || [])]),
+        ...config.walletFeedDiagnosticWallets
+      ]
         .filter((wallet) => wallet.address)
         .map((wallet) => [wallet.address, wallet])
     ).values()
   ].sort((a, b) => a.address.localeCompare(b.address));
+}
+
+function diagnosticWallet(address: string | null | undefined): WatchedWallet | null {
+  const normalized = address?.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  return config.walletFeedDiagnosticWallets.find((wallet) => wallet.address === normalized) || null;
 }
 
 function activeBuyPressureSellMints(): string[] {
@@ -1161,7 +1210,7 @@ function activeBuyPressureSellMints(): string[] {
 }
 
 function activePumpPortalSubscriptions(): PumpPortalSubscription[] {
-  const copyTradeWallets = copyTradeWalletAddresses();
+  const copyTradeWallets = [...new Set([...copyTradeWalletAddresses(), ...config.walletFeedDiagnosticWallets.map((wallet) => wallet.address)])].sort();
   const buyPressureMints = activeBuyPressureSellMints();
 
   return [
@@ -1258,7 +1307,7 @@ function logCopyTradeSignalRace(
     normalizedAtMs?: number | null;
   } = {}
 ): void {
-  if (config.copyTradeSignalProvider !== "parallel" || !copyTradeSignalSource(trade.provider)) {
+  if (!copyTradeSignalProviderRaces(config.copyTradeSignalProvider) || !copyTradeSignalSource(trade.provider)) {
     return;
   }
 
@@ -1302,13 +1351,7 @@ async function handleWalletTradeSignal(
         .filter((wallet) => wallet.address === trade.targetWallet)
         .map((wallet) => ({ subscriber, wallet, label: wallet.label }))
     );
-  const copyTradeEntries = subscribers
-    .list()
-    .flatMap((subscriber) =>
-      (subscriber.copyTradeWallets || [])
-        .filter((wallet) => wallet.address === trade.targetWallet)
-        .map((wallet) => ({ subscriber, wallet, label: wallet.label }))
-    );
+  const copyTradeEntries = activeCopyTradeEntriesForTarget(trade.targetWallet);
   const hasBuyPressureWatchers = Boolean(
     trade.mint && [...activeBuyPressureSellWatchers.values()].some((watcher) => watcher.mint === trade.mint)
   );
@@ -1317,8 +1360,9 @@ async function handleWalletTradeSignal(
     return false;
   }
 
-  const canRaceCopyTradeSignal = config.copyTradeSignalProvider === "parallel" &&
-    Boolean(signalSource) &&
+  const canRaceCopyTradeSignal = copyTradeSignalProviderRaces(config.copyTradeSignalProvider) &&
+    signalSource !== null &&
+    copyTradeSignalProviderAllows(config.copyTradeSignalProvider, signalSource) &&
     (copyTradeEntries.length > 0 || hasBuyPressureWatchers);
   const raceAgeBlockedReason = canRaceCopyTradeSignal
     ? copyTradeSignalAgeBlockedReason({
@@ -1365,6 +1409,7 @@ async function handleWalletTradeSignal(
       receivedAtMs,
       normalizedAtMs
     });
+    prefetchDirectPumpFastBuyStateForTrade(trade);
   }
 
   const eventId = walletTradeSeenEventId(trade);
@@ -1373,10 +1418,14 @@ async function handleWalletTradeSignal(
     return true;
   }
 
-  await writeWalletTradeLog(trade);
-  console.log(`Wallet trade event: ${JSON.stringify(trade)}`);
+  const walletTradeLog = writeWalletTradeLog(trade)
+    .then(() => {
+      console.log(`Wallet trade event: ${JSON.stringify(trade)}`);
+    })
+    .catch((error) => {
+      console.warn(`Wallet trade log write failed: ${errorMessage(error)}`);
+    });
 
-  await handleCopyTradeBuyPressureTrade(trade);
   await Promise.all(copyTradeEntries.map((entry) =>
     sendCopyTradeSimulationAlert(
       entry.subscriber,
@@ -1392,12 +1441,14 @@ async function handleWalletTradeSignal(
     )
   ));
 
+  await handleCopyTradeBuyPressureTrade(trade);
   await Promise.all(entries.map((entry) =>
     sendWalletTradeAlert(entry.subscriber, {
       ...trade,
       label: entry.label
     })
   ));
+  await walletTradeLog;
 
   return true;
 }
@@ -1411,7 +1462,24 @@ async function handleGeyserWalletTrade(
     return;
   }
 
-  await handleWalletTradeSignal(trade, timing);
+  const handled = await handleWalletTradeSignal(trade, timing);
+  if (handled) {
+    return;
+  }
+
+  const diagnostic = diagnosticWallet(trade.targetWallet);
+  if (diagnostic) {
+    const diagnosticTrade = {
+      ...trade,
+      label: diagnostic.label,
+      raw: {
+        ...trade.raw,
+        diagnosticWallet: true
+      }
+    };
+    await writeWalletTradeLog(diagnosticTrade);
+    console.log(`Geyser diagnostic wallet trade event: ${JSON.stringify(diagnosticTrade)}`);
+  }
 }
 
 function handleGeyserWalletTradeReject(reject: GeyserWalletTradeReject): void {
@@ -1477,6 +1545,9 @@ async function handleMigration(event: LooseRecord): Promise<void> {
 }
 
 async function handlePumpPortalEvent(event: LooseRecord): Promise<void> {
+  const receivedAtMs = Date.now();
+  await observePumpPortalDiscoveryEvent(event, receivedAtMs);
+
   if (await handlePumpPortalAccountTrade(event)) {
     return;
   }
@@ -1489,6 +1560,20 @@ async function handlePumpPortalEvent(event: LooseRecord): Promise<void> {
   }
 
   console.warn(`Skipping unknown PumpPortal event type: ${JSON.stringify(event)}`);
+}
+
+async function observePumpPortalDiscoveryEvent(event: LooseRecord, receivedAtMs: number): Promise<void> {
+  if (!config.shredstreamCompareEnabled) {
+    return;
+  }
+
+  const discoveryEvent = normalizePumpPortalDiscoveryLatencyEvent(event, receivedAtMs);
+
+  if (!discoveryEvent) {
+    return;
+  }
+
+  await writePumpPortalDiscoveryLog(discoveryEvent);
 }
 
 function walletTradeSeenEventId(trade: WalletTradeData): string | null {
@@ -1602,10 +1687,31 @@ async function handlePumpPortalAccountTrade(event: LooseRecord): Promise<boolean
   }
 
   const receivedAtMs = Date.now();
-  return handleWalletTradeSignal(trade, {
+  const handled = await handleWalletTradeSignal(trade, {
     receivedAtMs,
     normalizedAtMs: receivedAtMs
   });
+
+  if (handled) {
+    return true;
+  }
+
+  const diagnostic = diagnosticWallet(trader);
+  if (diagnostic) {
+    const diagnosticTrade = {
+      ...trade,
+      label: diagnostic.label,
+      raw: {
+        ...trade.raw,
+        diagnosticWallet: true
+      }
+    };
+    await writeWalletTradeLog(diagnosticTrade);
+    console.log(`PumpPortal diagnostic wallet trade event: ${JSON.stringify(diagnosticTrade)}`);
+    return true;
+  }
+
+  return false;
 }
 
 async function handleHeliusWebhookEvents(events: LooseRecord[]): Promise<void> {
@@ -1754,6 +1860,37 @@ async function handleYellowstoneWalletTrade(
       label: entry.label
     })
   ));
+}
+
+async function handleShredstreamWalletTrade(
+  trade: WalletTradeData,
+  { receivedAtMs = Date.now(), normalizedAtMs = Date.now() }: { receivedAtMs?: number; normalizedAtMs?: number } = {}
+): Promise<void> {
+  const diagnostic = diagnosticWallet(trade.targetWallet);
+  const observedTrade = {
+    ...trade,
+    label: diagnostic?.label || trade.label,
+    raw: {
+      ...trade.raw,
+      ...(diagnostic ? { diagnosticWallet: true } : {}),
+      feedTiming: {
+        receivedAtMs,
+        normalizedAtMs,
+        normalizedLagMs: Math.max(0, normalizedAtMs - receivedAtMs)
+      }
+    }
+  };
+
+  if (!diagnostic && copyTradeSignalProviderAllows(config.copyTradeSignalProvider, "shredstream")) {
+    if (activeCopyTradeEntriesForTarget(observedTrade.targetWallet).length > 0) {
+      prefetchDirectPumpFastBuyStateForTrade(observedTrade);
+    }
+    await handleWalletTradeSignal(observedTrade, { receivedAtMs, normalizedAtMs });
+    return;
+  }
+
+  await writeWalletTradeLog(observedTrade);
+  console.log(`ShredStream shadow wallet trade event: ${JSON.stringify(observedTrade)}`);
 }
 
 async function sendWalletTradeAlert(subscriber: SubscriberRecord, trade: WalletTradeData): Promise<void> {
@@ -4353,6 +4490,48 @@ function refreshDirectPumpFastBuyStateFromTrade(trade: WalletTradeData): boolean
   });
 }
 
+function prefetchDirectPumpFastBuyStateForTrade(trade: WalletTradeData): boolean {
+  if (
+    !isDirectTradeExecutionProvider(config.copyTradeExecutionProvider) ||
+    trade.action !== "buy" ||
+    trade.pool !== "pump" ||
+    !trade.mint
+  ) {
+    return false;
+  }
+
+  let mint: PublicKey;
+  try {
+    mint = new PublicKey(trade.mint);
+  } catch {
+    return false;
+  }
+
+  prefetchDirectPumpFastBuyStateFromChain({
+    connection: directSolanaConnection,
+    mint,
+    commitment: "processed",
+    source: `${trade.provider}-observed-buy-prefetch`
+  }).catch((error) => {
+    console.warn(`Direct Pump observed-buy prefetch failed for ${trade.mint}: ${errorMessage(error)}`);
+  });
+  return true;
+}
+
+function activeCopyTradeEntriesForTarget(targetWallet: string): Array<{
+  subscriber: SubscriberRecord;
+  wallet: WatchedWallet;
+  label: string | null;
+}> {
+  return subscribers
+    .list()
+    .flatMap((subscriber) =>
+      (subscriber.copyTradeWallets || [])
+        .filter((wallet) => wallet.address === targetWallet)
+        .map((wallet) => ({ subscriber, wallet, label: wallet.label }))
+    );
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -4484,6 +4663,11 @@ async function writeWalletTradeLog(trade: WalletTradeData): Promise<void> {
   await appendFile(config.walletTradeLogPath, `${JSON.stringify(trade)}\n`);
 }
 
+async function writePumpPortalDiscoveryLog(event: unknown): Promise<void> {
+  await mkdir(dirname(config.pumpPortalDiscoveryLogPath), { recursive: true });
+  await appendFile(config.pumpPortalDiscoveryLogPath, `${JSON.stringify(event)}\n`);
+}
+
 function testMigrationMessage(): string {
   return formatMigrationMessage(
     {
@@ -4541,6 +4725,7 @@ const commandPoller = createTelegramCommandPoller({
   onWalletWatchlistChange: () => {
     refreshPumpPortalSubscriptions();
     yellowstoneWalletMonitor.setWallets(watchedWalletAddresses());
+    shredstreamWalletObserver.setWallets(activeGeyserWallets());
     refreshGeyserSubscriptions();
     return syncHeliusWalletWebhook();
   },
@@ -4565,7 +4750,7 @@ const migrationListener = createPumpPortalMigrationListener({
 });
 
 const geyserWalletTradeListener = createGeyserWalletTradeListener({
-  enabled: config.geyserEnabled || config.copyTradeSignalProvider === "parallel",
+  enabled: config.geyserEnabled || copyTradeSignalProviderAllows(config.copyTradeSignalProvider, "geyser"),
   endpoint: config.geyserGrpcUrl,
   xToken: config.geyserXToken,
   wallets: activeGeyserWallets(),
@@ -4596,6 +4781,20 @@ const yellowstoneWalletMonitor = createYellowstoneWalletMonitor({
   onTrade: handleYellowstoneWalletTrade,
   onStatus: (message) => console.log(message),
   onError: (error) => console.error("Yellowstone gRPC error:", error.message)
+});
+
+const shredstreamWalletObserver = createShredstreamWalletObserver({
+  enabled: config.shredstreamWalletObserverEnabled || copyTradeSignalProviderAllows(config.copyTradeSignalProvider, "shredstream"),
+  wallets: activeGeyserWallets(),
+  explorer: {
+    pumpFunBaseUrl: config.pumpFunBaseUrl,
+    solscanBaseUrl: config.solscanBaseUrl
+  },
+  statsIntervalMs: config.shredstreamWalletObserverStatsIntervalMs,
+  isDiagnosticWallet: (wallet) => Boolean(diagnosticWallet(wallet.address)),
+  onTrade: handleShredstreamWalletTrade,
+  onStatus: (message) => console.log(message),
+  onError: (error) => console.error("ShredStream wallet observer error:", error.message)
 });
 
 async function syncHeliusWalletWebhook(): Promise<string | undefined> {
@@ -4638,6 +4837,7 @@ async function shutdown(): Promise<void> {
   console.log("Shutting down");
   commandPoller.stop();
   yellowstoneWalletMonitor.stop();
+  shredstreamWalletObserver.stop();
   migrationListener.stop();
   if (directBlockhashWarmTimer) {
     clearInterval(directBlockhashWarmTimer);
@@ -4693,6 +4893,7 @@ warmDirectExecutionBlockhashCache();
   // subscriptions after init rather than from the empty pre-init store.
 refreshPumpPortalSubscriptions();
 yellowstoneWalletMonitor.setWallets(watchedWalletAddresses());
+shredstreamWalletObserver.setWallets(activeGeyserWallets());
 refreshGeyserSubscriptions();
 if (watchedWalletAddresses().length > 0) {
   await syncHeliusWalletWebhook();
@@ -4703,6 +4904,7 @@ if (config.heliusWebhookAuthHeader) {
   console.warn(missingHeliusConfigWarning());
 }
 yellowstoneWalletMonitor.start();
+shredstreamWalletObserver.start();
 migrationListener.start();
 geyserWalletTradeListener.start();
 await commandPoller.start();

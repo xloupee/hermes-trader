@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  FLASHX_ROUTER_PROGRAM_ID,
   PUMP_BONDING_CURVE_PROGRAM_ID,
   PUMPSWAP_AMM_PROGRAM_ID,
-  normalizeShredstreamTransaction
+  normalizeShredstreamTransaction,
+  rawPumpDiscoveryEventToWalletTrade
 } from "../dist/shredstream-decoder.js";
 import { runShredListener, shredDiscoveryEnabled } from "../dist/shred-listener.js";
 
@@ -26,6 +28,19 @@ function dataBase64(discriminatorHex, u64Args = []) {
     buffer.writeBigUInt64LE(BigInt(value), 8 + index * 8);
   }
 
+  return buffer.toString("base64");
+}
+
+function flashxBuyDataBase64(solLamports, minTokenAmountOut) {
+  const buffer = Buffer.alloc(22);
+  buffer[0] = 0;
+  buffer.writeBigUInt64LE(BigInt(solLamports), 1);
+  buffer.writeBigUInt64LE(BigInt(minTokenAmountOut), 9);
+  buffer[17] = 0;
+  buffer[18] = 1;
+  buffer[19] = 0x21;
+  buffer[20] = 0x32;
+  buffer[21] = 0;
   return buffer.toString("base64");
 }
 
@@ -131,6 +146,154 @@ test("decodes Pump buy instructions and extracts mint trader and amounts", () =>
   assert.equal(events[0].maxSolCostLamports, "250000000");
   assert.equal(events[0].solAmountLamports, undefined);
   assert.equal(events[0].amountSemantics, "token_amount_out_with_max_sol_cost");
+});
+
+test("converts decoded ShredStream buys into shadow wallet trade rows", () => {
+  const [event] = normalizeShredstreamTransaction(
+    {
+      slot: 125,
+      signature,
+      accountKeys: [
+        PUMP_BONDING_CURVE_PROGRAM_ID,
+        "Global1111111111111111111111111111111111111",
+        "FeeRecipient1111111111111111111111111111111",
+        mint,
+        bondingCurve,
+        "AssociatedBondingCurve111111111111111111111",
+        "AssociatedUser11111111111111111111111111111",
+        trader
+      ],
+      instructions: [
+        {
+          programIdIndex: 0,
+          accounts: [1, 2, 3, 4, 5, 6, 7],
+          dataBase64: dataBase64("66063d1201daebea", ["123456789", "250000000"])
+        }
+      ]
+    },
+    { receivedAtMs }
+  );
+
+  const trade = rawPumpDiscoveryEventToWalletTrade({
+    event,
+    wallet: { address: trader, label: "fast wallet" },
+    explorer: {
+      pumpFunBaseUrl: "https://pump.fun/coin",
+      solscanBaseUrl: "https://solscan.io"
+    }
+  });
+
+  assert.equal(trade?.provider, "shredstream");
+  assert.equal(trade?.action, "buy");
+  assert.equal(trade?.targetWallet, trader);
+  assert.equal(trade?.label, "fast wallet");
+  assert.equal(trade?.mint, mint);
+  assert.equal(trade?.signature, signature);
+  assert.equal(trade?.source, "SHREDSTREAM_PUMP");
+  assert.equal(trade?.input?.mint, "So11111111111111111111111111111111111111112");
+  assert.equal(trade?.input?.symbol, "SOL");
+  assert.equal(trade?.output?.mint, mint);
+  assert.equal(trade?.tokenAmount, 123.456789);
+  assert.equal(trade?.solAmount, 0.25);
+  assert.equal(trade?.pumpFunUrl, `https://pump.fun/coin/${mint}`);
+  assert.equal(trade?.solscanTxUrl, `https://solscan.io/tx/${signature}`);
+  assert.equal(trade?.raw.parser, "shredstream-pump-instruction");
+});
+
+test("decodes FLASHX router Pump buys without hydrated ALT accounts", () => {
+  const events = normalizeShredstreamTransaction(
+    {
+      slot: 126,
+      signature: "flashx-router-buy-sig",
+      accountKeys: [
+        trader,
+        "UserMintAta11111111111111111111111111111111",
+        FLASHX_ROUTER_PROGRAM_ID,
+        "RouterState11111111111111111111111111111111",
+        bondingCurve,
+        "AssociatedBondingCurve111111111111111111111",
+        "CreatorVault1111111111111111111111111111111",
+        "Local11111111111111111111111111111111111111",
+        "ComputeBudget111111111111111111111111111111",
+        "AssociatedToken1111111111111111111111111111",
+        mint,
+        systemProgram,
+        "FeeRecipient1111111111111111111111111111111",
+        "RouterAux111111111111111111111111111111111",
+        "EventAuthority11111111111111111111111111111"
+      ],
+      instructions: [
+        {
+          programIdIndex: 2,
+          accounts: [0, 0, 15, 11, 2, 16, 12, 3, 17, 15, 10, 4, 5, 1, 0, 11, 18, 6, 17, 16, 13, 7, 18, 19],
+          dataBase64: flashxBuyDataBase64("990000", "29142236873")
+        }
+      ]
+    },
+    { receivedAtMs }
+  );
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].eventType, "buy");
+  assert.equal(events[0].decodeStatus, "decoded");
+  assert.equal(events[0].programId, PUMP_BONDING_CURVE_PROGRAM_ID);
+  assert.equal(events[0].routerProgramId, FLASHX_ROUTER_PROGRAM_ID);
+  assert.equal(events[0].mint, mint);
+  assert.equal(events[0].trader, trader);
+  assert.equal(events[0].bondingCurve, bondingCurve);
+  assert.equal(events[0].quoteMint, "So11111111111111111111111111111111111111112");
+  assert.equal(events[0].spendableSolLamports, "990000");
+  assert.equal(events[0].solAmountLamports, "990000");
+  assert.equal(events[0].minTokenAmountOut, "29142236873");
+});
+
+test("does not convert ShredStream wallet trade rows for non-matching or undecoded events", () => {
+  const [event] = normalizeShredstreamTransaction(
+    {
+      slot: 125,
+      signature,
+      accountKeys: [
+        PUMP_BONDING_CURVE_PROGRAM_ID,
+        "Global1111111111111111111111111111111111111",
+        "FeeRecipient1111111111111111111111111111111",
+        mint,
+        bondingCurve,
+        "AssociatedBondingCurve111111111111111111111",
+        "AssociatedUser11111111111111111111111111111",
+        trader
+      ],
+      instructions: [
+        {
+          programIdIndex: 0,
+          accounts: [1, 2, 3, 4, 5, 6, 7],
+          dataBase64: dataBase64("66063d1201daebea", ["123456789", "250000000"])
+        }
+      ]
+    },
+    { receivedAtMs }
+  );
+
+  const explorer = {
+    pumpFunBaseUrl: "https://pump.fun/coin",
+    solscanBaseUrl: "https://solscan.io"
+  };
+
+  assert.equal(
+    rawPumpDiscoveryEventToWalletTrade({
+      event,
+      wallet: { address: "DifferentWallet111111111111111111111111111111", label: null },
+      explorer
+    }),
+    null
+  );
+  assert.equal(
+    rawPumpDiscoveryEventToWalletTrade({
+      event: { ...event, decodeStatus: "unknown-discriminator" },
+      wallet: { address: trader, label: null },
+      explorer
+    }),
+    null
+  );
 });
 
 test("decodes Pump v2 buy instructions with quote amount first", () => {

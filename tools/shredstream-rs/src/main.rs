@@ -100,7 +100,16 @@ struct NormalizedTransaction {
     signature: String,
     received_at_ms: u64,
     account_keys: Vec<String>,
+    address_table_lookups: Vec<NormalizedAddressTableLookup>,
     instructions: Vec<NormalizedInstruction>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NormalizedAddressTableLookup {
+    account_key: String,
+    writable_indexes: Vec<u8>,
+    readonly_indexes: Vec<u8>,
 }
 
 #[derive(Debug, Serialize)]
@@ -186,6 +195,7 @@ fn decode_entries(
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>();
+            let address_table_lookups = address_table_lookups(&transaction.message);
             let instructions = transaction
                 .message
                 .instructions()
@@ -210,6 +220,7 @@ fn decode_entries(
                 signature: signature.to_string(),
                 received_at_ms,
                 account_keys,
+                address_table_lookups,
                 instructions,
             };
 
@@ -218,6 +229,23 @@ fn decode_entries(
     }
 
     Ok(transactions)
+}
+
+fn address_table_lookups(
+    message: &solana_message::VersionedMessage,
+) -> Vec<NormalizedAddressTableLookup> {
+    match message {
+        solana_message::VersionedMessage::V0(message) => message
+            .address_table_lookups
+            .iter()
+            .map(|lookup| NormalizedAddressTableLookup {
+                account_key: lookup.account_key.to_string(),
+                writable_indexes: lookup.writable_indexes.clone(),
+                readonly_indexes: lookup.readonly_indexes.clone(),
+            })
+            .collect(),
+        solana_message::VersionedMessage::Legacy(_) => Vec::new(),
+    }
 }
 
 fn now_ms() -> u64 {
@@ -278,6 +306,7 @@ mod tests {
             decoded[0].account_keys,
             vec![account.to_string(), program.to_string()]
         );
+        assert!(decoded[0].address_table_lookups.is_empty());
         assert_eq!(decoded[0].instructions[0].program_id_index, 1);
         assert_eq!(decoded[0].instructions[0].program_id, Some(program.to_string()));
         assert_eq!(decoded[0].instructions[0].accounts, vec![0]);

@@ -38,6 +38,34 @@ export interface DiscoveryLatencySummary {
   p99DeltaMs: number | null;
 }
 
+export function normalizePumpPortalDiscoveryLatencyEvent(
+  event: Record<string, unknown>,
+  receivedAtMs = Date.now()
+): DiscoveryLatencyEvent | null {
+  const eventType = stringValue(event.txType ?? event.type ?? event.eventType ?? event.action)?.toLowerCase() || null;
+
+  if (!eventType || !["create", "buy", "sell", "migration", "migrate"].includes(eventType)) {
+    return null;
+  }
+
+  const mint = stringValue(event.mint ?? event.ca ?? event.token ?? event.tokenAddress ?? event.address);
+  const signature = stringValue(event.signature ?? event.tx ?? event.txHash ?? event.transaction ?? event.transactionHash);
+  const instructionIndex = finiteNumberValue(event.instructionIndex);
+  const slot = finiteNumberValue(event.slot);
+  const programId = stringValue(event.programId ?? event.program ?? event.program_id);
+
+  return {
+    source: "pumpportal",
+    signature,
+    instructionIndex,
+    mint,
+    receivedAtMs,
+    slot,
+    programId,
+    eventType: eventType === "migration" ? "migrate" : eventType
+  };
+}
+
 export function compareDiscoveryLatency({
   pumpPortalEvents,
   shredstreamEvents,
@@ -62,6 +90,23 @@ export function compareDiscoveryLatency({
   }
 
   return comparisons;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function finiteNumberValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
 }
 
 export function summarizeDiscoveryLatency({

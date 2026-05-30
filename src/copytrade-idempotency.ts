@@ -113,7 +113,7 @@ type SupabaseClientLike = {
 };
 
 function normalizeProvider(value: unknown): WalletTradeData["provider"] {
-  return value === "geyser" || value === "helius" || value === "pumpportal" ? value : "helius";
+  return value === "geyser" || value === "helius" || value === "pumpportal" || value === "shredstream" ? value : "helius";
 }
 
 function baseRecord(input: CopyTradeBuyIdempotencyClaimInput): CopyTradeBuyIdempotencyRecord {

@@ -279,6 +279,20 @@ test("JSON copy buy idempotency preserves Geyser provider records", async (t) =>
   assert.equal(duplicate.existing?.provider, "geyser");
 });
 
+test("JSON copy buy idempotency preserves ShredStream provider records", async (t) => {
+  const path = await tempStorePath(t);
+  const store = createJsonCopyTradeBuyIdempotencyStore({ path });
+  const input = claimInput({ provider: "shredstream" });
+
+  assert.equal((await store.claimBuy(input)).claimed, true);
+
+  const restartedStore = createJsonCopyTradeBuyIdempotencyStore({ path });
+  const duplicate = await restartedStore.claimBuy(input);
+
+  assert.equal(duplicate.claimed, false);
+  assert.equal(duplicate.existing?.provider, "shredstream");
+});
+
 test("JSON copy buy idempotency survives restart after completion", async (t) => {
   const path = await tempStorePath(t);
   const firstStore = createJsonCopyTradeBuyIdempotencyStore({ path });

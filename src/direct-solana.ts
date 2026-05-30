@@ -52,6 +52,7 @@ const pumpAmmSdkByConnection = new WeakMap<Connection, OnlinePumpAmmSdkInstance>
 const PUMP_CONFIG_CACHE_MS = 60_000;
 const MINT_TOKEN_PROGRAM_CACHE_MS = 10 * 60_000;
 const PUMP_FAST_BUY_STATE_CACHE_MS = 2 * 60_000;
+const OBSERVED_BUY_FAST_STATE_MAX_AGE_MS = 1_000;
 const MAX_BLOCKHASH_CACHE_MS = 30_000;
 const latestBlockhashByConnection = new WeakMap<Connection, {
   value: LatestBlockhash | null;
@@ -67,6 +68,7 @@ let pumpGlobalInflight: Promise<PumpGlobal> | null = null;
 let pumpFeeConfigCache: { value: PumpFeeConfig | null; expiresAtMs: number } | null = null;
 let pumpFeeConfigInflight: Promise<PumpFeeConfig | null> | null = null;
 const directPumpFastBuyStateByMint = new Map<string, DirectPumpFastBuyStateCacheEntry>();
+const directPumpFastBuyStateInflightByMint = new Map<string, Promise<boolean>>();
 
 export interface DirectPumpFastBuyStateInput {
   mint: string;
@@ -397,11 +399,15 @@ function uniqueSendRpcUrls(primaryUrl: string, urls: string[]): string[] {
 export function buildDirectSolanaSendConnections({
   primaryConnection,
   primaryUrl,
-  urls
+  urls,
+  jitoUrls = [],
+  jitoAuthUuid
 }: {
   primaryConnection: Connection;
   primaryUrl: string;
   urls: string[];
+  jitoUrls?: string[];
+  jitoAuthUuid?: string;
 }): DirectSolanaSendConnection[] {
   return [
     {
@@ -413,8 +419,86 @@ export function buildDirectSolanaSendConnections({
       label: `fanout-${index + 1}`,
       url,
       connection: new Connection(url, "confirmed")
+    })),
+    ...uniqueSendRpcUrls(primaryUrl, jitoUrls).map((url, index) => ({
+      label: `jito-${index + 1}`,
+      url: jitoTransactionUrl(url),
+      connection: createJitoBlockEngineSendConnection({
+        url,
+        authUuid: jitoAuthUuid
+      })
     }))
   ];
+}
+
+function jitoTransactionUrl(url: string): string {
+  const trimmed = url.trim().replace(/\/+$/, "");
+  return trimmed.endsWith("/api/v1/transactions") ? trimmed : `${trimmed}/api/v1/transactions`;
+}
+
+function createJitoBlockEngineSendConnection({
+  url,
+  authUuid,
+  timeoutMs = 1_500
+}: {
+  url: string;
+  authUuid?: string;
+  timeoutMs?: number;
+}): Pick<Connection, "sendRawTransaction"> {
+  const transactionUrl = jitoTransactionUrl(url);
+
+  return {
+    async sendRawTransaction(serializedTransaction, options = {}) {
+      const encodedTransaction = Buffer.from(serializedTransaction).toString("base64");
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json"
+      };
+      if (authUuid) {
+        headers["x-jito-auth"] = authUuid;
+      }
+
+      const response = await fetch(transactionUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "sendTransaction",
+          params: [
+            encodedTransaction,
+            {
+              encoding: "base64",
+              ...(options.skipPreflight !== undefined ? { skipPreflight: options.skipPreflight } : {}),
+              ...(options.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {})
+            }
+          ]
+        }),
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+      const text = await response.text();
+      let body: unknown = null;
+      try {
+        body = text ? JSON.parse(text) : null;
+      } catch {
+        // Keep the raw text for the error below.
+      }
+
+      if (!response.ok) {
+        throw new Error(`Jito sendTransaction HTTP ${response.status}: ${text.slice(0, 500)}`);
+      }
+
+      const record = body && typeof body === "object" ? body as { result?: unknown; error?: unknown } : null;
+      if (record?.error) {
+        throw new Error(`Jito sendTransaction error: ${JSON.stringify(record.error).slice(0, 500)}`);
+      }
+
+      if (typeof record?.result !== "string" || !record.result) {
+        throw new Error(`Jito sendTransaction did not return a signature: ${text.slice(0, 500)}`);
+      }
+
+      return record.result;
+    }
+  };
 }
 
 function createBuildTimingTracker(nowMs = Date.now) {
@@ -572,10 +656,6 @@ export function refreshDirectPumpFastBuyStateReserves(input: DirectPumpFastBuySt
 function cachedDirectPumpFastBuyState(mint: PublicKey): DirectPumpFastBuyStateCacheEntry | null {
   const cached = directPumpFastBuyStateByMint.get(mint.toBase58());
   if (!cached || !cached.creatorVerified || cached.expiresAtMs <= Date.now()) {
-    return null;
-  }
-
-  if (!cached.tokenProgram.equals(TOKEN_PROGRAM_ID)) {
     return null;
   }
 
@@ -778,17 +858,70 @@ export async function fetchDirectPumpFastBuyStateFromChain({
   };
 }
 
+export function prefetchDirectPumpFastBuyStateFromChain({
+  connection,
+  mint,
+  commitment = "processed",
+  source = "rpc-bonding-curve-prefetch",
+  cacheMs
+}: {
+  connection: Pick<Connection, "getMultipleAccountsInfo">;
+  mint: PublicKey;
+  commitment?: "processed" | "confirmed" | "finalized";
+  source?: string;
+  cacheMs?: number;
+}): Promise<boolean> {
+  const key = mint.toBase58();
+  const existing = directPumpFastBuyStateInflightByMint.get(key);
+  if (existing) {
+    return existing;
+  }
+
+  const inflight = fetchDirectPumpFastBuyStateFromChain({
+    connection,
+    mint,
+    commitment
+  }).then((snapshot) => primeDirectPumpFastBuyState({
+    ...snapshot,
+    source,
+    ...(cacheMs !== undefined ? { cacheMs } : {})
+  })).finally(() => {
+    directPumpFastBuyStateInflightByMint.delete(key);
+  });
+
+  directPumpFastBuyStateInflightByMint.set(key, inflight);
+  return inflight;
+}
+
+async function awaitDirectPumpFastBuyStateInflight(mint: PublicKey): Promise<boolean> {
+  const inflight = directPumpFastBuyStateInflightByMint.get(mint.toBase58());
+  return inflight ? inflight.catch(() => false) : false;
+}
+
 function directPumpFastBuyState({
   connection,
   mint,
-  pumpModule
+  pumpModule,
+  maxAgeMs = null,
+  sourceIncludes = null
 }: {
   connection: Connection;
   mint: PublicKey;
   pumpModule: PumpSdkModule;
+  maxAgeMs?: number | null;
+  sourceIncludes?: string | null;
 }) {
   const cached = cachedDirectPumpFastBuyState(mint);
   if (!cached) {
+    return null;
+  }
+
+  const cacheAgeMs = Math.max(0, Date.now() - cached.observedAtMs);
+  if (typeof maxAgeMs === "number" && cacheAgeMs > maxAgeMs) {
+    return null;
+  }
+
+  if (sourceIncludes && !cached.source?.includes(sourceIncludes)) {
     return null;
   }
 
@@ -1004,9 +1137,24 @@ async function buildDirectPumpSolanaPayload({
         });
       }
 
-      const fastBuyState = request.forceFreshBuyState
-        ? null
+      let fastBuyState = request.forceFreshBuyState
+        ? directPumpFastBuyState({
+            connection,
+            mint,
+            pumpModule,
+            maxAgeMs: OBSERVED_BUY_FAST_STATE_MAX_AGE_MS,
+            sourceIncludes: "observed-buy-prefetch"
+          })
         : directPumpFastBuyState({ connection, mint, pumpModule });
+      if (!fastBuyState && request.forceFreshBuyState && await awaitDirectPumpFastBuyStateInflight(mint)) {
+        fastBuyState = directPumpFastBuyState({
+          connection,
+          mint,
+          pumpModule,
+          maxAgeMs: OBSERVED_BUY_FAST_STATE_MAX_AGE_MS,
+          sourceIncludes: "observed-buy-prefetch"
+        });
+      }
       const [buyState, cachedGlobal, cachedFeeConfig] = await Promise.all([
         fastBuyState ?? fetchDirectPumpBuyState({
           connection,

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compareDiscoveryLatency, summarizeDiscoveryLatency } from "../dist/shredstream-latency.js";
+import {
+  compareDiscoveryLatency,
+  normalizePumpPortalDiscoveryLatencyEvent,
+  summarizeDiscoveryLatency
+} from "../dist/shredstream-latency.js";
 
 function pumpPortalEvent(overrides) {
   return {
@@ -92,4 +96,34 @@ test("latency summary reports percentiles and missing source counts", () => {
     p90DeltaMs: 300,
     p99DeltaMs: 300
   });
+});
+
+test("normalizes PumpPortal discovery events for side-by-side comparison", () => {
+  const event = normalizePumpPortalDiscoveryLatencyEvent(
+    {
+      txType: "create",
+      mint: "mint",
+      signature: "sig",
+      slot: "123",
+      instructionIndex: "4",
+      programId: "program"
+    },
+    1500
+  );
+
+  assert.deepEqual(event, {
+    source: "pumpportal",
+    signature: "sig",
+    instructionIndex: 4,
+    mint: "mint",
+    receivedAtMs: 1500,
+    slot: 123,
+    programId: "program",
+    eventType: "create"
+  });
+});
+
+test("ignores PumpPortal records that are not discovery events", () => {
+  assert.equal(normalizePumpPortalDiscoveryLatencyEvent({ txType: "subscribe" }, 1500), null);
+  assert.equal(normalizePumpPortalDiscoveryLatencyEvent({}, 1500), null);
 });

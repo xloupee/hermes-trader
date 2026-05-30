@@ -13,8 +13,12 @@
     "import-subscribers": "npm run build && node dist/import-subscribers.js",
     "shredstream-decoder:check": "cargo check --manifest-path tools/shredstream-rs/Cargo.toml",
     "shredstream-decoder:test": "cargo test --manifest-path tools/shredstream-rs/Cargo.toml",
+    "shredstream-latency-report": "npm run build && node scripts/compare-shredstream-discovery-latency.mjs",
+    "shredstream-promotion-gate": "node scripts/shredstream-promotion-gate.mjs",
+    "shredstream-wallet-coverage-report": "node scripts/shredstream-wallet-coverage-report.mjs",
     "check": "tsc --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
+    "wallet-feed-readiness-report": "node scripts/wallet-feed-readiness-report.mjs",
     "wallet-feed-report": "node scripts/wallet-feed-comparison-report.mjs",
     "stop-local": "bash scripts/stop-local.sh",
     "deploy": "bash scripts/deploy.sh"

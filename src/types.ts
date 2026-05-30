@@ -2,7 +2,7 @@ export type LooseRecord = Record<string, unknown>;
 
 export type TelegramChatId = string | number;
 export type AlertModeValue = "migrations" | "newtokens" | "both";
-export type CopyTradeSignalProvider = "pumpportal" | "parallel";
+export type CopyTradeSignalProvider = "pumpportal" | "parallel" | "shredstream" | "all";
 export type TrailingSellMode = "custom_steps" | "formula";
 export type TrailingSellPercentBasis = "remaining_balance" | "original_position";
 
@@ -56,6 +56,11 @@ export interface BotConfig extends MigrationFormatConfig {
   pumpPortalWalletKeyEncryptionSecret?: string;
   migrationLogPath: string;
   walletTradeLogPath: string;
+  pumpPortalDiscoveryLogPath: string;
+  shredstreamCompareEnabled: boolean;
+  shredstreamWalletObserverEnabled: boolean;
+  shredstreamWalletObserverStatsIntervalMs: number;
+  walletFeedDiagnosticWallets: WatchedWallet[];
   copyTradeEmergencyStopPath: string;
   heliusApiKey?: string;
   heliusApiBaseUrl: string;
@@ -120,6 +125,8 @@ export interface BotConfig extends MigrationFormatConfig {
   directExecutionBlockhashWarmIntervalMs: number;
   directExecutionSdkWarmIntervalMs: number;
   directExecutionSendRpcUrls: string[];
+  directExecutionJitoSendUrls: string[];
+  directExecutionJitoAuthUuid?: string;
   directExecutionCanaryChatIds: string[];
   directExecutionCanaryWallets: string[];
   platformFeeEnabled: boolean;
@@ -295,7 +302,7 @@ export interface WalletTradeAsset {
 
 export interface WalletTradeData {
   observedAt: string;
-  provider: "pumpportal" | "helius" | "yellowstone" | "geyser";
+  provider: "pumpportal" | "helius" | "yellowstone" | "geyser" | "shredstream";
   targetWallet: string;
   label: string | null;
   action: WalletTradeAction;

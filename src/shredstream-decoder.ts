@@ -1,5 +1,8 @@
+import type { ExplorerConfig, WalletTradeData, WatchedWallet } from "./types.js";
+
 export const PUMP_BONDING_CURVE_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 export const PUMPSWAP_AMM_PROGRAM_ID = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
+export const FLASHX_ROUTER_PROGRAM_ID = "FLASHX8DrLbgeR8FcfNV1F5krxYcYMUdBkrP1EPBtxB9";
 export const WSOL_MINT = "So11111111111111111111111111111111111111112";
 
 export type PumpDiscoveryEventType = "create" | "buy" | "sell" | "migrate" | "unknown-pump";
@@ -10,7 +13,9 @@ export interface RawPumpDiscoveryEvent {
   slot: number;
   signature: string;
   receivedAtMs: number;
+  sourceTiming?: ShredstreamSourceTiming;
   programId: string;
+  routerProgramId?: string;
   eventType: PumpDiscoveryEventType;
   mint?: string;
   trader?: string;
@@ -40,16 +45,41 @@ export interface ShredstreamInstructionInput {
   dataBase64?: string;
 }
 
+export interface ShredstreamAddressTableLookupInput {
+  accountKey: string;
+  writableIndexes: number[];
+  readonlyIndexes: number[];
+}
+
 export interface ShredstreamTransactionInput {
   slot: number;
   signature: string;
   receivedAtMs?: number;
+  sourceTiming?: ShredstreamSourceTiming;
   accountKeys: string[];
+  addressTableLookups?: ShredstreamAddressTableLookupInput[];
   instructions: ShredstreamInstructionInput[];
+}
+
+export interface ShredstreamSourceTiming {
+  sourceReadAtMs?: number;
+  parsedAtMs?: number;
+  altLookupStatus?: "not_needed" | "static_decoded" | "hydrated" | "timeout_or_error";
+  altLookupCount?: number;
+  altLookupStartedAtMs?: number;
+  altLookupFinishedAtMs?: number;
+  altLookupDurationMs?: number;
+  altLookupTimeoutMs?: number;
 }
 
 export interface NormalizeShredstreamTransactionOptions {
   receivedAtMs?: number;
+}
+
+export interface ShredstreamWalletTradeOptions {
+  event: RawPumpDiscoveryEvent;
+  wallet: Pick<WatchedWallet, "address" | "label">;
+  explorer: ExplorerConfig;
 }
 
 interface AccountIndexes {
@@ -240,26 +270,138 @@ export function normalizeShredstreamTransaction(
   for (const [instructionIndex, instruction] of transaction.instructions.entries()) {
     const programId = resolveProgramId(transaction.accountKeys, instruction);
 
-    if (!isPumpProgram(programId)) {
+    if (isPumpProgram(programId)) {
+      events.push(
+        decodePumpInstruction({
+          transaction,
+          instruction,
+          programId,
+          instructionIndex,
+          receivedAtMs
+        })
+      );
       continue;
     }
 
-    events.push(
-      decodePumpInstruction({
-        transaction,
-        instruction,
-        programId,
-        instructionIndex,
-        receivedAtMs
-      })
-    );
+    const routerEvent = decodeKnownRouterInstruction({
+      transaction,
+      instruction,
+      programId,
+      instructionIndex,
+      receivedAtMs
+    });
+
+    if (routerEvent) {
+      events.push(routerEvent);
+    }
   }
 
   return events;
 }
 
+export function isKnownPumpRouterProgram(programId: string | null): programId is string {
+  return programId === FLASHX_ROUTER_PROGRAM_ID;
+}
+
+function decodeKnownRouterInstruction({
+  transaction,
+  instruction,
+  programId,
+  instructionIndex,
+  receivedAtMs
+}: {
+  transaction: ShredstreamTransactionInput;
+  instruction: ShredstreamInstructionInput;
+  programId: string | null;
+  instructionIndex: number;
+  receivedAtMs: number;
+}): RawPumpDiscoveryEvent | null {
+  if (!isKnownPumpRouterProgram(programId)) {
+    return null;
+  }
+
+  return decodeFlashxPumpInstruction({
+    transaction,
+    instruction,
+    routerProgramId: programId,
+    instructionIndex,
+    receivedAtMs
+  });
+}
+
+function decodeFlashxPumpInstruction({
+  transaction,
+  instruction,
+  routerProgramId,
+  instructionIndex,
+  receivedAtMs
+}: {
+  transaction: ShredstreamTransactionInput;
+  instruction: ShredstreamInstructionInput;
+  routerProgramId: string;
+  instructionIndex: number;
+  receivedAtMs: number;
+}): RawPumpDiscoveryEvent | null {
+  const accounts = instruction.accounts || [];
+  const resolvedAccounts = accounts.map((_, index) => resolveAccount(transaction.accountKeys, accounts, index));
+
+  const data = decodeBase64(instruction.dataBase64);
+  if (!data || data.length < 17 || data[0] !== 0) {
+    return null;
+  }
+
+  const spendableSolLamports = readRouterU64(data, 1);
+  const minTokenAmountOut = readRouterU64(data, 9);
+  const mint = resolvedAccounts[10] || resolvedAccounts.find((account) => account && (account.endsWith("pump") || account.endsWith("bonk")));
+  const trader = resolvedAccounts.find((account) => account === transaction.accountKeys[0]) || transaction.accountKeys[0] || undefined;
+  const bondingCurve = mint ? resolvedAccounts[resolvedAccounts.indexOf(mint) + 1] : undefined;
+
+  if (!mint || !trader || !spendableSolLamports) {
+    return null;
+  }
+
+  const event: RawPumpDiscoveryEvent = {
+    source: "shredstream",
+    slot: transaction.slot,
+    signature: transaction.signature,
+    receivedAtMs,
+    ...(transaction.sourceTiming ? { sourceTiming: transaction.sourceTiming } : {}),
+    programId: PUMP_BONDING_CURVE_PROGRAM_ID,
+    routerProgramId,
+    eventType: "buy",
+    mint,
+    trader,
+    bondingCurve: bondingCurve || undefined,
+    baseMint: mint,
+    quoteMint: WSOL_MINT,
+    pool: "pump",
+    amountSemantics: "flashx_spendable_sol_in_with_min_tokens_out",
+    spendableSolLamports,
+    solAmountLamports: spendableSolLamports,
+    minTokenAmountOut: minTokenAmountOut || undefined,
+    rawInstructionDiscriminator: data?.subarray(0, Math.min(8, data.length)).toString("hex"),
+    instructionIndex,
+    decodeStatus: "decoded"
+  };
+
+  return event;
+}
+
 export function isPumpProgram(programId: string | null): programId is string {
   return programId === PUMP_BONDING_CURVE_PROGRAM_ID || programId === PUMPSWAP_AMM_PROGRAM_ID;
+}
+
+/*
+  Router instructions are top-level non-Pump programs that CPI into Pump. The raw
+  shred does not include inner instructions, so we decode the stable account/data
+  shape that carries the watched wallet, mint, bonding curve, and spend amount.
+*/
+function readRouterU64(data: Buffer | null, offset: number): string | null {
+  if (!data || data.length < offset + 8) {
+    return null;
+  }
+
+  return data.readBigUInt64LE(offset).toString();
 }
 
 function decodePumpInstruction({
@@ -280,6 +422,7 @@ function decodePumpInstruction({
     slot: transaction.slot,
     signature: transaction.signature,
     receivedAtMs,
+    ...(transaction.sourceTiming ? { sourceTiming: transaction.sourceTiming } : {}),
     programId,
     eventType: "unknown-pump",
     pool: programId === PUMPSWAP_AMM_PROGRAM_ID ? "pump-amm" : "pump",
@@ -315,6 +458,88 @@ function decodePumpInstruction({
   applyDecodedAmounts(event, data, decoder);
 
   return event;
+}
+
+export function rawPumpDiscoveryEventToWalletTrade({
+  event,
+  wallet,
+  explorer
+}: ShredstreamWalletTradeOptions): WalletTradeData | null {
+  if (
+    event.decodeStatus !== "decoded" ||
+    (event.eventType !== "buy" && event.eventType !== "sell") ||
+    !event.mint ||
+    !event.trader ||
+    event.trader !== wallet.address
+  ) {
+    return null;
+  }
+
+  const input = event.eventType === "buy"
+    ? { mint: event.quoteMint || WSOL_MINT, symbol: event.quoteMint && event.quoteMint !== WSOL_MINT ? null : "SOL", amount: null }
+    : { mint: event.mint, symbol: null, amount: tokenAmount(event) };
+  const output = event.eventType === "buy"
+    ? { mint: event.mint, symbol: null, amount: tokenAmount(event) }
+    : { mint: event.quoteMint || WSOL_MINT, symbol: event.quoteMint && event.quoteMint !== WSOL_MINT ? null : "SOL", amount: null };
+
+  return {
+    observedAt: new Date(event.receivedAtMs).toISOString(),
+    provider: "shredstream",
+    targetWallet: wallet.address,
+    label: wallet.label || null,
+    action: event.eventType,
+    mint: event.mint,
+    signature: event.signature,
+    timestamp: Math.floor(event.receivedAtMs / 1000),
+    feePayer: event.trader,
+    source: event.pool === "pump-amm" ? "SHREDSTREAM_PUMP_AMM" : "SHREDSTREAM_PUMP",
+    input,
+    output,
+    solAmount: solAmount(event),
+    tokenAmount: tokenAmount(event),
+    pool: event.pool || null,
+    marketCapSol: null,
+    pumpFunUrl: `${explorer.pumpFunBaseUrl}/${event.mint}`,
+    solscanTokenUrl: `${explorer.solscanBaseUrl}/token/${event.mint}`,
+    solscanTxUrl: `${explorer.solscanBaseUrl}/tx/${event.signature}`,
+    raw: {
+      ...event,
+      parser: "shredstream-pump-instruction"
+    }
+  };
+}
+
+function lamportsToSol(value: string | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed / 1_000_000_000 : null;
+}
+
+function tokenAmount(event: RawPumpDiscoveryEvent): number | null {
+  if (!event.tokenAmountRaw) {
+    return null;
+  }
+
+  const parsed = Number(event.tokenAmountRaw);
+  return Number.isFinite(parsed) ? parsed / 1_000_000 : null;
+}
+
+function solAmount(event: RawPumpDiscoveryEvent): number | null {
+  if (event.quoteMint && event.quoteMint !== WSOL_MINT) {
+    return null;
+  }
+
+  return (
+    lamportsToSol(event.spendableSolLamports) ??
+    lamportsToSol(event.maxSolCostLamports) ??
+    lamportsToSol(event.minSolOutputLamports) ??
+    lamportsToSol(event.maxQuoteAmountIn) ??
+    lamportsToSol(event.spendableQuoteAmountIn) ??
+    lamportsToSol(event.minQuoteAmountOut)
+  );
 }
 
 function instructionDecoder(programId: string, discriminator: string): InstructionDecoder | null {

@@ -952,6 +952,46 @@ function cachedLocalSolanaSigner(tradingWallet: TradingWallet): ReturnType<typeo
   return signer;
 }
 
+function warmLocalSolanaSignerCache(): void {
+  if (!encryptionSecretReady(config.pumpPortalWalletKeyEncryptionSecret)) {
+    return;
+  }
+
+  const walletsByPublicKey = new Map<string, TradingWallet>();
+
+  for (const subscriber of subscribers.list()) {
+    const wallets = [subscriber.tradingWallet, ...(subscriber.tradingWallets || [])].filter(
+      (wallet): wallet is TradingWallet =>
+        Boolean(wallet?.publicKey) &&
+        wallet?.provider === "local-solana" &&
+        Boolean(wallet?.encryptedSecretKey)
+    );
+
+    for (const wallet of wallets) {
+      walletsByPublicKey.set(wallet.publicKey, wallet);
+    }
+  }
+
+  if (walletsByPublicKey.size === 0) {
+    return;
+  }
+
+  let warmed = 0;
+  let failed = 0;
+
+  for (const wallet of walletsByPublicKey.values()) {
+    try {
+      cachedLocalSolanaSigner(wallet);
+      warmed += 1;
+    } catch (error) {
+      failed += 1;
+      console.warn(`Local Solana signer warmup failed for ${wallet.publicKey}: ${errorMessage(error)}`);
+    }
+  }
+
+  console.log(`Local Solana signer cache warmed: warmed=${warmed} failed=${failed}`);
+}
+
 function percentAmountToBasisPoints(amount: number | string): bigint | null {
   if (typeof amount === "number") {
     return null;
@@ -4610,6 +4650,7 @@ console.log(`Using ${subscriberStoreLabel} subscriber storage`);
 console.log(`Loaded ${subscribers.count()} verified Telegram subscriber(s)`);
 logCopyTradeExecutionState();
 warmPlatformFeeTreasuryAccount();
+warmLocalSolanaSignerCache();
 warmDirectExecutionHotPath();
 warmDirectExecutionBlockhashCache();
   // Supabase-backed subscribers load at startup, so compute account-trade

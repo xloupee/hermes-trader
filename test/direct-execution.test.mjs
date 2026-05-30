@@ -451,6 +451,64 @@ test("Solana direct sender signs, simulates, sends, and confirms a versioned tra
   assert.equal(result.metadata.directSolanaTiming.simulateBeforeSend, true);
 });
 
+test("Solana direct sender can skip explicit pre-send simulation", async () => {
+  const solanaSigner = Keypair.generate();
+  const payload = {
+    provider: "direct-pump",
+    route: {
+      provider: "direct-pump",
+      route: "pump-bonding-curve",
+      mint: baseRequest.mint,
+      walletPublicKey: solanaSigner.publicKey.toBase58(),
+      poolAddress: null,
+      priorityFeeSol: 0.00005,
+      slippagePercent: 10,
+      amount: "990000000",
+      amountBasis: "sol"
+    },
+    instructions: [
+      SystemProgram.transfer({
+        fromPubkey: solanaSigner.publicKey,
+        toPubkey: solanaSigner.publicKey,
+        lamports: 0
+      })
+    ],
+    signers: [],
+    metadata: {}
+  };
+  let simulateCalls = 0;
+  const stages = [];
+  const result = await sendSolanaDirectTransaction({
+    connection: {
+      getLatestBlockhash: () => ({
+        blockhash: "11111111111111111111111111111111",
+        lastValidBlockHeight: 123
+      }),
+      simulateTransaction: () => {
+        simulateCalls += 1;
+        return { value: { err: null, unitsConsumed: 42 } };
+      },
+      sendRawTransaction: () => "signature-no-sim",
+      confirmTransaction: () => ({ value: { err: null } })
+    },
+    signer: solanaSigner,
+    payload,
+    config: {
+      gate: liveGate,
+      simulateBeforeSend: false,
+      onStage: (stage) => stages.push(stage)
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.signature, "signature-no-sim");
+  assert.equal(simulateCalls, 0);
+  assert.equal(result.metadata.directSolanaTiming.simulateBeforeSend, false);
+  assert.equal(result.metadata.directSolanaTiming.unitsConsumed, null);
+  assert.deepEqual(stages.includes("simulation_started"), false);
+  assert.deepEqual(stages.includes("simulation_finished"), false);
+});
+
 test("Solana direct sender background mode returns after signature without confirmation wait", async () => {
   const solanaSigner = Keypair.generate();
   const payload = {

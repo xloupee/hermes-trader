@@ -112,6 +112,7 @@ export interface BotConfig extends MigrationFormatConfig {
   directExecutionLiveEnabled: boolean;
   directExecutionBuildOnly: boolean;
   directExecutionSimulateOnly: boolean;
+  directExecutionSimulateBeforeSend: boolean;
   directExecutionSkipPreflight: boolean;
   directExecutionConfirmationMode: "inline" | "background";
   directExecutionMaxRetries: number;

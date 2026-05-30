@@ -323,6 +323,7 @@ const config: BotConfig = {
   directExecutionLiveEnabled: process.env.DIRECT_EXECUTION_LIVE_ENABLED === "true",
   directExecutionBuildOnly: process.env.DIRECT_EXECUTION_BUILD_ONLY === "true",
   directExecutionSimulateOnly: process.env.DIRECT_EXECUTION_SIMULATE_ONLY === "true",
+  directExecutionSimulateBeforeSend: process.env.DIRECT_EXECUTION_SIMULATE_BEFORE_SEND !== "false",
   directExecutionSkipPreflight: process.env.DIRECT_EXECUTION_SKIP_PREFLIGHT === "true",
   directExecutionConfirmationMode: directExecutionConfirmationModeFromEnv(process.env.DIRECT_EXECUTION_CONFIRMATION_MODE),
   directExecutionMaxRetries: Math.floor(nonNegativeNumberFromEnv(process.env.DIRECT_EXECUTION_MAX_RETRIES, 3)),
@@ -635,6 +636,41 @@ function withPlatformFeeResult(
   return split?.enabled ? { ...result, platformFee: platformFeeResultFields(split) } : result;
 }
 
+type DeferredCopyBuyIdempotencyClaim = {
+  key: string;
+  input: Parameters<typeof copyTradeBuyIdempotency.claimBuy>[0];
+};
+
+async function persistDeferredCopyTradeBuyIdempotency({
+  claim,
+  result,
+  errorText
+}: {
+  claim: DeferredCopyBuyIdempotencyClaim;
+  result?: PumpPortalLightningTradeResult | null;
+  errorText?: string | null;
+}): Promise<void> {
+  try {
+    const idempotencyClaim = await copyTradeBuyIdempotency.claimBuy(claim.input);
+
+    if (!idempotencyClaim.claimed) {
+      console.warn(
+        `Fast direct copy buy submitted before durable duplicate check; existing durable record for ${claim.key} is ${idempotencyClaim.existing?.status || "unknown"}`
+      );
+      return;
+    }
+
+    if (result) {
+      await safelyCompleteCopyTradeBuyIdempotency(copyTradeBuyIdempotency, claim.key, result);
+      return;
+    }
+
+    await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, claim.key, errorText || "fast direct copy buy failed before result");
+  } catch (error) {
+    console.warn(`Could not persist fast direct copy buy idempotency key ${claim.key}: ${errorMessage(error)}`);
+  }
+}
+
 async function verifyPlatformFeeTreasuryAccount({
   connection,
   treasury
@@ -787,6 +823,7 @@ function logCopyTradeExecutionState(): void {
       `live=${config.directExecutionLiveEnabled ? "true" : "false"}`,
       `buildOnly=${config.directExecutionBuildOnly ? "true" : "false"}`,
       `simulateOnly=${config.directExecutionSimulateOnly ? "true" : "false"}`,
+      `simulateBeforeSend=${config.directExecutionSimulateBeforeSend ? "true" : "false"}`,
       `confirmationMode=${config.directExecutionConfirmationMode}`,
       `blockhashCacheMs=${config.directExecutionBlockhashCacheMs}`,
       `blockhashWarmMs=${config.directExecutionBlockhashWarmIntervalMs}`,
@@ -1640,6 +1677,7 @@ async function executeDirectCopyTrade({
       payload: built,
       config: {
         gate: directExecutionGate(provider),
+        simulateBeforeSend: config.directExecutionSimulateBeforeSend,
         skipPreflight: config.directExecutionSkipPreflight,
         confirmationMode: "background",
         maxRetries: config.directExecutionMaxRetries,
@@ -1664,6 +1702,7 @@ async function executeDirectCopyTrade({
     payload: built,
     config: {
       gate: directExecutionGate(provider),
+      simulateBeforeSend: config.directExecutionSimulateBeforeSend,
       skipPreflight: config.directExecutionSkipPreflight,
       confirmationMode: "inline",
       maxRetries: config.directExecutionMaxRetries,
@@ -1876,6 +1915,7 @@ async function sendCopyTradeSimulationAlert(
   let copyBuySemanticReserved = false;
   let copyBuySemanticKey: string | null = null;
   let durableCopyBuyClaimKey: string | null = null;
+  let deferredDurableCopyBuyClaim: DeferredCopyBuyIdempotencyClaim | null = null;
   let preBuyTokenBalance: number | null = null;
   let result: CopyTradeExecutionResult | null = null;
 
@@ -2010,54 +2050,63 @@ async function sendCopyTradeSimulationAlert(
         copyBuySemanticReserved = true;
       }
 
-      let idempotencyClaim;
-      try {
-        idempotencyClaim = await copyTradeBuyIdempotency.claimBuy({
-          key: durableCopyBuyKey,
-          chatId: subscriber.chatId,
-          sourceWalletAddress: copyTradeWallet.address,
-          tradingWalletPublicKey: subscriber.tradingWallet.publicKey,
-          observedSignature: trade.signature,
-          mint: trade.mint,
-          amountSol,
-          provider: trade.provider,
-          request,
-          retryFailed: subscriber.copyTradeRetryFailedBuys
-        });
-      } catch (error) {
-        const reason = `copy buy idempotency claim failed: ${errorMessage(error)}`;
-        skipWithLatencyLog(reason);
-        await notifySkippedAutoCopyBuy({
-          subscriber,
-          trade,
-          copyTradeWallet,
-          request,
-          reason
-        });
-        return;
-      }
+      const claimInput = {
+        key: durableCopyBuyKey,
+        chatId: subscriber.chatId,
+        sourceWalletAddress: copyTradeWallet.address,
+        tradingWalletPublicKey: subscriber.tradingWallet.publicKey,
+        observedSignature: trade.signature,
+        mint: trade.mint,
+        amountSol,
+        provider: trade.provider,
+        request,
+        retryFailed: subscriber.copyTradeRetryFailedBuys
+      };
 
-      if (!idempotencyClaim.claimed) {
-        const existing = idempotencyClaim.existing;
-        const reason = existing?.status === "failed" && !subscriber.copyTradeRetryFailedBuys
-          ? "copy buy coin was already handled (failed); enable Retry failed copy buys in /copytrade settings to retry failed same-token buys"
-          : existing
-            ? `copy buy coin was already handled (${existing.status})`
-            : "copy buy coin was already handled";
-        skipWithLatencyLog(reason);
-        await notifySkippedAutoCopyBuy({
-          subscriber,
-          trade,
-          copyTradeWallet,
-          request,
-          reason
-        });
-        console.warn(
-          `Skipping duplicate auto copy buy for ${subscriber.chatId}:${trade.mint}: coin already handled`
-        );
-        return;
+      if (fastDirectCopyBuyPath) {
+        deferredDurableCopyBuyClaim = {
+          key: durableCopyBuyKey,
+          input: claimInput
+        };
+      } else {
+        let idempotencyClaim;
+        try {
+          idempotencyClaim = await copyTradeBuyIdempotency.claimBuy(claimInput);
+        } catch (error) {
+          const reason = `copy buy idempotency claim failed: ${errorMessage(error)}`;
+          skipWithLatencyLog(reason);
+          await notifySkippedAutoCopyBuy({
+            subscriber,
+            trade,
+            copyTradeWallet,
+            request,
+            reason
+          });
+          return;
+        }
+
+        if (!idempotencyClaim.claimed) {
+          const existing = idempotencyClaim.existing;
+          const reason = existing?.status === "failed" && !subscriber.copyTradeRetryFailedBuys
+            ? "copy buy coin was already handled (failed); enable Retry failed copy buys in /copytrade settings to retry failed same-token buys"
+            : existing
+              ? `copy buy coin was already handled (${existing.status})`
+              : "copy buy coin was already handled";
+          skipWithLatencyLog(reason);
+          await notifySkippedAutoCopyBuy({
+            subscriber,
+            trade,
+            copyTradeWallet,
+            request,
+            reason
+          });
+          console.warn(
+            `Skipping duplicate auto copy buy for ${subscriber.chatId}:${trade.mint}: coin already handled`
+          );
+          return;
+        }
+        durableCopyBuyClaimKey = durableCopyBuyKey;
       }
-      durableCopyBuyClaimKey = durableCopyBuyKey;
     }
 
     const blockedReason = copyTradeSubmissionBlockedReason(executionProvider);
@@ -2212,6 +2261,11 @@ async function sendCopyTradeSimulationAlert(
     const legacyResult = legacyResultFromExecution(result);
     if (durableCopyBuyClaimKey) {
       safelyCompleteCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, legacyResult);
+    } else if (deferredDurableCopyBuyClaim) {
+      persistDeferredCopyTradeBuyIdempotency({
+        claim: deferredDurableCopyBuyClaim,
+        result: legacyResult
+      });
     }
 
     await recordCopyTradeExecution({
@@ -2273,6 +2327,11 @@ async function sendCopyTradeSimulationAlert(
   } catch (error) {
     if (durableCopyBuyClaimKey && !result) {
       await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, errorMessage(error));
+    } else if (deferredDurableCopyBuyClaim && !result) {
+      persistDeferredCopyTradeBuyIdempotency({
+        claim: deferredDurableCopyBuyClaim,
+        errorText: errorMessage(error)
+      });
     }
     latencyTracker.skip(errorMessage(error), { status: "failed" });
     logLatencyOnce();

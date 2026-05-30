@@ -247,6 +247,209 @@ test("decodes FLASHX router Pump buys without hydrated ALT accounts", () => {
   assert.equal(events[0].minTokenAmountOut, "29142236873");
 });
 
+test("decodes FLASHX router Pump buys from target token balance deltas instead of temp WSOL account indexes", () => {
+  const wrongTempWsolAccount = "83DqVhmHb3RmZa8ieYC7VtHB5upyC5GHAr6g4WYfMjg4";
+  const actualMint = "5QmKEjUKCPpusjDycze5J875edpqtcHy8GUvdmB1pump";
+  const actualTokenAccount = "8Bdtcgjc263mAwEALzPw3kwpzNZqRhgnugjhENu1vXZp";
+  const actualBondingCurve = "8fwrauNJMqDGqduDsDFTTShceFGx61Yn94wgPihhpYsd";
+  const targetWallet = "A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS";
+  const events = normalizeShredstreamTransaction(
+    {
+      slot: 423222176,
+      signature: "3i6fp3KzBmKTja7kYM1WruhBfAPVZknBXBbNxj98E1413p9RGixYHcVPGNgQUkfuHk7eNmxwZXGGR4Ag15TbY4dx",
+      accountKeys: [
+        targetWallet,
+        actualTokenAccount,
+        "BAzr8WMC3TDX7xi1bi1fb1kV9kugFUFf83T4Ypp5CSiy",
+        FLASHX_ROUTER_PROGRAM_ID,
+        wrongTempWsolAccount,
+        "5dQZShePk85ztskSABT2nTo5iYgAykiPvu1PKsFnFhT9",
+        "HXNZP8xNU6EqUNVzACYwQ5PJWJ95wzjK7kwnVpumhT93",
+        actualBondingCurve,
+        "72ayp8X7L5fCTmEtXBBYMKuvFt1p2mj5vxcV2KfJNBpa",
+        "H7LM5X8oVPR5uiTjHGBUXjtkutDvMvyFjrBxe87kSLB5",
+        "8aHZJSt6frgjRTTfg4foDXjZHMyZ2ZQQjpwcWzzCvAGp",
+        "GmTjpGuvGsCrBFUAdV3RnBYqFC3Vmcr2Z9XkDWtu46dd",
+        "ComputeBudget111111111111111111111111111111",
+        "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+        actualMint,
+        systemProgram,
+        "FSqbigodv6rL8ABcJkZDF1Lps8HQnpuK2Df1ffH8ScWf",
+        "Hq2wp8uJ9jCPsYgNHex8RtqdvMPfVGoYwjvF1ATiwn2Y",
+        "846ah7iBSu9ApuCyEhA5xpnjHHX7d4QJKetWLbwzmJZ8",
+        "EWGcY44T5cBH61LwX3oGRd9cPfg55auELFwKSAorbFQx"
+      ],
+      preTokenBalances: [
+        {
+          accountIndex: 1,
+          mint: actualMint,
+          owner: targetWallet,
+          uiTokenAmount: { amount: "0", decimals: 6 }
+        }
+      ],
+      postTokenBalances: [
+        {
+          accountIndex: 1,
+          mint: actualMint,
+          owner: targetWallet,
+          uiTokenAmount: { amount: "16880200732", decimals: 6 }
+        }
+      ],
+      instructions: [
+        {
+          programIdIndex: 3,
+          accounts: [0, 0, 15, 11, 3, 16, 12, 4, 17, 15, 4, 7, 5, 1, 0, 15, 18, 6, 17, 16, 13, 8, 18, 19],
+          dataBase64: flashxBuyDataBase64("990000", "14106483363")
+        }
+      ]
+    },
+    { receivedAtMs }
+  );
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].eventType, "buy");
+  assert.equal(events[0].decodeStatus, "decoded");
+  assert.equal(events[0].routerProgramId, FLASHX_ROUTER_PROGRAM_ID);
+  assert.equal(events[0].trader, targetWallet);
+  assert.equal(events[0].mint, actualMint);
+  assert.notEqual(events[0].mint, wrongTempWsolAccount);
+  assert.equal(events[0].baseMint, actualMint);
+  assert.equal(events[0].tokenAmountRaw, "16880200732");
+  assert.equal(events[0].spendableSolLamports, "990000");
+  assert.equal(events[0].minTokenAmountOut, "14106483363");
+});
+
+test("decodes FLASHX router Pump buys from Pump-looking accounts before fixed temp-account fallback", () => {
+  const wrongTempWsolAccount = "83DqVhmHb3RmZa8ieYC7VtHB5upyC5GHAr6g4WYfMjg4";
+  const actualMint = "5QmKEjUKCPpusjDycze5J875edpqtcHy8GUvdmB1pump";
+  const targetWallet = "A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS";
+  const events = normalizeShredstreamTransaction(
+    {
+      slot: 423222176,
+      signature: "flashx-no-balance-meta-sig",
+      accountKeys: [
+        targetWallet,
+        "8Bdtcgjc263mAwEALzPw3kwpzNZqRhgnugjhENu1vXZp",
+        "BAzr8WMC3TDX7xi1bi1fb1kV9kugFUFf83T4Ypp5CSiy",
+        FLASHX_ROUTER_PROGRAM_ID,
+        wrongTempWsolAccount,
+        "5dQZShePk85ztskSABT2nTo5iYgAykiPvu1PKsFnFhT9",
+        "HXNZP8xNU6EqUNVzACYwQ5PJWJ95wzjK7kwnVpumhT93",
+        "8fwrauNJMqDGqduDsDFTTShceFGx61Yn94wgPihhpYsd",
+        "72ayp8X7L5fCTmEtXBBYMKuvFt1p2mj5vxcV2KfJNBpa",
+        "H7LM5X8oVPR5uiTjHGBUXjtkutDvMvyFjrBxe87kSLB5",
+        "8aHZJSt6frgjRTTfg4foDXjZHMyZ2ZQQjpwcWzzCvAGp",
+        "GmTjpGuvGsCrBFUAdV3RnBYqFC3Vmcr2Z9XkDWtu46dd",
+        "ComputeBudget111111111111111111111111111111",
+        "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+        actualMint,
+        systemProgram
+      ],
+      instructions: [
+        {
+          programIdIndex: 3,
+          accounts: [0, 0, 15, 11, 3, 15, 12, 4, 7, 15, 4, 7, 5, 1, 0, 15, 14],
+          dataBase64: flashxBuyDataBase64("990000", "14106483363")
+        }
+      ]
+    },
+    { receivedAtMs }
+  );
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].mint, actualMint);
+  assert.notEqual(events[0].mint, wrongTempWsolAccount);
+  assert.equal(events[0].tokenAmountRaw, undefined);
+});
+
+test("guards FLASHX router sells from being decoded as copyable buys with balance deltas", () => {
+  const actualMint = "FRjGWFQEw7qZQAhvsafzqoV7SvAepSL1Dpgx5giRpump";
+  const targetWallet = "A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS";
+  const events = normalizeShredstreamTransaction(
+    {
+      slot: 423240263,
+      signature: "3ghnnzj5WhCfkN7KZsa2BZi5ZK9MweAMdW9wbFa1L3HYUr1NWbfB3kcWSNsZ1JJa2mSAZJnUDA8oTMihf84qQxEg",
+      accountKeys: [
+        targetWallet,
+        FLASHX_ROUTER_PROGRAM_ID,
+        "89Car9WTSLkbjEceFH2Fdr52iQ1MDXtrc5zgafjUAYEt",
+        "DEqMQpG1oq7gqA8JeCRsbcJhMWwcU8tQvBLyUhsD7RCm",
+        "AwcQLVAP7mZE9jGHB4fAReHvSfp8SnPC1e9Rh4r1X23q",
+        "GjxanYEdq6FMhstLNQZ2k1kpTbiCc7Pnrzbtfg4eRwDD",
+        "A88fHmAEcHqHeTbX55hce2ttGfEHACqGQBV2nw27S5zL",
+        "8aHZJSt6frgjRTTfg4foDXjZHMyZ2ZQQjpwcWzzCvAGp",
+        "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+        "ComputeBudget111111111111111111111111111111",
+        systemProgram,
+        "3j9vH5XjckQw1qjiUqpw1aKLgYY1W3r9BT5WPovSwP4M",
+        actualMint
+      ],
+      preTokenBalances: [
+        {
+          accountIndex: 2,
+          mint: actualMint,
+          owner: targetWallet,
+          uiTokenAmount: { amount: "34943728744", decimals: 6 }
+        }
+      ],
+      postTokenBalances: [
+        {
+          accountIndex: 2,
+          mint: actualMint,
+          owner: targetWallet,
+          uiTokenAmount: { amount: "0", decimals: 6 }
+        }
+      ],
+      instructions: [
+        {
+          programIdIndex: 1,
+          accounts: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+          dataBase64: flashxBuyDataBase64("34943728744", "579367")
+        }
+      ]
+    },
+    { receivedAtMs }
+  );
+
+  assert.deepEqual(events, []);
+});
+
+test("guards raw FLASHX sell-shaped payloads from being decoded as copyable buys", () => {
+  const actualMint = "FRjGWFQEw7qZQAhvsafzqoV7SvAepSL1Dpgx5giRpump";
+  const targetWallet = "A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS";
+  const events = normalizeShredstreamTransaction(
+    {
+      slot: 423240263,
+      signature: "flashx-raw-sell-shaped-sig",
+      accountKeys: [
+        targetWallet,
+        FLASHX_ROUTER_PROGRAM_ID,
+        "89Car9WTSLkbjEceFH2Fdr52iQ1MDXtrc5zgafjUAYEt",
+        "DEqMQpG1oq7gqA8JeCRsbcJhMWwcU8tQvBLyUhsD7RCm",
+        "AwcQLVAP7mZE9jGHB4fAReHvSfp8SnPC1e9Rh4r1X23q",
+        "GjxanYEdq6FMhstLNQZ2k1kpTbiCc7Pnrzbtfg4eRwDD",
+        "A88fHmAEcHqHeTbX55hce2ttGfEHACqGQBV2nw27S5zL",
+        "8aHZJSt6frgjRTTfg4foDXjZHMyZ2ZQQjpwcWzzCvAGp",
+        "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+        "ComputeBudget111111111111111111111111111111",
+        systemProgram,
+        "3j9vH5XjckQw1qjiUqpw1aKLgYY1W3r9BT5WPovSwP4M",
+        actualMint
+      ],
+      instructions: [
+        {
+          programIdIndex: 1,
+          accounts: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+          dataBase64: flashxBuyDataBase64("34943728744", "579367")
+        }
+      ]
+    },
+    { receivedAtMs }
+  );
+
+  assert.deepEqual(events, []);
+});
+
 test("does not convert ShredStream wallet trade rows for non-matching or undecoded events", () => {
   const [event] = normalizeShredstreamTransaction(
     {

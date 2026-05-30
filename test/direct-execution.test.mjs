@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Keypair, SystemProgram } from "@solana/web3.js";
+import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { buildDirectAutoTransactionPayload } from "../dist/direct-auto.js";
 import { buildDirectPumpTransaction } from "../dist/direct-pump.js";
@@ -9,6 +9,7 @@ import { sendDirectTransaction } from "../dist/direct-sender.js";
 import {
   buildDirectSolanaSendConnections,
   directAutoProviderOrderForRequest,
+  extractPumpBuyV2CreatorVaultFromTransaction,
   fetchDirectPumpBuyState,
   primeDirectPumpFastBuyState,
   refreshDirectPumpFastBuyStateReserves,
@@ -976,6 +977,40 @@ test("Solana direct Pump fast buy state cache fails closed and refreshes known r
     virtualTokenReserves: "1072000000000000",
     virtualQuoteReserves: "30100000000"
   }), true);
+});
+
+test("Solana direct Pump extracts observed BuyV2 creator vault from inner instructions", () => {
+  const mint = Keypair.generate().publicKey;
+  const creatorVault = Keypair.generate().publicKey;
+  const pumpProgram = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
+  const accountKeys = Array.from({ length: 25 }, () => Keypair.generate().publicKey);
+  accountKeys[1] = mint;
+  accountKeys[16] = creatorVault;
+  accountKeys[24] = pumpProgram;
+  const accounts = Array.from({ length: 18 }, (_, index) => index);
+
+  const extracted = extractPumpBuyV2CreatorVaultFromTransaction({
+    transaction: {
+      message: {
+        staticAccountKeys: accountKeys,
+        compiledInstructions: []
+      }
+    },
+    meta: {
+      innerInstructions: [
+        {
+          instructions: [
+            {
+              programIdIndex: 24,
+              accounts
+            }
+          ]
+        }
+      ]
+    }
+  }, mint);
+
+  assert.equal(extracted?.toBase58(), creatorVault.toBase58());
 });
 
 test("Solana direct builder rejects missing or non-token mint accounts", async () => {

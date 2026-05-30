@@ -58,7 +58,19 @@ export interface ShredstreamTransactionInput {
   sourceTiming?: ShredstreamSourceTiming;
   accountKeys: string[];
   addressTableLookups?: ShredstreamAddressTableLookupInput[];
+  preTokenBalances?: ShredstreamTokenBalanceInput[];
+  postTokenBalances?: ShredstreamTokenBalanceInput[];
   instructions: ShredstreamInstructionInput[];
+}
+
+export interface ShredstreamTokenBalanceInput {
+  accountIndex: number;
+  mint: string;
+  owner?: string | null;
+  uiTokenAmount?: {
+    amount?: string | number | null;
+    decimals?: number | null;
+  } | null;
 }
 
 export interface ShredstreamSourceTiming {
@@ -107,6 +119,14 @@ interface InstructionDecoder {
   amountArgs?: Partial<Record<number, AmountField>>;
   amountSemantics?: string;
 }
+
+interface TokenBalanceDelta {
+  mint: string;
+  rawAmount: bigint;
+  decimals: number | null;
+}
+
+type FlashxRouterTradeShape = "buy" | "sell" | "ambiguous";
 
 // Verified against @pump-fun/pump-sdk@1.36.0 src/idl/pump.json.
 const PUMP_INSTRUCTION_DECODERS: Record<string, InstructionDecoder> = {
@@ -352,9 +372,23 @@ function decodeFlashxPumpInstruction({
 
   const spendableSolLamports = readRouterU64(data, 1);
   const minTokenAmountOut = readRouterU64(data, 9);
-  const mint = resolvedAccounts[10] || resolvedAccounts.find((account) => account && (account.endsWith("pump") || account.endsWith("bonk")));
   const trader = resolvedAccounts.find((account) => account === transaction.accountKeys[0]) || transaction.accountKeys[0] || undefined;
-  const bondingCurve = mint ? resolvedAccounts[resolvedAccounts.indexOf(mint) + 1] : undefined;
+  const balanceDelta = trader ? singleTokenBalanceDelta(transaction, trader) : null;
+  const tradeShape = balanceDelta ? (balanceDelta.rawAmount > 0n ? "buy" : "sell") : inferFlashxRouterTradeShape({
+    spendableSolLamports,
+    minTokenAmountOut
+  });
+
+  if (tradeShape !== "buy") {
+    return null;
+  }
+
+  const mint =
+    balanceDelta?.mint ||
+    resolvedAccounts.find((account) => account && looksLikePumpMint(account)) ||
+    resolvedAccounts[10] ||
+    undefined;
+  const bondingCurve = resolveFlashxBondingCurve(resolvedAccounts, mint);
 
   if (!mint || !trader || !spendableSolLamports) {
     return null;
@@ -378,6 +412,7 @@ function decodeFlashxPumpInstruction({
     amountSemantics: "flashx_spendable_sol_in_with_min_tokens_out",
     spendableSolLamports,
     solAmountLamports: spendableSolLamports,
+    tokenAmountRaw: balanceDelta && balanceDelta.rawAmount > 0n ? balanceDelta.rawAmount.toString() : undefined,
     minTokenAmountOut: minTokenAmountOut || undefined,
     rawInstructionDiscriminator: data?.subarray(0, Math.min(8, data.length)).toString("hex"),
     instructionIndex,
@@ -402,6 +437,134 @@ function readRouterU64(data: Buffer | null, offset: number): string | null {
   }
 
   return data.readBigUInt64LE(offset).toString();
+}
+
+function looksLikePumpMint(account: string): boolean {
+  return account.endsWith("pump") || account.endsWith("bonk");
+}
+
+function resolveFlashxBondingCurve(resolvedAccounts: Array<string | null>, mint: string | undefined): string | undefined {
+  if (!mint) {
+    return undefined;
+  }
+
+  const mintIndex = resolvedAccounts.indexOf(mint);
+
+  if (mintIndex >= 0) {
+    return resolvedAccounts[mintIndex + 1] || undefined;
+  }
+
+  return undefined;
+}
+
+function inferFlashxRouterTradeShape({
+  spendableSolLamports,
+  minTokenAmountOut
+}: {
+  spendableSolLamports: string | null;
+  minTokenAmountOut: string | null;
+}): FlashxRouterTradeShape {
+  const firstAmount = bigintString(spendableSolLamports);
+  const secondAmount = bigintString(minTokenAmountOut);
+
+  if (firstAmount === null || secondAmount === null || secondAmount === 0n) {
+    return "ambiguous";
+  }
+
+  if (firstAmount > secondAmount) {
+    return "sell";
+  }
+
+  return "buy";
+}
+
+function singleTokenBalanceDelta(
+  transaction: ShredstreamTransactionInput,
+  owner: string
+): TokenBalanceDelta | null {
+  const deltas = tokenBalanceDeltasForOwner(transaction, owner);
+  return deltas.length === 1 ? deltas[0] : null;
+}
+
+function tokenBalanceDeltasForOwner(transaction: ShredstreamTransactionInput, owner: string): TokenBalanceDelta[] {
+  const byAccountAndMint = new Map<string, TokenBalanceDelta>();
+
+  function apply(balance: ShredstreamTokenBalanceInput, sign: 1n | -1n): void {
+    if (balance.owner !== owner || !balance.mint || balance.mint === WSOL_MINT) {
+      return;
+    }
+
+    const rawAmount = rawTokenBalanceAmount(balance);
+
+    if (rawAmount === null) {
+      return;
+    }
+
+    const key = `${balance.accountIndex}:${balance.mint}`;
+    const previous = byAccountAndMint.get(key) || {
+      mint: balance.mint,
+      rawAmount: 0n,
+      decimals: balance.uiTokenAmount?.decimals ?? null
+    };
+
+    byAccountAndMint.set(key, {
+      ...previous,
+      rawAmount: previous.rawAmount + rawAmount * sign,
+      decimals: previous.decimals ?? balance.uiTokenAmount?.decimals ?? null
+    });
+  }
+
+  for (const balance of transaction.preTokenBalances || []) {
+    apply(balance, -1n);
+  }
+
+  for (const balance of transaction.postTokenBalances || []) {
+    apply(balance, 1n);
+  }
+
+  const byMint = new Map<string, TokenBalanceDelta>();
+
+  for (const delta of byAccountAndMint.values()) {
+    if (delta.rawAmount === 0n) {
+      continue;
+    }
+
+    const previous = byMint.get(delta.mint) || {
+      mint: delta.mint,
+      rawAmount: 0n,
+      decimals: delta.decimals
+    };
+
+    byMint.set(delta.mint, {
+      ...previous,
+      rawAmount: previous.rawAmount + delta.rawAmount,
+      decimals: previous.decimals ?? delta.decimals
+    });
+  }
+
+  return [...byMint.values()].filter((delta) => delta.rawAmount !== 0n);
+}
+
+function rawTokenBalanceAmount(balance: ShredstreamTokenBalanceInput): bigint | null {
+  const value = balance.uiTokenAmount?.amount;
+
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= 0 ? BigInt(value) : null;
+  }
+
+  if (typeof value !== "string" || !/^\d+$/.test(value)) {
+    return null;
+  }
+
+  return BigInt(value);
+}
+
+function bigintString(value: string | null): bigint | null {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) {
+    return null;
+  }
+
+  return BigInt(value);
 }
 
 function decodePumpInstruction({

@@ -54,6 +54,10 @@ const MINT_TOKEN_PROGRAM_CACHE_MS = 10 * 60_000;
 const PUMP_FAST_BUY_STATE_CACHE_MS = 2 * 60_000;
 const OBSERVED_BUY_FAST_STATE_MAX_AGE_MS = 1_000;
 const MAX_BLOCKHASH_CACHE_MS = 30_000;
+const PUMP_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+const PUMP_BUY_V2_BASE_MINT_ACCOUNT_INDEX = 1;
+const PUMP_BUY_V2_CREATOR_VAULT_ACCOUNT_INDEX = 16;
+const PUMP_BUY_V2_ASSOCIATED_CREATOR_VAULT_ACCOUNT_INDEX = 17;
 const latestBlockhashByConnection = new WeakMap<Connection, {
   value: LatestBlockhash | null;
   expiresAtMs: number;
@@ -577,6 +581,14 @@ function bn(value: bigint): BN {
   return new BN(value.toString());
 }
 
+function stringFromUnknown(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function observedSignatureFromMetadata(metadata: Record<string, unknown> | undefined): string | null {
+  return stringFromUnknown(metadata?.observedSignature);
+}
+
 function bnFromInteger(value: string | bigint): BN {
   return new BN(value.toString());
 }
@@ -959,6 +971,173 @@ function directPumpFastBuyState({
   };
 }
 
+function transactionAccountKeys(transaction: unknown): string[] {
+  const record = transaction as {
+    transaction?: {
+      message?: {
+        staticAccountKeys?: unknown[];
+        accountKeys?: unknown[];
+      };
+    };
+    meta?: {
+      loadedAddresses?: {
+        writable?: unknown[];
+        readonly?: unknown[];
+      };
+    };
+  } | null;
+  const message = record?.transaction?.message;
+  const staticKeys = Array.isArray(message?.staticAccountKeys)
+    ? message?.staticAccountKeys
+    : Array.isArray(message?.accountKeys)
+      ? message?.accountKeys
+      : [];
+  const loadedWritable = Array.isArray(record?.meta?.loadedAddresses?.writable)
+    ? record?.meta?.loadedAddresses?.writable
+    : [];
+  const loadedReadonly = Array.isArray(record?.meta?.loadedAddresses?.readonly)
+    ? record?.meta?.loadedAddresses?.readonly
+    : [];
+  return [...staticKeys, ...loadedWritable, ...loadedReadonly]
+    .map((key) => {
+      if (typeof key === "string") {
+        return key;
+      }
+      if (key instanceof PublicKey) {
+        return key.toBase58();
+      }
+      if (key && typeof key === "object" && "pubkey" in key) {
+        const pubkey = (key as { pubkey?: unknown }).pubkey;
+        return pubkey instanceof PublicKey ? pubkey.toBase58() : stringFromUnknown(pubkey);
+      }
+      if (key && typeof (key as { toBase58?: unknown }).toBase58 === "function") {
+        return (key as { toBase58: () => string }).toBase58();
+      }
+      return null;
+    })
+    .filter((key): key is string => Boolean(key));
+}
+
+function compiledInstructionsFromTransaction(transaction: unknown): Array<{ programIdIndex: number; accounts: number[] }> {
+  const record = transaction as {
+    transaction?: {
+      message?: {
+        compiledInstructions?: unknown[];
+        instructions?: unknown[];
+      };
+    };
+    meta?: {
+      innerInstructions?: Array<{ instructions?: unknown[] }>;
+    };
+  } | null;
+  const message = record?.transaction?.message;
+  const topLevel = Array.isArray(message?.compiledInstructions)
+    ? message?.compiledInstructions
+    : Array.isArray(message?.instructions)
+      ? message?.instructions
+      : [];
+  const inner = Array.isArray(record?.meta?.innerInstructions)
+    ? record.meta.innerInstructions.flatMap((group) => Array.isArray(group.instructions) ? group.instructions : [])
+    : [];
+  return [...topLevel, ...inner]
+    .map((instruction) => {
+      const candidate = instruction as { programIdIndex?: unknown; accounts?: unknown };
+      const programIdIndex = typeof candidate.programIdIndex === "number" ? candidate.programIdIndex : null;
+      const accounts = Array.isArray(candidate.accounts)
+        ? candidate.accounts.filter((account): account is number => typeof account === "number")
+        : [];
+      return programIdIndex === null ? null : { programIdIndex, accounts };
+    })
+    .filter((instruction): instruction is { programIdIndex: number; accounts: number[] } => Boolean(instruction));
+}
+
+export function extractPumpBuyV2CreatorVaultFromTransaction(transaction: unknown, mint: PublicKey): PublicKey | null {
+  const accountKeys = transactionAccountKeys(transaction);
+  if (accountKeys.length === 0) {
+    return null;
+  }
+
+  for (const instruction of compiledInstructionsFromTransaction(transaction)) {
+    const programId = accountKeys[instruction.programIdIndex];
+    const baseMint = accountKeys[instruction.accounts[PUMP_BUY_V2_BASE_MINT_ACCOUNT_INDEX]];
+    const creatorVault = accountKeys[instruction.accounts[PUMP_BUY_V2_CREATOR_VAULT_ACCOUNT_INDEX]];
+    if (programId === PUMP_PROGRAM_ID && baseMint === mint.toBase58() && creatorVault) {
+      try {
+        return new PublicKey(creatorVault);
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  return null;
+}
+
+async function fetchObservedPumpBuyV2CreatorVault({
+  connection,
+  signature,
+  mint
+}: {
+  connection: Connection;
+  signature: string | null;
+  mint: PublicKey;
+}): Promise<PublicKey | null> {
+  if (!signature) {
+    return null;
+  }
+
+  try {
+    const transaction = await connection.getTransaction(signature, {
+      commitment: "confirmed",
+      maxSupportedTransactionVersion: 0
+    });
+    return transaction ? extractPumpBuyV2CreatorVaultFromTransaction(transaction, mint) : null;
+  } catch {
+    return null;
+  }
+}
+
+function patchPumpBuyV2CreatorVault({
+  instructions,
+  pumpProgramId,
+  creatorVault,
+  quoteMint,
+  quoteTokenProgram
+}: {
+  instructions: TransactionInstruction[];
+  pumpProgramId: PublicKey;
+  creatorVault: PublicKey | null;
+  quoteMint: PublicKey;
+  quoteTokenProgram: PublicKey;
+}): boolean {
+  if (!creatorVault) {
+    return false;
+  }
+
+  const associatedCreatorVault = getAssociatedTokenAddressSync(
+    quoteMint,
+    creatorVault,
+    true,
+    quoteTokenProgram
+  );
+  let patched = false;
+  for (const instruction of instructions) {
+    if (!instruction.programId.equals(pumpProgramId) || instruction.keys.length <= PUMP_BUY_V2_ASSOCIATED_CREATOR_VAULT_ACCOUNT_INDEX) {
+      continue;
+    }
+    instruction.keys[PUMP_BUY_V2_CREATOR_VAULT_ACCOUNT_INDEX] = {
+      ...instruction.keys[PUMP_BUY_V2_CREATOR_VAULT_ACCOUNT_INDEX],
+      pubkey: creatorVault
+    };
+    instruction.keys[PUMP_BUY_V2_ASSOCIATED_CREATOR_VAULT_ACCOUNT_INDEX] = {
+      ...instruction.keys[PUMP_BUY_V2_ASSOCIATED_CREATOR_VAULT_ACCOUNT_INDEX],
+      pubkey: associatedCreatorVault
+    };
+    patched = true;
+  }
+  return patched;
+}
+
 function directSolanaTimingMetadata(stages: DirectSolanaSendStageRecord[]): DirectExecutionTimingMetadata {
   const atMs = Object.fromEntries(stages.map((stage) => [stage.stage, stage.atMs])) as Record<string, number>;
   const duration = (from: DirectSolanaSendStage, to: DirectSolanaSendStage): number | null => {
@@ -1215,8 +1394,19 @@ async function buildDirectPumpSolanaPayload({
         sdkQuoteLamports: sdkQuoteLamports.toString(),
         tokenAmount: amount.toString()
       });
+      const creatorVaultOverride = tokenProgram.equals(TOKEN_2022_PROGRAM_ID)
+        ? await fetchObservedPumpBuyV2CreatorVault({
+            connection,
+            signature: observedSignatureFromMetadata(request.metadata),
+            mint
+          })
+        : null;
+      buildTiming.mark("creator_vault_ready", {
+        source: creatorVaultOverride ? "observed-transaction" : "sdk-derived",
+        observedSignature: observedSignatureFromMetadata(request.metadata)
+      });
       const buyInstructions = tokenProgram.equals(TOKEN_2022_PROGRAM_ID)
-        ? PUMP_SDK.buyV2Instructions({
+        ? await PUMP_SDK.buyV2Instructions({
             global,
             bondingCurveAccountInfo: buyState.bondingCurveAccountInfo,
             bondingCurve: buyState.bondingCurve,
@@ -1229,7 +1419,7 @@ async function buildDirectPumpSolanaPayload({
             tokenProgram,
             quoteTokenProgram: TOKEN_PROGRAM_ID
           })
-        : PUMP_SDK.buyInstructions({
+        : await PUMP_SDK.buyInstructions({
             global,
             bondingCurveAccountInfo: buyState.bondingCurveAccountInfo,
             bondingCurve: buyState.bondingCurve,
@@ -1241,8 +1431,20 @@ async function buildDirectPumpSolanaPayload({
             slippage: request.slippagePercent,
             tokenProgram
       });
-      instructions.push(...await buyInstructions);
-      buildTiming.mark("instructions_ready", { instructionCount: instructions.length });
+      const creatorVaultPatched = tokenProgram.equals(TOKEN_2022_PROGRAM_ID)
+        ? patchPumpBuyV2CreatorVault({
+            instructions: buyInstructions,
+            pumpProgramId: pumpModule.PUMP_PROGRAM_ID,
+            creatorVault: creatorVaultOverride,
+            quoteMint: NATIVE_MINT,
+            quoteTokenProgram: TOKEN_PROGRAM_ID
+          })
+        : false;
+      instructions.push(...buyInstructions);
+      buildTiming.mark("instructions_ready", {
+        instructionCount: instructions.length,
+        creatorVaultPatched
+      });
     } else {
       const [resolvedTokenProgram, cachedGlobal, cachedFeeConfig] = await Promise.all([
         resolveMintTokenProgram({ connection, mint }),

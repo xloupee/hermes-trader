@@ -2,6 +2,7 @@ export type LooseRecord = Record<string, unknown>;
 
 export type TelegramChatId = string | number;
 export type AlertModeValue = "migrations" | "newtokens" | "both";
+export type CopyTradeSignalProvider = "pumpportal" | "parallel";
 export type TrailingSellMode = "custom_steps" | "formula";
 export type TrailingSellPercentBasis = "remaining_balance" | "original_position";
 
@@ -82,6 +83,7 @@ export interface BotConfig extends MigrationFormatConfig {
   notifyOnShutdown: boolean;
   copyTradeEnabled: boolean;
   copyTradeDryRun: boolean;
+  copyTradeSignalProvider: CopyTradeSignalProvider;
   copyTradeExecutionProvider: "pumpportal-lightning" | "direct-pump" | "direct-pumpswap" | "direct-auto";
   copyTradeSlippage: number;
   copyTradePriorityFee: number;

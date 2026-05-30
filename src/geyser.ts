@@ -52,7 +52,7 @@ export interface GeyserWalletTradeListenerOptions {
   xToken?: string;
   wallets: GeyserWallet[];
   config: ExplorerConfig;
-  onTrade: (trade: WalletTradeData) => void | Promise<void>;
+  onTrade: (trade: WalletTradeData, timing: { receivedAtMs: number; normalizedAtMs: number }) => void | Promise<void>;
   onReject?: (reject: GeyserWalletTradeReject) => void | Promise<void>;
   onStatus?: (message: string) => void;
   onError?: (error: Error) => void;
@@ -513,6 +513,8 @@ export function createGeyserWalletTradeListener(options: GeyserWalletTradeListen
       return;
     }
 
+    const receivedAtMs = Date.now();
+
     for (const wallet of wallets) {
       if (!geyserUpdateMentionsWallet(update, wallet.address)) {
         continue;
@@ -526,7 +528,10 @@ export function createGeyserWalletTradeListener(options: GeyserWalletTradeListen
       });
 
       if (result.ok) {
-        await options.onTrade(result.trade);
+        await options.onTrade(result.trade, {
+          receivedAtMs,
+          normalizedAtMs: Date.now()
+        });
       } else {
         await options.onReject?.(result);
       }

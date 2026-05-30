@@ -27,7 +27,11 @@ test("index runtime wires Helius receipt and normalization timestamps into copy 
   );
   assert.match(
     indexSource,
-    /handlePumpPortalAccountTrade[\s\S]*sendCopyTradeSimulationAlert\([\s\S]*receivedAtMs,\s*[\r\n\s]*normalizedAtMs: receivedAtMs/
+    /handlePumpPortalAccountTrade[\s\S]*handleWalletTradeSignal\(trade, \{[\s\S]*receivedAtMs,\s*[\r\n\s]*normalizedAtMs: receivedAtMs/
+  );
+  assert.match(
+    indexSource,
+    /handleWalletTradeSignal[\s\S]*sendCopyTradeSimulationAlert\([\s\S]*receivedAtMs,\s*[\r\n\s]*normalizedAtMs/
   );
   assert.match(
     indexSource,
@@ -71,7 +75,7 @@ test("index runtime wires Helius receipt and normalization timestamps into copy 
   );
   assert.match(
     indexSource,
-    /copyTradeBuyIdempotency\.claimBuy\([\s\S]*latencyTracker\.mark\("risk_checked"/
+    /latencyTracker\.mark\("risk_checked"[\s\S]*copyTradeBuyIdempotency\.claimBuy\(/
   );
   assert.doesNotMatch(
     indexSource,

@@ -131,6 +131,36 @@ test("direct PumpSwap builder records pool metadata and WSOL handling instructio
   assert.equal(calls[0].amountBasis, "percent");
 });
 
+test("direct PumpSwap builder appends sell platform fee after sell handling", async () => {
+  const result = await buildDirectPumpSwapTransaction({
+    sdk: {
+      sellBaseInput: () => [{ kind: "pumpswap-sell" }]
+    },
+    request: {
+      ...baseRequest,
+      action: "sell",
+      amount: "100%",
+      amountBasis: "percent",
+      platformFeeInstruction: { kind: "system-transfer", lamports: 10_000_000n }
+    },
+    loadPool: () => ({
+      ok: true,
+      pool: {
+        poolAddress: "Pool1111111111111111111111111111111111111",
+        needsWrappedSolAccount: true
+      }
+    })
+  });
+
+  assert.deepEqual(result.instructions.map((instruction) => instruction.kind), [
+    "create-wsol-account",
+    "sync-wsol-account",
+    "pumpswap-sell",
+    "close-wsol-account",
+    "system-transfer"
+  ]);
+});
+
 function payload(overrides = {}) {
   return {
     provider: "direct-pump",

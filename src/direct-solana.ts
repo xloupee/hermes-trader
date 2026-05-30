@@ -374,6 +374,21 @@ function platformFeeResult(split?: PlatformFeeSplit | null) {
   } : null;
 }
 
+function platformFeeForProceeds(split: PlatformFeeSplit | null | undefined, proceedsLamports: bigint): PlatformFeeSplit | null | undefined {
+  if (!split?.enabled || split.blockedReason || !split.treasury) {
+    return split;
+  }
+
+  const budgetLamports = proceedsLamports < 0n ? 0n : proceedsLamports;
+  const feeLamports = (budgetLamports * BigInt(split.bps)) / 10_000n;
+  return {
+    ...split,
+    budgetLamports,
+    feeLamports,
+    tradeLamports: budgetLamports - feeLamports
+  };
+}
+
 function directSolanaTimingMetadata(stages: DirectSolanaSendStageRecord[]): DirectExecutionTimingMetadata {
   const atMs = Object.fromEntries(stages.map((stage) => [stage.stage, stage.atMs])) as Record<string, number>;
   const duration = (from: DirectSolanaSendStage, to: DirectSolanaSendStage): number | null => {
@@ -519,12 +534,15 @@ async function buildDirectPumpSolanaPayload({
       fetchCachedPumpGlobal(sdk),
       fetchCachedPumpFeeConfig(sdk)
     ]);
-    const instructions = [...computeBudgetInstructions(request.priorityFeeSol), ...platformFeeInstruction({
-      split: request.platformFee,
-      fromPubkey: user
-    })];
+    const instructions = [...computeBudgetInstructions(request.priorityFeeSol)];
+    let appliedPlatformFee = request.platformFee;
 
     if (request.action === "buy") {
+      instructions.push(...platformFeeInstruction({
+        split: request.platformFee,
+        fromPubkey: user
+      }));
+
       if (request.amountBasis !== "sol") {
         return tradeExecutionSkippedResult({
           provider: "direct-pump",
@@ -618,6 +636,7 @@ async function buildDirectPumpSolanaPayload({
         bondingCurve: sellState.bondingCurve,
         amount
       });
+      appliedPlatformFee = platformFeeForProceeds(request.platformFee, BigInt(solAmount.toString()));
 
       const sellInstructions = tokenProgram.equals(TOKEN_2022_PROGRAM_ID)
         ? PUMP_SDK.sellV2Instructions({
@@ -646,6 +665,10 @@ async function buildDirectPumpSolanaPayload({
             cashback: sellState.bondingCurve.isCashbackCoin
           });
       instructions.push(...await sellInstructions);
+      instructions.push(...platformFeeInstruction({
+        split: appliedPlatformFee,
+        fromPubkey: user
+      }));
     }
 
     return {
@@ -663,8 +686,14 @@ async function buildDirectPumpSolanaPayload({
             }
           : {}),
         tokenProgram: tokenProgram.toBase58(),
+        ...(request.action === "sell" && appliedPlatformFee?.enabled
+          ? {
+              platformFeeBasis: "sell_expected_output_lamports"
+            }
+          : {}),
         instructionCount: instructions.length
-      }
+      },
+      platformFee: appliedPlatformFee
     };
   } catch (error) {
     return tradeExecutionFailedResult({
@@ -706,12 +735,15 @@ async function buildDirectPumpSwapSolanaPayload({
 
   try {
     const state = await sdk.swapSolanaState(pool, user);
-    const instructions = [...computeBudgetInstructions(request.priorityFeeSol), ...platformFeeInstruction({
-      split: request.platformFee,
-      fromPubkey: user
-    })];
+    const instructions = [...computeBudgetInstructions(request.priorityFeeSol)];
+    let appliedPlatformFee = request.platformFee;
 
     if (request.action === "buy") {
+      instructions.push(...platformFeeInstruction({
+        split: request.platformFee,
+        fromPubkey: user
+      }));
+
       if (request.amountBasis !== "sol") {
         return tradeExecutionSkippedResult({
           provider: "direct-pumpswap",
@@ -744,10 +776,27 @@ async function buildDirectPumpSwapSolanaPayload({
               tokenProgram: state.baseTokenProgram
             }),
             request.amountLamports
-          )
+        )
         : bn(request.amountLamports);
+      const quote = pumpSwapModule.sellBaseInput({
+        base: amount,
+        slippage: request.slippagePercent,
+        baseReserve: state.poolBaseAmount,
+        quoteReserve: state.poolQuoteAmount,
+        baseMintAccount: state.baseMintAccount,
+        baseMint: state.baseMint,
+        coinCreator: state.pool.coinCreator,
+        creator: state.pool.creator,
+        feeConfig: state.feeConfig,
+        globalConfig: state.globalConfig
+      });
+      appliedPlatformFee = platformFeeForProceeds(request.platformFee, BigInt(quote.minQuote.toString()));
 
       instructions.push(...await PUMP_AMM_SDK.sellBaseInput(state, amount, request.slippagePercent));
+      instructions.push(...platformFeeInstruction({
+        split: appliedPlatformFee,
+        fromPubkey: user
+      }));
     }
 
     return {
@@ -765,8 +814,14 @@ async function buildDirectPumpSwapSolanaPayload({
               sdkQuoteLamports: maxQuoteLamportsForSlippageCap(request.amountLamports, request.slippagePercent).toString()
             }
           : {}),
+        ...(request.action === "sell" && appliedPlatformFee?.enabled
+          ? {
+              platformFeeBasis: "sell_min_output_lamports"
+            }
+          : {}),
         instructionCount: instructions.length
-      }
+      },
+      platformFee: appliedPlatformFee
     };
   } catch (error) {
     return tradeExecutionFailedResult({

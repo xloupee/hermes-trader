@@ -599,6 +599,35 @@ function platformFeeResultFields(split: ReturnType<typeof calculatePlatformFeeSp
     : null;
 }
 
+function calculateCopyTradePlatformFee(action: "buy" | "sell", budgetLamports: bigint | number = 0n): ReturnType<typeof calculatePlatformFeeSplit> {
+  return calculatePlatformFeeSplit({
+    action,
+    budgetLamports,
+    config: {
+      enabled: config.platformFeeEnabled,
+      bps: config.platformFeeBps,
+      treasury: config.platformFeeTreasury,
+      validateTreasury: validateSolanaPublicKey
+    }
+  });
+}
+
+function copyTradePlatformFeeBlockedReason({
+  action,
+  platformFee,
+  provider
+}: {
+  action: "buy" | "sell";
+  platformFee: ReturnType<typeof calculatePlatformFeeSplit>;
+  provider: TradeExecutionProvider;
+}): string | null {
+  return platformFee.blockedReason ||
+    (platformFee.enabled && platformFee.tradeLamports <= 0n && action === "buy" ? "copy buy amount is too small after platform fee" : null) ||
+    (platformFee.enabled && !isDirectTradeExecutionProvider(provider)
+      ? "PLATFORM_FEE_ENABLED requires a direct execution provider"
+      : null);
+}
+
 function withPlatformFeeResult(
   result: TradeExecutionResult,
   split: ReturnType<typeof calculatePlatformFeeSplit> | null
@@ -1575,6 +1604,7 @@ async function executeDirectCopyTrade({
   if (!isDirectPayload(built)) {
     return withPlatformFeeResult(built, platformFee);
   }
+  const resultPlatformFee = built.platformFee || platformFee;
 
   if (config.directExecutionBuildOnly) {
     return withPlatformFeeResult({
@@ -1592,7 +1622,7 @@ async function executeDirectCopyTrade({
         ...built.metadata,
         instructionCount: built.instructions.length
       }
-    }, platformFee);
+    }, resultPlatformFee);
   }
 
   if (config.directExecutionSimulateOnly) {
@@ -1600,7 +1630,7 @@ async function executeDirectCopyTrade({
       connection,
       signer,
       payload: built
-    }), platformFee);
+    }), resultPlatformFee);
   }
 
   if (config.directExecutionConfirmationMode === "background" && request.action === "buy") {
@@ -1625,7 +1655,7 @@ async function executeDirectCopyTrade({
           }
         }
       }
-    }), platformFee);
+    }), resultPlatformFee);
   }
 
   return withPlatformFeeResult(await sendSolanaDirectTransaction({
@@ -1649,7 +1679,7 @@ async function executeDirectCopyTrade({
         }
       }
     }
-  }), platformFee);
+  }), resultPlatformFee);
 }
 
 async function executeCopyTradeBuy({
@@ -1716,15 +1746,30 @@ async function executeCopyTradeSell({
   trade,
   request,
   provider,
-  seenSellSignatures
+  seenSellSignatures,
+  platformFee
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
   request: PumpPortalLightningTradeRequest;
   provider: TradeExecutionProvider;
   seenSellSignatures: Set<string>;
+  platformFee: ReturnType<typeof calculatePlatformFeeSplit>;
 }): Promise<{ result: CopyTradeExecutionResult; duplicateSignature: boolean }> {
   if (!isDirectTradeExecutionProvider(provider)) {
+    if (platformFee.enabled) {
+      return {
+        result: tradeExecutionSkippedResult({
+          provider: "pumpportal-lightning",
+          route: "pumpportal-lightning",
+          reason: "PLATFORM_FEE_ENABLED requires a direct execution provider",
+          platformFee: platformFeeResultFields(platformFee),
+          metadata: { observedSignature: trade.signature }
+        }),
+        duplicateSignature: false
+      };
+    }
+
     if (subscriber.tradingWallet?.provider === "local-solana") {
       return {
         result: tradeExecutionSkippedResult({
@@ -1751,6 +1796,7 @@ async function executeCopyTradeSell({
         provider,
         route: provider === "direct-pumpswap" ? "pumpswap-amm" : provider === "direct-pump" ? "pump-bonding-curve" : "auto",
         reason: "direct trailing sell requires a percent amount",
+        platformFee: platformFeeResultFields(platformFee),
         metadata: { observedSignature: trade.signature }
       })
     : await executeDirectCopyTrade({
@@ -1759,6 +1805,7 @@ async function executeCopyTradeSell({
         request,
         amountLamports: percentBasisPoints,
         amountBasis: "percent",
+        platformFee,
         metadata: {
           observedSignature: trade.signature,
           sourceWallet: trade.targetWallet
@@ -1863,21 +1910,12 @@ async function sendCopyTradeSimulationAlert(
       return;
     }
 
-    const platformFee = calculatePlatformFeeSplit({
+    const platformFee = calculateCopyTradePlatformFee("buy", solToLamports(amountSol));
+    const platformFeeBlockedReason = copyTradePlatformFeeBlockedReason({
       action: "buy",
-      budgetLamports: solToLamports(amountSol),
-      config: {
-        enabled: config.platformFeeEnabled,
-        bps: config.platformFeeBps,
-        treasury: config.platformFeeTreasury,
-        validateTreasury: validateSolanaPublicKey
-      }
+      platformFee,
+      provider: executionProvider
     });
-    const platformFeeBlockedReason = platformFee.blockedReason ||
-      (platformFee.enabled && platformFee.tradeLamports <= 0n ? "copy buy amount is too small after platform fee" : null) ||
-      (platformFee.enabled && !isDirectTradeExecutionProvider(executionProvider)
-        ? "PLATFORM_FEE_ENABLED requires a direct execution provider"
-        : null);
 
     if (platformFeeBlockedReason) {
       skipWithLatencyLog(platformFeeBlockedReason);
@@ -2944,11 +2982,19 @@ async function buildAndNotifyBuyPressureSell({
     status: liveBlockedReason ? "blocked" : "ok",
     reason: liveBlockedReason
   });
-  const positionBlockedReason = request && !setupBlockedReason && !requestRiskBlockedReason && !liveBlockedReason
+  const platformFee = calculateCopyTradePlatformFee("sell");
+  const platformFeeBlockedReason = request && !setupBlockedReason
+    ? copyTradePlatformFeeBlockedReason({
+        action: "sell",
+        platformFee,
+        provider: watcher.executionProvider
+      })
+    : null;
+  const positionBlockedReason = request && !setupBlockedReason && !requestRiskBlockedReason && !liveBlockedReason && !platformFeeBlockedReason
     ? await copyTradePositionBalanceBlockedReason(watcher)
     : null;
 
-  const blockedReason = setupBlockedReason || liveBlockedReason || requestRiskBlockedReason || positionBlockedReason;
+  const blockedReason = setupBlockedReason || liveBlockedReason || requestRiskBlockedReason || platformFeeBlockedReason || positionBlockedReason;
   let result: CopyTradeExecutionResult;
   let duplicateSignature = false;
 
@@ -2972,7 +3018,8 @@ async function buildAndNotifyBuyPressureSell({
       trade: watcher.trade,
       request,
       provider: watcher.executionProvider,
-      seenSellSignatures: new Set<string>()
+      seenSellSignatures: new Set<string>(),
+      platformFee
     });
     result = execution.result;
     duplicateSignature = execution.duplicateSignature;
@@ -3270,8 +3317,14 @@ async function buildAndNotifyTrailingSell({
     status: liveBlockedReason ? "blocked" : "ok",
     reason: liveBlockedReason
   });
+  const platformFee = calculateCopyTradePlatformFee("sell");
+  const platformFeeBlockedReason = copyTradePlatformFeeBlockedReason({
+    action: "sell",
+    platformFee,
+    provider: executionProvider
+  });
 
-  const blockedReason = liveBlockedReason || requestRiskBlockedReason;
+  const blockedReason = liveBlockedReason || requestRiskBlockedReason || platformFeeBlockedReason;
   if (blockedReason) {
     const result = tradeExecutionSkippedResult({
       provider: executionProvider,
@@ -3309,7 +3362,8 @@ async function buildAndNotifyTrailingSell({
     trade,
     request,
     provider: executionProvider,
-    seenSellSignatures
+    seenSellSignatures,
+    platformFee
   });
   const trailingSellSkipped = Boolean(result.errorText?.startsWith("Trailing sell skipped:"));
   latencyTracker.mark("submit_finished", {

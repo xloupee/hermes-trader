@@ -50,12 +50,17 @@ let pumpSwapSdkModule: PumpSwapSdkModule | null = null;
 const pumpSdkByConnection = new WeakMap<Connection, OnlinePumpSdkInstance>();
 const pumpAmmSdkByConnection = new WeakMap<Connection, OnlinePumpAmmSdkInstance>();
 const PUMP_CONFIG_CACHE_MS = 60_000;
+const MINT_TOKEN_PROGRAM_CACHE_MS = 10 * 60_000;
 const MAX_BLOCKHASH_CACHE_MS = 30_000;
 const latestBlockhashByConnection = new WeakMap<Connection, {
   value: LatestBlockhash | null;
   expiresAtMs: number;
   inflight: Promise<LatestBlockhash> | null;
 }>();
+const mintTokenProgramByConnection = new WeakMap<Connection, Map<string, {
+  value: PublicKey;
+  expiresAtMs: number;
+}>>();
 let pumpGlobalCache: { value: PumpGlobal; expiresAtMs: number } | null = null;
 let pumpGlobalInflight: Promise<PumpGlobal> | null = null;
 let pumpFeeConfigCache: { value: PumpFeeConfig | null; expiresAtMs: number } | null = null;
@@ -226,6 +231,31 @@ export interface DirectSolanaBuildRequest {
   metadata?: Record<string, unknown>;
 }
 
+export function directAutoProviderOrderForRequest(
+  request: Pick<DirectSolanaBuildRequest, "metadata">
+): Array<"direct-pumpswap" | "direct-pump"> {
+  const hints = [
+    request.metadata?.observedPool,
+    request.metadata?.pool,
+    request.metadata?.observedSource,
+    request.metadata?.source,
+    request.metadata?.tradeSource
+  ]
+    .filter((value): value is string | number | boolean => ["string", "number", "boolean"].includes(typeof value))
+    .map((value) => String(value).trim().toLowerCase())
+    .filter(Boolean);
+
+  if (hints.some((hint) => hint === "pump-amm" || hint === "pumpswap" || hint.includes("pump-amm") || hint.includes("pumpswap"))) {
+    return ["direct-pumpswap", "direct-pump"];
+  }
+
+  if (hints.some((hint) => hint === "pump" || hint === "pump_fun" || hint === "pump-fun" || hint.includes("bonding"))) {
+    return ["direct-pump", "direct-pumpswap"];
+  }
+
+  return ["direct-pumpswap", "direct-pump"];
+}
+
 export interface SolanaDirectSendConfig {
   gate: DirectExecutionGateConfig;
   simulateBeforeSend?: boolean;
@@ -321,22 +351,40 @@ function bn(value: bigint): BN {
 
 export async function resolveMintTokenProgram({
   connection,
-  mint
+  mint,
+  cacheMs = MINT_TOKEN_PROGRAM_CACHE_MS
 }: {
   connection: Connection;
   mint: PublicKey;
+  cacheMs?: number;
 }): Promise<PublicKey> {
+  const mintAddress = mint.toBase58();
+  const now = Date.now();
+  let cache = mintTokenProgramByConnection.get(connection);
+  const cached = cache?.get(mintAddress);
+  if (cached && cached.expiresAtMs > now) {
+    return cached.value;
+  }
+
   const mintInfo = await connection.getAccountInfo(mint, "confirmed");
 
   if (!mintInfo) {
-    throw new Error(`mint account not found: ${mint.toBase58()}`);
+    throw new Error(`mint account not found: ${mintAddress}`);
   }
 
   if (mintInfo.owner.equals(TOKEN_PROGRAM_ID) || mintInfo.owner.equals(TOKEN_2022_PROGRAM_ID)) {
+    if (cacheMs > 0) {
+      cache ||= new Map();
+      cache.set(mintAddress, {
+        value: mintInfo.owner,
+        expiresAtMs: Date.now() + cacheMs
+      });
+      mintTokenProgramByConnection.set(connection, cache);
+    }
     return mintInfo.owner;
   }
 
-  throw new Error(`mint account is not owned by SPL Token or Token-2022: ${mint.toBase58()}`);
+  throw new Error(`mint account is not owned by SPL Token or Token-2022: ${mintAddress}`);
 }
 
 async function tokenBalanceRaw({
@@ -451,41 +499,43 @@ export async function buildDirectSolanaPayload({
   request: DirectSolanaBuildRequest;
 }): Promise<TradeExecutionResult | DirectTransactionPayload> {
   if (request.provider === "direct-auto") {
+    const providerOrder = directAutoProviderOrderForRequest(request);
+    const attemptBuilders = {
+      "direct-pumpswap": () => buildDirectPumpSwapSolanaPayload({
+        connection,
+        request: {
+          ...request,
+          provider: "direct-pumpswap" as const,
+          metadata: {
+            ...(request.metadata || {}),
+            requestedProvider: "direct-auto",
+            autoRouteAttempt: "direct-pumpswap",
+            autoRoutePreference: providerOrder
+          }
+        }
+      }),
+      "direct-pump": () => buildDirectPumpSolanaPayload({
+        connection,
+        request: {
+          ...request,
+          provider: "direct-pump" as const,
+          metadata: {
+            ...(request.metadata || {}),
+            requestedProvider: "direct-auto",
+            autoRouteAttempt: "direct-pump",
+            autoRoutePreference: providerOrder
+          }
+        }
+      })
+    };
+
     return buildDirectAutoTransactionPayload({
       metadata: request.metadata,
       platformFee: platformFeeResult(request.platformFee),
-      attempts: [
-        {
-          provider: "direct-pumpswap",
-          build: () => buildDirectPumpSwapSolanaPayload({
-            connection,
-            request: {
-              ...request,
-              provider: "direct-pumpswap",
-              metadata: {
-                ...(request.metadata || {}),
-                requestedProvider: "direct-auto",
-                autoRouteAttempt: "direct-pumpswap"
-              }
-            }
-          })
-        },
-        {
-          provider: "direct-pump",
-          build: () => buildDirectPumpSolanaPayload({
-            connection,
-            request: {
-              ...request,
-              provider: "direct-pump",
-              metadata: {
-                ...(request.metadata || {}),
-                requestedProvider: "direct-auto",
-                autoRouteAttempt: "direct-pump"
-              }
-            }
-          })
-        }
-      ]
+      attempts: providerOrder.map((provider) => ({
+        provider,
+        build: attemptBuilders[provider]
+      }))
     });
   }
 

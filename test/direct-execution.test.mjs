@@ -6,7 +6,7 @@ import { buildDirectAutoTransactionPayload } from "../dist/direct-auto.js";
 import { buildDirectPumpTransaction } from "../dist/direct-pump.js";
 import { buildDirectPumpSwapTransaction } from "../dist/direct-pumpswap.js";
 import { sendDirectTransaction } from "../dist/direct-sender.js";
-import { resolveMintTokenProgram, sendSolanaDirectTransaction } from "../dist/direct-solana.js";
+import { directAutoProviderOrderForRequest, resolveMintTokenProgram, sendSolanaDirectTransaction } from "../dist/direct-solana.js";
 import { maxQuoteLamportsForSlippageCap } from "../dist/direct-budget.js";
 import { tradeExecutionSkippedResult } from "../dist/trade-execution.js";
 
@@ -246,6 +246,32 @@ test("direct-auto records thrown route-builder failures and continues to the nex
 
   assert.deepEqual(attempts, ["direct-pumpswap", "direct-pump"]);
   assert.equal(result.provider, "direct-pump");
+});
+
+test("direct-auto prefers Pump first when observed route hints point at bonding curve", () => {
+  assert.deepEqual(
+    directAutoProviderOrderForRequest({ metadata: { observedPool: "pump" } }),
+    ["direct-pump", "direct-pumpswap"]
+  );
+  assert.deepEqual(
+    directAutoProviderOrderForRequest({ metadata: { observedSource: "pump_fun" } }),
+    ["direct-pump", "direct-pumpswap"]
+  );
+});
+
+test("direct-auto preserves PumpSwap first for AMM hints and unknown routes", () => {
+  assert.deepEqual(
+    directAutoProviderOrderForRequest({ metadata: { observedPool: "pump-amm" } }),
+    ["direct-pumpswap", "direct-pump"]
+  );
+  assert.deepEqual(
+    directAutoProviderOrderForRequest({ metadata: { observedPool: "pumpswap" } }),
+    ["direct-pumpswap", "direct-pump"]
+  );
+  assert.deepEqual(
+    directAutoProviderOrderForRequest({ metadata: { observedPool: "unknown" } }),
+    ["direct-pumpswap", "direct-pump"]
+  );
 });
 
 test("direct sender fails closed when direct live gates are missing", async () => {
@@ -705,6 +731,24 @@ test("Solana direct builder resolves legacy and Token-2022 mint programs", async
     mint
   });
   assert.equal(token2022Program.toBase58(), TOKEN_2022_PROGRAM_ID.toBase58());
+});
+
+test("Solana direct builder caches mint token program resolution per connection", async () => {
+  const mint = Keypair.generate().publicKey;
+  let accountInfoCalls = 0;
+  const connection = {
+    getAccountInfo: () => {
+      accountInfoCalls += 1;
+      return { owner: TOKEN_PROGRAM_ID };
+    }
+  };
+
+  const first = await resolveMintTokenProgram({ connection, mint });
+  const second = await resolveMintTokenProgram({ connection, mint });
+
+  assert.equal(first.toBase58(), TOKEN_PROGRAM_ID.toBase58());
+  assert.equal(second.toBase58(), TOKEN_PROGRAM_ID.toBase58());
+  assert.equal(accountInfoCalls, 1);
 });
 
 test("Solana direct builder rejects missing or non-token mint accounts", async () => {

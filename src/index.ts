@@ -1775,6 +1775,8 @@ async function executeCopyTradeBuy({
     metadata: {
       observedSignature: trade.signature,
       sourceWallet: trade.targetWallet,
+      observedPool: trade.pool || request.pool || null,
+      observedSource: trade.source || null,
       budgetLamports: platformFee.budgetLamports.toString()
     }
   });
@@ -1847,7 +1849,9 @@ async function executeCopyTradeSell({
         platformFee,
         metadata: {
           observedSignature: trade.signature,
-          sourceWallet: trade.targetWallet
+          sourceWallet: trade.targetWallet,
+          observedPool: trade.pool || request.pool || null,
+          observedSource: trade.source || null
         }
       });
 

@@ -327,6 +327,40 @@ export function formatTradeExecutionResultLog(result: TradeExecutionResult): str
     }
   }
 
+  const buildTiming = result.metadata.directBuildTiming;
+  if (buildTiming && typeof buildTiming === "object" && !Array.isArray(buildTiming)) {
+    const totalMs = (buildTiming as { totalMs?: unknown }).totalMs;
+    const stages = (buildTiming as { stages?: unknown }).stages;
+    const buyAccounts = Array.isArray(stages)
+      ? stages.find((record) => {
+        return record &&
+          typeof record === "object" &&
+          (record as { stage?: unknown }).stage === "buy_accounts_ready";
+      }) as Record<string, unknown> | undefined
+      : undefined;
+
+    if (typeof totalMs === "number") {
+      parts.push(`directBuildMs=${totalMs}`);
+    }
+    if (buyAccounts) {
+      if (typeof buyAccounts.source === "string") {
+        parts.push(`directBuyState=${buyAccounts.source}`);
+      }
+      if (typeof buyAccounts.cachedStateSource === "string") {
+        parts.push(`directBuyStateSource=${buyAccounts.cachedStateSource}`);
+      }
+      if (typeof buyAccounts.cachedStateAgeMs === "number") {
+        parts.push(`directBuyStateAgeMs=${buyAccounts.cachedStateAgeMs}`);
+      }
+      if (typeof buyAccounts.tokenProgram === "string") {
+        parts.push(`tokenProgram=${buyAccounts.tokenProgram}`);
+      }
+      if (buyAccounts.forceFreshBuyState === true) {
+        parts.push("forceFreshBuyState=true");
+      }
+    }
+  }
+
   if (result.errorText) {
     parts.push(`error=${result.errorText}`);
   }

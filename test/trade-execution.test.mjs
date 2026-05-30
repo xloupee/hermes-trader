@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
 import {
   buildDirectRouteMetadata,
   directExecutionLiveBlockedReason,
@@ -117,4 +118,35 @@ test("provider-neutral result log includes platform fee accounting", () => {
   assert.match(formatTradeExecutionResultLog(result), /platformFeeBps=100/);
   assert.match(formatTradeExecutionResultLog(result), /tradeLamports=990/);
   assert.match(formatTradeExecutionResultLog(result), /budgetLamports=1000/);
+});
+
+test("provider-neutral result log includes direct Pump buy-state timing", () => {
+  const result = tradeExecutionSkippedResult({
+    provider: "direct-pump",
+    route: "pump-bonding-curve",
+    reason: "build-only",
+    metadata: {
+      directBuildTiming: {
+        totalMs: 42,
+        stages: [
+          {
+            stage: "buy_accounts_ready",
+            source: "rpc",
+            cachedStateSource: "rpc-bonding-curve-prefetch",
+            cachedStateAgeMs: 12,
+            tokenProgram: TOKEN_2022_PROGRAM_ID.toBase58(),
+            forceFreshBuyState: true
+          }
+        ]
+      }
+    }
+  });
+
+  const log = formatTradeExecutionResultLog(result);
+  assert.match(log, /directBuildMs=42/);
+  assert.match(log, /directBuyState=rpc/);
+  assert.match(log, /directBuyStateSource=rpc-bonding-curve-prefetch/);
+  assert.match(log, /directBuyStateAgeMs=12/);
+  assert.match(log, new RegExp(`tokenProgram=${TOKEN_2022_PROGRAM_ID.toBase58()}`));
+  assert.match(log, /forceFreshBuyState=true/);
 });

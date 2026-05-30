@@ -2,7 +2,7 @@ import "dotenv/config";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Connection, PublicKey } from "@solana/web3.js";
-import { buildMigrationReplyMarkup, extractMigrationData, formatMigrationMessage, getEventId } from "./format.js";
+import { buildMigrationReplyMarkup, escapeHtml, extractMigrationData, formatMigrationMessage, getEventId } from "./format.js";
 import { createTelegramCommandPoller } from "./commands.js";
 import {
   copyTradeBuyRiskBlockedReason,
@@ -952,6 +952,46 @@ function cachedLocalSolanaSigner(tradingWallet: TradingWallet): ReturnType<typeo
   return signer;
 }
 
+function warmLocalSolanaSignerCache(): void {
+  if (!encryptionSecretReady(config.pumpPortalWalletKeyEncryptionSecret)) {
+    return;
+  }
+
+  const walletsByPublicKey = new Map<string, TradingWallet>();
+
+  for (const subscriber of subscribers.list()) {
+    const wallets = [subscriber.tradingWallet, ...(subscriber.tradingWallets || [])].filter(
+      (wallet): wallet is TradingWallet =>
+        Boolean(wallet?.publicKey) &&
+        wallet?.provider === "local-solana" &&
+        Boolean(wallet?.encryptedSecretKey)
+    );
+
+    for (const wallet of wallets) {
+      walletsByPublicKey.set(wallet.publicKey, wallet);
+    }
+  }
+
+  if (walletsByPublicKey.size === 0) {
+    return;
+  }
+
+  let warmed = 0;
+  let failed = 0;
+
+  for (const wallet of walletsByPublicKey.values()) {
+    try {
+      cachedLocalSolanaSigner(wallet);
+      warmed += 1;
+    } catch (error) {
+      failed += 1;
+      console.warn(`Local Solana signer warmup failed for ${wallet.publicKey}: ${errorMessage(error)}`);
+    }
+  }
+
+  console.log(`Local Solana signer cache warmed: warmed=${warmed} failed=${failed}`);
+}
+
 function percentAmountToBasisPoints(amount: number | string): bigint | null {
   if (typeof amount === "number") {
     return null;
@@ -1741,6 +1781,7 @@ async function executeDirectCopyTrade({
   amountBasis,
   platformFee = null,
   metadata = {},
+  forceFreshBuyState = false,
   onLatencyMilestone
 }: {
   subscriber: SubscriberRecord;
@@ -1750,6 +1791,7 @@ async function executeDirectCopyTrade({
   amountBasis: "sol" | "percent" | "token";
   platformFee?: ReturnType<typeof calculatePlatformFeeSplit> | null;
   metadata?: Record<string, unknown>;
+  forceFreshBuyState?: boolean;
   onLatencyMilestone?: (milestone: CopyTradeLatencyMilestone, details?: CopyTradeLatencyMilestoneDetails) => void;
 }): Promise<TradeExecutionResult> {
   const tradingWallet = subscriber.tradingWallet;
@@ -1778,6 +1820,7 @@ async function executeDirectCopyTrade({
       platformFee: platformFee ? platformFeeResultFields(platformFee) : null
     });
   }
+  onLatencyMilestone?.("direct_wallet_checked", { status: "ok" });
 
   if (!encryptionSecretReady(config.pumpPortalWalletKeyEncryptionSecret)) {
     return tradeExecutionSkippedResult({
@@ -1801,15 +1844,19 @@ async function executeDirectCopyTrade({
       platformFee: platformFee ? platformFeeResultFields(platformFee) : null
     });
   }
+  onLatencyMilestone?.("direct_signer_ready", { status: "ok" });
   const connection = directSolanaConnection;
 
   if (config.directExecutionBlockhashCacheMs > 0) {
+    onLatencyMilestone?.("direct_warmup_started", { status: "blockhash" });
     warmDirectSolanaBlockhash({
       connection,
       cacheMs: config.directExecutionBlockhashCacheMs
     }).catch((error) => {
       console.warn(`Direct execution pre-build blockhash warmup failed: ${errorMessage(error)}`);
     });
+  } else {
+    onLatencyMilestone?.("direct_warmup_started", { status: "disabled" });
   }
 
   onLatencyMilestone?.("direct_build_started");
@@ -1825,7 +1872,8 @@ async function executeDirectCopyTrade({
       priorityFeeSol: request.priorityFee,
       walletPublicKey: tradingWallet.publicKey,
       platformFee,
-      metadata
+      metadata,
+      forceFreshBuyState
     }
   });
   onLatencyMilestone?.("direct_build_finished", {
@@ -1961,7 +2009,14 @@ async function executeCopyTradeBuy({
     });
   }
 
-  refreshDirectPumpFastBuyStateFromTrade(trade);
+  const refreshedFastState = refreshDirectPumpFastBuyStateFromTrade(trade);
+  onLatencyMilestone?.("direct_buy_state_refreshed", {
+    status: refreshedFastState ? "refreshed" : "skipped"
+  });
+  const forceFreshBuyState = request.action === "buy" &&
+    trade.pool === "pump" &&
+    !refreshedFastState &&
+    trade.provider !== "pumpportal";
 
   return executeDirectCopyTrade({
     subscriber,
@@ -1970,12 +2025,14 @@ async function executeCopyTradeBuy({
     amountLamports: platformFee.tradeLamports,
     amountBasis: "sol",
     platformFee,
+    forceFreshBuyState,
     onLatencyMilestone,
     metadata: {
       observedSignature: trade.signature,
       sourceWallet: trade.targetWallet,
       observedPool: trade.pool || request.pool || null,
       observedSource: trade.source || null,
+      forceFreshBuyState,
       budgetLamports: platformFee.budgetLamports.toString()
     }
   });
@@ -2581,12 +2638,14 @@ async function scheduleCopyTradeTrailingSellsAfterConfirmation({
     return;
   }
 
-  const confirmed = await waitForSignatureConfirmation(buySignature);
-  if (!confirmed) {
+  const confirmation = await waitForSignatureConfirmationResult(buySignature);
+  if (!confirmation.confirmed) {
     await notifySkippedTrailingSellSchedule({
       subscriber,
       trade,
-      reason: "copy buy was not confirmed before trailing sell scheduling timeout",
+      reason: confirmation.errorText
+        ? `copy buy was not confirmed: ${confirmation.errorText}`
+        : "copy buy was not confirmed before trailing sell scheduling timeout",
       replyToMessageId
     });
     return;
@@ -2706,21 +2765,24 @@ async function watchSubmittedCopyTradeBuy({
     return;
   }
 
-  const confirmed = await waitForSignatureConfirmation(buySignature);
-  if (!confirmed) {
-    console.warn(`Submitted copy buy did not confirm before timeout: ${buySignature}`);
+  const confirmation = await waitForSignatureConfirmationResult(buySignature);
+  if (!confirmation.confirmed) {
+    const errorText = confirmation.errorText || "copy buy was not confirmed before trailing sell scheduling timeout";
+    console.warn(`Submitted copy buy did not confirm: ${buySignature}: ${errorText}`);
     await updateRecordedCopyTradeBuyStatus({
       subscriber,
       trade,
       buySignature,
-      status: "expired",
-      errorText: "copy buy was not confirmed before trailing sell scheduling timeout"
+      status: confirmation.timedOut ? "expired" : "failed",
+      errorText
     });
     await sendCopyTradeBuyConfirmationUpdate({
       subscriber,
       trade,
       buySignature,
       confirmed: false,
+      timedOut: confirmation.timedOut,
+      errorText,
       replyToMessageId
     });
     return;
@@ -2757,19 +2819,23 @@ async function sendCopyTradeBuyConfirmationUpdate({
   trade,
   buySignature,
   confirmed,
+  timedOut = false,
+  errorText = null,
   replyToMessageId = null
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
   buySignature: string;
   confirmed: boolean;
+  timedOut?: boolean;
+  errorText?: string | null;
   replyToMessageId?: number | null;
 }): Promise<void> {
   if (!trade.mint) {
     return;
   }
 
-  const statusLine = confirmed ? "🟢 Buy confirmed" : "🟡 Confirmation timed out";
+  const statusLine = confirmed ? "🟢 Buy confirmed" : timedOut ? "🟡 Confirmation timed out" : "🔴 Buy failed";
   const lines = [
     "<b>⚡ Auto Copy Buy</b>",
     statusLine,
@@ -2779,6 +2845,9 @@ async function sendCopyTradeBuyConfirmationUpdate({
     "",
     `<b>Tx:</b> <code>${buySignature}</code>`
   ];
+  if (!confirmed && errorText && !timedOut) {
+    lines.push("", `<b>Reason:</b> ${escapeHtml(errorText)}`);
+  }
 
   try {
     await sendTelegramMessage({
@@ -3780,7 +3849,17 @@ function trackedDelay(ms: number): Promise<void> {
   });
 }
 
-async function waitForSignatureConfirmation(signature: string, timeoutMs = 30000, pollMs = 2000): Promise<boolean> {
+type SignatureConfirmationResult = {
+  confirmed: boolean;
+  timedOut: boolean;
+  errorText: string | null;
+};
+
+async function waitForSignatureConfirmationResult(
+  signature: string,
+  timeoutMs = 30000,
+  pollMs = 2000
+): Promise<SignatureConfirmationResult> {
   const startedAt = Date.now();
 
   while (!isShuttingDown && Date.now() - startedAt < timeoutMs) {
@@ -3801,22 +3880,27 @@ async function waitForSignatureConfirmation(signature: string, timeoutMs = 30000
       const status = body.result?.value?.[0] || null;
 
       if (status?.err) {
-        console.warn(`Signature ${signature} landed with error: ${JSON.stringify(status.err)}`);
-        return false;
+        const errorText = `transaction landed with error: ${JSON.stringify(status.err)}`;
+        console.warn(`Signature ${signature} ${errorText}`);
+        return { confirmed: false, timedOut: false, errorText };
       }
 
       if (status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized") {
-        return true;
+        return { confirmed: true, timedOut: false, errorText: null };
       }
     } catch (error) {
-      console.warn(`Could not check trailing sell confirmation for ${signature}: ${errorMessage(error)}`);
+      console.warn(`Could not check signature confirmation for ${signature}: ${errorMessage(error)}`);
     }
 
     await trackedDelay(pollMs);
   }
 
-  console.warn(`Timed out waiting for trailing sell confirmation: ${signature}`);
-  return false;
+  console.warn(`Timed out waiting for signature confirmation: ${signature}`);
+  return { confirmed: false, timedOut: true, errorText: "confirmation timed out" };
+}
+
+async function waitForSignatureConfirmation(signature: string, timeoutMs = 30000, pollMs = 2000): Promise<boolean> {
+  return (await waitForSignatureConfirmationResult(signature, timeoutMs, pollMs)).confirmed;
 }
 
 async function recordCopyTradeExecution({
@@ -4218,7 +4302,6 @@ function scheduleDirectPumpFastBuyStatePrime(event: LooseRecord): void {
   if (primeDirectPumpFastBuyStateFromEvent(event)) {
     directPumpFastStatePrefetchStats.directPrimed += 1;
     logDirectPumpFastStatePrefetchStats();
-    return;
   }
 
   const mint = pickEventMint(event);
@@ -4603,6 +4686,7 @@ console.log(`Using ${subscriberStoreLabel} subscriber storage`);
 console.log(`Loaded ${subscribers.count()} verified Telegram subscriber(s)`);
 logCopyTradeExecutionState();
 warmPlatformFeeTreasuryAccount();
+warmLocalSolanaSignerCache();
 warmDirectExecutionHotPath();
 warmDirectExecutionBlockhashCache();
   // Supabase-backed subscribers load at startup, so compute account-trade

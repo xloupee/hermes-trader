@@ -206,6 +206,52 @@ function createMissingSupabaseIdempotencyClient() {
   };
 }
 
+function createProviderConstraintSupabaseIdempotencyClient() {
+  const providerCheck = {
+    code: "23514",
+    message: 'new row for relation "telegram_copytrade_buy_idempotency" violates check constraint "telegram_copytrade_buy_idempotency_provider_check"'
+  };
+
+  return {
+    from() {
+      return {
+        insert() {
+          return Promise.resolve({ error: providerCheck });
+        },
+        select() {
+          return {
+            eq() {
+              return this;
+            },
+            order() {
+              return this;
+            },
+            limit() {
+              return this;
+            },
+            maybeSingle() {
+              return Promise.resolve({ data: null, error: null });
+            }
+          };
+        },
+        update() {
+          return {
+            eq() {
+              return this;
+            },
+            select() {
+              return this;
+            },
+            maybeSingle() {
+              return Promise.resolve({ data: null, error: null });
+            }
+          };
+        }
+      };
+    }
+  };
+}
+
 test("JSON copy buy idempotency blocks duplicate claims before submit", async (t) => {
   const path = await tempStorePath(t);
   const store = createJsonCopyTradeBuyIdempotencyStore({ path });
@@ -422,6 +468,31 @@ test("Supabase copy buy idempotency delegates to JSON fallback when table is una
   assert.equal(stored.records.length, 1);
   assert.equal(stored.records[0].observedSignature, "target-buy-signature-2");
   assert.equal(stored.records[0].status, "claimed");
+});
+
+test("Supabase copy buy idempotency delegates to JSON fallback when provider check is outdated", async (t) => {
+  const path = await tempStorePath(t);
+  const fallback = createJsonCopyTradeBuyIdempotencyStore({ path });
+  const store = createSupabaseCopyTradeBuyIdempotencyStore({
+    client: createProviderConstraintSupabaseIdempotencyClient(),
+    fallback
+  });
+  const input = claimInput({ provider: "geyser" });
+
+  assert.equal((await store.claimBuy(input)).claimed, true);
+  await store.completeBuy(input.key, {
+    ok: true,
+    status: 200,
+    signature: "copy-buy-signature-geyser",
+    errorText: null,
+    raw: { signature: "copy-buy-signature-geyser" }
+  });
+
+  const stored = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(stored.records.length, 1);
+  assert.equal(stored.records[0].provider, "geyser");
+  assert.equal(stored.records[0].status, "submitted");
+  assert.equal(stored.records[0].resultSignature, "copy-buy-signature-geyser");
 });
 
 test("JSON copy buy idempotency blocks same chat and mint across observed signatures", async (t) => {

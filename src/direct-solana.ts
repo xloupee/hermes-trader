@@ -71,6 +71,7 @@ const directPumpFastBuyStateByMint = new Map<string, DirectPumpFastBuyStateCache
 export interface DirectPumpFastBuyStateInput {
   mint: string;
   creator: string;
+  creatorVerified?: boolean;
   tokenProgram: string;
   virtualTokenReserves: string | bigint;
   virtualQuoteReserves: string | bigint;
@@ -102,6 +103,7 @@ export interface DirectPumpFastBuyStateChainSnapshot extends DirectPumpFastBuySt
 interface DirectPumpFastBuyStateCacheEntry {
   mint: PublicKey;
   creator: PublicKey;
+  creatorVerified: boolean;
   tokenProgram: PublicKey;
   virtualTokenReserves: BN;
   virtualQuoteReserves: BN;
@@ -289,6 +291,7 @@ export interface DirectSolanaBuildRequest {
   walletPublicKey: string;
   platformFee?: PlatformFeeSplit | null;
   metadata?: Record<string, unknown>;
+  forceFreshBuyState?: boolean;
 }
 
 export function directAutoProviderOrderForRequest(
@@ -516,6 +519,7 @@ export function primeDirectPumpFastBuyState(input: DirectPumpFastBuyStateInput):
     directPumpFastBuyStateByMint.set(mint.toBase58(), {
       mint,
       creator,
+      creatorVerified: input.creatorVerified === true,
       tokenProgram,
       virtualTokenReserves: bnFromInteger(input.virtualTokenReserves),
       virtualQuoteReserves: bnFromInteger(input.virtualQuoteReserves),
@@ -567,7 +571,15 @@ export function refreshDirectPumpFastBuyStateReserves(input: DirectPumpFastBuySt
 
 function cachedDirectPumpFastBuyState(mint: PublicKey): DirectPumpFastBuyStateCacheEntry | null {
   const cached = directPumpFastBuyStateByMint.get(mint.toBase58());
-  return cached && cached.expiresAtMs > Date.now() ? cached : null;
+  if (!cached || !cached.creatorVerified || cached.expiresAtMs <= Date.now()) {
+    return null;
+  }
+
+  if (!cached.tokenProgram.equals(TOKEN_PROGRAM_ID)) {
+    return null;
+  }
+
+  return cached;
 }
 
 function cachedMintTokenProgram(connection: Connection, mint: PublicKey): PublicKey | null {
@@ -751,6 +763,7 @@ export async function fetchDirectPumpFastBuyStateFromChain({
   return {
     mint: mint.toBase58(),
     creator: bondingCurve.creator.toBase58(),
+    creatorVerified: true,
     tokenProgram: tokenProgram.toBase58(),
     virtualTokenReserves: bondingCurve.virtualTokenReserves.toString(),
     virtualQuoteReserves: bondingCurve.virtualQuoteReserves.toString(),
@@ -807,6 +820,7 @@ function directPumpFastBuyState({
       quoteMint: cached.quoteMint
     },
     associatedUserAccountInfo: null,
+    creatorVerified: cached.creatorVerified,
     source: cached.source,
     observedAtMs: cached.observedAtMs
   };
@@ -990,7 +1004,9 @@ async function buildDirectPumpSolanaPayload({
         });
       }
 
-      const fastBuyState = directPumpFastBuyState({ connection, mint, pumpModule });
+      const fastBuyState = request.forceFreshBuyState
+        ? null
+        : directPumpFastBuyState({ connection, mint, pumpModule });
       const [buyState, cachedGlobal, cachedFeeConfig] = await Promise.all([
         fastBuyState ?? fetchDirectPumpBuyState({
           connection,
@@ -1007,8 +1023,10 @@ async function buildDirectPumpSolanaPayload({
       buildTiming.mark("buy_accounts_ready", {
         tokenProgram: tokenProgram.toBase58(),
         source: fastBuyState ? "cache" : "rpc",
+        forceFreshBuyState: request.forceFreshBuyState === true,
         cachedStateSource: "source" in buyState ? buyState.source : null,
         cachedStateAgeMs: "observedAtMs" in buyState ? Math.max(0, Date.now() - buyState.observedAtMs) : null,
+        creatorVerified: "creatorVerified" in buyState ? buyState.creatorVerified : true,
         feeConfigLoaded: Boolean(feeConfig),
         associatedUserAccountExists: Boolean(buyState.associatedUserAccountInfo),
         bondingCurveComplete: Boolean(buyState.bondingCurve.complete)

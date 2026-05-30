@@ -394,6 +394,14 @@ function isMissingSupabaseRelation(error: SupabaseErrorLike | null): boolean {
   );
 }
 
+function isUnsupportedProviderConstraint(error: SupabaseErrorLike | null): boolean {
+  return Boolean(
+    error &&
+      error.code === "23514" &&
+      /provider_check|provider.*check constraint|violates check constraint/i.test(error.message || "")
+  );
+}
+
 function formatSupabaseError(error: SupabaseErrorLike | null): Error | null {
   return error ? new Error(error.message || "Supabase copy trade idempotency request failed") : null;
 }
@@ -423,7 +431,7 @@ export function createSupabaseCopyTradeBuyIdempotencyStore({
   let warnedAboutFallback = false;
 
   function activateFallback(error: SupabaseErrorLike | null): boolean {
-    if (!fallback || !isMissingSupabaseRelation(error)) {
+    if (!fallback || (!isMissingSupabaseRelation(error) && !isUnsupportedProviderConstraint(error))) {
       return false;
     }
 
@@ -432,8 +440,8 @@ export function createSupabaseCopyTradeBuyIdempotencyStore({
     if (!warnedAboutFallback) {
       warnedAboutFallback = true;
       console.warn(
-        `Supabase copy trade idempotency table is unavailable; using local JSON idempotency fallback: ${
-          error?.message || "missing relation"
+        `Supabase copy trade idempotency table is unavailable or incompatible; using local JSON idempotency fallback: ${
+          error?.message || "schema unavailable"
         }`
       );
     }

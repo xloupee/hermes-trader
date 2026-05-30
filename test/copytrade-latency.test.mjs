@@ -67,23 +67,23 @@ test("index runtime wires Helius receipt and normalization timestamps into copy 
   );
   assert.match(
     indexSource,
-    /fastDirectCopyBuyPath[\s\S]*copyBuySemanticSubmissionGuard\.reserve\(copyBuySemanticKey\)[\s\S]*copyTradeBuyIdempotency\.claimBuy/
+    /fastDirectCopyBuyPath[\s\S]*copyBuySemanticSubmissionGuard\.reserve\(copyBuySemanticKey\)[\s\S]*deferredDurableCopyBuyClaim =/
   );
   assert.match(
     indexSource,
-    /copyTradeBuyIdempotency\.claimBuy\([\s\S]*retryFailed: subscriber\.copyTradeRetryFailedBuys[\s\S]*if \(!idempotencyClaim\.claimed\)/
+    /persistDeferredCopyTradeBuyIdempotency[\s\S]*copyTradeBuyIdempotency\.claimBuy\(claim\.input\)[\s\S]*Fast direct copy buy submitted before durable duplicate check/
   );
   assert.match(
     indexSource,
-    /latencyTracker\.mark\("risk_checked"[\s\S]*copyTradeBuyIdempotency\.claimBuy\(/
+    /else \{[\s\S]*copyTradeBuyIdempotency\.claimBuy\(claimInput\)[\s\S]*if \(!idempotencyClaim\.claimed\)/
   );
-  assert.doesNotMatch(
+  assert.match(
     indexSource,
-    /deferredDurableCopyBuyClaimKey/
+    /latencyTracker\.mark\("submit_started"\)[\s\S]*executeCopyTradeBuy/
   );
-  assert.doesNotMatch(
+  assert.match(
     indexSource,
-    /submitted before durable duplicate check/
+    /else if \(deferredDurableCopyBuyClaim\) \{[\s\S]*persistDeferredCopyTradeBuyIdempotency/
   );
   assert.match(
     indexSource,

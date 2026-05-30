@@ -112,11 +112,14 @@ export interface BotConfig extends MigrationFormatConfig {
   directExecutionLiveEnabled: boolean;
   directExecutionBuildOnly: boolean;
   directExecutionSimulateOnly: boolean;
+  directExecutionSimulateBeforeSend: boolean;
   directExecutionSkipPreflight: boolean;
   directExecutionConfirmationMode: "inline" | "background";
   directExecutionMaxRetries: number;
   directExecutionBlockhashCacheMs: number;
   directExecutionBlockhashWarmIntervalMs: number;
+  directExecutionSdkWarmIntervalMs: number;
+  directExecutionSendRpcUrls: string[];
   directExecutionCanaryChatIds: string[];
   directExecutionCanaryWallets: string[];
   platformFeeEnabled: boolean;
@@ -166,6 +169,7 @@ export interface TelegramChat {
 }
 
 export interface TelegramMessage {
+  message_id?: number;
   text?: string;
   chat?: TelegramChat;
 }

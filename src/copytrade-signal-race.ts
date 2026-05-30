@@ -26,6 +26,8 @@ export interface CopyTradeSignalRaceLogInput {
   reason?: string | null;
   winner?: CopyTradeSignalRaceRecord | null;
   key?: string | null;
+  receivedAtMs?: number | null;
+  normalizedAtMs?: number | null;
 }
 
 function formatNumber(value: number): string {
@@ -197,8 +199,21 @@ export function copyTradeSignalRaceLogPayload({
   outcome,
   reason = null,
   winner = null,
-  key = copyTradeSignalRaceKey(trade)
+  key = copyTradeSignalRaceKey(trade),
+  receivedAtMs = null,
+  normalizedAtMs = null
 }: CopyTradeSignalRaceLogInput): Record<string, unknown> {
+  const timestampMs = tradeTimestampMs(trade);
+  const signalAgeMs = typeof receivedAtMs === "number" && timestampMs !== null
+    ? Math.max(0, receivedAtMs - timestampMs)
+    : null;
+  const normalizedLagMs = typeof receivedAtMs === "number" && typeof normalizedAtMs === "number"
+    ? Math.max(0, normalizedAtMs - receivedAtMs)
+    : null;
+  const winnerDeltaMs = typeof receivedAtMs === "number" && winner?.claimedAtMs
+    ? receivedAtMs - winner.claimedAtMs
+    : null;
+
   return {
     event: "copy_trade_signal_race",
     mode,
@@ -210,6 +225,11 @@ export function copyTradeSignalRaceLogPayload({
     reason,
     raceKey: key,
     winnerProvider: winner?.provider || null,
-    winnerClaimedAtMs: winner?.claimedAtMs || null
+    winnerClaimedAtMs: winner?.claimedAtMs || null,
+    receivedAtMs,
+    normalizedAtMs,
+    signalAgeMs,
+    normalizedLagMs,
+    winnerDeltaMs
   };
 }

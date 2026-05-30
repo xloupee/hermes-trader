@@ -92,7 +92,48 @@ test("copy trade signal race lets PumpPortal first win and Geyser duplicate lose
     reason: null,
     raceKey: copyTradeSignalRaceKey(geyserTrade),
     winnerProvider: "pumpportal",
-    winnerClaimedAtMs: nowMs
+    winnerClaimedAtMs: nowMs,
+    receivedAtMs: null,
+    normalizedAtMs: null,
+    signalAgeMs: null,
+    normalizedLagMs: null,
+    winnerDeltaMs: null
+  });
+});
+
+test("copy trade signal race log includes provider arrival timing deltas", () => {
+  const tracker = createCopyTradeSignalRaceTracker();
+  const pumpPortalTrade = trade({ provider: "pumpportal" });
+  const geyserTrade = trade({ provider: "geyser", source: "GEYSER_PUMP_BONDING_CURVE" });
+
+  tracker.claim(pumpPortalTrade, nowMs + 10);
+  const duplicate = tracker.claim(geyserTrade, nowMs + 18);
+
+  assert.deepEqual(copyTradeSignalRaceLogPayload({
+    mode: "parallel",
+    trade: geyserTrade,
+    outcome: "duplicate",
+    winner: duplicate.record,
+    key: duplicate.key,
+    receivedAtMs: nowMs + 18,
+    normalizedAtMs: nowMs + 21
+  }), {
+    event: "copy_trade_signal_race",
+    mode: "parallel",
+    provider: "geyser",
+    observedSignature: "ObservedSignature11111111111111111111111111",
+    targetWallet: "TargetWallet111111111111111111111111111111",
+    mint: "Mint111111111111111111111111111111111111111",
+    outcome: "duplicate",
+    reason: null,
+    raceKey: copyTradeSignalRaceKey(geyserTrade),
+    winnerProvider: "pumpportal",
+    winnerClaimedAtMs: nowMs + 10,
+    receivedAtMs: nowMs + 18,
+    normalizedAtMs: nowMs + 21,
+    signalAgeMs: 18,
+    normalizedLagMs: 3,
+    winnerDeltaMs: 8
   });
 });
 

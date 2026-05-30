@@ -6,7 +6,16 @@ import { buildDirectAutoTransactionPayload } from "../dist/direct-auto.js";
 import { buildDirectPumpTransaction } from "../dist/direct-pump.js";
 import { buildDirectPumpSwapTransaction } from "../dist/direct-pumpswap.js";
 import { sendDirectTransaction } from "../dist/direct-sender.js";
-import { resolveMintTokenProgram, sendSolanaDirectTransaction } from "../dist/direct-solana.js";
+import {
+  buildDirectSolanaSendConnections,
+  directAutoProviderOrderForRequest,
+  fetchDirectPumpBuyState,
+  primeDirectPumpFastBuyState,
+  refreshDirectPumpFastBuyStateReserves,
+  resolveMintTokenProgram,
+  sendSolanaDirectTransaction,
+  warmDirectSolanaBlockhash
+} from "../dist/direct-solana.js";
 import { maxQuoteLamportsForSlippageCap } from "../dist/direct-budget.js";
 import { tradeExecutionSkippedResult } from "../dist/trade-execution.js";
 
@@ -248,6 +257,32 @@ test("direct-auto records thrown route-builder failures and continues to the nex
   assert.equal(result.provider, "direct-pump");
 });
 
+test("direct-auto prefers Pump first when observed route hints point at bonding curve", () => {
+  assert.deepEqual(
+    directAutoProviderOrderForRequest({ metadata: { observedPool: "pump" } }),
+    ["direct-pump", "direct-pumpswap"]
+  );
+  assert.deepEqual(
+    directAutoProviderOrderForRequest({ metadata: { observedSource: "pump_fun" } }),
+    ["direct-pump", "direct-pumpswap"]
+  );
+});
+
+test("direct-auto preserves PumpSwap first for AMM hints and unknown routes", () => {
+  assert.deepEqual(
+    directAutoProviderOrderForRequest({ metadata: { observedPool: "pump-amm" } }),
+    ["direct-pumpswap", "direct-pump"]
+  );
+  assert.deepEqual(
+    directAutoProviderOrderForRequest({ metadata: { observedPool: "pumpswap" } }),
+    ["direct-pumpswap", "direct-pump"]
+  );
+  assert.deepEqual(
+    directAutoProviderOrderForRequest({ metadata: { observedPool: "unknown" } }),
+    ["direct-pumpswap", "direct-pump"]
+  );
+});
+
 test("direct sender fails closed when direct live gates are missing", async () => {
   const result = await sendDirectTransaction({
     connection: {},
@@ -451,6 +486,64 @@ test("Solana direct sender signs, simulates, sends, and confirms a versioned tra
   assert.equal(result.metadata.directSolanaTiming.simulateBeforeSend, true);
 });
 
+test("Solana direct sender can skip explicit pre-send simulation", async () => {
+  const solanaSigner = Keypair.generate();
+  const payload = {
+    provider: "direct-pump",
+    route: {
+      provider: "direct-pump",
+      route: "pump-bonding-curve",
+      mint: baseRequest.mint,
+      walletPublicKey: solanaSigner.publicKey.toBase58(),
+      poolAddress: null,
+      priorityFeeSol: 0.00005,
+      slippagePercent: 10,
+      amount: "990000000",
+      amountBasis: "sol"
+    },
+    instructions: [
+      SystemProgram.transfer({
+        fromPubkey: solanaSigner.publicKey,
+        toPubkey: solanaSigner.publicKey,
+        lamports: 0
+      })
+    ],
+    signers: [],
+    metadata: {}
+  };
+  let simulateCalls = 0;
+  const stages = [];
+  const result = await sendSolanaDirectTransaction({
+    connection: {
+      getLatestBlockhash: () => ({
+        blockhash: "11111111111111111111111111111111",
+        lastValidBlockHeight: 123
+      }),
+      simulateTransaction: () => {
+        simulateCalls += 1;
+        return { value: { err: null, unitsConsumed: 42 } };
+      },
+      sendRawTransaction: () => "signature-no-sim",
+      confirmTransaction: () => ({ value: { err: null } })
+    },
+    signer: solanaSigner,
+    payload,
+    config: {
+      gate: liveGate,
+      simulateBeforeSend: false,
+      onStage: (stage) => stages.push(stage)
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.signature, "signature-no-sim");
+  assert.equal(simulateCalls, 0);
+  assert.equal(result.metadata.directSolanaTiming.simulateBeforeSend, false);
+  assert.equal(result.metadata.directSolanaTiming.unitsConsumed, null);
+  assert.deepEqual(stages.includes("simulation_started"), false);
+  assert.deepEqual(stages.includes("simulation_finished"), false);
+});
+
 test("Solana direct sender background mode returns after signature without confirmation wait", async () => {
   const solanaSigner = Keypair.generate();
   const payload = {
@@ -575,6 +668,112 @@ test("Solana direct sender reuses a warm blockhash cache", async () => {
   assert.equal(second.metadata.directSolanaTiming.blockhashCacheMs, 30_000);
 });
 
+test("Solana direct blockhash warmer can force refresh an unexpired cache", async () => {
+  let blockhashCalls = 0;
+  const connection = {
+    getLatestBlockhash: () => {
+      blockhashCalls += 1;
+      return {
+        blockhash: blockhashCalls === 1
+          ? "11111111111111111111111111111111"
+          : "22222222222222222222222222222222",
+        lastValidBlockHeight: 123 + blockhashCalls
+      };
+    }
+  };
+
+  await warmDirectSolanaBlockhash({ connection, cacheMs: 30_000 });
+  await warmDirectSolanaBlockhash({ connection, cacheMs: 30_000 });
+  assert.equal(blockhashCalls, 1);
+
+  await warmDirectSolanaBlockhash({ connection, cacheMs: 30_000, forceRefresh: true });
+  assert.equal(blockhashCalls, 2);
+});
+
+test("Solana direct sender can fan out raw sends and returns the first RPC signature", async () => {
+  const solanaSigner = Keypair.generate();
+  const payload = {
+    provider: "direct-pump",
+    route: {
+      provider: "direct-pump",
+      route: "pump-bonding-curve",
+      mint: baseRequest.mint,
+      walletPublicKey: solanaSigner.publicKey.toBase58(),
+      poolAddress: null,
+      priorityFeeSol: 0.00005,
+      slippagePercent: 10,
+      amount: "990000000",
+      amountBasis: "sol"
+    },
+    instructions: [
+      SystemProgram.transfer({
+        fromPubkey: solanaSigner.publicKey,
+        toPubkey: solanaSigner.publicKey,
+        lamports: 0
+      })
+    ],
+    signers: [],
+    metadata: {}
+  };
+  const stages = [];
+  const result = await sendSolanaDirectTransaction({
+    connection: {
+      getLatestBlockhash: () => ({
+        blockhash: "11111111111111111111111111111111",
+        lastValidBlockHeight: 123
+      }),
+      simulateTransaction: () => ({ value: { err: null, unitsConsumed: 42 } }),
+      sendRawTransaction: () => new Promise((resolve) => setTimeout(() => resolve("signature-primary"), 20)),
+      confirmTransaction: () => ({ value: { err: null } })
+    },
+    signer: solanaSigner,
+    payload,
+    config: {
+      gate: liveGate,
+      confirmationMode: "background",
+      simulateBeforeSend: false,
+      sendConnections: [
+        {
+          label: "primary",
+          url: "https://primary.example",
+          connection: {
+            sendRawTransaction: () => new Promise((resolve) => setTimeout(() => resolve("signature-primary"), 20))
+          }
+        },
+        {
+          label: "fanout-1",
+          url: "https://fanout.example",
+          connection: {
+            sendRawTransaction: () => "signature-fanout"
+          }
+        }
+      ],
+      onStage: (stage, details) => stages.push({ stage, ...details })
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.signature, "signature-fanout");
+  assert.equal(result.metadata.directSolanaTiming.rawSendRpcCount, 2);
+  assert.equal(result.metadata.directSolanaTiming.rawSendWinner, "fanout-1");
+  assert.equal(stages.find((stage) => stage.stage === "raw_send_started").rpcCount, 2);
+});
+
+test("Solana direct send connection builder dedupes primary and labels fanout RPCs", () => {
+  const primaryConnection = { sendRawTransaction: () => "signature-primary" };
+  const connections = buildDirectSolanaSendConnections({
+    primaryConnection,
+    primaryUrl: "https://primary.example",
+    urls: ["https://primary.example", "https://fanout.example"]
+  });
+
+  assert.equal(connections.length, 2);
+  assert.equal(connections[0].label, "primary");
+  assert.equal(connections[0].connection, primaryConnection);
+  assert.equal(connections[1].label, "fanout-1");
+  assert.equal(connections[1].url, "https://fanout.example");
+});
+
 test("Solana direct sender clamps excessive blockhash cache windows", async () => {
   const solanaSigner = Keypair.generate();
   const payload = {
@@ -647,6 +846,104 @@ test("Solana direct builder resolves legacy and Token-2022 mint programs", async
     mint
   });
   assert.equal(token2022Program.toBase58(), TOKEN_2022_PROGRAM_ID.toBase58());
+});
+
+test("Solana direct builder caches mint token program resolution per connection", async () => {
+  const mint = Keypair.generate().publicKey;
+  let accountInfoCalls = 0;
+  const connection = {
+    getAccountInfo: () => {
+      accountInfoCalls += 1;
+      return { owner: TOKEN_PROGRAM_ID };
+    }
+  };
+
+  const first = await resolveMintTokenProgram({ connection, mint });
+  const second = await resolveMintTokenProgram({ connection, mint });
+
+  assert.equal(first.toBase58(), TOKEN_PROGRAM_ID.toBase58());
+  assert.equal(second.toBase58(), TOKEN_PROGRAM_ID.toBase58());
+  assert.equal(accountInfoCalls, 1);
+});
+
+test("Solana direct Pump buy state batches mint, bonding curve, and both ATA candidates", async () => {
+  const mint = Keypair.generate().publicKey;
+  const user = Keypair.generate().publicKey;
+  const bondingCurve = Keypair.generate().publicKey;
+  const legacyAtaInfo = { owner: TOKEN_PROGRAM_ID, data: Buffer.alloc(0) };
+  const token2022AtaInfo = { owner: TOKEN_2022_PROGRAM_ID, data: Buffer.alloc(0) };
+  const seen = [];
+
+  const result = await fetchDirectPumpBuyState({
+    connection: {
+      getMultipleAccountsInfo: (accounts) => {
+        seen.push(accounts.map((account) => account.toBase58()));
+        return [
+          { owner: TOKEN_2022_PROGRAM_ID, data: Buffer.alloc(0) },
+          { owner: SystemProgram.programId, data: Buffer.alloc(8) },
+          legacyAtaInfo,
+          token2022AtaInfo
+        ];
+      }
+    },
+    pumpModule: {
+      bondingCurvePda: () => bondingCurve,
+      PUMP_SDK: {
+        decodeBondingCurve: () => ({
+          complete: false,
+          tokenTotalSupply: 1n
+        })
+      }
+    },
+    mint,
+    user
+  });
+
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].length, 4);
+  assert.equal(seen[0][0], mint.toBase58());
+  assert.equal(seen[0][1], bondingCurve.toBase58());
+  assert.equal(result.tokenProgram.toBase58(), TOKEN_2022_PROGRAM_ID.toBase58());
+  assert.equal(result.associatedUserAccountInfo, token2022AtaInfo);
+});
+
+test("Solana direct Pump fast buy state cache fails closed and refreshes known reserves", () => {
+  const mint = Keypair.generate().publicKey.toBase58();
+  const creator = Keypair.generate().publicKey.toBase58();
+
+  assert.equal(primeDirectPumpFastBuyState({
+    mint,
+    creator,
+    tokenProgram: SystemProgram.programId.toBase58(),
+    virtualTokenReserves: "1073000000000000",
+    virtualQuoteReserves: "30000000000",
+    realTokenReserves: "793000000000000",
+    realQuoteReserves: "0",
+    tokenTotalSupply: "1000000000000000"
+  }), false);
+
+  assert.equal(refreshDirectPumpFastBuyStateReserves({
+    mint,
+    virtualTokenReserves: "1072000000000000",
+    virtualQuoteReserves: "30100000000"
+  }), false);
+
+  assert.equal(primeDirectPumpFastBuyState({
+    mint,
+    creator,
+    tokenProgram: TOKEN_2022_PROGRAM_ID.toBase58(),
+    virtualTokenReserves: "1073000000000000",
+    virtualQuoteReserves: "30000000000",
+    realTokenReserves: "793000000000000",
+    realQuoteReserves: "0",
+    tokenTotalSupply: "1000000000000000"
+  }), true);
+
+  assert.equal(refreshDirectPumpFastBuyStateReserves({
+    mint,
+    virtualTokenReserves: "1072000000000000",
+    virtualQuoteReserves: "30100000000"
+  }), true);
 });
 
 test("Solana direct builder rejects missing or non-token mint accounts", async () => {

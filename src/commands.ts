@@ -2049,8 +2049,7 @@ export function createTelegramCommandPoller({
           `└ ${tradingWallets.length}`,
           "",
           "<b>🧾 Active Wallet</b>",
-          `├ Name: ${tradingWallet.label ? escapeWalletLabel(tradingWallet.label) : "Not set"}`,
-          `└ Type: ${tradingWalletTypeLabel(tradingWallet)}`,
+          `└ ${tradingWallet.label ? escapeWalletLabel(tradingWallet.label) : `<code>${tradingWallet.publicKey}</code>`}`,
           "",
           "<b>📥 Deposit Address</b>",
           `└ <code>${tradingWallet.publicKey}</code>`,
@@ -2065,8 +2064,7 @@ export function createTelegramCommandPoller({
           "└ 0",
           "",
           "<b>🧾 Active Wallet</b>",
-          "├ Name: Not set",
-          "└ Type: Not created",
+          "└ Not created",
           "",
           "<b>📥 Deposit Address</b>",
           "└ Create a wallet to get a deposit address."
@@ -2302,10 +2300,6 @@ export function createTelegramCommandPoller({
   function formatTradingWalletButtonLabel(wallet: TradingWallet): string {
     const name = wallet.label ? escapeWalletLabel(wallet.label) : shortWallet(wallet.publicKey);
     return `${name} (${wallet.provider === "local-solana" ? "Local" : "PumpPortal"})`;
-  }
-
-  function tradingWalletTypeLabel(wallet: TradingWallet): string {
-    return wallet.provider === "local-solana" ? "Local signing" : "PumpPortal Lightning";
   }
 
   function myWalletCreateConfirm(

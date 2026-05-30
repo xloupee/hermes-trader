@@ -811,6 +811,7 @@ function directPumpFastBuyState({
       quoteMint: cached.quoteMint
     },
     associatedUserAccountInfo: null,
+    creatorVerified: cached.creatorVerified,
     source: cached.source,
     observedAtMs: cached.observedAtMs
   };
@@ -1013,6 +1014,7 @@ async function buildDirectPumpSolanaPayload({
         source: fastBuyState ? "cache" : "rpc",
         cachedStateSource: "source" in buyState ? buyState.source : null,
         cachedStateAgeMs: "observedAtMs" in buyState ? Math.max(0, Date.now() - buyState.observedAtMs) : null,
+        creatorVerified: "creatorVerified" in buyState ? buyState.creatorVerified : true,
         feeConfigLoaded: Boolean(feeConfig),
         associatedUserAccountExists: Boolean(buyState.associatedUserAccountInfo),
         bondingCurveComplete: Boolean(buyState.bondingCurve.complete)

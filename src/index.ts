@@ -1778,6 +1778,7 @@ async function executeDirectCopyTrade({
       platformFee: platformFee ? platformFeeResultFields(platformFee) : null
     });
   }
+  onLatencyMilestone?.("direct_wallet_checked", { status: "ok" });
 
   if (!encryptionSecretReady(config.pumpPortalWalletKeyEncryptionSecret)) {
     return tradeExecutionSkippedResult({
@@ -1801,15 +1802,19 @@ async function executeDirectCopyTrade({
       platformFee: platformFee ? platformFeeResultFields(platformFee) : null
     });
   }
+  onLatencyMilestone?.("direct_signer_ready", { status: "ok" });
   const connection = directSolanaConnection;
 
   if (config.directExecutionBlockhashCacheMs > 0) {
+    onLatencyMilestone?.("direct_warmup_started", { status: "blockhash" });
     warmDirectSolanaBlockhash({
       connection,
       cacheMs: config.directExecutionBlockhashCacheMs
     }).catch((error) => {
       console.warn(`Direct execution pre-build blockhash warmup failed: ${errorMessage(error)}`);
     });
+  } else {
+    onLatencyMilestone?.("direct_warmup_started", { status: "disabled" });
   }
 
   onLatencyMilestone?.("direct_build_started");
@@ -1961,7 +1966,10 @@ async function executeCopyTradeBuy({
     });
   }
 
-  refreshDirectPumpFastBuyStateFromTrade(trade);
+  const refreshedFastState = refreshDirectPumpFastBuyStateFromTrade(trade);
+  onLatencyMilestone?.("direct_buy_state_refreshed", {
+    status: refreshedFastState ? "refreshed" : "skipped"
+  });
 
   return executeDirectCopyTrade({
     subscriber,

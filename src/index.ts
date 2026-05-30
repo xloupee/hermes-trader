@@ -27,6 +27,16 @@ import {
 } from "./copytrade-idempotency.js";
 import { createCopyTradeLatencyClock, createCopyTradeLatencyTracker } from "./copytrade-latency.js";
 import {
+  copyTradeSignalAgeBlockedReason,
+  copyTradeSignalProviderAllows,
+  copyTradeSignalRaceLogPayload,
+  copyTradeSignalSource,
+  copyTradeSignalSourceBlockedReason,
+  createCopyTradeSignalRaceTracker,
+  parseCopyTradeSignalProvider
+} from "./copytrade-signal-race.js";
+import type { CopyTradeSignalRaceRecord } from "./copytrade-signal-race.js";
+import {
   applyCopyTradeBuyPressureTrade,
   claimCopyTradeBuyPressureSellTrigger,
   copyTradeBuyPressureTimeoutTrigger,
@@ -46,6 +56,8 @@ import {
 } from "./direct-solana.js";
 import type { DirectSolanaSendStage } from "./direct-solana.js";
 import type { DirectTransactionPayload } from "./direct-pump.js";
+import { createGeyserWalletTradeListener } from "./geyser.js";
+import type { GeyserWalletTradeReject } from "./geyser.js";
 import { createHeliusWebhookServer, missingHeliusConfigWarning, syncHeliusWebhook } from "./helius.js";
 import { heliusEventMentionsWatchedWallet, isHeliusSwapEvent, normalizeHeliusSwapData } from "./helius-swaps.js";
 import { createYellowstoneWalletMonitor } from "./yellowstone.js";
@@ -273,12 +285,16 @@ const config: BotConfig = {
   pumpFunCoinApiBaseUrl: process.env.PUMPFUN_COIN_API_BASE_URL || "https://frontend-api-v3.pump.fun/coins",
   solUsdPriceUrl: process.env.SOL_USD_PRICE_URL || "https://api.coinbase.com/v2/prices/SOL-USD/spot",
   solanaRpcUrl: process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
+  geyserEnabled: process.env.GEYSER_ENABLED === "true",
+  geyserGrpcUrl: process.env.GEYSER_GRPC_URL,
+  geyserXToken: process.env.GEYSER_X_TOKEN,
   transactionFlowEnabled: process.env.TRANSACTION_FLOW_ENABLED === "true",
   transactionAccountLabels: process.env.TRANSACTION_ACCOUNT_LABELS,
   shutdownReason: process.env.BOT_SHUTDOWN_REASON,
   notifyOnShutdown: process.env.BOT_NOTIFY_ON_SHUTDOWN === "true",
   copyTradeEnabled: process.env.COPY_TRADE_ENABLED === "true",
   copyTradeDryRun: process.env.COPY_TRADE_DRY_RUN !== "false",
+  copyTradeSignalProvider: parseCopyTradeSignalProvider(process.env.COPY_TRADE_SIGNAL_PROVIDER),
   copyTradeExecutionProvider: parseTradeExecutionProvider(rawCopyTradeExecutionProvider),
   copyTradeSlippage: numberFromEnv(process.env.COPY_TRADE_SLIPPAGE, 10),
   copyTradePriorityFee: numberFromEnv(process.env.COPY_TRADE_PRIORITY_FEE, 0.00005),
@@ -320,6 +336,7 @@ const config: BotConfig = {
 };
 
 const seenEvents = new Set<string>();
+const seenGeyserDiagnostics = new Set<string>();
 let cachedSolUsdPrice: number | undefined;
 let cachedSolUsdPriceAt = 0;
 const metadataCache = new Map<string, LooseRecord | null>();
@@ -331,6 +348,7 @@ const activeBuyPressureSellWatchers = new Map<string, CopyTradeBuyPressureSellWa
 const activeBuyPressureSellTriggers = new Set<string>();
 const copyBuySubmissionGuard = createCopyBuySubmissionGuard();
 const copyBuySemanticSubmissionGuard = createCopyBuySubmissionGuard();
+const copyTradeSignalRaceTracker = createCopyTradeSignalRaceTracker();
 const copyTradeDailySolBudget = createInMemoryCopyTradeDailySolBudget();
 const directSolanaConnection = new Connection(config.solanaRpcUrl, "confirmed");
 let isShuttingDown = false;
@@ -726,6 +744,14 @@ function logCopyTradeExecutionState(): void {
   console.log(formatCopyTradeRiskControlLog(config));
   console.log(
     [
+      "Copy trade signal provider",
+      `mode=${config.copyTradeSignalProvider}`,
+      `pumpPortal=trigger`,
+      `geyser=${config.copyTradeSignalProvider === "parallel" ? "trigger" : "diagnostic"}`
+    ].join(" | ")
+  );
+  console.log(
+    [
       "Direct execution controls",
       `provider=${config.copyTradeExecutionProvider}`,
       `enabled=${config.directExecutionEnabled ? "true" : "false"}`,
@@ -841,6 +867,18 @@ function copyTradeWalletAddresses(): string[] {
   ].sort();
 }
 
+function activeGeyserWallets(): WatchedWallet[] {
+  return [
+    ...new Map(
+      subscribers
+        .list()
+        .flatMap((subscriber) => [...(subscriber.watchedWallets || []), ...(subscriber.copyTradeWallets || [])])
+        .filter((wallet) => wallet.address)
+        .map((wallet) => [wallet.address, wallet])
+    ).values()
+  ].sort((a, b) => a.address.localeCompare(b.address));
+}
+
 function activeBuyPressureSellMints(): string[] {
   return [...new Set([...activeBuyPressureSellWatchers.values()].map((watcher) => watcher.mint).filter(Boolean))].sort();
 }
@@ -903,6 +941,204 @@ function runAfterHotPath(label: string, work: Promise<unknown>): void {
   work.catch((error) => {
     console.warn(`${label} failed: ${errorMessage(error)}`);
   });
+}
+
+function rememberGeyserDiagnostic(id: string | null): boolean {
+  if (!id) {
+    return false;
+  }
+
+  if (seenGeyserDiagnostics.has(id)) {
+    return true;
+  }
+
+  seenGeyserDiagnostics.add(id);
+
+  if (seenGeyserDiagnostics.size > 1000) {
+    const oldest = seenGeyserDiagnostics.values().next().value;
+    if (oldest) {
+      seenGeyserDiagnostics.delete(oldest);
+    }
+  }
+
+  return false;
+}
+
+function geyserDiagnosticEventId(trade: WalletTradeData): string | null {
+  return trade.signature
+    ? ["geyser-wallet-trade", trade.signature, trade.targetWallet].join(":")
+    : getWalletTradeEventId(trade);
+}
+
+function logCopyTradeSignalRace(
+  trade: WalletTradeData,
+  outcome: "won" | "duplicate" | "skipped",
+  options: {
+    reason?: string | null;
+    winner?: CopyTradeSignalRaceRecord | null;
+    key?: string | null;
+  } = {}
+): void {
+  if (config.copyTradeSignalProvider !== "parallel" || !copyTradeSignalSource(trade.provider)) {
+    return;
+  }
+
+  console.log(`Copy trade signal race: ${JSON.stringify(copyTradeSignalRaceLogPayload({
+    mode: config.copyTradeSignalProvider,
+    trade,
+    outcome,
+    reason: options.reason,
+    winner: options.winner,
+    key: options.key
+  }))}`);
+}
+
+async function handleGeyserWalletTradeDiagnostic(trade: WalletTradeData): Promise<void> {
+  const eventId = geyserDiagnosticEventId(trade);
+
+  if (rememberGeyserDiagnostic(eventId)) {
+    return;
+  }
+
+  await writeWalletTradeLog(trade);
+  console.log(`Geyser wallet trade diagnostic: ${JSON.stringify(trade)}`);
+}
+
+async function handleWalletTradeSignal(
+  trade: WalletTradeData,
+  { receivedAtMs = Date.now(), normalizedAtMs = receivedAtMs }: { receivedAtMs?: number; normalizedAtMs?: number } = {}
+): Promise<boolean> {
+  const signalSource = copyTradeSignalSource(trade.provider);
+
+  if (signalSource && !copyTradeSignalProviderAllows(config.copyTradeSignalProvider, signalSource)) {
+    return false;
+  }
+
+  const entries = subscribers
+    .list()
+    .flatMap((subscriber) =>
+      (subscriber.watchedWallets || [])
+        .filter((wallet) => wallet.address === trade.targetWallet)
+        .map((wallet) => ({ subscriber, wallet, label: wallet.label }))
+    );
+  const copyTradeEntries = subscribers
+    .list()
+    .flatMap((subscriber) =>
+      (subscriber.copyTradeWallets || [])
+        .filter((wallet) => wallet.address === trade.targetWallet)
+        .map((wallet) => ({ subscriber, wallet, label: wallet.label }))
+    );
+  const hasBuyPressureWatchers = Boolean(
+    trade.mint && [...activeBuyPressureSellWatchers.values()].some((watcher) => watcher.mint === trade.mint)
+  );
+
+  if (entries.length === 0 && copyTradeEntries.length === 0 && !hasBuyPressureWatchers) {
+    return false;
+  }
+
+  const canRaceCopyTradeSignal = config.copyTradeSignalProvider === "parallel" &&
+    Boolean(signalSource) &&
+    (copyTradeEntries.length > 0 || hasBuyPressureWatchers);
+  const raceAgeBlockedReason = canRaceCopyTradeSignal
+    ? copyTradeSignalAgeBlockedReason({
+        trade,
+        maxSignalAgeMs: config.copyTradeMaxSignalAgeMs,
+        nowMs: receivedAtMs
+      })
+    : null;
+  const raceSourceBlockedReason = canRaceCopyTradeSignal && !raceAgeBlockedReason
+    ? copyTradeSignalSourceBlockedReason({
+        trade,
+        allowedSources: config.copyTradeAllowedSources
+      })
+    : null;
+  const raceBlockedReason = raceAgeBlockedReason || raceSourceBlockedReason;
+  const raceCopyableBlockedReason = canRaceCopyTradeSignal && !raceBlockedReason && !isCopyableSolToTokenBuy(trade)
+    ? "trade is not a copyable SOL-to-token buy"
+    : null;
+  const racesCopyTradeSignal = canRaceCopyTradeSignal && !raceCopyableBlockedReason;
+
+  if (raceBlockedReason) {
+    logCopyTradeSignalRace(trade, "skipped", { reason: raceBlockedReason });
+    return true;
+  }
+
+  if (raceCopyableBlockedReason) {
+    logCopyTradeSignalRace(trade, "skipped", { reason: raceCopyableBlockedReason });
+  } else if (racesCopyTradeSignal) {
+    const claim = copyTradeSignalRaceTracker.claim(trade, receivedAtMs);
+
+    if (claim.outcome === "duplicate") {
+      logCopyTradeSignalRace(trade, "duplicate", {
+        winner: claim.record,
+        key: claim.key
+      });
+      return true;
+    }
+
+    logCopyTradeSignalRace(trade, "won", {
+      winner: claim.record,
+      key: claim.key
+    });
+  }
+
+  const eventId = walletTradeSeenEventId(trade);
+
+  if (rememberEvent(eventId)) {
+    return true;
+  }
+
+  await writeWalletTradeLog(trade);
+  console.log(`Wallet trade event: ${JSON.stringify(trade)}`);
+
+  await handleCopyTradeBuyPressureTrade(trade);
+  await Promise.all(copyTradeEntries.map((entry) =>
+    sendCopyTradeSimulationAlert(
+      entry.subscriber,
+      {
+        ...trade,
+        label: entry.label
+      },
+      entry.wallet,
+      {
+        receivedAtMs,
+        normalizedAtMs
+      }
+    )
+  ));
+
+  await Promise.all(entries.map((entry) =>
+    sendWalletTradeAlert(entry.subscriber, {
+      ...trade,
+      label: entry.label
+    })
+  ));
+
+  return true;
+}
+
+async function handleGeyserWalletTrade(
+  trade: WalletTradeData,
+  timing: { receivedAtMs?: number; normalizedAtMs?: number } = {}
+): Promise<void> {
+  if (!copyTradeSignalProviderAllows(config.copyTradeSignalProvider, "geyser")) {
+    await handleGeyserWalletTradeDiagnostic(trade);
+    return;
+  }
+
+  await handleWalletTradeSignal(trade, timing);
+}
+
+function handleGeyserWalletTradeReject(reject: GeyserWalletTradeReject): void {
+  const eventId = reject.signature
+    ? ["geyser-wallet-trade-reject", reject.signature, reject.targetWallet, reject.reason].join(":")
+    : ["geyser-wallet-trade-reject", reject.slot, reject.targetWallet, reject.reason].filter(Boolean).join(":");
+
+  if (rememberGeyserDiagnostic(eventId)) {
+    return;
+  }
+
+  console.log(`Geyser wallet trade reject: ${JSON.stringify(reject)}`);
 }
 
 async function handleMigration(event: LooseRecord): Promise<void> {
@@ -1063,29 +1299,6 @@ async function handlePumpPortalAccountTrade(event: LooseRecord): Promise<boolean
     return false;
   }
 
-  const entries = subscribers
-    .list()
-    .flatMap((subscriber) =>
-      (subscriber.watchedWallets || [])
-        .filter((wallet) => wallet.address === trader)
-        .map((wallet) => ({ subscriber, wallet, label: wallet.label }))
-    );
-  const copyTradeEntries = subscribers
-    .list()
-    .flatMap((subscriber) =>
-      (subscriber.copyTradeWallets || [])
-        .filter((wallet) => wallet.address === trader)
-        .map((wallet) => ({ subscriber, wallet, label: wallet.label }))
-    );
-  const mint = stringValue(event.mint || event.ca || event.token || event.tokenAddress || event.address);
-  const hasBuyPressureWatchers = Boolean(
-    mint && [...activeBuyPressureSellWatchers.values()].some((watcher) => watcher.mint === mint)
-  );
-
-  if (entries.length === 0 && copyTradeEntries.length === 0 && !hasBuyPressureWatchers) {
-    return false;
-  }
-
   const trade = normalizePumpPortalAccountTradeData({
     event,
     targetWallet: trader,
@@ -1096,42 +1309,11 @@ async function handlePumpPortalAccountTrade(event: LooseRecord): Promise<boolean
     return false;
   }
 
-  const eventId = walletTradeSeenEventId(trade);
-
-  if (rememberEvent(eventId)) {
-    return true;
-  }
-
   const receivedAtMs = Date.now();
-  await handleCopyTradeBuyPressureTrade(trade);
-  await Promise.all(copyTradeEntries.map((entry) =>
-    sendCopyTradeSimulationAlert(
-      entry.subscriber,
-      {
-        ...trade,
-        label: entry.label
-      },
-      entry.wallet,
-      {
-        receivedAtMs,
-        normalizedAtMs: receivedAtMs
-      }
-    )
-  ));
-
-  runAfterHotPath("PumpPortal wallet trade post-processing", (async () => {
-    await writeWalletTradeLog(trade);
-    console.log(`Wallet trade event: ${JSON.stringify(trade)}`);
-
-    await Promise.all(entries.map((entry) =>
-      sendWalletTradeAlert(entry.subscriber, {
-        ...trade,
-        label: entry.label
-      })
-    ));
-  })());
-
-  return true;
+  return handleWalletTradeSignal(trade, {
+    receivedAtMs,
+    normalizedAtMs: receivedAtMs
+  });
 }
 
 async function handleHeliusWebhookEvents(events: LooseRecord[]): Promise<void> {
@@ -1615,6 +1797,7 @@ async function sendCopyTradeSimulationAlert(
     latencyLogged = true;
   };
   const skipWithLatencyLog = (reason: string): void => {
+    logCopyTradeSignalRace(trade, "skipped", { reason });
     latencyTracker.skip(reason, { status: "skipped" });
     logLatencyOnce();
   };
@@ -1725,6 +1908,35 @@ async function sendCopyTradeSimulationAlert(
       return;
     }
 
+    const dailyBudgetKey = copyTradeDailyBudgetKey({
+      chatId: subscriber.chatId,
+      tradingWalletPublicKey: subscriber.tradingWallet.publicKey
+    });
+    const nowMs = Date.now();
+    const riskBlockedReason = copyTradeBuyRiskBlockedReason({
+      config,
+      request,
+      trade,
+      copyTradeWalletCount: subscriber.copyTradeWallets.length,
+      dailySpentSol: copyTradeDailySolBudget.spentSol({ key: dailyBudgetKey, nowMs }),
+      nowMs
+    });
+    latencyTracker.mark("risk_checked", {
+      status: riskBlockedReason ? "blocked" : "ok",
+      reason: riskBlockedReason
+    });
+    if (riskBlockedReason) {
+      skipWithLatencyLog(riskBlockedReason);
+      await notifySkippedAutoCopyBuy({
+        subscriber,
+        trade,
+        copyTradeWallet,
+        request,
+        reason: riskBlockedReason
+      });
+      return;
+    }
+
     if (shouldReserveDailyBudget(executionProvider)) {
       const durableCopyBuyKey = copyTradeBuyIdempotencyKey({
         chatId: subscriber.chatId,
@@ -1808,38 +2020,6 @@ async function sendCopyTradeSimulationAlert(
         return;
       }
       durableCopyBuyClaimKey = durableCopyBuyKey;
-    }
-
-    const dailyBudgetKey = copyTradeDailyBudgetKey({
-      chatId: subscriber.chatId,
-      tradingWalletPublicKey: subscriber.tradingWallet.publicKey
-    });
-    const nowMs = Date.now();
-    const riskBlockedReason = copyTradeBuyRiskBlockedReason({
-      config,
-      request,
-      trade,
-      copyTradeWalletCount: subscriber.copyTradeWallets.length,
-      dailySpentSol: copyTradeDailySolBudget.spentSol({ key: dailyBudgetKey, nowMs }),
-      nowMs
-    });
-    latencyTracker.mark("risk_checked", {
-      status: riskBlockedReason ? "blocked" : "ok",
-      reason: riskBlockedReason
-    });
-    if (riskBlockedReason) {
-      if (durableCopyBuyClaimKey) {
-        await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, riskBlockedReason);
-      }
-      skipWithLatencyLog(riskBlockedReason);
-      await notifySkippedAutoCopyBuy({
-        subscriber,
-        trade,
-        copyTradeWallet,
-        request,
-        reason: riskBlockedReason
-      });
-      return;
     }
 
     const blockedReason = copyTradeSubmissionBlockedReason(executionProvider);
@@ -2498,6 +2678,10 @@ async function copyTradePositionBalanceBlockedReason(watcher: CopyTradeBuyPressu
 
 function refreshPumpPortalSubscriptions(): void {
   migrationListener.setSubscriptionMethods(activePumpPortalSubscriptions());
+}
+
+function refreshGeyserSubscriptions(): void {
+  geyserWalletTradeListener.setWallets(activeGeyserWallets());
 }
 
 function clearBuyPressureSellTimer(watcherId: string): void {
@@ -3704,8 +3888,9 @@ const commandPoller = createTelegramCommandPoller({
   testMessage: testMigrationMessage,
   subscribers,
   onWalletWatchlistChange: () => {
-    migrationListener.setSubscriptionMethods(activePumpPortalSubscriptions());
+    refreshPumpPortalSubscriptions();
     yellowstoneWalletMonitor.setWallets(watchedWalletAddresses());
+    refreshGeyserSubscriptions();
     return syncHeliusWalletWebhook();
   },
   onCopyTradeEmergencyStop: (chatId) => {
@@ -3726,6 +3911,18 @@ const migrationListener = createPumpPortalMigrationListener({
   },
   onStatus: (message: string) => console.log(message),
   onError: (error: Error) => console.error("PumpPortal websocket error:", error.message)
+});
+
+const geyserWalletTradeListener = createGeyserWalletTradeListener({
+  enabled: config.geyserEnabled || config.copyTradeSignalProvider === "parallel",
+  endpoint: config.geyserGrpcUrl,
+  xToken: config.geyserXToken,
+  wallets: activeGeyserWallets(),
+  config,
+  onTrade: handleGeyserWalletTrade,
+  onReject: handleGeyserWalletTradeReject,
+  onStatus: (message: string) => console.log(message),
+  onError: (error: Error) => console.error("Geyser stream error:", error.message)
 });
 
 const heliusWebhookServer = createHeliusWebhookServer({
@@ -3795,6 +3992,7 @@ async function shutdown(): Promise<void> {
     clearInterval(directBlockhashWarmTimer);
     directBlockhashWarmTimer = null;
   }
+  geyserWalletTradeListener.stop();
   for (const timer of trailingSellTimers) {
     clearTimeout(timer);
   }
@@ -3835,10 +4033,11 @@ logCopyTradeExecutionState();
 warmPlatformFeeTreasuryAccount();
 warmDirectExecutionHotPath();
 warmDirectExecutionBlockhashCache();
-// Supabase-backed subscribers load at startup, so compute account-trade
-// subscriptions after init rather than from the empty pre-init store.
-migrationListener.setSubscriptionMethods(activePumpPortalSubscriptions());
+  // Supabase-backed subscribers load at startup, so compute account-trade
+  // subscriptions after init rather than from the empty pre-init store.
+refreshPumpPortalSubscriptions();
 yellowstoneWalletMonitor.setWallets(watchedWalletAddresses());
+refreshGeyserSubscriptions();
 if (watchedWalletAddresses().length > 0) {
   await syncHeliusWalletWebhook();
 }
@@ -3849,4 +4048,5 @@ if (config.heliusWebhookAuthHeader) {
 }
 yellowstoneWalletMonitor.start();
 migrationListener.start();
+geyserWalletTradeListener.start();
 await commandPoller.start();

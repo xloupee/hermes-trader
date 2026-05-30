@@ -12,6 +12,7 @@
     "import-subscribers": "npm run build && node dist/import-subscribers.js",
     "check": "tsc --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
+    "wallet-feed-report": "node scripts/wallet-feed-comparison-report.mjs",
     "stop-local": "bash scripts/stop-local.sh",
     "deploy": "bash scripts/deploy.sh"
   },
@@ -28,7 +29,7 @@
     "ws": "^8.18.0"
   },
   "engines": {
-    "node": ">=20.18"
+    "node": ">=20.18.0"
   },
   "devDependencies": {
     "@types/bn.js": "^5.2.0",

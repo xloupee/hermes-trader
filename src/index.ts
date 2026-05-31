@@ -1241,22 +1241,45 @@ function walletTradeTimestamp(trade: WalletTradeData): number | null {
   return finiteNumber(trade.timestamp);
 }
 
+function directSolanaSendSummary(result: TradeExecutionResult | null | undefined): {
+  sendRpcWinner: string | null;
+  sendRpcCount: number | null;
+} {
+  const timing = result?.metadata.directSolanaTiming;
+  if (!timing || typeof timing !== "object" || Array.isArray(timing)) {
+    return {
+      sendRpcWinner: null,
+      sendRpcCount: null
+    };
+  }
+
+  const rawSendTiming = timing as { rawSendWinner?: unknown; rawSendRpcCount?: unknown };
+  return {
+    sendRpcWinner: typeof rawSendTiming.rawSendWinner === "string" ? rawSendTiming.rawSendWinner : null,
+    sendRpcCount: finiteNumber(rawSendTiming.rawSendRpcCount)
+  };
+}
+
 function logCopyTradeLatencySummary({
   tracker,
   trade,
   details,
-  copySlot = null
+  copySlot = null,
+  result = null
 }: {
   tracker: CopyTradeLatencyTracker;
   trade: WalletTradeData;
   details?: CopyTradeLatencyMilestoneDetails;
   copySlot?: number | null;
+  result?: TradeExecutionResult | null;
 }): CopyTradeLatencySummaryMetadata {
+  const sendSummary = directSolanaSendSummary(result);
   const summary = formatCopyTradeLatencySummary(tracker.snapshot(), details, {
     targetTimestamp: walletTradeTimestamp(trade),
     targetSlot: walletTradeSlot(trade),
     copySlot,
-    winnerProvider: trade.provider
+    winnerProvider: trade.provider,
+    ...sendSummary
   });
 
   console.log(`Copy trade latency summary: ${JSON.stringify(summary)}`);
@@ -2818,7 +2841,8 @@ async function sendCopyTradeSimulationAlert(
       tracker: latencyTracker,
       trade,
       details: resultDetails,
-      copySlot: isProviderNeutralResult(result) ? result.slot : null
+      copySlot: isProviderNeutralResult(result) ? result.slot : null,
+      result: isProviderNeutralResult(result) ? result : null
     });
     console.log(`Copy trade execution result: ${isProviderNeutralResult(result) ? formatTradeExecutionResultLog(result) : JSON.stringify(result)}`);
 
@@ -4814,6 +4838,7 @@ function prefetchDirectPumpFastBuyStateForTrade(trade: WalletTradeData): boolean
 
   prefetchDirectPumpFastBuyStateFromChain({
     connection: directSolanaConnection,
+    readConnections: directSolanaReadConnections,
     mint,
     commitment: "processed",
     source: `${trade.provider}-observed-buy-prefetch`

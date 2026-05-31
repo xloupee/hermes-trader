@@ -69,6 +69,7 @@ export function makeSubscriber(chatId: string, mode: AlertModeValue | null, now 
   return {
     chatId,
     mode,
+    notificationsPaused: false,
     watchedWallets: [],
     copyTradeWallets: [],
     tradingWallet: null,
@@ -154,6 +155,7 @@ export function mergeSubscriber(
   subscribers.set(chatId, {
     chatId,
     mode,
+    notificationsPaused: existing?.notificationsPaused === true,
     watchedWallets: existing?.watchedWallets || [],
     copyTradeWallets: existing?.copyTradeWallets || [],
     tradingWallet: existing?.tradingWallet || null,
@@ -276,10 +278,12 @@ function loadSubscriberRecordInto(subscribers: Map<string, SubscriberRecord>, va
   const nextWatchedWallets = legacyCopyTarget
     ? watchedWallets.filter((wallet) => wallet.address !== legacyCopyTarget)
     : watchedWallets;
+  const notificationsPaused = record.notificationsPaused === true || record.notifications_paused === true;
 
   if (existing) {
     subscribers.set(chatId, {
       ...existing,
+      notificationsPaused,
       watchedWallets: nextWatchedWallets.length > 0 || watchedWallets.length > 0 ? dedupeWatchedWallets(nextWatchedWallets) : existing.watchedWallets,
       copyTradeWallets: nextCopyTradeWallets.length > 0 ? dedupeWatchedWallets(nextCopyTradeWallets) : existing.copyTradeWallets,
       tradingWallet: tradingWallet || existing.tradingWallet || nextTradingWallets[0] || null,
@@ -467,6 +471,25 @@ export function createSubscriberStore({
       subscribers.set(normalized, {
         ...(existing || makeSubscriber(normalized, mode)),
         mode,
+        notificationsPaused: false,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return true;
+    },
+    async setNotificationsPaused(chatId, paused) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      subscribers.set(normalized, {
+        ...existing,
+        notificationsPaused: paused,
+        mode: paused ? null : existing.mode,
         updatedAt: new Date().toISOString()
       });
       await save();

@@ -202,6 +202,76 @@ test("unverified chats can open read-only dashboards", async () => {
   }
 });
 
+test("stop pauses notifications without deleting subscriber settings", async () => {
+  const subscribers = createSubscriberStore({});
+  await subscribers.init();
+  await subscribers.add("chat-1");
+  await subscribers.setMode("chat-1", "both");
+  await subscribers.setCopyAmountSol("chat-1", 0.5);
+  await subscribers.watchCopyTradeWallet("chat-1", wallet, "copy");
+
+  const replies = [];
+  const updates = [
+    { update_id: 1, message: { text: "/stop", chat: { id: "chat-1", type: "private" } } },
+    { update_id: 2, message: { text: "/start", chat: { id: "chat-1", type: "private" } } }
+  ];
+  let updateIndex = 0;
+  let poller;
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (url, init) => {
+    const href = String(url);
+
+    if (href.includes("/getMe")) {
+      return new Response(JSON.stringify({ ok: true, result: { username: "copybot" } }), { status: 200 });
+    }
+
+    if (href.includes("/deleteWebhook") || href.includes("/setMyCommands")) {
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    }
+
+    if (href.includes("/getUpdates")) {
+      if (updateIndex >= updates.length) {
+        poller?.stop();
+        return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+      }
+
+      return new Response(JSON.stringify({ ok: true, result: [updates[updateIndex++]] }), { status: 200 });
+    }
+
+    if (href.includes("/sendMessage")) {
+      replies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+    }
+
+    throw new Error(`Unexpected Telegram request: ${href}`);
+  };
+
+  try {
+    poller = createTelegramCommandPoller({
+      config: {
+        ...config,
+        telegramToken: "token"
+      },
+      testMessage: () => "",
+      subscribers
+    });
+    await poller.start();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const subscriber = subscribers.get("chat-1");
+  assert.equal(subscriber?.mode, null);
+  assert.equal(subscriber?.notificationsPaused, true);
+  assert.equal(subscriber?.copyAmountSol, 0.5);
+  assert.equal(subscriber?.copyTradeWallets.length, 1);
+  assert.match(replies[0].text, /Notifications paused/);
+  assert.match(replies[0].text, /saved settings were kept/);
+  assert.match(replies[1].text, /Notifications are <b>paused<\/b>/);
+  assert.doesNotMatch(replies[1].text, /Verification/);
+});
+
 test("cashback command renders summary and claim callback", async () => {
   const subscribers = createSubscriberStore({});
   await subscribers.init();

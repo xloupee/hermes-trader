@@ -1194,6 +1194,7 @@ function watchedWalletAddresses(): string[] {
       [
         ...subscribers
           .list()
+          .filter(isSubscriberLive)
           .flatMap((subscriber) => [...(subscriber.watchedWallets || []), ...(subscriber.copyTradeWallets || [])]),
         ...config.walletFeedDiagnosticWallets
       ].map((wallet) => wallet.address)
@@ -1207,6 +1208,7 @@ function copyTradeWalletAddresses(): string[] {
     ...new Set(
       subscribers
         .list()
+        .filter(isSubscriberLive)
         .flatMap((subscriber) => subscriber.copyTradeWallets || [])
         .map((wallet) => wallet.address)
         .filter(Boolean)
@@ -1220,6 +1222,7 @@ function activeGeyserWallets(): WatchedWallet[] {
       [
         ...subscribers
           .list()
+          .filter(isSubscriberLive)
           .flatMap((subscriber) => [...(subscriber.watchedWallets || []), ...(subscriber.copyTradeWallets || [])]),
         ...config.walletFeedDiagnosticWallets
       ]
@@ -1379,6 +1382,7 @@ async function handleWalletTradeSignal(
 
   const entries = subscribers
     .list()
+    .filter(isSubscriberLive)
     .flatMap((subscriber) =>
       (subscriber.watchedWallets || [])
         .filter((wallet) => wallet.address === trade.targetWallet)
@@ -1764,6 +1768,10 @@ async function handleHeliusSwap(event: LooseRecord, { receivedAtMs = Date.now() 
   const copyTradeSubscribersByWallet = new Map<string, Array<{ subscriber: SubscriberRecord; wallet: WatchedWallet; label: string | null }>>();
 
   for (const subscriber of subscribers.list()) {
+    if (!isSubscriberLive(subscriber)) {
+      continue;
+    }
+
     for (const wallet of subscriber.watchedWallets || []) {
       if (!heliusEventMentionsWatchedWallet(event, wallet.address)) {
         continue;
@@ -1860,6 +1868,7 @@ async function handleYellowstoneWalletTrade(
 
   const copyTradeEntries = subscribers
     .list()
+    .filter(isSubscriberLive)
     .flatMap((subscriber) =>
       (subscriber.copyTradeWallets || [])
         .filter((wallet) => wallet.address === trade.targetWallet)
@@ -1882,6 +1891,7 @@ async function handleYellowstoneWalletTrade(
 
   const entries = subscribers
     .list()
+    .filter(isSubscriberLive)
     .flatMap((subscriber) =>
       (subscriber.watchedWallets || [])
         .filter((wallet) => wallet.address === trade.targetWallet)
@@ -3156,7 +3166,7 @@ function copyTradeBuyPressureSellConfig() {
 }
 
 function copyTradeBuyPressureSellEnabledForSubscriber(subscriber: SubscriberRecord): boolean {
-  return config.copyTradeBuyPressureSellEnabled && subscriber.copyTradeBuyPressureSellEnabled === true;
+  return isSubscriberLive(subscriber) && config.copyTradeBuyPressureSellEnabled && subscriber.copyTradeBuyPressureSellEnabled === true;
 }
 
 function copyTradeBuyPressureSellConfigForSubscriber(subscriber: SubscriberRecord) {
@@ -3387,6 +3397,15 @@ async function handleCopyTradeBuyPressureTrade(trade: WalletTradeData): Promise<
   let changed = false;
 
   for (const watcher of activeBuyPressureSellWatchers.values()) {
+    const subscriber = subscribers.get(watcher.chatId);
+
+    if (!subscriber || !isSubscriberLive(subscriber)) {
+      activeBuyPressureSellWatchers.delete(watcher.id);
+      clearBuyPressureSellTimer(watcher.id);
+      changed = true;
+      continue;
+    }
+
     const result = applyCopyTradeBuyPressureTrade({ watcher, trade });
 
     if (!result.changed) {
@@ -3418,6 +3437,15 @@ async function triggerCopyTradeBuyPressureSell({
   trigger: CopyTradeBuyPressureSellTrigger;
 }): Promise<void> {
   if (!activeBuyPressureSellWatchers.has(watcher.id) || activeBuyPressureSellTriggers.has(watcher.id)) {
+    return;
+  }
+
+  const subscriber = subscribers.get(watcher.chatId);
+
+  if (!subscriber || !isSubscriberLive(subscriber)) {
+    activeBuyPressureSellWatchers.delete(watcher.id);
+    clearBuyPressureSellTimer(watcher.id);
+    await persistActiveBuyPressureSellWatchers();
     return;
   }
 
@@ -4227,7 +4255,7 @@ function hasMigrationStyleFields(event: LooseRecord): boolean {
 }
 
 function shouldSendEventToSubscriber(eventMode: Exclude<AlertModeValue, "both">, subscriber: SubscriberRecord): boolean {
-  return subscriber.mode === "both" || subscriber.mode === eventMode;
+  return isSubscriberLive(subscriber) && (subscriber.mode === "both" || subscriber.mode === eventMode);
 }
 
 async function sendAlertToSubscribers({
@@ -4618,11 +4646,16 @@ function activeCopyTradeEntriesForTarget(targetWallet: string): Array<{
 }> {
   return subscribers
     .list()
+    .filter(isSubscriberLive)
     .flatMap((subscriber) =>
       (subscriber.copyTradeWallets || [])
         .filter((wallet) => wallet.address === targetWallet)
         .map((wallet) => ({ subscriber, wallet, label: wallet.label }))
     );
+}
+
+function isSubscriberLive(subscriber: SubscriberRecord): boolean {
+  return subscriber.notificationsPaused !== true;
 }
 
 function sleep(ms: number): Promise<void> {

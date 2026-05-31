@@ -438,7 +438,8 @@ export function formatCopyTradeDashboardText({
   buyPriorityFeeSol = DEFAULT_COPY_TRADE_PRIORITY_FEE,
   sellSlippagePercent = DEFAULT_COPY_TRADE_SLIPPAGE,
   sellPriorityFeeSol = DEFAULT_COPY_TRADE_PRIORITY_FEE,
-  retryFailedCopyBuys = false
+  retryFailedCopyBuys = false,
+  notificationsPaused = false
 }: {
   tradingWalletPublicKey: string | null;
   copyAmountSol: number | null;
@@ -448,8 +449,9 @@ export function formatCopyTradeDashboardText({
   sellSlippagePercent?: number;
   sellPriorityFeeSol?: number;
   retryFailedCopyBuys?: boolean;
+  notificationsPaused?: boolean;
 }): string {
-  const ready = Boolean(tradingWalletPublicKey && copyAmountSol && copyTradeWallets.length > 0);
+  const ready = Boolean(!notificationsPaused && tradingWalletPublicKey && copyAmountSol && copyTradeWallets.length > 0);
   const trailingSellStatus = copyTradeWallets.length === 0
     ? "Add wallets first"
     : copyTradeWallets.some((wallet) => wallet.trailingSellConfig)
@@ -476,7 +478,7 @@ export function formatCopyTradeDashboardText({
     `<b>🎯 Copytrade Wallets:</b> ${copyTradeWallets.length}`,
     ...walletLines,
     "",
-    ready ? "🟢 Setup is <b>active</b>" : "🔴 Setup is <b>inactive</b>",
+    notificationsPaused ? "⏸️ Setup is <b>paused</b>" : ready ? "🟢 Setup is <b>active</b>" : "🔴 Setup is <b>inactive</b>",
     "",
     `<b>📉 Trailing Sells:</b> ${trailingSellStatus}`
   ].join("\n");
@@ -748,9 +750,9 @@ function verificationPrompt(): string {
 }
 
 export function formatStartDashboardText(subscriber: SubscriberRecord): string {
-  const tokenAlertsActive = Boolean(subscriber.mode);
+  const tokenAlertsActive = Boolean(!subscriber.notificationsPaused && subscriber.mode);
   const tradingWalletStatus = subscriber.tradingWallet ? shortWallet(subscriber.tradingWallet.publicKey) : "Not created";
-  const copyReady = Boolean(subscriber.tradingWallet && subscriber.copyAmountSol && subscriber.copyTradeWallets.length > 0);
+  const copyReady = Boolean(!subscriber.notificationsPaused && subscriber.tradingWallet && subscriber.copyAmountSol && subscriber.copyTradeWallets.length > 0);
   const copyWalletLines = subscriber.copyTradeWallets.length === 0
     ? ["└ No Copytrade Wallets yet"]
     : subscriber.copyTradeWallets.slice(0, 3).map((wallet) => `└ ${formatCopyTradeWalletSummary(wallet)}`);
@@ -763,7 +765,9 @@ export function formatStartDashboardText(subscriber: SubscriberRecord): string {
     "",
     "Real-time token alerts, wallet tracking, and Bloom-style copy trading from Telegram.",
     "",
-    tokenAlertsActive || copyReady ? "🟢 Setup is <b>active</b>" : "🔴 Setup is <b>inactive</b>",
+    subscriber.notificationsPaused
+      ? "⏸️ Notifications are <b>paused</b>"
+      : tokenAlertsActive || copyReady ? "🟢 Setup is <b>active</b>" : "🔴 Setup is <b>inactive</b>",
     "",
     "<b>🔔 Token Alerts</b>",
     `└ ${tokenAlertsActive ? modeLabel(subscriber.mode as AlertModeValue) : "Paused"}`,
@@ -1587,8 +1591,23 @@ export function createTelegramCommandPoller({
       return "Subscriber controls are not available in this bot process.";
     }
 
-    await subscribers.remove(chatId);
-    return "Notifications are off for this chat.";
+    if (!subscribers.has(chatId)) {
+      return verificationPrompt();
+    }
+
+    const paused = await subscribers.setNotificationsPaused(chatId, true);
+
+    if (!paused) {
+      return verificationPrompt();
+    }
+
+    return [
+      "<b>⏸️ Notifications paused</b>",
+      "",
+      "Token alerts, wallet alerts, and copytrade execution are paused for this chat.",
+      "",
+      "Your verification, wallets, payout wallet, and saved settings were kept."
+    ].join("\n");
   }
 
   async function changeMode(chatId: TelegramChatId, requestedMode: AlertModeValue): Promise<string> {
@@ -1614,17 +1633,18 @@ export function createTelegramCommandPoller({
 
   function alertDashboard(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
     const mode = subscribers?.get(chatId)?.mode || null;
+    const paused = subscribers?.get(chatId)?.notificationsPaused === true;
     const text = [
       "<b>🔔 Alerts</b>",
       "",
-      `<b>📡 ${mode ? "Active" : "Paused"}</b>`,
-      `├ Migrated Coins: ${alertEnabled(mode, "migrations") ? "On" : "Off"}`,
-      `└ New Tokens: ${alertEnabled(mode, "newtokens") ? "On" : "Off"}`
+      `<b>📡 ${paused ? "Paused" : mode ? "Active" : "Paused"}</b>`,
+      `├ Migrated Coins: ${!paused && alertEnabled(mode, "migrations") ? "On" : "Off"}`,
+      `└ New Tokens: ${!paused && alertEnabled(mode, "newtokens") ? "On" : "Off"}`
     ].join("\n");
 
     return {
       text,
-      replyMarkup: alertDashboardReplyMarkup(mode)
+      replyMarkup: alertDashboardReplyMarkup(paused ? null : mode)
     };
   }
 
@@ -2903,7 +2923,8 @@ export function createTelegramCommandPoller({
       buyPriorityFeeSol: effectiveBuyPriorityFee(subscriber, config),
       sellSlippagePercent: effectiveSellSlippage(subscriber, config),
       sellPriorityFeeSol: effectiveSellPriorityFee(subscriber, config),
-      retryFailedCopyBuys: subscriber?.copyTradeRetryFailedBuys === true
+      retryFailedCopyBuys: subscriber?.copyTradeRetryFailedBuys === true,
+      notificationsPaused: subscriber?.notificationsPaused === true
     });
 
     return {

@@ -224,6 +224,7 @@ export interface SubscriberStore {
   remove: (chatId: TelegramChatId) => Promise<void>;
   get: (chatId: TelegramChatId) => SubscriberRecord | null;
   setMode: (chatId: TelegramChatId, mode: AlertModeValue | null) => Promise<boolean>;
+  setNotificationsPaused: (chatId: TelegramChatId, paused: boolean) => Promise<boolean>;
   watchWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
   renameWallet: (chatId: TelegramChatId, address: string, label: string | null) => Promise<boolean>;
   unwatchWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
@@ -266,6 +267,7 @@ export interface SubscriberStore {
 export interface SubscriberRecord {
   chatId: string;
   mode: AlertModeValue | null;
+  notificationsPaused: boolean;
   watchedWallets: WatchedWallet[];
   copyTradeWallets: WatchedWallet[];
   tradingWallet: TradingWallet | null;

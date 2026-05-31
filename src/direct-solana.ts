@@ -326,6 +326,7 @@ export interface DirectSolanaBuildRequest {
   platformFee?: PlatformFeeSplit | null;
   metadata?: Record<string, unknown>;
   forceFreshBuyState?: boolean;
+  observedCreatorVaultLookup?: boolean;
   readConnections?: DirectSolanaReadConnection[];
 }
 
@@ -1703,7 +1704,7 @@ async function buildDirectPumpSolanaPayload({
         sdkQuoteLamports: sdkQuoteLamports.toString(),
         tokenAmount: amount.toString()
       });
-      const creatorVaultOverride = tokenProgram.equals(TOKEN_2022_PROGRAM_ID)
+      const creatorVaultOverride = tokenProgram.equals(TOKEN_2022_PROGRAM_ID) && request.observedCreatorVaultLookup === true
         ? await fetchObservedPumpBuyV2CreatorVault({
             connection,
             signature: observedSignatureFromMetadata(request.metadata),
@@ -1711,7 +1712,11 @@ async function buildDirectPumpSolanaPayload({
           })
         : null;
       buildTiming.mark("creator_vault_ready", {
-        source: creatorVaultOverride ? "observed-transaction" : "sdk-derived",
+        source: creatorVaultOverride
+          ? "observed-transaction"
+          : tokenProgram.equals(TOKEN_2022_PROGRAM_ID) && request.observedCreatorVaultLookup === true
+            ? "observed-transaction-miss"
+            : "local-derived",
         observedSignature: observedSignatureFromMetadata(request.metadata)
       });
       instructions.push(...buildDirectPumpLocalBuyInstructions({

@@ -6,6 +6,7 @@ import {
   createCopyTradeLatencyTrace,
   createCopyTradeLatencyTracker,
   formatCopyTradeLatencyLog,
+  formatCopyTradeLatencySummary,
   recordCopyTradeLatencyMilestone
 } from "../dist/copytrade-latency.js";
 
@@ -158,6 +159,50 @@ test("copy trade latency trace records deterministic total and stage timings", (
       balance_checked_to_submit_started: 15,
       submit_started_to_submit_finished: 65
     }
+  });
+});
+
+test("copy trade latency summary flattens submit timing and slot delta", () => {
+  let trace = createCopyTradeLatencyTrace({ context, nowMs: 2_000 });
+  trace = recordCopyTradeLatencyMilestone({ trace, milestone: "normalized", nowMs: 2_004 });
+  trace = recordCopyTradeLatencyMilestone({ trace, milestone: "direct_build_started", nowMs: 2_010 });
+  trace = recordCopyTradeLatencyMilestone({ trace, milestone: "direct_build_finished", nowMs: 2_040 });
+  trace = recordCopyTradeLatencyMilestone({ trace, milestone: "direct_raw_send_started", nowMs: 2_045 });
+  trace = recordCopyTradeLatencyMilestone({ trace, milestone: "direct_raw_signature_returned", nowMs: 2_057 });
+  trace = recordCopyTradeLatencyMilestone({
+    trace,
+    milestone: "submit_finished",
+    nowMs: 2_080,
+    details: {
+      status: "submitted",
+      signature: "CopyBuySignature111111111111111111111111111"
+    }
+  });
+
+  assert.deepEqual(formatCopyTradeLatencySummary(trace, undefined, {
+    targetTimestamp: 1,
+    targetSlot: 100,
+    copySlot: 101,
+    winnerProvider: "shredstream"
+  }), {
+    event: "copy_trade_latency_summary",
+    chatId: "-1001234567890",
+    sourceWallet: "SourceWallet111111111111111111111111111111",
+    tradingWallet: "TradingWallet111111111111111111111111111",
+    observedSignature: "ObservedSignature11111111111111111111111111",
+    mint: "Mint111111111111111111111111111111111111111",
+    mode: "live",
+    status: "submitted",
+    reason: null,
+    signature: "CopyBuySignature111111111111111111111111111",
+    targetObservedToSubmitMs: 80,
+    targetBlockTimeToSubmitMs: 1080,
+    targetSlot: 100,
+    copySlot: 101,
+    slotDelta: 1,
+    buildMs: 30,
+    sendMs: 12,
+    winnerProvider: "shredstream"
   });
 });
 

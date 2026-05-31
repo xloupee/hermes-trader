@@ -25,7 +25,11 @@ import {
   safelyCompleteCopyTradeBuyIdempotency,
   safelyFailCopyTradeBuyIdempotency
 } from "./copytrade-idempotency.js";
-import { createCopyTradeLatencyClock, createCopyTradeLatencyTracker } from "./copytrade-latency.js";
+import {
+  createCopyTradeLatencyClock,
+  createCopyTradeLatencyTracker,
+  formatCopyTradeLatencySummary
+} from "./copytrade-latency.js";
 import {
   copyTradeSignalAgeBlockedReason,
   copyTradeSignalProviderAllows,
@@ -141,7 +145,12 @@ import type {
   WalletTradeData,
   WatchedWallet
 } from "./types.js";
-import type { CopyTradeLatencyMilestone, CopyTradeLatencyMilestoneDetails, CopyTradeLatencyTracker } from "./copytrade-latency.js";
+import type {
+  CopyTradeLatencyMilestone,
+  CopyTradeLatencyMilestoneDetails,
+  CopyTradeLatencySummaryMetadata,
+  CopyTradeLatencyTracker
+} from "./copytrade-latency.js";
 
 function numberFromEnv(value: string | undefined, fallback: number): number {
   const number = Number(value);
@@ -512,6 +521,7 @@ const config: BotConfig = {
   directExecutionBlockhashCacheMs: Math.floor(nonNegativeNumberFromEnv(process.env.DIRECT_EXECUTION_BLOCKHASH_CACHE_MS, 15_000)),
   directExecutionBlockhashWarmIntervalMs: Math.floor(nonNegativeNumberFromEnv(process.env.DIRECT_EXECUTION_BLOCKHASH_WARM_INTERVAL_MS, 5_000)),
   directExecutionSdkWarmIntervalMs: Math.floor(nonNegativeNumberFromEnv(process.env.DIRECT_EXECUTION_SDK_WARM_INTERVAL_MS, 30_000)),
+  directExecutionObservedCreatorVaultLookup: process.env.DIRECT_EXECUTION_OBSERVED_CREATOR_VAULT_LOOKUP === "true",
   directExecutionSendRpcUrls: rawListFromEnv(process.env.DIRECT_EXECUTION_SEND_RPC_URLS),
   directExecutionJitoSendUrls: rawListFromEnv(process.env.DIRECT_EXECUTION_JITO_SEND_URLS),
   directExecutionJitoAuthUuid: process.env.DIRECT_EXECUTION_JITO_AUTH_UUID,
@@ -815,11 +825,17 @@ function platformFeeResultFields(split: ReturnType<typeof calculatePlatformFeeSp
 }
 
 function calculateCopyTradePlatformFee(action: "buy" | "sell", budgetLamports: bigint | number = 0n): ReturnType<typeof calculatePlatformFeeSplit> {
+  const treasuryVerified = Boolean(
+    config.platformFeeTreasury &&
+    platformFeeTreasuryVerified === config.platformFeeTreasury &&
+    !platformFeeTreasuryBlockedReason
+  );
+
   return calculatePlatformFeeSplit({
     action,
     budgetLamports,
     config: {
-      enabled: config.platformFeeEnabled,
+      enabled: config.platformFeeEnabled && treasuryVerified,
       bps: config.platformFeeBps,
       treasury: config.platformFeeTreasury,
       validateTreasury: validateSolanaPublicKey
@@ -1106,6 +1122,7 @@ function logCopyTradeExecutionState(): void {
       `blockhashCacheMs=${config.directExecutionBlockhashCacheMs}`,
       `blockhashWarmMs=${config.directExecutionBlockhashWarmIntervalMs}`,
       `sdkWarmMs=${config.directExecutionSdkWarmIntervalMs}`,
+      `observedCreatorVaultLookup=${config.directExecutionObservedCreatorVaultLookup ? "true" : "false"}`,
       `sendRpcFanout=${directSolanaSendConnections.length}`,
       `canaryChats=${config.directExecutionCanaryChatIds.length || "none"}`,
       `canaryWallets=${config.directExecutionCanaryWallets.length || "none"}`,
@@ -1197,6 +1214,80 @@ function logCopyTradeLatency(
   details?: CopyTradeLatencyMilestoneDetails
 ): void {
   console.log(`Copy trade latency: ${JSON.stringify(tracker.format(details))}`);
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function optionalNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function walletTradeSlot(trade: WalletTradeData): number | null {
+  return optionalNumber(trade.raw?.slot);
+}
+
+function walletTradeTimestamp(trade: WalletTradeData): number | null {
+  return finiteNumber(trade.timestamp);
+}
+
+function logCopyTradeLatencySummary({
+  tracker,
+  trade,
+  details,
+  copySlot = null
+}: {
+  tracker: CopyTradeLatencyTracker;
+  trade: WalletTradeData;
+  details?: CopyTradeLatencyMilestoneDetails;
+  copySlot?: number | null;
+}): CopyTradeLatencySummaryMetadata {
+  const summary = formatCopyTradeLatencySummary(tracker.snapshot(), details, {
+    targetTimestamp: walletTradeTimestamp(trade),
+    targetSlot: walletTradeSlot(trade),
+    copySlot,
+    winnerProvider: trade.provider
+  });
+
+  console.log(`Copy trade latency summary: ${JSON.stringify(summary)}`);
+  return summary;
+}
+
+function logCopyTradeConfirmationLatencySummary(
+  submittedSummary: CopyTradeLatencySummaryMetadata,
+  {
+    status,
+    reason = null,
+    copySlot = null
+  }: {
+    status: string;
+    reason?: string | null;
+    copySlot?: number | null;
+  }
+): CopyTradeLatencySummaryMetadata {
+  const slotDelta = submittedSummary.targetSlot !== null && copySlot !== null
+    ? copySlot - submittedSummary.targetSlot
+    : null;
+  const summary = {
+    ...submittedSummary,
+    status,
+    reason,
+    copySlot,
+    slotDelta
+  };
+
+  console.log(`Copy trade latency summary: ${JSON.stringify(summary)}`);
+  return summary;
 }
 
 function watchedWalletAddresses(): string[] {
@@ -2073,6 +2164,7 @@ async function executeDirectCopyTrade({
       platformFee,
       metadata,
       forceFreshBuyState,
+      observedCreatorVaultLookup: config.directExecutionObservedCreatorVaultLookup,
       readConnections: directSolanaReadConnections
     }
   });
@@ -2378,6 +2470,7 @@ async function sendCopyTradeSimulationAlert(
   let deferredDurableCopyBuyClaim: DeferredCopyBuyIdempotencyClaim | null = null;
   let preBuyTokenBalance: number | null = null;
   let result: CopyTradeExecutionResult | null = null;
+  let submittedLatencySummary: CopyTradeLatencySummaryMetadata | null = null;
 
   try {
     const executionProvider = resolveExecutionProviderForTrade(trade);
@@ -2715,7 +2808,18 @@ async function sendCopyTradeSimulationAlert(
       reason: resultOk(result) ? null : result.errorText,
       signature: resultSignature(result)
     });
-    logLatencyOnce();
+    const resultDetails = {
+      status: resultOk(result) ? (isProviderNeutralResult(result) ? result.status : "submitted") : "failed",
+      reason: resultOk(result) ? null : result.errorText,
+      signature: resultSignature(result)
+    };
+    logLatencyOnce(resultDetails);
+    submittedLatencySummary = logCopyTradeLatencySummary({
+      tracker: latencyTracker,
+      trade,
+      details: resultDetails,
+      copySlot: isProviderNeutralResult(result) ? result.slot : null
+    });
     console.log(`Copy trade execution result: ${isProviderNeutralResult(result) ? formatTradeExecutionResultLog(result) : JSON.stringify(result)}`);
 
     const legacyResult = legacyResultFromExecution(result);
@@ -2772,6 +2876,7 @@ async function sendCopyTradeSimulationAlert(
             buySignature: resultSignature(result),
             executionProvider,
             preBuyTokenBalance,
+            submittedLatencySummary,
             replyToMessageId: copyBuyMessageId
           })
         : scheduleCopyTradeTrailingSellsAfterConfirmation({
@@ -2945,6 +3050,7 @@ async function watchSubmittedCopyTradeBuy({
   buySignature,
   executionProvider,
   preBuyTokenBalance,
+  submittedLatencySummary,
   replyToMessageId = null
 }: {
   subscriber: SubscriberRecord;
@@ -2953,6 +3059,7 @@ async function watchSubmittedCopyTradeBuy({
   buySignature: string | null;
   executionProvider: TradeExecutionProvider;
   preBuyTokenBalance: number | null;
+  submittedLatencySummary?: CopyTradeLatencySummaryMetadata | null;
   replyToMessageId?: number | null;
 }): Promise<void> {
   if (!buySignature) {
@@ -2969,6 +3076,13 @@ async function watchSubmittedCopyTradeBuy({
   if (!confirmation.confirmed) {
     const errorText = confirmation.errorText || "copy buy was not confirmed before trailing sell scheduling timeout";
     console.warn(`Submitted copy buy did not confirm: ${buySignature}: ${errorText}`);
+    if (submittedLatencySummary) {
+      logCopyTradeConfirmationLatencySummary(submittedLatencySummary, {
+        status: confirmation.timedOut ? "expired" : "failed",
+        reason: errorText,
+        copySlot: confirmation.slot
+      });
+    }
     await updateRecordedCopyTradeBuyStatus({
       subscriber,
       trade,
@@ -2986,6 +3100,13 @@ async function watchSubmittedCopyTradeBuy({
       replyToMessageId
     });
     return;
+  }
+
+  if (submittedLatencySummary) {
+    logCopyTradeConfirmationLatencySummary(submittedLatencySummary, {
+      status: "confirmed",
+      copySlot: confirmation.slot
+    });
   }
 
   await updateRecordedCopyTradeBuyStatus({
@@ -4074,6 +4195,7 @@ type SignatureConfirmationResult = {
   confirmed: boolean;
   timedOut: boolean;
   errorText: string | null;
+  slot: number | null;
 };
 
 async function waitForSignatureConfirmationResult(
@@ -4097,17 +4219,17 @@ async function waitForSignatureConfirmationResult(
           params: [[signature], { searchTransactionHistory: true }]
         })
       });
-      const body = await response.json() as { result?: { value?: Array<{ confirmationStatus?: string; err?: unknown } | null> } };
+      const body = await response.json() as { result?: { value?: Array<{ confirmationStatus?: string; err?: unknown; slot?: number } | null> } };
       const status = body.result?.value?.[0] || null;
 
       if (status?.err) {
         const errorText = `transaction landed with error: ${JSON.stringify(status.err)}`;
         console.warn(`Signature ${signature} ${errorText}`);
-        return { confirmed: false, timedOut: false, errorText };
+        return { confirmed: false, timedOut: false, errorText, slot: finiteNumber(status.slot) };
       }
 
       if (status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized") {
-        return { confirmed: true, timedOut: false, errorText: null };
+        return { confirmed: true, timedOut: false, errorText: null, slot: finiteNumber(status.slot) };
       }
     } catch (error) {
       console.warn(`Could not check signature confirmation for ${signature}: ${errorMessage(error)}`);
@@ -4117,7 +4239,7 @@ async function waitForSignatureConfirmationResult(
   }
 
   console.warn(`Timed out waiting for signature confirmation: ${signature}`);
-  return { confirmed: false, timedOut: true, errorText: "confirmation timed out" };
+  return { confirmed: false, timedOut: true, errorText: "confirmation timed out", slot: null };
 }
 
 async function waitForSignatureConfirmation(signature: string, timeoutMs = 30000, pollMs = 2000): Promise<boolean> {

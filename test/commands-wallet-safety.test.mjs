@@ -76,7 +76,7 @@ test("copy trade emergency stop confirmation is explicit and preserves setup", (
   const text = formatCopyTradeEmergencyStopConfirmText();
   assert.match(text, /Emergency Stop Live Copy Trading/);
   assert.match(text, /disables live copy-trade submissions/);
-  assert.match(text, /will not remove Copytrade Wallets/);
+  assert.match(text, /will not remove Target Wallets/);
   assert.match(text, /trading wallet config/);
   assert.match(text, /token alerts/);
 

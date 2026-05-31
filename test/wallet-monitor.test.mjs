@@ -516,8 +516,8 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
   assert.match(dashboard, /⚙️ Copy Settings<\/b>\n├ Copy Amount: 0.5 SOL/);
   assert.match(dashboard, /├ Buy: 10% slip \/ 0.00005 SOL priority/);
   assert.match(dashboard, /├ Sell: 10% slip \/ 0.00005 SOL priority/);
-  assert.match(dashboard, /└ Retry Failed Buys: Off/);
-  assert.match(dashboard, /🎯 Copytrade Wallets:<\/b> 1/);
+  assert.match(dashboard, /└ Copy Repeat Buys: Off/);
+  assert.match(dashboard, /🎯 Target Wallets:<\/b> 1/);
   assert.match(dashboard, /└ cented/);
   assert.doesNotMatch(dashboard, new RegExp(wallet));
   assert.match(dashboard, /🟢 Setup is <b>active<\/b>/);
@@ -546,7 +546,7 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
   assert.match(missing, /├ Copy Amount: Not set/);
   assert.match(missing, /├ Buy: 12.5% slip \/ 0.00012 SOL priority/);
   assert.match(missing, /├ Sell: 20% slip \/ 0.0002 SOL priority/);
-  assert.match(missing, /└ Retry Failed Buys: On/);
+  assert.match(missing, /└ Copy Repeat Buys: On/);
   assert.match(missing, /🔴 Setup is <b>inactive<\/b>/);
 });
 
@@ -630,10 +630,10 @@ test("copytrade settings callback toggles retry failed buys and reset clears it"
 
   const toggleReplies = await runCallback("copytrade:settings:retry_failed_buys");
   assert.equal(subscribers.get("chat-1")?.copyTradeRetryFailedBuys, true);
-  assert.match(toggleReplies[0].text, /Retry failed copy buys is now on/);
+  assert.match(toggleReplies[0].text, /Copy repeat buys is now on/);
   assert.deepEqual(
     toggleReplies[0].reply_markup.inline_keyboard.some((row) =>
-      row.some((button) => button.text === "☑ Retry Failed Buys")
+      row.some((button) => button.text === "☑ Copy Repeat Buys")
     ),
     true
   );
@@ -645,7 +645,7 @@ test("copytrade settings callback toggles retry failed buys and reset clears it"
   assert.match(resetReplies[0].text, /Execution settings reset to inherited defaults/);
   assert.deepEqual(
     resetReplies[0].reply_markup.inline_keyboard.some((row) =>
-      row.some((button) => button.text === "☐ Retry Failed Buys")
+      row.some((button) => button.text === "☐ Copy Repeat Buys")
     ),
     true
   );
@@ -753,6 +753,20 @@ test("copytrade settings callback toggles buy-pressure sells and saves timeout",
   assert.deepEqual(
     settingsReplies.at(-1).reply_markup.inline_keyboard.some((row) =>
       row.some((button) => button.text === "☑ Buy-Pressure Sell · 5s")
+    ),
+    true
+  );
+  assert.deepEqual(
+    settingsReplies.at(-1).reply_markup.inline_keyboard.some((row) =>
+      row.some((button) => button.text === "☐ Copy Repeat Buys") &&
+      row.some((button) => button.text === "☑ Buy-Pressure Sell · 5s")
+    ),
+    true
+  );
+  assert.deepEqual(
+    settingsReplies.at(-1).reply_markup.inline_keyboard.some((row) =>
+      row.some((button) => button.text === "♻️ Reset Defaults") &&
+      row.some((button) => button.text === "↩️ Back")
     ),
     true
   );

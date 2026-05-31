@@ -2528,7 +2528,7 @@ async function sendCopyTradeSimulationAlert(
         if (!idempotencyClaim.claimed) {
           const existing = idempotencyClaim.existing;
           const reason = existing?.status === "failed" && !subscriber.copyTradeRetryFailedBuys
-            ? "copy buy coin was already handled (failed); enable Retry failed copy buys in /copytrade settings to retry failed same-token buys"
+            ? "copy buy coin was already handled (failed); enable Copy Repeat Buys in /copytrade settings to copy repeat same-coin target buys"
             : existing
               ? `copy buy coin was already handled (${existing.status})`
               : "copy buy coin was already handled";

@@ -66,7 +66,7 @@ test("copy trade signal provider defaults to PumpPortal and supports explicit ra
   assert.equal(copyTradeSignalProviderAllows("parallel", "pumpportal"), true);
   assert.equal(copyTradeSignalProviderAllows("parallel", "geyser"), true);
   assert.equal(copyTradeSignalProviderAllows("parallel", "shredstream"), false);
-  assert.equal(copyTradeSignalProviderAllows("shredstream", "pumpportal"), true);
+  assert.equal(copyTradeSignalProviderAllows("shredstream", "pumpportal"), false);
   assert.equal(copyTradeSignalProviderAllows("shredstream", "geyser"), false);
   assert.equal(copyTradeSignalProviderAllows("shredstream", "shredstream"), true);
   assert.equal(copyTradeSignalProviderAllows("all", "pumpportal"), true);
@@ -272,6 +272,7 @@ test("index wires PumpPortal and Geyser through the shared signal race path", ()
   assert.match(indexSource, /raw: \{[\s\S]*diagnosticWallet: true/);
   assert.match(indexSource, /copyTradeSignalAgeBlockedReason\(\{[\s\S]*maxSignalAgeMs: config\.copyTradeMaxSignalAgeMs/);
   assert.match(indexSource, /copyTradeSignalSourceBlockedReason\(\{[\s\S]*allowedSources: config\.copyTradeAllowedSources/);
+  assert.match(indexSource, /pumpPortal=\$\{copyTradeSignalProviderAllows\(config\.copyTradeSignalProvider, "pumpportal"\) \? "trigger" : "diagnostic"\}/);
   assert.match(indexSource, /if \(raceBlockedReason\) \{[\s\S]*return true;/);
   assert.match(indexSource, /raceCopyableBlockedReason[\s\S]*trade is not a copyable SOL-to-token buy/);
   assert.match(indexSource, /const racesCopyTradeSignal = canRaceCopyTradeSignal && !raceCopyableBlockedReason/);

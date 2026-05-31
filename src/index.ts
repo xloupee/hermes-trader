@@ -1101,7 +1101,7 @@ function logCopyTradeExecutionState(): void {
     [
       "Copy trade signal provider",
       `mode=${config.copyTradeSignalProvider}`,
-      `pumpPortal=trigger`,
+      `pumpPortal=${copyTradeSignalProviderAllows(config.copyTradeSignalProvider, "pumpportal") ? "trigger" : "diagnostic"}`,
       `geyser=${copyTradeSignalProviderAllows(config.copyTradeSignalProvider, "geyser") ? "trigger" : "diagnostic"}`,
       `shredstream=${copyTradeSignalProviderAllows(config.copyTradeSignalProvider, "shredstream") ? "trigger" : config.shredstreamWalletObserverEnabled ? "observe" : "off"}`,
       `diagnosticWallets=${config.walletFeedDiagnosticWallets.length}`

@@ -1665,9 +1665,7 @@ export function createTelegramCommandPoller({
           {
             text: `${alertEnabled(mode, "migrations") ? "🟢 ON" : "⚪ OFF"} - Migrated Coins`,
             callback_data: "alerts:toggle:migrations"
-          }
-        ],
-        [
+          },
           {
             text: `${alertEnabled(mode, "newtokens") ? "🟢 ON" : "⚪ OFF"} - New Tokens`,
             callback_data: "alerts:toggle:newtokens"

@@ -403,8 +403,11 @@ export function formatCopyTradeTrailingSellScheduledMessage({
 
   lines.push(
     ...steps.map((step, index) => {
-      const seconds = formatNumber(step.delayMs / 1000);
-      return nestedLine(index, steps.length, `Sell ${escapeHtml(String(step.request.amount))} after ${seconds}s`);
+      const previousDelayMs = index > 0 ? steps[index - 1].delayMs : 0;
+      const waitMs = Math.max(0, step.delayMs - previousDelayMs);
+      const seconds = formatNumber(waitMs / 1000);
+      const timing = index === 0 ? `after ${seconds}s` : `${seconds}s later`;
+      return nestedLine(index, steps.length, `Sell ${escapeHtml(String(step.request.amount))} ${timing}`);
     })
   );
 

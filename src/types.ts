@@ -24,6 +24,7 @@ export interface WatchedWallet {
   label: string | null;
   addedAt: string;
   updatedAt: string;
+  copyTradeEnabled?: boolean;
   trailingSellConfig?: TrailingSellConfig | null;
 }
 
@@ -230,6 +231,7 @@ export interface SubscriberStore {
   unwatchWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   watchCopyTradeWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
   renameCopyTradeWallet: (chatId: TelegramChatId, address: string, label: string | null) => Promise<boolean>;
+  setCopyTradeWalletEnabled: (chatId: TelegramChatId, address: string, enabled: boolean) => Promise<boolean>;
   unwatchCopyTradeWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   unwatchAllCopyTradeWallets: (chatId: TelegramChatId) => Promise<number>;
   setCopyTradeWalletTrailingSellConfig: (

@@ -10,15 +10,16 @@ import {
   normalizeTrailingSellConfig,
   seedSubscriberMap
 } from "./subscribers.js";
-import type {
-  AlertModeValue,
-  CopyTradeExecutionRecord,
-  CopyTradeExecutionStatusUpdate,
-  SubscriberRecord,
-  SubscriberStore,
-  TelegramChatId,
-  TradingWallet,
-  WatchedWallet
+import {
+  asRecord,
+  type AlertModeValue,
+  type CopyTradeExecutionRecord,
+  type CopyTradeExecutionStatusUpdate,
+  type SubscriberRecord,
+  type SubscriberStore,
+  type TelegramChatId,
+  type TradingWallet,
+  type WatchedWallet
 } from "./types.js";
 
 interface SupabaseErrorLike {
@@ -204,8 +205,24 @@ function watchedWalletRow(chatId: string, wallet: WatchedWallet): WatchedWalletR
 function copyTradeWalletRow(chatId: string, wallet: WatchedWallet): WatchedWalletRow {
   return {
     ...watchedWalletRow(chatId, wallet),
-    trailing_sell_config: wallet.trailingSellConfig ?? null
+    trailing_sell_config: copyTradeWalletTrailingSellConfigValue(wallet)
   };
+}
+
+function copyTradeWalletTrailingSellConfigValue(wallet: WatchedWallet): unknown {
+  if (wallet.trailingSellConfig) {
+    return {
+      ...wallet.trailingSellConfig,
+      copyTradeEnabled: wallet.copyTradeEnabled !== false
+    };
+  }
+
+  return wallet.copyTradeEnabled === false ? { copyTradeEnabled: false } : null;
+}
+
+function copyTradeEnabledFromTrailingSellConfig(value: unknown): boolean {
+  const record = asRecord(value);
+  return record.copyTradeEnabled === false || record.copy_trade_enabled === false ? false : true;
 }
 
 const TRADING_WALLET_STATE_PREFIX = "trading_wallets_v1:";
@@ -356,6 +373,7 @@ export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
         label: wallet.label,
         addedAt: wallet.added_at,
         updatedAt: wallet.updated_at,
+        copyTradeEnabled: copyTradeEnabledFromTrailingSellConfig(wallet.trailing_sell_config),
         trailingSellConfig: normalizeTrailingSellConfig(wallet.trailing_sell_config, wallet.updated_at)
       }))
     : [];
@@ -532,13 +550,15 @@ export function createSupabaseSubscriberRepository({
 
       const [
         { data: watchedRows, error: watchedError },
-        { data: copyTradeRows, error: copyTradeError },
+        copyTradeResult,
         tradingWalletResult
       ] = await Promise.all([
         client.from("telegram_watched_wallets").select("chat_id,address,label,added_at,updated_at"),
         client.from("telegram_copytrade_wallets").select("chat_id,address,label,added_at,updated_at,trailing_sell_config"),
         client.from("telegram_trading_wallets").select("chat_id,public_key,encrypted_api_key,api_key_last4,provider,kind,encrypted_secret_key,secret_key_format,key_last4,label,created_at,updated_at")
       ]);
+      let copyTradeRows = copyTradeResult.data as unknown;
+      let copyTradeError = copyTradeResult.error;
       let tradingWalletRows = tradingWalletResult.data as unknown;
       let tradingWalletError = tradingWalletResult.error;
 
@@ -917,7 +937,9 @@ export function createSupabaseSubscriberStore({
         address,
         label: label?.trim() || previous?.label || null,
         addedAt: previous?.addedAt || now,
-        updatedAt: now
+        updatedAt: now,
+        copyTradeEnabled: previous?.copyTradeEnabled === false ? false : true,
+        trailingSellConfig: previous?.trailingSellConfig || null
       };
       const next = {
         ...existing,
@@ -950,6 +972,39 @@ export function createSupabaseSubscriberStore({
       const wallet = {
         ...existing.copyTradeWallets[walletIndex],
         label: label?.trim() || null,
+        updatedAt: now
+      };
+      const copyTradeWallets = existing.copyTradeWallets.map((entry, index) => (index === walletIndex ? wallet : entry));
+      const next = {
+        ...existing,
+        copyTradeWallets: dedupeWatchedWallets(copyTradeWallets),
+        updatedAt: now
+      };
+
+      await repository.upsertSubscriber(next);
+      await repository.upsertCopyTradeWallet(normalized, wallet);
+      subscribers.set(normalized, next);
+      return true;
+    },
+    async setCopyTradeWalletEnabled(chatId, address, enabled) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const walletIndex = existing.copyTradeWallets.findIndex((wallet) => wallet.address === address);
+
+      if (walletIndex === -1) {
+        return false;
+      }
+
+      const now = new Date().toISOString();
+      const wallet = {
+        ...existing.copyTradeWallets[walletIndex],
+        copyTradeEnabled: enabled,
         updatedAt: now
       };
       const copyTradeWallets = existing.copyTradeWallets.map((entry, index) => (index === walletIndex ? wallet : entry));
@@ -1451,6 +1506,7 @@ export function createSupabaseSubscriberStore({
           label: existing.watchedWallets.find((watchedWallet) => watchedWallet.address === address)?.label || null,
           addedAt: now,
           updatedAt: now,
+          copyTradeEnabled: true,
           trailingSellConfig: null
         };
         const next = {

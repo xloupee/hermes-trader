@@ -1561,6 +1561,16 @@ async function buildDirectPumpSolanaPayload({
             request.amountLamports
           )
         : bn(request.amountLamports);
+      if (amount.lte(new BN(0))) {
+        buildTiming.mark("skipped", { status: "zero_sell_amount" });
+        return tradeExecutionSkippedResult({
+          provider: "direct-pump",
+          route: route.route,
+          reason: "direct Pump sell has no token balance left",
+          platformFee: platformFeeResult(request.platformFee),
+          metadata: metadataWithBuildTiming({ route })
+        });
+      }
       const solAmount = getSellSolAmountFromTokenAmount({
         global,
         feeConfig,
@@ -1715,6 +1725,19 @@ async function buildDirectPumpSwapSolanaPayload({
             request.amountLamports
         )
         : bn(request.amountLamports);
+      if (amount.lte(new BN(0))) {
+        return tradeExecutionSkippedResult({
+          provider: "direct-pumpswap",
+          route: route.route,
+          reason: "direct PumpSwap sell has no token balance left",
+          platformFee: platformFeeResult(request.platformFee),
+          metadata: {
+            ...(request.metadata || {}),
+            route,
+            poolAddress: pool.toBase58()
+          }
+        });
+      }
       const quote = pumpSwapModule.sellBaseInput({
         base: amount,
         slippage: request.slippagePercent,

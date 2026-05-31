@@ -158,6 +158,11 @@ function nonNegativeNumberFromEnv(value: string | undefined, fallback: number): 
   return number >= 0 ? number : fallback;
 }
 
+function nonNegativeIntegerFromEnv(value: string | undefined, fallback: number): number {
+  const number = nonNegativeNumberFromEnv(value, fallback);
+  return Math.max(0, Math.floor(number));
+}
+
 function positiveIntegerFromEnv(value: string | undefined, fallback: number): number {
   return Math.max(1, Math.floor(positiveNumberFromEnv(value, fallback)));
 }
@@ -476,14 +481,14 @@ const config: BotConfig = {
   copyTradeSlippage: numberFromEnv(process.env.COPY_TRADE_SLIPPAGE, 10),
   copyTradePriorityFee: numberFromEnv(process.env.COPY_TRADE_PRIORITY_FEE, 0.00005),
   copyTradePool: pumpPortalPoolFromEnv(process.env.COPY_TRADE_POOL),
-  copyTradeMaxBuySol: positiveNumberFromEnv(process.env.COPY_TRADE_MAX_BUY_SOL, 0.005),
-  copyTradeDailySolCap: nonNegativeNumberFromEnv(process.env.COPY_TRADE_DAILY_SOL_CAP, 0.02),
+  copyTradeMaxBuySol: nonNegativeNumberFromEnv(process.env.COPY_TRADE_MAX_BUY_SOL, 0),
+  copyTradeDailySolCap: nonNegativeNumberFromEnv(process.env.COPY_TRADE_DAILY_SOL_CAP, 0),
   copyTradeMinWalletReserveSol: nonNegativeNumberFromEnv(process.env.COPY_TRADE_MIN_WALLET_RESERVE_SOL, 0),
-  copyTradeMaxSignalAgeMs: positiveIntegerFromEnv(process.env.COPY_TRADE_MAX_SIGNAL_AGE_MS, 60_000),
-  copyTradeMaxCopyWalletsPerChat: positiveIntegerFromEnv(process.env.COPY_TRADE_MAX_COPY_WALLETS_PER_CHAT, 1),
+  copyTradeMaxSignalAgeMs: nonNegativeIntegerFromEnv(process.env.COPY_TRADE_MAX_SIGNAL_AGE_MS, 0),
+  copyTradeMaxCopyWalletsPerChat: nonNegativeIntegerFromEnv(process.env.COPY_TRADE_MAX_COPY_WALLETS_PER_CHAT, 0),
   copyTradeAllowedSources: listFromEnv(process.env.COPY_TRADE_ALLOWED_SOURCES),
-  copyTradeMaxSlippage: percentFromEnv(process.env.COPY_TRADE_MAX_SLIPPAGE, 15),
-  copyTradeMaxPriorityFee: positiveNumberFromEnv(process.env.COPY_TRADE_MAX_PRIORITY_FEE, 0.0002),
+  copyTradeMaxSlippage: nonNegativeNumberFromEnv(process.env.COPY_TRADE_MAX_SLIPPAGE, 0),
+  copyTradeMaxPriorityFee: nonNegativeNumberFromEnv(process.env.COPY_TRADE_MAX_PRIORITY_FEE, 0),
   copyTradeTrailingSellEnabled: process.env.COPY_TRADE_TRAILING_SELL_ENABLED === "true",
   copyTradeTrailingSellHoldMs: positiveIntegerFromEnv(process.env.COPY_TRADE_TRAILING_SELL_HOLD_MS, 2000),
   copyTradeTrailingSellFirstPercent: percentFromEnv(process.env.COPY_TRADE_TRAILING_SELL_FIRST_PERCENT, 20),
@@ -1201,7 +1206,10 @@ function watchedWalletAddresses(): string[] {
         ...subscribers
           .list()
           .filter(isSubscriberLive)
-          .flatMap((subscriber) => [...(subscriber.watchedWallets || []), ...(subscriber.copyTradeWallets || [])]),
+          .flatMap((subscriber) => [
+            ...(subscriber.watchedWallets || []),
+            ...(subscriber.copyTradeWallets || []).filter(isCopyTradeWalletEnabled)
+          ]),
         ...config.walletFeedDiagnosticWallets
       ].map((wallet) => wallet.address)
         .filter(Boolean)
@@ -1216,6 +1224,7 @@ function copyTradeWalletAddresses(): string[] {
         .list()
         .filter(isSubscriberLive)
         .flatMap((subscriber) => subscriber.copyTradeWallets || [])
+        .filter(isCopyTradeWalletEnabled)
         .map((wallet) => wallet.address)
         .filter(Boolean)
     )
@@ -1229,7 +1238,10 @@ function activeGeyserWallets(): WatchedWallet[] {
         ...subscribers
           .list()
           .filter(isSubscriberLive)
-          .flatMap((subscriber) => [...(subscriber.watchedWallets || []), ...(subscriber.copyTradeWallets || [])]),
+          .flatMap((subscriber) => [
+            ...(subscriber.watchedWallets || []),
+            ...(subscriber.copyTradeWallets || []).filter(isCopyTradeWalletEnabled)
+          ]),
         ...config.walletFeedDiagnosticWallets
       ]
         .filter((wallet) => wallet.address)
@@ -1788,7 +1800,7 @@ async function handleHeliusSwap(event: LooseRecord, { receivedAtMs = Date.now() 
       subscribersByWallet.set(wallet.address, entries);
     }
 
-    for (const wallet of subscriber.copyTradeWallets || []) {
+    for (const wallet of (subscriber.copyTradeWallets || []).filter(isCopyTradeWalletEnabled)) {
       if (!heliusEventMentionsWatchedWallet(event, wallet.address)) {
         continue;
       }
@@ -1878,6 +1890,7 @@ async function handleYellowstoneWalletTrade(
     .flatMap((subscriber) =>
       (subscriber.copyTradeWallets || [])
         .filter((wallet) => wallet.address === trade.targetWallet)
+        .filter(isCopyTradeWalletEnabled)
         .map((wallet) => ({ subscriber, wallet, label: wallet.label }))
     );
   await Promise.all(copyTradeEntries.map((entry) =>
@@ -2442,7 +2455,7 @@ async function sendCopyTradeSimulationAlert(
       config,
       request,
       trade,
-      copyTradeWalletCount: subscriber.copyTradeWallets.length,
+      copyTradeWalletCount: subscriber.copyTradeWallets.filter(isCopyTradeWalletEnabled).length,
       dailySpentSol: copyTradeDailySolBudget.spentSol({ key: dailyBudgetKey, nowMs }),
       nowMs
     });
@@ -3642,10 +3655,12 @@ function buildTrailingSellSchedule({
   const sellPercents = trailingSellConfig.percentBasis === "original_position"
     ? originalPositionPercentsToRemainingBalancePercents(trailingSellConfig.steps)
     : trailingSellConfig.steps;
+  let customElapsedMs = 0;
   const executionSettings = copyTradeSellExecutionSettings(subscriber);
 
   return sellPercents
     .map((step) => {
+      customElapsedMs += trailingSellConfig.mode === "custom_steps" ? step.delayMs : 0;
       const request = buildPumpPortalLightningSellRequest({
         mint: trade.mint || "",
         amountPercent: step.percent,
@@ -3659,7 +3674,7 @@ function buildTrailingSellSchedule({
       }
 
       return {
-        delayMs: step.delayMs,
+        delayMs: trailingSellConfig.mode === "custom_steps" ? customElapsedMs : step.delayMs,
         request
       };
     })
@@ -4697,12 +4712,17 @@ function activeCopyTradeEntriesForTarget(targetWallet: string): Array<{
     .flatMap((subscriber) =>
       (subscriber.copyTradeWallets || [])
         .filter((wallet) => wallet.address === targetWallet)
+        .filter(isCopyTradeWalletEnabled)
         .map((wallet) => ({ subscriber, wallet, label: wallet.label }))
     );
 }
 
 function isSubscriberLive(subscriber: SubscriberRecord): boolean {
   return subscriber.notificationsPaused !== true;
+}
+
+function isCopyTradeWalletEnabled(wallet: WatchedWallet): boolean {
+  return wallet.copyTradeEnabled !== false;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -4902,6 +4922,7 @@ const commandPoller = createTelegramCommandPoller({
     refreshGeyserSubscriptions();
     return syncHeliusWalletWebhook();
   },
+  isCopyTradeEmergencyStopped: () => copyTradeEmergencyStopped,
   onCopyTradeEmergencyStop: (chatId) => {
     return activateCopyTradeEmergencyStop(chatId);
   },

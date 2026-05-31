@@ -81,6 +81,15 @@ import type { PumpPortalSubscription } from "./pumpportal.js";
 import { decryptLocalSolanaKeypair, decryptSecret, encryptionSecretReady } from "./secrets.js";
 import { calculatePlatformFeeSplit, platformFeeConfigBlockedReason } from "./platform-fee.js";
 import {
+  buildCashbackAccrual,
+  buildCashbackExecutionKey,
+  cashbackConfigBlockedReason,
+  claimCashback,
+  createSupabaseCashbackStore,
+  parseCashbackConfig
+} from "./cashback.js";
+import type { CashbackConfig, CashbackStore } from "./cashback.js";
+import {
   formatTradeExecutionResultLog,
   isDirectTradeExecutionProvider,
   parseTradeExecutionProvider,
@@ -505,8 +514,15 @@ const config: BotConfig = {
   directExecutionCanaryWallets: rawListFromEnv(process.env.DIRECT_EXECUTION_CANARY_WALLETS),
   platformFeeEnabled: process.env.PLATFORM_FEE_ENABLED === "true",
   platformFeeBps: Math.floor(nonNegativeNumberFromEnv(process.env.PLATFORM_FEE_BPS, 100)),
-  platformFeeTreasury: process.env.PLATFORM_FEE_TREASURY
+  platformFeeTreasury: process.env.PLATFORM_FEE_TREASURY,
+  cashbackEnabled: process.env.CASHBACK_ENABLED === "true",
+  cashbackFeeShareBps: Math.floor(nonNegativeNumberFromEnv(process.env.CASHBACK_FEE_SHARE_BPS, 0)),
+  cashbackMinClaimSol: nonNegativeNumberFromEnv(process.env.CASHBACK_MIN_CLAIM_SOL, 0.005),
+  cashbackPayoutWalletPublicKey: process.env.CASHBACK_PAYOUT_WALLET_PUBLIC_KEY,
+  cashbackPayoutWalletSecretKey: process.env.CASHBACK_PAYOUT_WALLET_SECRET_KEY,
+  cashbackMaxPayoutSolPerDay: nonNegativeNumberFromEnv(process.env.CASHBACK_MAX_PAYOUT_SOL_PER_DAY, 0)
 };
+const cashbackConfig: CashbackConfig = parseCashbackConfig(process.env);
 
 const seenEvents = new Set<string>();
 const seenGeyserDiagnostics = new Set<string>();
@@ -555,6 +571,13 @@ const subscriberStoreLabel = config.supabaseUrl && config.supabaseServiceRoleKey
 const copyTradeRecorder =
   config.supabaseUrl && config.supabaseServiceRoleKey
     ? createSupabaseCopyTradeRecorderFromEnv({
+        url: config.supabaseUrl,
+        serviceRoleKey: config.supabaseServiceRoleKey
+      })
+    : null;
+const cashbackStore: CashbackStore | null =
+  config.supabaseUrl && config.supabaseServiceRoleKey
+    ? createSupabaseCashbackStore({
         url: config.supabaseUrl,
         serviceRoleKey: config.supabaseServiceRoleKey
       })
@@ -1081,7 +1104,8 @@ function logCopyTradeExecutionState(): void {
       `sendRpcFanout=${directSolanaSendConnections.length}`,
       `canaryChats=${config.directExecutionCanaryChatIds.length || "none"}`,
       `canaryWallets=${config.directExecutionCanaryWallets.length || "none"}`,
-      `platformFee=${config.platformFeeEnabled ? `${config.platformFeeBps}bps` : "disabled"}`
+      `platformFee=${config.platformFeeEnabled ? `${config.platformFeeBps}bps` : "disabled"}`,
+      `cashback=${cashbackConfig.enabled ? `${cashbackConfig.feeShareBps}bps` : "disabled"}`
     ].join(" | ")
   );
 
@@ -1093,6 +1117,15 @@ function logCopyTradeExecutionState(): void {
   });
   if (platformFeeBlockedReason) {
     console.warn(`Platform fee config blocks fee-enabled direct execution: ${platformFeeBlockedReason}`);
+  }
+
+  const cashbackBlockedReason = cashbackConfigBlockedReason(cashbackConfig);
+  if (cashbackBlockedReason) {
+    console.warn(`Cashback config blocks accrual and claims: ${cashbackBlockedReason}`);
+  }
+
+  if (cashbackConfig.enabled && !cashbackStore) {
+    console.warn("CASHBACK_ENABLED is true but Supabase is not configured; cashback accrual and claims are disabled.");
   }
 
   if (copyTradeExecutionProviderError) {
@@ -1167,6 +1200,7 @@ function watchedWalletAddresses(): string[] {
       [
         ...subscribers
           .list()
+          .filter(isSubscriberLive)
           .flatMap((subscriber) => [...(subscriber.watchedWallets || []), ...(subscriber.copyTradeWallets || [])]),
         ...config.walletFeedDiagnosticWallets
       ].map((wallet) => wallet.address)
@@ -1180,6 +1214,7 @@ function copyTradeWalletAddresses(): string[] {
     ...new Set(
       subscribers
         .list()
+        .filter(isSubscriberLive)
         .flatMap((subscriber) => subscriber.copyTradeWallets || [])
         .map((wallet) => wallet.address)
         .filter(Boolean)
@@ -1193,6 +1228,7 @@ function activeGeyserWallets(): WatchedWallet[] {
       [
         ...subscribers
           .list()
+          .filter(isSubscriberLive)
           .flatMap((subscriber) => [...(subscriber.watchedWallets || []), ...(subscriber.copyTradeWallets || [])]),
         ...config.walletFeedDiagnosticWallets
       ]
@@ -1352,6 +1388,7 @@ async function handleWalletTradeSignal(
 
   const entries = subscribers
     .list()
+    .filter(isSubscriberLive)
     .flatMap((subscriber) =>
       (subscriber.watchedWallets || [])
         .filter((wallet) => wallet.address === trade.targetWallet)
@@ -1737,6 +1774,10 @@ async function handleHeliusSwap(event: LooseRecord, { receivedAtMs = Date.now() 
   const copyTradeSubscribersByWallet = new Map<string, Array<{ subscriber: SubscriberRecord; wallet: WatchedWallet; label: string | null }>>();
 
   for (const subscriber of subscribers.list()) {
+    if (!isSubscriberLive(subscriber)) {
+      continue;
+    }
+
     for (const wallet of subscriber.watchedWallets || []) {
       if (!heliusEventMentionsWatchedWallet(event, wallet.address)) {
         continue;
@@ -1833,6 +1874,7 @@ async function handleYellowstoneWalletTrade(
 
   const copyTradeEntries = subscribers
     .list()
+    .filter(isSubscriberLive)
     .flatMap((subscriber) =>
       (subscriber.copyTradeWallets || [])
         .filter((wallet) => wallet.address === trade.targetWallet)
@@ -1855,6 +1897,7 @@ async function handleYellowstoneWalletTrade(
 
   const entries = subscribers
     .list()
+    .filter(isSubscriberLive)
     .flatMap((subscriber) =>
       (subscriber.watchedWallets || [])
         .filter((wallet) => wallet.address === trade.targetWallet)
@@ -2492,7 +2535,7 @@ async function sendCopyTradeSimulationAlert(
         if (!idempotencyClaim.claimed) {
           const existing = idempotencyClaim.existing;
           const reason = existing?.status === "failed" && !subscriber.copyTradeRetryFailedBuys
-            ? "copy buy coin was already handled (failed); enable Retry failed copy buys in /copytrade settings to retry failed same-token buys"
+            ? "copy buy coin was already handled (failed); enable Copy Repeat Buys in /copytrade settings to copy repeat same-coin target buys"
             : existing
               ? `copy buy coin was already handled (${existing.status})`
               : "copy buy coin was already handled";
@@ -3114,7 +3157,8 @@ function formatSkippedAutoCopyBuyMessage({
     simulationMessage,
     "",
     `🟡 ${mode}; no copy order was submitted.`,
-    `<b>Reason:</b> <code>${reason}</code>`
+    "<b>Reason</b>",
+    `└ <code>${reason}</code>`
   ].join("\n");
 }
 
@@ -3129,7 +3173,7 @@ function copyTradeBuyPressureSellConfig() {
 }
 
 function copyTradeBuyPressureSellEnabledForSubscriber(subscriber: SubscriberRecord): boolean {
-  return config.copyTradeBuyPressureSellEnabled && subscriber.copyTradeBuyPressureSellEnabled === true;
+  return isSubscriberLive(subscriber) && config.copyTradeBuyPressureSellEnabled && subscriber.copyTradeBuyPressureSellEnabled === true;
 }
 
 function copyTradeBuyPressureSellConfigForSubscriber(subscriber: SubscriberRecord) {
@@ -3360,6 +3404,15 @@ async function handleCopyTradeBuyPressureTrade(trade: WalletTradeData): Promise<
   let changed = false;
 
   for (const watcher of activeBuyPressureSellWatchers.values()) {
+    const subscriber = subscribers.get(watcher.chatId);
+
+    if (!subscriber || !isSubscriberLive(subscriber)) {
+      activeBuyPressureSellWatchers.delete(watcher.id);
+      clearBuyPressureSellTimer(watcher.id);
+      changed = true;
+      continue;
+    }
+
     const result = applyCopyTradeBuyPressureTrade({ watcher, trade });
 
     if (!result.changed) {
@@ -3391,6 +3444,15 @@ async function triggerCopyTradeBuyPressureSell({
   trigger: CopyTradeBuyPressureSellTrigger;
 }): Promise<void> {
   if (!activeBuyPressureSellWatchers.has(watcher.id) || activeBuyPressureSellTriggers.has(watcher.id)) {
+    return;
+  }
+
+  const subscriber = subscribers.get(watcher.chatId);
+
+  if (!subscriber || !isSubscriberLive(subscriber)) {
+    activeBuyPressureSellWatchers.delete(watcher.id);
+    clearBuyPressureSellTimer(watcher.id);
+    await persistActiveBuyPressureSellWatchers();
     return;
   }
 
@@ -4105,8 +4167,67 @@ async function recordCopyTradeExecution({
 
   try {
     await copyTradeRecorder.recordCopyTradeExecution(record);
+    await accrueCashbackFromCopyTradeExecution({
+      record,
+      trade,
+      result,
+      trailingSellStepIndex,
+      trailingSellTotalSteps
+    });
   } catch (error) {
     console.warn(`Could not record copy trade execution for ${subscriber.chatId}: ${errorMessage(error)}`);
+  }
+}
+
+async function accrueCashbackFromCopyTradeExecution({
+  record,
+  trade,
+  result,
+  trailingSellStepIndex = null,
+  trailingSellTotalSteps = null
+}: {
+  record: CopyTradeExecutionRecord;
+  trade: WalletTradeData;
+  result: CopyTradeExecutionResult;
+  trailingSellStepIndex?: number | null;
+  trailingSellTotalSteps?: number | null;
+}): Promise<void> {
+  if (!cashbackStore || !isProviderNeutralResult(result) || !isDirectTradeExecutionProvider(result.provider)) {
+    return;
+  }
+
+  const executionKey = buildCashbackExecutionKey({
+    chatId: record.chatId,
+    tradingWalletPublicKey: record.tradingWalletPublicKey,
+    sourceSignature: trade.signature,
+    executionSignature: result.signature,
+    action: record.action,
+    trailingSellStepIndex,
+    trailingSellTotalSteps
+  });
+  const accrual = buildCashbackAccrual({
+    chatId: record.chatId,
+    tradingWalletPublicKey: record.tradingWalletPublicKey,
+    executionKey,
+    sourceSignature: trade.signature,
+    executionSignature: result.signature,
+    action: record.action,
+    status: record.status,
+    provider: result.provider,
+    platformFee: result.platformFee,
+    trailingSellStepIndex,
+    trailingSellTotalSteps,
+    config: cashbackConfig
+  });
+
+  if (!accrual) {
+    return;
+  }
+
+  try {
+    await cashbackStore.accrue(accrual);
+  } catch (error) {
+    console.warn(`Could not accrue cashback for ${record.chatId}:${executionKey}: ${errorMessage(error)}`);
   }
 }
 
@@ -4141,7 +4262,7 @@ function hasMigrationStyleFields(event: LooseRecord): boolean {
 }
 
 function shouldSendEventToSubscriber(eventMode: Exclude<AlertModeValue, "both">, subscriber: SubscriberRecord): boolean {
-  return subscriber.mode === "both" || subscriber.mode === eventMode;
+  return isSubscriberLive(subscriber) && (subscriber.mode === "both" || subscriber.mode === eventMode);
 }
 
 async function sendAlertToSubscribers({
@@ -4572,11 +4693,16 @@ function activeCopyTradeEntriesForTarget(targetWallet: string): Array<{
 }> {
   return subscribers
     .list()
+    .filter(isSubscriberLive)
     .flatMap((subscriber) =>
       (subscriber.copyTradeWallets || [])
         .filter((wallet) => wallet.address === targetWallet)
         .map((wallet) => ({ subscriber, wallet, label: wallet.label }))
     );
+}
+
+function isSubscriberLive(subscriber: SubscriberRecord): boolean {
+  return subscriber.notificationsPaused !== true;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -4781,7 +4907,22 @@ const commandPoller = createTelegramCommandPoller({
   },
   onCopyTradeEmergencyResume: (chatId) => {
     return clearCopyTradeEmergencyStop(chatId);
-  }
+  },
+  cashback: cashbackConfig.enabled && cashbackStore
+    ? {
+        getSummary: ({ chatId, tradingWalletPublicKey, payoutWalletPublicKey }) =>
+          cashbackStore.getSummary({ chatId, tradingWalletPublicKey, payoutWalletPublicKey, config: cashbackConfig }),
+        claim: ({ chatId, tradingWalletPublicKey, payoutWalletPublicKey }) =>
+          claimCashback({
+            store: cashbackStore,
+            config: cashbackConfig,
+            connection: directSolanaConnection,
+            chatId,
+            tradingWalletPublicKey,
+            payoutWalletPublicKey
+          })
+      }
+    : undefined
 });
 const migrationListener = createPumpPortalMigrationListener({
   pumpPortalWsUrl: config.pumpPortalWsUrl,

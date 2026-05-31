@@ -185,6 +185,7 @@ function subscriber(overrides = {}) {
     copyTradeRetryFailedBuys: false,
     copyTradeBuyPressureSellEnabled: false,
     copyTradeBuyPressureSellTimeoutMs: null,
+    cashbackPayoutWalletAddress: null,
     copyTargetWalletAddress: null,
     verifiedAt: "2026-05-22T00:00:00.000Z",
     updatedAt: "2026-05-22T00:00:00.000Z",
@@ -288,11 +289,13 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
   assert.equal(await store.setCopyTradeRetryFailedBuys("chat-1", true), true);
   assert.equal(await store.setCopyTradeBuyPressureSellEnabled("chat-1", true), true);
   assert.equal(await store.setCopyTradeBuyPressureSellTimeoutMs("chat-1", 5000), true);
+  assert.equal(await store.setCashbackPayoutWallet("chat-1", wallet), true);
   assert.equal(await store.setCopyTradeBuySlippage("chat-2", 12.5), false);
   assert.equal(await store.setCopyTradeSellPriorityFee("chat-2", 0.0002), false);
   assert.equal(await store.setCopyTradeRetryFailedBuys("chat-2", true), false);
   assert.equal(await store.setCopyTradeBuyPressureSellEnabled("chat-2", true), false);
   assert.equal(await store.setCopyTradeBuyPressureSellTimeoutMs("chat-2", 5000), false);
+  assert.equal(await store.setCashbackPayoutWallet("chat-2", wallet), false);
   assert.equal(await store.watchCopyTradeWallet("chat-2", wallet, "Unverified"), false);
   assert.equal(store.get("chat-1")?.mode, "newtokens");
   assert.equal(store.get("chat-1")?.copyWalletAddress, otherWallet);
@@ -306,6 +309,7 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
   assert.equal(store.get("chat-1")?.copyTradeRetryFailedBuys, true);
   assert.equal(store.get("chat-1")?.copyTradeBuyPressureSellEnabled, true);
   assert.equal(store.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, 5000);
+  assert.equal(store.get("chat-1")?.cashbackPayoutWalletAddress, wallet);
   assert.equal(store.getTradingWallet("chat-1")?.publicKey, otherWallet);
   assert.equal(store.getTradingWallet("chat-1")?.apiKeyLast4, "ikey");
   assert.equal(store.getTradingWallet("chat-1")?.label, "Main Wallet");
@@ -333,6 +337,7 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
   assert.equal(reloaded.get("chat-1")?.copyTradeRetryFailedBuys, true);
   assert.equal(reloaded.get("chat-1")?.copyTradeBuyPressureSellEnabled, true);
   assert.equal(reloaded.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, 5000);
+  assert.equal(reloaded.get("chat-1")?.cashbackPayoutWalletAddress, wallet);
   assert.equal(reloaded.getTradingWallet("chat-1")?.publicKey, otherWallet);
   assert.equal(reloaded.getTradingWallet("chat-1")?.label, "Main Wallet");
   assert.equal(await reloaded.renameTradingWallet("chat-1", null), true);

@@ -57,9 +57,10 @@ test("telegram help exposes wallet and copy trade dashboards", () => {
   assert.match(help, /🚀 Quick Start/);
   assert.match(help, /\/alerts - Toggle migrated coins and new tokens/);
   assert.match(help, /\/trackwallets - Track wallets for normal trade alerts/);
-  assert.match(help, /\/mywallets - Create or view your PumpPortal trading wallet/);
+  assert.match(help, /\/mywallets - Create or view your local signing trading wallet/);
   assert.match(help, /\/copytrade - Configure copy amount, wallets, and trailing sells/);
-  assert.match(help, /🕒 Last updated:/);
+  assert.match(help, /\/cashback - View and claim platform-fee cashback/);
+  assert.doesNotMatch(help, /🕒 Last updated:/);
   assert.doesNotMatch(help, /Commands:/);
   assert.doesNotMatch(help, /\/wallets/);
   assert.doesNotMatch(help, /\/migrations/);
@@ -89,6 +90,10 @@ test("telegram help exposes wallet and copy trade dashboards", () => {
   });
   assert.deepEqual(commandFromMessage({ text: "/copytrade" }), {
     command: "/copytrade",
+    args: []
+  });
+  assert.deepEqual(commandFromMessage({ text: "/cashback" }), {
+    command: "/cashback",
     args: []
   });
 });
@@ -124,9 +129,311 @@ test("start dashboard uses polished status card", () => {
   assert.match(dashboard, /👀 Tracked Wallets/);
   assert.match(dashboard, /👛 Trading Wallet/);
   assert.match(dashboard, /⚡ Copy Trading/);
+  assert.match(dashboard, /\/cashback - Copytrade cashback/);
   assert.match(dashboard, /Cented/);
-  assert.match(dashboard, /🕒 Last updated:/);
+  assert.doesNotMatch(dashboard, /🕒 Last updated:/);
   assert.doesNotMatch(dashboard, /Commands:/);
+});
+
+test("unverified chats can open read-only dashboards", async () => {
+  const subscribers = createSubscriberStore({});
+  await subscribers.init();
+  const replies = [];
+  const commands = ["/alerts", "/trackwallets", "/mywallets", "/copytrade", "/cashback"];
+  let updateIndex = 0;
+  let poller;
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (url, init) => {
+    const href = String(url);
+
+    if (href.includes("/getMe")) {
+      return new Response(JSON.stringify({ ok: true, result: { username: "copybot" } }), { status: 200 });
+    }
+
+    if (href.includes("/deleteWebhook") || href.includes("/setMyCommands")) {
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    }
+
+    if (href.includes("/getUpdates")) {
+      if (updateIndex >= commands.length) {
+        poller?.stop();
+        return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+      }
+
+      const text = commands[updateIndex];
+      updateIndex += 1;
+      return new Response(JSON.stringify({
+        ok: true,
+        result: [{ update_id: updateIndex, message: { text, chat: { id: "guest-chat", type: "private" } } }]
+      }), { status: 200 });
+    }
+
+    if (href.includes("/sendMessage")) {
+      replies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+    }
+
+    throw new Error(`Unexpected Telegram request: ${href}`);
+  };
+
+  try {
+    poller = createTelegramCommandPoller({
+      config: {
+        ...config,
+        telegramToken: "token"
+      },
+      testMessage: () => "",
+      subscribers
+    });
+    await poller.start();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(replies.length, commands.length);
+  assert.match(replies[0].text, /🔔 Alerts/);
+  assert.match(replies[1].text, /👀 Tracked Wallets/);
+  assert.match(replies[2].text, /👛 Trading Wallet/);
+  assert.match(replies[3].text, /🔎 Copy Trading/);
+  assert.match(replies[4].text, /Cashback is not available/);
+  for (const reply of replies) {
+    assert.doesNotMatch(reply.text, /Verification/);
+  }
+});
+
+test("stop pauses notifications without deleting subscriber settings", async () => {
+  const subscribers = createSubscriberStore({});
+  await subscribers.init();
+  await subscribers.add("chat-1");
+  await subscribers.setMode("chat-1", "both");
+  await subscribers.setCopyAmountSol("chat-1", 0.5);
+  await subscribers.watchCopyTradeWallet("chat-1", wallet, "copy");
+
+  const replies = [];
+  const updates = [
+    { update_id: 1, message: { text: "/stop", chat: { id: "chat-1", type: "private" } } },
+    { update_id: 2, message: { text: "/start", chat: { id: "chat-1", type: "private" } } }
+  ];
+  let updateIndex = 0;
+  let poller;
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (url, init) => {
+    const href = String(url);
+
+    if (href.includes("/getMe")) {
+      return new Response(JSON.stringify({ ok: true, result: { username: "copybot" } }), { status: 200 });
+    }
+
+    if (href.includes("/deleteWebhook") || href.includes("/setMyCommands")) {
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    }
+
+    if (href.includes("/getUpdates")) {
+      if (updateIndex >= updates.length) {
+        poller?.stop();
+        return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+      }
+
+      return new Response(JSON.stringify({ ok: true, result: [updates[updateIndex++]] }), { status: 200 });
+    }
+
+    if (href.includes("/sendMessage")) {
+      replies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+    }
+
+    throw new Error(`Unexpected Telegram request: ${href}`);
+  };
+
+  try {
+    poller = createTelegramCommandPoller({
+      config: {
+        ...config,
+        telegramToken: "token"
+      },
+      testMessage: () => "",
+      subscribers
+    });
+    await poller.start();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const subscriber = subscribers.get("chat-1");
+  assert.equal(subscriber?.mode, null);
+  assert.equal(subscriber?.notificationsPaused, true);
+  assert.equal(subscriber?.copyAmountSol, 0.5);
+  assert.equal(subscriber?.copyTradeWallets.length, 1);
+  assert.match(replies[0].text, /Notifications paused/);
+  assert.match(replies[0].text, /saved settings were kept/);
+  assert.match(replies[1].text, /Notifications are <b>paused<\/b>/);
+  assert.doesNotMatch(replies[1].text, /Verification/);
+});
+
+test("cashback command renders summary and claim callback", async () => {
+  const subscribers = createSubscriberStore({});
+  await subscribers.init();
+  await subscribers.add("chat-1");
+  await subscribers.setTradingWallet("chat-1", {
+    publicKey: otherWallet,
+    encryptedApiKey: "encrypted",
+    apiKeyLast4: "abcd",
+    provider: "local-solana",
+    kind: "local-solana",
+    label: null,
+    createdAt: "now",
+    updatedAt: "now"
+  });
+
+  const replies = [];
+  const updates = [
+    {
+      update_id: 1,
+      message: {
+        text: "/cashback",
+        chat: { id: "chat-1", type: "private" }
+      }
+    },
+    {
+      update_id: 2,
+      callback_query: {
+        id: "cashback-set-wallet",
+        data: "cashback:set_payout_wallet",
+        message: {
+          chat: { id: "chat-1", type: "private" }
+        }
+      }
+    },
+    {
+      update_id: 3,
+      message: {
+        text: wallet,
+        chat: { id: "chat-1", type: "private" }
+      }
+    },
+    {
+      update_id: 4,
+      callback_query: {
+        id: "cashback-claim",
+        data: "cashback:claim",
+        message: {
+          chat: { id: "chat-1", type: "private" }
+        }
+      }
+    }
+  ];
+  let updateIndex = 0;
+  let poller;
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (url, init) => {
+    const href = String(url);
+
+    if (href.includes("/getMe")) {
+      return new Response(JSON.stringify({ ok: true, result: { username: "copybot" } }), { status: 200 });
+    }
+
+    if (href.includes("/deleteWebhook") || href.includes("/setMyCommands") || href.includes("/answerCallbackQuery")) {
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    }
+
+    if (href.includes("/getUpdates")) {
+      if (updateIndex >= updates.length) {
+        poller?.stop();
+        return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+      }
+
+      return new Response(JSON.stringify({ ok: true, result: [updates[updateIndex++]] }), { status: 200 });
+    }
+
+    if (href.includes("/sendMessage")) {
+      replies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+    }
+
+    throw new Error(`Unexpected Telegram request: ${href}`);
+  };
+
+  try {
+    poller = createTelegramCommandPoller({
+      config: {
+        ...config,
+        telegramToken: "token"
+      },
+      testMessage: () => "",
+      subscribers,
+      cashback: {
+        async getSummary({ tradingWalletPublicKey }) {
+          const payoutWalletPublicKey = subscribers.get("chat-1")?.cashbackPayoutWalletAddress || null;
+          return {
+            enabled: true,
+            tradingWalletPublicKey,
+            payoutWalletPublicKey,
+            accruedLamports: 10_000_000n,
+            claimableLamports: 10_000_000n,
+            pendingLamports: 0n,
+            lifetimePaidLamports: 0n,
+            minClaimLamports: 5_000_000n,
+            payoutUnavailableReason: payoutWalletPublicKey ? null : "add a payout wallet"
+          };
+        },
+        async claim({ tradingWalletPublicKey }) {
+          const payoutWalletPublicKey = subscribers.get("chat-1")?.cashbackPayoutWalletAddress || null;
+          return {
+            ok: true,
+            status: "submitted",
+            signature: "cashback-signature",
+            errorText: null,
+            summary: {
+              enabled: true,
+              tradingWalletPublicKey,
+              payoutWalletPublicKey,
+              accruedLamports: 10_000_000n,
+              claimableLamports: 0n,
+              pendingLamports: 0n,
+              lifetimePaidLamports: 10_000_000n,
+              minClaimLamports: 5_000_000n,
+              payoutUnavailableReason: null
+            }
+          };
+        }
+      }
+    });
+    await poller.start();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.match(replies[0].text, /<b>💎 Cashback Vault<\/b>/);
+  assert.match(replies[0].text, /Claimable: <b>0\.01 SOL<\/b>/);
+  assert.match(replies[0].text, /Lifetime Paid: 0 SOL/);
+  assert.doesNotMatch(replies[0].text, /Accrued:/);
+  assert.doesNotMatch(replies[0].text, /Pending:/);
+  assert.deepEqual(
+    replies[0].reply_markup.inline_keyboard.some((row) =>
+      row.some((button) => button.text === "Add Payout Wallet" && button.callback_data === "cashback:set_payout_wallet")
+    ),
+    true
+  );
+  assert.match(replies[1].text, /Set cashback payout wallet/);
+  assert.match(replies[2].text, /Cashback payout wallet saved/);
+  assert.match(replies[2].text, new RegExp(wallet));
+  assert.deepEqual(
+    replies[2].reply_markup.inline_keyboard.some((row) =>
+      row.some((button) => button.text === "Claim Cashback" && button.callback_data === "cashback:claim")
+    ),
+    true
+  );
+  assert.match(replies[3].text, /Cashback submitted/);
+  assert.match(replies[3].text, /cashback-signature/);
+  assert.deepEqual(
+    replies[3].reply_markup.inline_keyboard.some((row) =>
+      row.some((button) => button.text === "Claim Cashback")
+    ),
+    false
+  );
 });
 
 test("alert mode toggles individual token alert types", () => {
@@ -199,8 +506,7 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
         addedAt: "2026-05-23T00:00:00.000Z",
         updatedAt: "2026-05-23T00:00:00.000Z"
       }
-    ],
-    now: new Date("2026-05-23T14:48:25.107Z")
+    ]
   });
 
   assert.match(dashboard, /🔎 Copy Trading/);
@@ -210,13 +516,13 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
   assert.match(dashboard, /⚙️ Copy Settings<\/b>\n├ Copy Amount: 0.5 SOL/);
   assert.match(dashboard, /├ Buy: 10% slip \/ 0.00005 SOL priority/);
   assert.match(dashboard, /├ Sell: 10% slip \/ 0.00005 SOL priority/);
-  assert.match(dashboard, /└ Retry Failed Buys: Off/);
-  assert.match(dashboard, /🎯 Copytrade Wallets:<\/b> 1/);
+  assert.match(dashboard, /└ Copy Repeat Buys: Off/);
+  assert.match(dashboard, /🎯 Target Wallets:<\/b> 1/);
   assert.match(dashboard, /└ cented/);
   assert.doesNotMatch(dashboard, new RegExp(wallet));
   assert.match(dashboard, /🟢 Setup is <b>active<\/b>/);
   assert.match(dashboard, /📉 Trailing Sells:<\/b> Not configured/);
-  assert.match(dashboard, /🕒 Last updated: 10:48:25/);
+  assert.doesNotMatch(dashboard, /🕒 Last updated:/);
 
   const missing = formatCopyTradeDashboardText({
     tradingWalletPublicKey: null,
@@ -233,15 +539,14 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
     buyPriorityFeeSol: 0.00012,
     sellSlippagePercent: 20,
     sellPriorityFeeSol: 0.0002,
-    retryFailedCopyBuys: true,
-    now: new Date("2026-05-23T14:48:25.107Z")
+    retryFailedCopyBuys: true
   });
 
   assert.match(missing, /└ 39azUY\.\.\.5jUJjg/);
   assert.match(missing, /├ Copy Amount: Not set/);
   assert.match(missing, /├ Buy: 12.5% slip \/ 0.00012 SOL priority/);
   assert.match(missing, /├ Sell: 20% slip \/ 0.0002 SOL priority/);
-  assert.match(missing, /└ Retry Failed Buys: On/);
+  assert.match(missing, /└ Copy Repeat Buys: On/);
   assert.match(missing, /🔴 Setup is <b>inactive<\/b>/);
 });
 
@@ -325,10 +630,10 @@ test("copytrade settings callback toggles retry failed buys and reset clears it"
 
   const toggleReplies = await runCallback("copytrade:settings:retry_failed_buys");
   assert.equal(subscribers.get("chat-1")?.copyTradeRetryFailedBuys, true);
-  assert.match(toggleReplies[0].text, /Retry failed copy buys is now on/);
+  assert.match(toggleReplies[0].text, /Copy repeat buys is now on/);
   assert.deepEqual(
     toggleReplies[0].reply_markup.inline_keyboard.some((row) =>
-      row.some((button) => button.text === "☑ Retry Failed Buys")
+      row.some((button) => button.text === "☑ Copy Repeat Buys")
     ),
     true
   );
@@ -340,7 +645,7 @@ test("copytrade settings callback toggles retry failed buys and reset clears it"
   assert.match(resetReplies[0].text, /Execution settings reset to inherited defaults/);
   assert.deepEqual(
     resetReplies[0].reply_markup.inline_keyboard.some((row) =>
-      row.some((button) => button.text === "☐ Retry Failed Buys")
+      row.some((button) => button.text === "☐ Copy Repeat Buys")
     ),
     true
   );
@@ -448,6 +753,20 @@ test("copytrade settings callback toggles buy-pressure sells and saves timeout",
   assert.deepEqual(
     settingsReplies.at(-1).reply_markup.inline_keyboard.some((row) =>
       row.some((button) => button.text === "☑ Buy-Pressure Sell · 5s")
+    ),
+    true
+  );
+  assert.deepEqual(
+    settingsReplies.at(-1).reply_markup.inline_keyboard.some((row) =>
+      row.some((button) => button.text === "☐ Copy Repeat Buys") &&
+      row.some((button) => button.text === "☑ Buy-Pressure Sell · 5s")
+    ),
+    true
+  );
+  assert.deepEqual(
+    settingsReplies.at(-1).reply_markup.inline_keyboard.some((row) =>
+      row.some((button) => button.text === "♻️ Reset Defaults") &&
+      row.some((button) => button.text === "↩️ Back")
     ),
     true
   );
@@ -843,7 +1162,8 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
   assert.match(message, /Alpha &lt;Wallet&gt;/);
   assert.match(message, /0.125 SOL -> 250,000 BONK/);
   assert.match(message, /0.125 SOL/);
-  assert.match(message, /📡 Source:<\/b> JUPITER/);
+  assert.match(message, /<b>📡 Route<\/b>/);
+  assert.match(message, /└ Source: JUPITER/);
 
   const copyMessage = formatWalletTradeMessageWithCopySettings(trade, {
     copyWalletAddress: otherWallet,
@@ -853,8 +1173,8 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
   assert.match(copyMessage, /⚡ Copy Trade Setup/);
   assert.match(copyMessage, new RegExp(otherWallet));
   assert.match(copyMessage, new RegExp(wallet));
-  assert.match(copyMessage, /👛 Copy Wallets:<\/b> 2/);
-  assert.match(copyMessage, /💰 Copy Amount:<\/b> 0.25 SOL/);
+  assert.match(copyMessage, /├ Copy Wallets: 2/);
+  assert.match(copyMessage, /└ Copy Amount: 0.25 SOL/);
   assert.match(copyMessage, /🟢 Ready to copy <b>0.25 SOL<\/b> into this token from 2 wallet/);
 
   assert.equal(isCopyableSolToTokenBuy(trade), true);
@@ -883,7 +1203,8 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
   assert.match(simulationMessage || "", /Alpha &lt;Wallet&gt;/);
   assert.match(simulationMessage || "", new RegExp(otherWallet));
   assert.match(simulationMessage || "", new RegExp(mint));
-  assert.match(simulationMessage || "", /Build:<\/b> Local transaction build not requested/);
+  assert.match(simulationMessage || "", /<b>🧱 Build<\/b>/);
+  assert.match(simulationMessage || "", /└ Local transaction build not requested/);
   assert.doesNotMatch(simulationMessage || "", /500,000/);
 
   const builtSimulationMessage = formatCopyTradeSimulationMessage(
@@ -899,7 +1220,7 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
       errorText: null
     }
   );
-  assert.match(builtSimulationMessage || "", /Build:<\/b> Local transaction built \(1,234 bytes\)/);
+  assert.match(builtSimulationMessage || "", /└ Local transaction built \(1,234 bytes\)/);
 
   assert.deepEqual(
     buildPumpPortalLocalTradeRequest({
@@ -957,11 +1278,12 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
   });
   assert.match(autoBuyMessage || "", /⚡ Auto Copy Buy/);
   assert.match(autoBuyMessage || "", /🟢 Buy submitted/);
-  assert.match(autoBuyMessage || "", /🎯 Target/);
-  assert.match(autoBuyMessage || "", /👛 Trading Wallet/);
-  assert.match(autoBuyMessage || "", /💰 Copy Amount/);
+  assert.match(autoBuyMessage || "", /🎯 Copy Buy/);
+  assert.match(autoBuyMessage || "", /├ Target: Alpha/);
+  assert.match(autoBuyMessage || "", /├ Trading Wallet:/);
+  assert.match(autoBuyMessage || "", /└ Copy Amount: 0.25 SOL/);
   assert.match(autoBuyMessage || "", /🪙 Contract Address/);
-  assert.match(autoBuyMessage || "", /Tx:<\/b> <code>tx-alpha<\/code>/);
+  assert.match(autoBuyMessage || "", /└ Tx: <code>tx-alpha<\/code>/);
   assert.doesNotMatch(autoBuyMessage || "", /PumpPortal:/);
   assert.match(autoBuyMessage || "", new RegExp(otherWallet));
 
@@ -980,7 +1302,7 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
       raw: { signature: "tx-alpha" }
     }
   });
-  assert.match(nicknamedAutoBuyMessage || "", /Target:<\/b> cented/);
+  assert.match(nicknamedAutoBuyMessage || "", /├ Target: cented/);
   assert.doesNotMatch(nicknamedAutoBuyMessage || "", new RegExp(wallet));
 
   const failedAutoBuyMessage = formatAutoCopyBuyMessage({
@@ -997,7 +1319,7 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
   });
   assert.match(failedAutoBuyMessage || "", /⚡ Auto Copy Buy/);
   assert.match(failedAutoBuyMessage || "", /🔴 Buy failed/);
-  assert.match(failedAutoBuyMessage || "", /Trade failed:<\/b> HTTP 429 - rate limited/);
+  assert.match(failedAutoBuyMessage || "", /└ Failed: HTTP 429 - rate limited/);
   assert.doesNotMatch(failedAutoBuyMessage || "", /PumpPortal:/);
 
   const sellRequest = buildPumpPortalLightningSellRequest({
@@ -1066,10 +1388,10 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
   });
   assert.match(trailingResultMessage, /📉 Trailing Sell/);
   assert.match(trailingResultMessage, /🟢 Sell submitted/);
-  assert.match(trailingResultMessage, /🪜 Step:<\/b> 2\/2/);
-  assert.match(trailingResultMessage, /💰 Sell Amount:<\/b> 100%/);
+  assert.match(trailingResultMessage, /├ Step: 2\/2/);
+  assert.match(trailingResultMessage, /└ Sell Amount: 100%/);
   assert.match(trailingResultMessage, /🪙 Contract Address/);
-  assert.match(trailingResultMessage, /Tx:<\/b> <code>sell-tx-beta<\/code>/);
+  assert.match(trailingResultMessage, /└ Tx: <code>sell-tx-beta<\/code>/);
 
   const duplicateTrailingMessage = formatCopyTradeTrailingSellResultMessage({
     trade,
@@ -1105,7 +1427,7 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
     }
   });
   assert.match(trailingFailureMessage, /🔴 Sell failed/);
-  assert.match(trailingFailureMessage, /Trade failed:<\/b> HTTP 500 - sell failed/);
+  assert.match(trailingFailureMessage, /└ Failed: HTTP 500 - sell failed/);
   assert.doesNotMatch(trailingFailureMessage, /PumpPortal:/);
 });
 

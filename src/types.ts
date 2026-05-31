@@ -132,6 +132,12 @@ export interface BotConfig extends MigrationFormatConfig {
   platformFeeEnabled: boolean;
   platformFeeBps: number;
   platformFeeTreasury?: string;
+  cashbackEnabled: boolean;
+  cashbackFeeShareBps: number;
+  cashbackMinClaimSol: number;
+  cashbackPayoutWalletPublicKey?: string;
+  cashbackPayoutWalletSecretKey?: string;
+  cashbackMaxPayoutSolPerDay: number;
 }
 
 export interface LegacyBotConfig extends MigrationFormatConfig {
@@ -218,6 +224,7 @@ export interface SubscriberStore {
   remove: (chatId: TelegramChatId) => Promise<void>;
   get: (chatId: TelegramChatId) => SubscriberRecord | null;
   setMode: (chatId: TelegramChatId, mode: AlertModeValue | null) => Promise<boolean>;
+  setNotificationsPaused: (chatId: TelegramChatId, paused: boolean) => Promise<boolean>;
   watchWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
   renameWallet: (chatId: TelegramChatId, address: string, label: string | null) => Promise<boolean>;
   unwatchWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
@@ -247,6 +254,7 @@ export interface SubscriberStore {
   setCopyTradeRetryFailedBuys: (chatId: TelegramChatId, enabled: boolean) => Promise<boolean>;
   setCopyTradeBuyPressureSellEnabled: (chatId: TelegramChatId, enabled: boolean) => Promise<boolean>;
   setCopyTradeBuyPressureSellTimeoutMs: (chatId: TelegramChatId, timeoutMs: number | null) => Promise<boolean>;
+  setCashbackPayoutWallet: (chatId: TelegramChatId, address: string | null) => Promise<boolean>;
   resetCopyTradeExecutionSettings: (chatId: TelegramChatId) => Promise<boolean>;
   setCopyTargetWallet: (chatId: TelegramChatId, address: string | null) => Promise<boolean>;
   listWatchedWallets: (chatId: TelegramChatId) => WatchedWallet[];
@@ -259,6 +267,7 @@ export interface SubscriberStore {
 export interface SubscriberRecord {
   chatId: string;
   mode: AlertModeValue | null;
+  notificationsPaused: boolean;
   watchedWallets: WatchedWallet[];
   copyTradeWallets: WatchedWallet[];
   tradingWallet: TradingWallet | null;
@@ -273,6 +282,7 @@ export interface SubscriberRecord {
   copyTradeRetryFailedBuys: boolean;
   copyTradeBuyPressureSellEnabled: boolean;
   copyTradeBuyPressureSellTimeoutMs: number | null;
+  cashbackPayoutWalletAddress: string | null;
   copyTargetWalletAddress: string | null;
   verifiedAt: string;
   updatedAt: string;

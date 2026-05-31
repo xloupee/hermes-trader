@@ -20,6 +20,7 @@
     "test": "npm run build && node --test test/*.test.mjs",
     "wallet-feed-readiness-report": "node scripts/wallet-feed-readiness-report.mjs",
     "wallet-feed-report": "node scripts/wallet-feed-comparison-report.mjs",
+    "cashback-reconciliation-report": "node scripts/cashback-reconciliation-report.mjs",
     "stop-local": "bash scripts/stop-local.sh",
     "deploy": "bash scripts/deploy.sh"
   },

@@ -2000,12 +2000,21 @@ export function createTelegramCommandPoller({
     }
 
     const wallets = subscribers?.listWatchedWallets(chatId) || [];
+    const walletLines = wallets.length === 0
+      ? ["└ None yet"]
+      : wallets.map((wallet, index) => {
+          const branch = index === wallets.length - 1 ? "└" : "├";
+          const name = wallet.label ? escapeWalletLabel(wallet.label) : shortWallet(wallet.address);
+          return `${branch} ${name}`;
+        });
     const text = [
-      "<b>Wallets</b>",
-      `<b>Tracked wallets:</b> ${wallets.length}`,
-      wallets.length === 0 ? "No tracked wallets yet." : wallets.map((wallet) => formatWalletSummary(wallet)).join("\n"),
+      "<b>👀 Tracked Wallets</b>",
       "",
-      "Use the buttons below to manage tracked wallets."
+      "<b>📚 Saved Wallets</b>",
+      `└ ${wallets.length}`,
+      "",
+      "<b>🔎 Watchlist</b>",
+      ...walletLines
     ].join("\n");
 
     return {
@@ -2018,12 +2027,12 @@ export function createTelegramCommandPoller({
     return {
       inline_keyboard: [
         [
-          { text: "➕ Add Wallet", callback_data: "trackwallets:add" },
+          { text: "➕ Add", callback_data: "trackwallets:add" },
           { text: "✏️ Rename", callback_data: "trackwallets:rename" }
         ],
         [
           { text: "🗑️ Remove", callback_data: "trackwallets:remove" },
-          { text: "📋 List", callback_data: "trackwallets:list" }
+          { text: "📋 Full List", callback_data: "trackwallets:list" }
         ]
       ]
     };

@@ -1644,12 +1644,9 @@ export function createTelegramCommandPoller({
     const text = [
       "<b>🔔 Alerts</b>",
       "",
-      "<b>🪙 Token Alerts</b>",
+      `<b>📡 ${mode ? "Active" : "Paused"}</b>`,
       `├ Migrated Coins: ${alertEnabled(mode, "migrations") ? "On" : "Off"}`,
-      `└ New Tokens: ${alertEnabled(mode, "newtokens") ? "On" : "Off"}`,
-      "",
-      "<b>📡 Alert State</b>",
-      `└ ${mode ? "Active" : "Paused"}`
+      `└ New Tokens: ${alertEnabled(mode, "newtokens") ? "On" : "Off"}`
     ].join("\n");
 
     return {
@@ -1663,11 +1660,11 @@ export function createTelegramCommandPoller({
       inline_keyboard: [
         [
           {
-            text: `${alertEnabled(mode, "migrations") ? "🟢 ON" : "⚪ OFF"} - Migrated Coins`,
+            text: `${alertEnabled(mode, "migrations") ? "🟢" : "⚪"} Migrated`,
             callback_data: "alerts:toggle:migrations"
           },
           {
-            text: `${alertEnabled(mode, "newtokens") ? "🟢 ON" : "⚪ OFF"} - New Tokens`,
+            text: `${alertEnabled(mode, "newtokens") ? "🟢" : "⚪"} New`,
             callback_data: "alerts:toggle:newtokens"
           }
         ]

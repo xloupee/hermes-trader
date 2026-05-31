@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import test from "node:test";
+import BN from "bn.js";
 import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
-import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { NATIVE_MINT, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { buildDirectAutoTransactionPayload } from "../dist/direct-auto.js";
 import { buildDirectPumpTransaction } from "../dist/direct-pump.js";
 import { buildDirectPumpSwapTransaction } from "../dist/direct-pumpswap.js";
 import { sendDirectTransaction } from "../dist/direct-sender.js";
 import {
+  buildDirectPumpLocalBuyInstructions,
   buildDirectSolanaSendConnections,
   directAutoProviderOrderForRequest,
   extractPumpBuyV2CreatorVaultFromTransaction,
@@ -20,6 +23,9 @@ import {
 import { maxQuoteLamportsForSlippageCap } from "../dist/direct-budget.js";
 import { tradeExecutionSkippedResult } from "../dist/trade-execution.js";
 
+const require = createRequire(import.meta.url);
+const { PUMP_SDK } = require("@pump-fun/pump-sdk");
+
 const baseRequest = {
   action: "buy",
   mint: "Mint111111111111111111111111111111111111111",
@@ -29,6 +35,18 @@ const baseRequest = {
   priorityFeeSol: 0.00005,
   walletPublicKey: "Wallet111111111111111111111111111111111111"
 };
+
+function instructionShape(instruction) {
+  return {
+    programId: instruction.programId.toBase58(),
+    data: instruction.data.toString("hex"),
+    keys: instruction.keys.map((key) => ({
+      pubkey: key.pubkey.toBase58(),
+      isWritable: key.isWritable,
+      isSigner: key.isSigner
+    }))
+  };
+}
 
 const liveGate = {
   provider: "direct-pump",
@@ -88,6 +106,88 @@ test("direct Pump builder maps injected SDK errors to failed provider-neutral re
 
   assert.equal(result.status, "failed");
   assert.match(result.errorText, /invalid mint/);
+});
+
+test("local Solana Pump buy builder matches SDK legacy and Token-2022 instructions", async () => {
+  const originalRandom = Math.random;
+  Math.random = () => 0;
+
+  try {
+    const mint = Keypair.generate().publicKey;
+    const user = Keypair.generate().publicKey;
+    const creator = Keypair.generate().publicKey;
+    const global = {
+      feeRecipient: new PublicKey("62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV"),
+      feeRecipients: [new PublicKey("7VtfL8fvgNfhz17qKRMjzQEXgbdpnHHHQRh54R9jP2RJ")],
+      reservedFeeRecipient: new PublicKey("62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV"),
+      reservedFeeRecipients: [],
+      buybackFeeRecipients: [],
+      buybackBasisPoints: new BN(0)
+    };
+    const bondingCurve = {
+      creator,
+      isMayhemMode: false,
+      quoteMint: NATIVE_MINT
+    };
+    const baseInput = {
+      global,
+      bondingCurveAccountInfo: { data: Buffer.alloc(0) },
+      bondingCurve,
+      associatedUserAccountInfo: { data: Buffer.alloc(0) },
+      mint,
+      user,
+      amount: new BN(123),
+      slippage: 1
+    };
+
+    const legacySdk = await PUMP_SDK.buyInstructions({
+      ...baseInput,
+      solAmount: new BN(456),
+      tokenProgram: TOKEN_PROGRAM_ID
+    });
+    const legacyLocal = buildDirectPumpLocalBuyInstructions({
+      global,
+      bondingCurve,
+      associatedUserAccountInfo: baseInput.associatedUserAccountInfo,
+      mint,
+      user,
+      amount: baseInput.amount,
+      quoteAmount: new BN(456),
+      slippage: baseInput.slippage,
+      tokenProgram: TOKEN_PROGRAM_ID
+    });
+
+    assert.deepEqual(
+      legacyLocal.map(instructionShape),
+      legacySdk.map(instructionShape)
+    );
+
+    const token2022Sdk = await PUMP_SDK.buyV2Instructions({
+      ...baseInput,
+      quoteAmount: new BN(789),
+      tokenProgram: TOKEN_2022_PROGRAM_ID,
+      quoteTokenProgram: TOKEN_PROGRAM_ID
+    });
+    const token2022Local = buildDirectPumpLocalBuyInstructions({
+      global,
+      bondingCurve,
+      associatedUserAccountInfo: baseInput.associatedUserAccountInfo,
+      mint,
+      user,
+      amount: baseInput.amount,
+      quoteAmount: new BN(789),
+      slippage: baseInput.slippage,
+      tokenProgram: TOKEN_2022_PROGRAM_ID,
+      quoteTokenProgram: TOKEN_PROGRAM_ID
+    });
+
+    assert.deepEqual(
+      token2022Local.map(instructionShape),
+      token2022Sdk.map(instructionShape)
+    );
+  } finally {
+    Math.random = originalRandom;
+  }
 });
 
 test("direct PumpSwap builder safely skips missing canonical pool", async () => {

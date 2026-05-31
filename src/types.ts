@@ -125,6 +125,7 @@ export interface BotConfig extends MigrationFormatConfig {
   directExecutionBlockhashCacheMs: number;
   directExecutionBlockhashWarmIntervalMs: number;
   directExecutionSdkWarmIntervalMs: number;
+  directExecutionObservedCreatorVaultLookup: boolean;
   directExecutionSendRpcUrls: string[];
   directExecutionJitoSendUrls: string[];
   directExecutionJitoAuthUuid?: string;

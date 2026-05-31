@@ -138,6 +138,10 @@ test("provider-neutral result log includes direct Pump buy-state timing", () => 
             creatorVerifiedAgeMs: 24,
             tokenProgram: TOKEN_2022_PROGRAM_ID.toBase58(),
             forceFreshBuyState: true
+          },
+          {
+            stage: "instructions_ready",
+            buyInstructionBuilder: "local"
           }
         ]
       }
@@ -146,6 +150,7 @@ test("provider-neutral result log includes direct Pump buy-state timing", () => 
 
   const log = formatTradeExecutionResultLog(result);
   assert.match(log, /directBuildMs=42/);
+  assert.match(log, /directBuyBuilder=local/);
   assert.match(log, /directBuyState=rpc/);
   assert.match(log, /directBuyStateSource=rpc-bonding-curve-prefetch/);
   assert.match(log, /directBuyStateAgeMs=12/);

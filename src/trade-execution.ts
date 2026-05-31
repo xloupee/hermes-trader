@@ -338,9 +338,19 @@ export function formatTradeExecutionResultLog(result: TradeExecutionResult): str
           (record as { stage?: unknown }).stage === "buy_accounts_ready";
       }) as Record<string, unknown> | undefined
       : undefined;
+    const instructionsReady = Array.isArray(stages)
+      ? stages.find((record) => {
+        return record &&
+          typeof record === "object" &&
+          (record as { stage?: unknown }).stage === "instructions_ready";
+      }) as Record<string, unknown> | undefined
+      : undefined;
 
     if (typeof totalMs === "number") {
       parts.push(`directBuildMs=${totalMs}`);
+    }
+    if (typeof instructionsReady?.buyInstructionBuilder === "string") {
+      parts.push(`directBuyBuilder=${instructionsReady.buyInstructionBuilder}`);
     }
     if (buyAccounts) {
       if (typeof buyAccounts.source === "string") {

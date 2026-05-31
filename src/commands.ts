@@ -1639,12 +1639,14 @@ export function createTelegramCommandPoller({
 
     const mode = subscribers?.get(chatId)?.mode || null;
     const text = [
-      "<b>Alerts</b>",
-      `<b>Migrated coins:</b> ${alertEnabled(mode, "migrations") ? "On" : "Off"}`,
-      `<b>New tokens:</b> ${alertEnabled(mode, "newtokens") ? "On" : "Off"}`,
-      `<b>Status:</b> ${mode ? "Token alerts active" : "Token alerts paused"}`,
+      "<b>🔔 Alerts</b>",
       "",
-      "Tap a button to turn that alert type on or off."
+      "<b>🪙 Token Alerts</b>",
+      `├ Migrated Coins: ${alertEnabled(mode, "migrations") ? "On" : "Off"}`,
+      `└ New Tokens: ${alertEnabled(mode, "newtokens") ? "On" : "Off"}`,
+      "",
+      "<b>📡 Alert State</b>",
+      `└ ${mode ? "Active" : "Paused"}`
     ].join("\n");
 
     return {
@@ -1673,7 +1675,10 @@ export function createTelegramCommandPoller({
   }
 
   function formatAlertStatusLine(mode: AlertModeValue | null): string {
-    return mode ? `<b>Now watching:</b> ${modeLabel(mode)}` : "<b>Token alerts paused.</b>";
+    return [
+      "<b>🔔 Alerts Updated</b>",
+      `└ ${mode ? modeLabel(mode) : "Paused"}`
+    ].join("\n");
   }
 
   async function watchWallet(chatId: TelegramChatId, args: string[]): Promise<string> {

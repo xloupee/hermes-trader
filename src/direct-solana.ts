@@ -10,7 +10,14 @@ import {
   TransactionMessage,
   VersionedTransaction
 } from "@solana/web3.js";
-import { getAssociatedTokenAddressSync, NATIVE_MINT, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import {
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  createAssociatedTokenAccountIdempotentInstruction,
+  getAssociatedTokenAddressSync,
+  NATIVE_MINT,
+  TOKEN_2022_PROGRAM_ID,
+  TOKEN_PROGRAM_ID
+} from "@solana/spl-token";
 import { buildDirectAutoTransactionPayload } from "./direct-auto.js";
 import { maxQuoteLamportsForSlippageCap } from "./direct-budget.js";
 import type { DirectTransactionPayload } from "./direct-pump.js";
@@ -31,6 +38,24 @@ import {
 
 const DEFAULT_COMPUTE_UNIT_LIMIT = 250_000;
 const LAMPORTS_PER_SOL = 1_000_000_000n;
+const PUMP_PROGRAM_ID = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
+const PUMP_FEE_PROGRAM_ID = new PublicKey("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ");
+const PUMP_GLOBAL_PDA = new PublicKey("4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf");
+const PUMP_EVENT_AUTHORITY_PDA = new PublicKey("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1");
+const PUMP_GLOBAL_VOLUME_ACCUMULATOR_PDA = new PublicKey("Hq2wp8uJ9jCPsYgNHex8RtqdvMPfVGoYwjvF1ATiwn2Y");
+const PUMP_FEE_CONFIG_PDA = new PublicKey("8Wf5TiAheLUqBrKXeYg2JtAFFMWtKdG2BSFgqUcPVwTt");
+const PUMP_BUY_DISCRIMINATOR = Buffer.from([102, 6, 61, 18, 1, 218, 235, 234]);
+const PUMP_BUY_V2_DISCRIMINATOR = Buffer.from([184, 23, 238, 97, 103, 197, 211, 61]);
+const PUMP_BUYBACK_FEE_RECIPIENTS = [
+  "5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD",
+  "9M4giFFMxmFGXtc3feFzRai56WbBqehoSeRE5GK7gf7",
+  "GXPFM2caqTtQYC2cJ5yJRi9VDkpsYZXzYdwYpGnLmtDL",
+  "3BpXnfJaUTiwXnJNe7Ej1rcbzqTTQUvLShZaWazebsVR",
+  "5cjcW9wExnJJiqgLjq7DEG75Pm6JBgE1hNv4B2vHXUW6",
+  "EHAAiTxcdDwQ3U4bU6YcMsQGaekdzLS3B5SmYo46kJtL",
+  "5eHhjP8JaYkz83CWwvGU2uMUXefd3AazWGx4gpcuEEYD",
+  "A7hAgCzFw14fejgCp387JUJRMNyz4j89JKnhtKU8piqW"
+].map((address) => new PublicKey(address));
 const require = createRequire(import.meta.url);
 const DIRECT_SIMULATION_CONFIG = {
   replaceRecentBlockhash: true,
@@ -55,7 +80,6 @@ const PUMP_FAST_BUY_STATE_CACHE_MS = 2 * 60_000;
 const OBSERVED_BUY_FAST_STATE_MAX_AGE_MS = 1_000;
 const PUMP_TOKEN_2022_VERIFIED_CREATOR_CACHE_MS = 60_000;
 const MAX_BLOCKHASH_CACHE_MS = 30_000;
-const PUMP_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const PUMP_BUY_V2_BASE_MINT_ACCOUNT_INDEX = 1;
 const PUMP_BUY_V2_CREATOR_VAULT_ACCOUNT_INDEX = 16;
 const PUMP_BUY_V2_ASSOCIATED_CREATOR_VAULT_ACCOUNT_INDEX = 17;
@@ -585,6 +609,209 @@ function platformFeeInstruction({
       lamports: Number(split.feeLamports)
     })
   ];
+}
+
+function pumpProgramPda(seeds: Buffer[]): PublicKey {
+  return PublicKey.findProgramAddressSync(seeds, PUMP_PROGRAM_ID)[0];
+}
+
+function pumpFeeProgramPda(seeds: Buffer[]): PublicKey {
+  return PublicKey.findProgramAddressSync(seeds, PUMP_FEE_PROGRAM_ID)[0];
+}
+
+function pumpBondingCurvePda(mint: PublicKey): PublicKey {
+  return pumpProgramPda([Buffer.from("bonding-curve"), mint.toBuffer()]);
+}
+
+function pumpBondingCurveV2Pda(mint: PublicKey): PublicKey {
+  return pumpProgramPda([Buffer.from("bonding-curve-v2"), mint.toBuffer()]);
+}
+
+function pumpCreatorVaultPda(creator: PublicKey): PublicKey {
+  return pumpProgramPda([Buffer.from("creator-vault"), creator.toBuffer()]);
+}
+
+function pumpUserVolumeAccumulatorPda(user: PublicKey): PublicKey {
+  return pumpProgramPda([Buffer.from("user_volume_accumulator"), user.toBuffer()]);
+}
+
+function pumpSharingConfigPda(mint: PublicKey): PublicKey {
+  return pumpFeeProgramPda([Buffer.from("sharing-config"), mint.toBuffer()]);
+}
+
+function isLegacyQuoteMint(quoteMint: PublicKey): boolean {
+  return quoteMint.equals(NATIVE_MINT) || quoteMint.equals(PublicKey.default);
+}
+
+function quoteAta(owner: PublicKey, quoteMint: PublicKey, quoteTokenProgram: PublicKey): PublicKey {
+  return getAssociatedTokenAddressSync(quoteMint, owner, true, quoteTokenProgram);
+}
+
+function u64Le(value: BN): Buffer {
+  return value.toArrayLike(Buffer, "le", 8);
+}
+
+function slippageAdjustedQuoteAmount(amount: BN, slippagePercent: number): BN {
+  if (!Number.isFinite(slippagePercent) || slippagePercent <= 0) {
+    return amount;
+  }
+
+  return amount.add(amount.mul(new BN(Math.floor(slippagePercent * 10))).div(new BN(1000)));
+}
+
+function pumpFeeRecipient(global: PumpGlobal, mayhemMode: boolean): PublicKey {
+  const recipients = mayhemMode
+    ? [global.reservedFeeRecipient, ...(global.reservedFeeRecipients || [])]
+    : [global.feeRecipient, ...(global.feeRecipients || [])];
+  return recipients.find((recipient): recipient is PublicKey => recipient instanceof PublicKey) || global.feeRecipient;
+}
+
+function pumpBuybackFeeRecipient(): PublicKey {
+  return PUMP_BUYBACK_FEE_RECIPIENTS[Math.floor(Math.random() * PUMP_BUYBACK_FEE_RECIPIENTS.length)]
+    || PUMP_BUYBACK_FEE_RECIPIENTS[0];
+}
+
+function pumpBuyInstructionData({
+  discriminator,
+  amount,
+  maxQuoteAmount,
+  trackVolume
+}: {
+  discriminator: Buffer;
+  amount: BN;
+  maxQuoteAmount: BN;
+  trackVolume?: boolean;
+}): Buffer {
+  return Buffer.concat([
+    discriminator,
+    u64Le(amount),
+    u64Le(maxQuoteAmount),
+    ...(typeof trackVolume === "boolean" ? [Buffer.from([trackVolume ? 1 : 0])] : [])
+  ]);
+}
+
+export function buildDirectPumpLocalBuyInstructions({
+  global,
+  bondingCurve,
+  associatedUserAccountInfo,
+  mint,
+  user,
+  amount,
+  quoteAmount,
+  slippage,
+  tokenProgram,
+  quoteTokenProgram = TOKEN_PROGRAM_ID,
+  creatorVaultOverride = null
+}: {
+  global: PumpGlobal;
+  bondingCurve: {
+    creator: PublicKey;
+    isMayhemMode?: boolean;
+    quoteMint?: PublicKey;
+  };
+  associatedUserAccountInfo: unknown | null;
+  mint: PublicKey;
+  user: PublicKey;
+  amount: BN;
+  quoteAmount: BN;
+  slippage: number;
+  tokenProgram: PublicKey;
+  quoteTokenProgram?: PublicKey;
+  creatorVaultOverride?: PublicKey | null;
+}): TransactionInstruction[] {
+  const instructions: TransactionInstruction[] = [];
+  const associatedUser = getAssociatedTokenAddressSync(mint, user, true, tokenProgram);
+  const bondingCurvePda = pumpBondingCurvePda(mint);
+  const creatorVault = creatorVaultOverride || pumpCreatorVaultPda(bondingCurve.creator);
+  const feeRecipient = pumpFeeRecipient(global, bondingCurve.isMayhemMode === true);
+  const buybackFeeRecipient = pumpBuybackFeeRecipient();
+  const maxQuoteAmount = slippageAdjustedQuoteAmount(quoteAmount, slippage);
+
+  if (!associatedUserAccountInfo) {
+    instructions.push(createAssociatedTokenAccountIdempotentInstruction(
+      user,
+      associatedUser,
+      user,
+      mint,
+      tokenProgram
+    ));
+  }
+
+  if (tokenProgram.equals(TOKEN_2022_PROGRAM_ID)) {
+    const quoteMint = bondingCurve.quoteMint && !isLegacyQuoteMint(bondingCurve.quoteMint)
+      ? bondingCurve.quoteMint
+      : NATIVE_MINT;
+    const userVolumeAccumulator = pumpUserVolumeAccumulatorPda(user);
+    instructions.push(new TransactionInstruction({
+      programId: PUMP_PROGRAM_ID,
+      keys: [
+        { pubkey: PUMP_GLOBAL_PDA, isWritable: false, isSigner: false },
+        { pubkey: mint, isWritable: false, isSigner: false },
+        { pubkey: quoteMint, isWritable: false, isSigner: false },
+        { pubkey: tokenProgram, isWritable: false, isSigner: false },
+        { pubkey: quoteTokenProgram, isWritable: false, isSigner: false },
+        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isWritable: false, isSigner: false },
+        { pubkey: feeRecipient, isWritable: true, isSigner: false },
+        { pubkey: quoteAta(feeRecipient, quoteMint, quoteTokenProgram), isWritable: true, isSigner: false },
+        { pubkey: buybackFeeRecipient, isWritable: true, isSigner: false },
+        { pubkey: quoteAta(buybackFeeRecipient, quoteMint, quoteTokenProgram), isWritable: true, isSigner: false },
+        { pubkey: bondingCurvePda, isWritable: true, isSigner: false },
+        { pubkey: getAssociatedTokenAddressSync(mint, bondingCurvePda, true, tokenProgram), isWritable: true, isSigner: false },
+        { pubkey: quoteAta(bondingCurvePda, quoteMint, quoteTokenProgram), isWritable: true, isSigner: false },
+        { pubkey: user, isWritable: true, isSigner: true },
+        { pubkey: associatedUser, isWritable: true, isSigner: false },
+        { pubkey: quoteAta(user, quoteMint, quoteTokenProgram), isWritable: true, isSigner: false },
+        { pubkey: creatorVault, isWritable: true, isSigner: false },
+        { pubkey: quoteAta(creatorVault, quoteMint, quoteTokenProgram), isWritable: true, isSigner: false },
+        { pubkey: pumpSharingConfigPda(mint), isWritable: false, isSigner: false },
+        { pubkey: PUMP_GLOBAL_VOLUME_ACCUMULATOR_PDA, isWritable: false, isSigner: false },
+        { pubkey: userVolumeAccumulator, isWritable: true, isSigner: false },
+        { pubkey: quoteAta(userVolumeAccumulator, quoteMint, quoteTokenProgram), isWritable: true, isSigner: false },
+        { pubkey: PUMP_FEE_CONFIG_PDA, isWritable: false, isSigner: false },
+        { pubkey: PUMP_FEE_PROGRAM_ID, isWritable: false, isSigner: false },
+        { pubkey: SystemProgram.programId, isWritable: false, isSigner: false },
+        { pubkey: PUMP_EVENT_AUTHORITY_PDA, isWritable: false, isSigner: false },
+        { pubkey: PUMP_PROGRAM_ID, isWritable: false, isSigner: false }
+      ],
+      data: pumpBuyInstructionData({
+        discriminator: PUMP_BUY_V2_DISCRIMINATOR,
+        amount,
+        maxQuoteAmount
+      })
+    }));
+    return instructions;
+  }
+
+  instructions.push(new TransactionInstruction({
+    programId: PUMP_PROGRAM_ID,
+    keys: [
+      { pubkey: PUMP_GLOBAL_PDA, isWritable: false, isSigner: false },
+      { pubkey: feeRecipient, isWritable: true, isSigner: false },
+      { pubkey: mint, isWritable: false, isSigner: false },
+      { pubkey: bondingCurvePda, isWritable: true, isSigner: false },
+      { pubkey: getAssociatedTokenAddressSync(mint, bondingCurvePda, true, tokenProgram), isWritable: true, isSigner: false },
+      { pubkey: associatedUser, isWritable: true, isSigner: false },
+      { pubkey: user, isWritable: true, isSigner: true },
+      { pubkey: SystemProgram.programId, isWritable: false, isSigner: false },
+      { pubkey: tokenProgram, isWritable: false, isSigner: false },
+      { pubkey: creatorVault, isWritable: true, isSigner: false },
+      { pubkey: PUMP_EVENT_AUTHORITY_PDA, isWritable: false, isSigner: false },
+      { pubkey: PUMP_PROGRAM_ID, isWritable: false, isSigner: false },
+      { pubkey: PUMP_GLOBAL_VOLUME_ACCUMULATOR_PDA, isWritable: false, isSigner: false },
+      { pubkey: pumpUserVolumeAccumulatorPda(user), isWritable: true, isSigner: false },
+      { pubkey: PUMP_FEE_CONFIG_PDA, isWritable: false, isSigner: false },
+      { pubkey: PUMP_FEE_PROGRAM_ID, isWritable: false, isSigner: false },
+      { pubkey: pumpBondingCurveV2Pda(mint), isWritable: false, isSigner: false },
+      { pubkey: buybackFeeRecipient, isWritable: true, isSigner: false }
+    ],
+    data: pumpBuyInstructionData({
+      discriminator: PUMP_BUY_DISCRIMINATOR,
+      amount,
+      maxQuoteAmount,
+      trackVolume: true
+    })
+  }));
+  return instructions;
 }
 
 function bn(value: bigint): BN {
@@ -1140,7 +1367,7 @@ export function extractPumpBuyV2CreatorVaultFromTransaction(transaction: unknown
     const programId = accountKeys[instruction.programIdIndex];
     const baseMint = accountKeys[instruction.accounts[PUMP_BUY_V2_BASE_MINT_ACCOUNT_INDEX]];
     const creatorVault = accountKeys[instruction.accounts[PUMP_BUY_V2_CREATOR_VAULT_ACCOUNT_INDEX]];
-    if (programId === PUMP_PROGRAM_ID && baseMint === mint.toBase58() && creatorVault) {
+    if (programId === PUMP_PROGRAM_ID.toBase58() && baseMint === mint.toBase58() && creatorVault) {
       try {
         return new PublicKey(creatorVault);
       } catch {
@@ -1487,45 +1714,23 @@ async function buildDirectPumpSolanaPayload({
         source: creatorVaultOverride ? "observed-transaction" : "sdk-derived",
         observedSignature: observedSignatureFromMetadata(request.metadata)
       });
-      const buyInstructions = tokenProgram.equals(TOKEN_2022_PROGRAM_ID)
-        ? await PUMP_SDK.buyV2Instructions({
-            global,
-            bondingCurveAccountInfo: buyState.bondingCurveAccountInfo,
-            bondingCurve: buyState.bondingCurve,
-            associatedUserAccountInfo: buyState.associatedUserAccountInfo,
-            mint,
-            user,
-            amount,
-            quoteAmount: solAmount,
-            slippage: request.slippagePercent,
-            tokenProgram,
-            quoteTokenProgram: TOKEN_PROGRAM_ID
-          })
-        : await PUMP_SDK.buyInstructions({
-            global,
-            bondingCurveAccountInfo: buyState.bondingCurveAccountInfo,
-            bondingCurve: buyState.bondingCurve,
-            associatedUserAccountInfo: buyState.associatedUserAccountInfo,
-            mint,
-            user,
-            amount,
-            solAmount,
-            slippage: request.slippagePercent,
-            tokenProgram
-      });
-      const creatorVaultPatched = tokenProgram.equals(TOKEN_2022_PROGRAM_ID)
-        ? patchPumpBuyV2CreatorVault({
-            instructions: buyInstructions,
-            pumpProgramId: pumpModule.PUMP_PROGRAM_ID,
-            creatorVault: creatorVaultOverride,
-            quoteMint: NATIVE_MINT,
-            quoteTokenProgram: TOKEN_PROGRAM_ID
-          })
-        : false;
-      instructions.push(...buyInstructions);
+      instructions.push(...buildDirectPumpLocalBuyInstructions({
+        global,
+        bondingCurve: buyState.bondingCurve,
+        associatedUserAccountInfo: buyState.associatedUserAccountInfo,
+        mint,
+        user,
+        amount,
+        quoteAmount: solAmount,
+        slippage: request.slippagePercent,
+        tokenProgram,
+        quoteTokenProgram: TOKEN_PROGRAM_ID,
+        creatorVaultOverride
+      }));
       buildTiming.mark("instructions_ready", {
         instructionCount: instructions.length,
-        creatorVaultPatched
+        buyInstructionBuilder: "local",
+        creatorVaultPatched: Boolean(creatorVaultOverride)
       });
     } else {
       const [resolvedTokenProgram, cachedGlobal, cachedFeeConfig] = await Promise.all([

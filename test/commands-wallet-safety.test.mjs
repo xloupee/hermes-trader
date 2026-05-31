@@ -34,19 +34,21 @@ test("PumpPortal trading wallet creation only allows private chats when chat typ
 test("trading wallet creation confirmation includes hot-wallet backup warning", () => {
   const warning = tradingWalletBackupWarningText();
   assert.match(warning, /Hot-wallet\/private-key warning/);
-  assert.match(warning, /Back it up somewhere private before depositing SOL/);
-  assert.match(warning, /bot cannot recover it later/);
+  assert.match(warning, /├ Bot can use it for copy buys/);
+  assert.match(warning, /├ Secret key is shown once/);
+  assert.match(warning, /├ Back it up privately before depositing SOL/);
+  assert.match(warning, /└ The bot cannot recover it later/);
 
   const firstWalletConfirm = formatTradingWalletCreateConfirmText();
   assert.match(firstWalletConfirm, /Create Trading Wallet\?/);
   assert.match(firstWalletConfirm, /PumpPortal trading wallet/);
-  assert.match(firstWalletConfirm, /private key or secret key is shown once/i);
+  assert.match(firstWalletConfirm, /Secret key is shown once/i);
 
   const localWalletConfirm = formatTradingWalletCreateConfirmText({
     provider: "local-solana"
   });
-  assert.match(localWalletConfirm, /local Solana signing wallet/);
-  assert.match(localWalletConfirm, /private key or secret key is shown once/i);
+  assert.match(localWalletConfirm, /Solana signing wallet/);
+  assert.match(localWalletConfirm, /Secret key is shown once/i);
 
   const replacementConfirm = formatTradingWalletCreateConfirmText({
     existingPublicKey: "wallet<key>"
@@ -55,14 +57,17 @@ test("trading wallet creation confirmation includes hot-wallet backup warning", 
   assert.match(replacementConfirm, /Current wallet/);
   assert.match(replacementConfirm, /wallet&lt;key&gt;/);
   assert.match(replacementConfirm, /old wallet will still exist on-chain/);
-  assert.match(replacementConfirm, /Back it up somewhere private before depositing SOL/);
+  assert.match(replacementConfirm, /Back it up privately before depositing SOL/);
 });
 
 test("copy trade risk setting confirmation warns before saving live-affecting values", () => {
   const text = formatCopyTradeRiskSettingConfirmText("buy_slippage", 12.5);
   assert.match(text, /Confirm Buy slippage/);
   assert.match(text, /12\.5%/);
-  assert.match(text, /affect live SOL trades/);
+  assert.match(text, /🧾 Pending Change/);
+  assert.match(text, /⚠️ Live Trade Warning/);
+  assert.match(text, /├ Can affect live SOL trades/);
+  assert.match(text, /└ Dry-run must be off/);
 
   assert.deepEqual(copyTradeRiskSettingConfirmReplyMarkup(), {
     inline_keyboard: [
@@ -74,7 +79,7 @@ test("copy trade risk setting confirmation warns before saving live-affecting va
 
 test("copy trade emergency stop confirmation is explicit and preserves setup", () => {
   const text = formatCopyTradeEmergencyStopConfirmText();
-  assert.match(text, /Emergency Stop Live Copy Trading/);
+  assert.match(text, /Stop Live Copy Trading/);
   assert.match(text, /disables live copy-trade submissions/);
   assert.match(text, /will not remove Target Wallets/);
   assert.match(text, /trading wallet config/);
@@ -82,7 +87,7 @@ test("copy trade emergency stop confirmation is explicit and preserves setup", (
 
   assert.deepEqual(copyTradeEmergencyStopConfirmReplyMarkup(), {
     inline_keyboard: [
-      [{ text: "🚨 Confirm Emergency Stop", callback_data: "copytrade:emergency_stop_confirm" }],
+      [{ text: "🛑 Confirm Stop", callback_data: "copytrade:emergency_stop_confirm" }],
       [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]
     ]
   });
@@ -102,15 +107,16 @@ test("copy trade emergency stop state text reports disabled live submissions", (
 
 test("copy trade emergency resume confirmation is explicit about env gates", () => {
   const text = formatCopyTradeEmergencyResumeConfirmText();
-  assert.match(text, /Clear Emergency Stop/);
-  assert.match(text, /clears the runtime emergency stop/);
-  assert.match(text, /does not change COPY_TRADE_ENABLED/);
-  assert.match(text, /COPY_TRADE_DRY_RUN/);
-  assert.match(text, /caps/);
+  assert.match(text, /Resume Live Copy Trading/);
+  assert.match(text, /turns live copy-trade submissions back on/);
+  assert.match(text, /🧾 What stays the same/);
+  assert.match(text, /Target Wallets stay saved/);
+  assert.match(text, /Trading wallet and balances stay unchanged/);
+  assert.match(text, /Amount, slippage, priority, and other settings stay unchanged/);
 
   assert.deepEqual(copyTradeEmergencyResumeConfirmReplyMarkup(), {
     inline_keyboard: [
-      [{ text: "🟢 Confirm Clear", callback_data: "copytrade:emergency_resume_confirm" }],
+      [{ text: "🟢 Confirm Resume", callback_data: "copytrade:emergency_resume_confirm" }],
       [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]
     ]
   });

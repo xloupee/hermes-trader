@@ -57,7 +57,7 @@ test("telegram help exposes wallet and copy trade dashboards", () => {
   assert.match(help, /🚀 Quick Start/);
   assert.match(help, /\/alerts - Toggle migrated coins and new tokens/);
   assert.match(help, /\/trackwallets - Track wallets for normal trade alerts/);
-  assert.match(help, /\/mywallets - Create or view your local signing trading wallet/);
+  assert.match(help, /\/mywallets - Create or view your Solana trading wallet/);
   assert.match(help, /\/copytrade - Configure copy amount, wallets, and trailing sells/);
   assert.match(help, /\/cashback - View and claim platform-fee cashback/);
   assert.doesNotMatch(help, /🕒 Last updated:/);
@@ -263,13 +263,87 @@ test("stop pauses notifications without deleting subscriber settings", async () 
 
   const subscriber = subscribers.get("chat-1");
   assert.equal(subscriber?.mode, null);
-  assert.equal(subscriber?.notificationsPaused, true);
+  assert.equal(subscriber?.notificationsPaused, false);
   assert.equal(subscriber?.copyAmountSol, 0.5);
   assert.equal(subscriber?.copyTradeWallets.length, 1);
   assert.match(replies[0].text, /Notifications paused/);
   assert.match(replies[0].text, /saved settings were kept/);
-  assert.match(replies[1].text, /Notifications are <b>paused<\/b>/);
+  assert.match(replies[1].text, /▶️ Chat resumed/);
+  assert.match(replies[1].text, /🔴 Setup is <b>inactive<\/b>/);
+  assert.doesNotMatch(replies[1].text, /Setup is paused/);
   assert.doesNotMatch(replies[1].text, /Verification/);
+});
+
+test("my wallets dashboard shows the active wallet address once", async () => {
+  const subscribers = createSubscriberStore({});
+  await subscribers.init();
+  await subscribers.add("chat-1");
+  await subscribers.setTradingWallet("chat-1", {
+    publicKey: otherWallet,
+    encryptedApiKey: "encrypted",
+    apiKeyLast4: "abcd",
+    provider: "local-solana",
+    kind: "local-solana",
+    label: null,
+    createdAt: "now",
+    updatedAt: "now"
+  });
+
+  const replies = [];
+  const originalFetch = globalThis.fetch;
+  let poller;
+  let updateSent = false;
+
+  globalThis.fetch = async (url, init) => {
+    const href = String(url);
+
+    if (href.includes("/getMe")) {
+      return new Response(JSON.stringify({ ok: true, result: { username: "copybot" } }), { status: 200 });
+    }
+
+    if (href.includes("/deleteWebhook") || href.includes("/setMyCommands")) {
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    }
+
+    if (href.includes("/getUpdates")) {
+      if (updateSent) {
+        poller?.stop();
+        return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+      }
+
+      updateSent = true;
+      return new Response(JSON.stringify({
+        ok: true,
+        result: [{ update_id: 1, message: { text: "/mywallets", chat: { id: "chat-1", type: "private" } } }]
+      }), { status: 200 });
+    }
+
+    if (href.includes("/sendMessage")) {
+      replies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+    }
+
+    throw new Error(`Unexpected Telegram request: ${href}`);
+  };
+
+  try {
+    poller = createTelegramCommandPoller({
+      config: {
+        ...config,
+        telegramToken: "token"
+      },
+      testMessage: () => "",
+      subscribers
+    });
+    await poller.start();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(replies.length, 1);
+  assert.match(replies[0].text, /🧾 Active Wallet/);
+  assert.doesNotMatch(replies[0].text, /📥 Deposit Address/);
+  assert.equal(replies[0].text.match(new RegExp(otherWallet, "g"))?.length, 1);
 });
 
 test("cashback command renders summary and claim callback", async () => {
@@ -456,8 +530,8 @@ test("copytrade execution setting inputs parse slippage and priority fees", () =
 
   assert.equal(parsePriorityFeeInput("0.00005"), 0.00005);
   assert.equal(parsePriorityFeeInput("1"), 1);
+  assert.equal(parsePriorityFeeInput("1.1"), 1.1);
   assert.equal(parsePriorityFeeInput("0"), null);
-  assert.equal(parsePriorityFeeInput("1.1"), null);
   assert.equal(parsePriorityFeeInput("abc"), null);
 });
 
@@ -474,11 +548,19 @@ test("trailing sell inputs parse custom steps and formula presets", () => {
     percent: 100,
     delayMs: 3_600_000
   });
+  assert.deepEqual(parseTrailingSellStepInput("100% .5s"), {
+    percent: 100,
+    delayMs: 500
+  });
   assert.equal(parseTrailingSellStepInput("101% 10s"), null);
   assert.equal(parseTrailingSellStepInput("20% forever"), null);
   assert.deepEqual(parseTrailingSellStepsInput("30% 2m, 20% 10s"), [
-    { percent: 20, delayMs: 10_000 },
-    { percent: 30, delayMs: 120_000 }
+    { percent: 30, delayMs: 120_000 },
+    { percent: 20, delayMs: 10_000 }
+  ]);
+  assert.deepEqual(parseTrailingSellStepsInput("50% 1s 100% .5s"), [
+    { percent: 50, delayMs: 1_000 },
+    { percent: 100, delayMs: 500 }
   ]);
   assert.deepEqual(parseTrailingSellStepsInput("50% 1s, 100%, 2s"), [
     { percent: 50, delayMs: 1_000 },
@@ -513,12 +595,12 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
   assert.match(dashboard, /Automatically mirror trades from selected wallets in real time\./);
   assert.match(dashboard, /👛 Trading Wallet:/);
   assert.match(dashboard, /62qc2C\.\.\.fafNgV/);
-  assert.match(dashboard, /⚙️ Copy Settings<\/b>\n├ Copy Amount: 0.5 SOL/);
+  assert.match(dashboard, /⚙️ Settings<\/b>\n├ Copy Amount: 0.5 SOL/);
   assert.match(dashboard, /├ Buy: 10% slip \/ 0.00005 SOL priority/);
   assert.match(dashboard, /├ Sell: 10% slip \/ 0.00005 SOL priority/);
   assert.match(dashboard, /└ Copy Repeat Buys: Off/);
   assert.match(dashboard, /🎯 Target Wallets:<\/b> 1/);
-  assert.match(dashboard, /└ cented/);
+  assert.match(dashboard, /└ 🟢 cented/);
   assert.doesNotMatch(dashboard, new RegExp(wallet));
   assert.match(dashboard, /🟢 Setup is <b>active<\/b>/);
   assert.match(dashboard, /📉 Trailing Sells:<\/b> Not configured/);
@@ -539,15 +621,35 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
     buyPriorityFeeSol: 0.00012,
     sellSlippagePercent: 20,
     sellPriorityFeeSol: 0.0002,
-    retryFailedCopyBuys: true
+    retryFailedCopyBuys: true,
+    maxCopyAmountSol: 0
   });
 
-  assert.match(missing, /└ 39azUY\.\.\.5jUJjg/);
+  assert.match(missing, /└ 🟢 39azUY\.\.\.5jUJjg/);
   assert.match(missing, /├ Copy Amount: Not set/);
+  assert.doesNotMatch(missing, /Max Copy Amount/);
   assert.match(missing, /├ Buy: 12.5% slip \/ 0.00012 SOL priority/);
   assert.match(missing, /├ Sell: 20% slip \/ 0.0002 SOL priority/);
   assert.match(missing, /└ Copy Repeat Buys: On/);
   assert.match(missing, /🔴 Setup is <b>inactive<\/b>/);
+
+  const paused = formatCopyTradeDashboardText({
+    tradingWalletPublicKey: otherWallet,
+    copyAmountSol: 0.5,
+    copyTradeWallets: [
+      {
+        address: wallet,
+        label: "cented",
+        addedAt: "2026-05-23T00:00:00.000Z",
+        updatedAt: "2026-05-23T00:00:00.000Z"
+      }
+    ],
+    notificationsPaused: true
+  });
+
+  assert.match(paused, /<b>⏸️ Setup is paused<\/b>/);
+  assert.match(paused, /├ \/stop paused this chat/);
+  assert.match(paused, /└ Send \/start to resume this chat/);
 });
 
 test("copytrade settings callback toggles retry failed buys and reset clears it", async () => {
@@ -651,6 +753,541 @@ test("copytrade settings callback toggles retry failed buys and reset clears it"
   );
 });
 
+test("copy amount confirmation returns dashboard with saved amount in settings", async () => {
+  const subscribers = createSubscriberStore({});
+  await subscribers.init();
+  await subscribers.add("chat-1");
+
+  const updates = [
+    {
+      update_id: 1,
+      callback_query: {
+        id: "amount-open",
+        data: "copytrade:set_amount",
+        message: { chat: { id: "chat-1", type: "private" } }
+      }
+    },
+    {
+      update_id: 2,
+      message: {
+        text: "0.001",
+        chat: { id: "chat-1", type: "private" }
+      }
+    },
+    {
+      update_id: 3,
+      callback_query: {
+        id: "amount-confirm",
+        data: "copytrade:confirm_pending",
+        message: { chat: { id: "chat-1", type: "private" } }
+      }
+    }
+  ];
+  const replies = [];
+  const originalFetch = globalThis.fetch;
+  let updateIndex = 0;
+  let poller;
+
+  globalThis.fetch = async (url, init) => {
+    const href = String(url);
+
+    if (href.includes("/getMe")) {
+      return new Response(JSON.stringify({ ok: true, result: { username: "copybot" } }), { status: 200 });
+    }
+
+    if (href.includes("/deleteWebhook") || href.includes("/setMyCommands") || href.includes("/answerCallbackQuery")) {
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    }
+
+    if (href.includes("/getUpdates")) {
+      if (updateIndex >= updates.length) {
+        poller?.stop();
+        return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+      }
+
+      const update = updates[updateIndex++];
+      return new Response(JSON.stringify({ ok: true, result: [update] }), { status: 200 });
+    }
+
+    if (href.includes("/sendMessage")) {
+      replies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+    }
+
+    throw new Error(`Unexpected Telegram request: ${href}`);
+  };
+
+  try {
+    poller = createTelegramCommandPoller({
+      config: {
+        ...config,
+        copyTradeMaxBuySol: 0,
+        telegramToken: "token"
+      },
+      testMessage: () => "",
+      subscribers
+    });
+    await poller.start();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(subscribers.get("chat-1")?.copyAmountSol, 0.001);
+  assert.match(replies.at(-1).text, /⚙️ Settings<\/b>\n├ Copy Amount: 0.001 SOL/);
+  assert.doesNotMatch(replies.at(-1).text, /Copy amount saved/);
+});
+
+test("adding a target wallet returns dashboard without redundant saved prefix", async () => {
+  const subscribers = createSubscriberStore({});
+  await subscribers.init();
+  await subscribers.add("chat-1");
+
+  const updates = [
+    {
+      update_id: 1,
+      callback_query: {
+        id: "target-open",
+        data: "copytrade:add_wallet",
+        message: { chat: { id: "chat-1", type: "private" } }
+      }
+    },
+    {
+      update_id: 2,
+      message: {
+        text: wallet,
+        chat: { id: "chat-1", type: "private" }
+      }
+    }
+  ];
+  const replies = [];
+  const originalFetch = globalThis.fetch;
+  let updateIndex = 0;
+  let poller;
+
+  globalThis.fetch = async (url, init) => {
+    const href = String(url);
+
+    if (href.includes("/getMe")) {
+      return new Response(JSON.stringify({ ok: true, result: { username: "copybot" } }), { status: 200 });
+    }
+
+    if (href.includes("/deleteWebhook") || href.includes("/setMyCommands") || href.includes("/answerCallbackQuery")) {
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    }
+
+    if (href.includes("/getUpdates")) {
+      if (updateIndex >= updates.length) {
+        poller?.stop();
+        return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+      }
+
+      const update = updates[updateIndex++];
+      return new Response(JSON.stringify({ ok: true, result: [update] }), { status: 200 });
+    }
+
+    if (href.includes("/sendMessage")) {
+      replies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+    }
+
+    throw new Error(`Unexpected Telegram request: ${href}`);
+  };
+
+  try {
+    poller = createTelegramCommandPoller({
+      config: {
+        ...config,
+        telegramToken: "token"
+      },
+      testMessage: () => "",
+      subscribers
+    });
+    await poller.start();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(subscribers.get("chat-1")?.copyTradeWallets.length, 1);
+  assert.match(replies.at(-1).text, /🎯 Target Wallets:<\/b> 1/);
+  assert.match(replies.at(-1).text, /└ 🟢 39azUY\.\.\.5jUJjg/);
+  assert.doesNotMatch(replies.at(-1).text, /Target wallet saved/);
+});
+
+test("copytrade target wallet list uses nested dashboard style", async () => {
+  const subscribers = createSubscriberStore({});
+  await subscribers.init();
+  await subscribers.add("chat-1");
+  await subscribers.watchCopyTradeWallet("chat-1", wallet);
+
+  const replies = [];
+  const originalFetch = globalThis.fetch;
+  let updateServed = false;
+  let poller;
+
+  globalThis.fetch = async (url, init) => {
+    const href = String(url);
+
+    if (href.includes("/getMe")) {
+      return new Response(JSON.stringify({ ok: true, result: { username: "copybot" } }), { status: 200 });
+    }
+
+    if (href.includes("/deleteWebhook") || href.includes("/setMyCommands") || href.includes("/answerCallbackQuery")) {
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    }
+
+    if (href.includes("/getUpdates")) {
+      if (updateServed) {
+        poller?.stop();
+        return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+      }
+
+      updateServed = true;
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          result: [
+            {
+              update_id: 1,
+              callback_query: {
+                id: "callback-list-targets",
+                data: "copytrade:wallets",
+                message: {
+                  chat: {
+                    id: "chat-1",
+                    type: "private"
+                  }
+                }
+              }
+            }
+          ]
+        }),
+        { status: 200 }
+      );
+    }
+
+    if (href.includes("/sendMessage")) {
+      replies.push(JSON.parse(String(init?.body)));
+      poller?.stop();
+      return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+    }
+
+    throw new Error(`Unexpected Telegram request: ${href}`);
+  };
+
+  try {
+    poller = createTelegramCommandPoller({
+      config: {
+        ...config,
+        telegramToken: "token"
+      },
+      testMessage: () => "",
+      subscribers
+    });
+    await poller.start();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.match(replies[0].text, /🎯 Target Wallets/);
+  assert.match(replies[0].text, /📚 Saved Targets/);
+  assert.match(replies[0].text, /└ 1/);
+  assert.match(replies[0].text, /🎯 Target 1/);
+  assert.match(replies[0].text, /├ Status: On/);
+  assert.match(replies[0].text, new RegExp(`└ <code>${wallet}</code>`));
+  assert.doesNotMatch(replies[0].text, /^<b>Target Wallets<\/b>/);
+});
+
+test("copytrade stop picker shows a single stateful trading toggle", async () => {
+  const subscribers = createSubscriberStore({});
+  await subscribers.init();
+  await subscribers.add("chat-1");
+  await subscribers.watchCopyTradeWallet("chat-1", wallet, "copy");
+
+  async function runStopPicker(stopped) {
+    const replies = [];
+    const originalFetch = globalThis.fetch;
+    let updateServed = false;
+    let poller;
+
+    globalThis.fetch = async (url, init) => {
+      const href = String(url);
+
+      if (href.includes("/getMe")) {
+        return new Response(JSON.stringify({ ok: true, result: { username: "copybot" } }), { status: 200 });
+      }
+
+      if (href.includes("/deleteWebhook") || href.includes("/setMyCommands") || href.includes("/answerCallbackQuery")) {
+        return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+      }
+
+      if (href.includes("/getUpdates")) {
+        if (updateServed) {
+          poller?.stop();
+          return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+        }
+
+        updateServed = true;
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            result: [
+              {
+                update_id: 1,
+                callback_query: {
+                  id: `callback-${stopped ? "stopped" : "live"}`,
+                  data: "copytrade:stop",
+                  message: {
+                    chat: {
+                      id: "chat-1",
+                      type: "private"
+                    }
+                  }
+                }
+              }
+            ]
+          }),
+          { status: 200 }
+        );
+      }
+
+      if (href.includes("/sendMessage")) {
+        replies.push(JSON.parse(String(init?.body)));
+        poller?.stop();
+        return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+      }
+
+      throw new Error(`Unexpected Telegram request: ${href}`);
+    };
+
+    try {
+      poller = createTelegramCommandPoller({
+        config: {
+          ...config,
+          telegramToken: "token"
+        },
+        testMessage: () => "",
+        subscribers,
+        isCopyTradeEmergencyStopped: () => stopped
+      });
+      await poller.start();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    return replies.at(-1);
+  }
+
+  const liveReply = await runStopPicker(false);
+  assert.match(liveReply.text, /🔁 Toggle Trade/);
+  assert.match(liveReply.text, /⚡ Live Submissions/);
+  assert.match(liveReply.text, /├ Stop or resume all live copy trading/);
+  assert.match(liveReply.text, /🎯 Target Toggles/);
+  assert.deepEqual(liveReply.reply_markup.inline_keyboard[0], [
+    { text: "🛑 Stop Trading", callback_data: "copytrade:emergency_stop" },
+    { text: "↩️ Back", callback_data: "copytrade:dashboard" }
+  ]);
+  assert.deepEqual(
+    liveReply.reply_markup.inline_keyboard.some((row) => row.some((button) => button.text === "🛑 Stop Trading")),
+    true
+  );
+  assert.deepEqual(
+    liveReply.reply_markup.inline_keyboard.some((row) => row.some((button) => button.text === "🟢 Resume Trading")),
+    false
+  );
+
+  const stoppedReply = await runStopPicker(true);
+  assert.match(stoppedReply.text, /🔁 Toggle Trade/);
+  assert.deepEqual(stoppedReply.reply_markup.inline_keyboard[0], [
+    { text: "🟢 Resume Trading", callback_data: "copytrade:emergency_resume" },
+    { text: "↩️ Back", callback_data: "copytrade:dashboard" }
+  ]);
+  assert.deepEqual(
+    stoppedReply.reply_markup.inline_keyboard.some((row) => row.some((button) => button.text === "🟢 Resume Trading")),
+    true
+  );
+  assert.deepEqual(
+    stoppedReply.reply_markup.inline_keyboard.some((row) => row.some((button) => button.text === "🛑 Stop Trading")),
+    false
+  );
+});
+
+test("copytrade target toggle confirmation uses nested wallet summary", async () => {
+  const subscribers = createSubscriberStore({});
+  await subscribers.init();
+  await subscribers.add("chat-1");
+  await subscribers.watchCopyTradeWallet("chat-1", wallet, "copy");
+
+  const replies = [];
+  const originalFetch = globalThis.fetch;
+  let updateServed = false;
+  let poller;
+
+  globalThis.fetch = async (url, init) => {
+    const href = String(url);
+
+    if (href.includes("/getMe")) {
+      return new Response(JSON.stringify({ ok: true, result: { username: "copybot" } }), { status: 200 });
+    }
+
+    if (href.includes("/deleteWebhook") || href.includes("/setMyCommands") || href.includes("/answerCallbackQuery")) {
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    }
+
+    if (href.includes("/getUpdates")) {
+      if (updateServed) {
+        poller?.stop();
+        return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+      }
+
+      updateServed = true;
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          result: [
+            {
+              update_id: 1,
+              callback_query: {
+                id: "callback-stop-one",
+                data: "copytrade:stop_one:0",
+                message: {
+                  chat: {
+                    id: "chat-1",
+                    type: "private"
+                  }
+                }
+              }
+            }
+          ]
+        }),
+        { status: 200 }
+      );
+    }
+
+    if (href.includes("/sendMessage")) {
+      replies.push(JSON.parse(String(init?.body)));
+      poller?.stop();
+      return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+    }
+
+    throw new Error(`Unexpected Telegram request: ${href}`);
+  };
+
+  try {
+    poller = createTelegramCommandPoller({
+      config: {
+        ...config,
+        telegramToken: "token"
+      },
+      testMessage: () => "",
+      subscribers
+    });
+    await poller.start();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.match(replies[0].text, /🔁 Toggle Target Trade\?/);
+  assert.match(replies[0].text, /🎯 Target Wallet/);
+  assert.match(replies[0].text, /└ copy/);
+  assert.match(replies[0].text, /📡 Current State/);
+  assert.match(replies[0].text, /└ On/);
+  assert.match(replies[0].text, /🧾 What changes/);
+  assert.match(replies[0].text, /Copy trading turns off for this Target Wallet/);
+  assert.match(replies[0].text, /🔒 What stays saved/);
+  assert.match(replies[0].text, /├ Trading Wallet/);
+  assert.match(replies[0].text, /└ Other Target Wallets/);
+  assert.doesNotMatch(replies[0].text, /Confirm stop/);
+});
+
+test("copytrade target toggle disables copying without removing the target wallet", async () => {
+  const subscribers = createSubscriberStore({});
+  await subscribers.init();
+  await subscribers.add("chat-1");
+  await subscribers.watchCopyTradeWallet("chat-1", wallet, "copy");
+
+  const replies = [];
+  const originalFetch = globalThis.fetch;
+  let updateServed = false;
+  let poller;
+  let syncRefreshes = 0;
+
+  globalThis.fetch = async (url, init) => {
+    const href = String(url);
+
+    if (href.includes("/getMe")) {
+      return new Response(JSON.stringify({ ok: true, result: { username: "copybot" } }), { status: 200 });
+    }
+
+    if (href.includes("/deleteWebhook") || href.includes("/setMyCommands") || href.includes("/answerCallbackQuery")) {
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    }
+
+    if (href.includes("/getUpdates")) {
+      if (updateServed) {
+        poller?.stop();
+        return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+      }
+
+      updateServed = true;
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          result: [
+            {
+              update_id: 1,
+              callback_query: {
+                id: "callback-toggle-target",
+                data: "copytrade:stop_confirm:0",
+                message: {
+                  chat: {
+                    id: "chat-1",
+                    type: "private"
+                  }
+                }
+              }
+            }
+          ]
+        }),
+        { status: 200 }
+      );
+    }
+
+    if (href.includes("/sendMessage")) {
+      replies.push(JSON.parse(String(init?.body)));
+      poller?.stop();
+      return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+    }
+
+    throw new Error(`Unexpected Telegram request: ${href}`);
+  };
+
+  try {
+    poller = createTelegramCommandPoller({
+      config: {
+        ...config,
+        telegramToken: "token"
+      },
+      testMessage: () => "",
+      subscribers,
+      onWalletWatchlistChange: () => {
+        syncRefreshes += 1;
+      }
+    });
+    await poller.start();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const targets = subscribers.listCopyTradeWallets("chat-1");
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].copyTradeEnabled, false);
+  assert.equal(syncRefreshes, 1);
+  assert.match(replies[0].text, /⚪ Target trade disabled/);
+  assert.match(replies[0].text, /🎯 Target Wallets:<\/b> 1/);
+  assert.match(replies[0].text, /└ ⚪ copy/);
+  assert.doesNotMatch(replies[0].text, /Removed Target Wallet/);
+});
+
 test("copytrade settings callback toggles buy-pressure sells and saves timeout", async () => {
   const subscribers = createSubscriberStore({});
   await subscribers.init();
@@ -740,8 +1377,13 @@ test("copytrade settings callback toggles buy-pressure sells and saves timeout",
   assert.match(toggleReplies.at(-1).text, /Buy-pressure sell is now on/);
   assert.match(toggleReplies.at(-1).text, /<b>📈 Buy-Pressure Sell<\/b>\n├ Status: On/);
   assert.match(toggleReplies.at(-1).text, /├ Status: On/);
-  assert.match(toggleReplies.at(-1).text, /├ Timeout: Inherited 5s/);
+  assert.match(toggleReplies.at(-1).text, /├ Timeout: 5s/);
   assert.match(toggleReplies.at(-1).text, /└ Bot gate: Enabled/);
+  assert.match(toggleReplies.at(-1).text, /🧭 How it works/);
+  assert.match(toggleReplies.at(-1).text, /Starts after the bot copies a buy/);
+  assert.match(toggleReplies.at(-1).text, /Watches the same token for fresh target-wallet buys/);
+  assert.match(toggleReplies.at(-1).text, /If no trigger appears within 5s/);
+  assert.match(toggleReplies.at(-1).text, /Only applies to copied positions from this bot/);
   assert.deepEqual(
     toggleReplies.at(-1).reply_markup.inline_keyboard.some((row) =>
       row.some((button) => button.text === "☑ Enabled")
@@ -771,21 +1413,31 @@ test("copytrade settings callback toggles buy-pressure sells and saves timeout",
     true
   );
 
+  const cancelReplies = await runUpdates([
+    callbackUpdate("copytrade:settings:buy_slippage", 6),
+    messageUpdate("2.5", 7),
+    callbackUpdate("copytrade:cancel_pending", 8)
+  ], { copyTradeMaxSlippage: 0 });
+  assert.match(cancelReplies.at(-1).text, /<b>↩️ Change canceled<\/b>/);
+  assert.match(cancelReplies.at(-1).text, /└ Buy slippage was not saved/);
+  assert.match(cancelReplies.at(-1).text, /<b>✅ Saved Settings<\/b>/);
+  assert.match(cancelReplies.at(-1).text, /<b>⚙️ Execution Settings<\/b>/);
+
   const timeoutReplies = await runUpdates([
     callbackUpdate("copytrade:settings:buy_pressure_timeout", 10),
-    messageUpdate("5", 11),
+    messageUpdate("120", 11),
     callbackUpdate("copytrade:confirm_pending", 12)
-  ]);
-  assert.equal(subscribers.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, 5000);
-  assert.match(timeoutReplies.at(-1).text, /Buy-pressure timeout saved:<\/b> 5s/);
-  assert.match(timeoutReplies.at(-1).text, /├ Timeout: Custom 5s/);
+  ], { copyTradeMaxPriorityFee: 0.0002 });
+  assert.equal(subscribers.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, 120000);
+  assert.match(timeoutReplies.at(-1).text, /Buy-pressure timeout saved:<\/b> 2m/);
+  assert.match(timeoutReplies.at(-1).text, /├ Timeout: 2m/);
 
   const resetReplies = await runUpdates([callbackUpdate("copytrade:settings:reset", 20)]);
   assert.equal(subscribers.get("chat-1")?.copyTradeBuyPressureSellEnabled, false);
   assert.equal(subscribers.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, null);
   assert.match(resetReplies.at(-1).text, /Execution settings reset to inherited defaults/);
   assert.match(resetReplies.at(-1).text, /├ Status: Off/);
-  assert.match(resetReplies.at(-1).text, /├ Timeout: Inherited 5s/);
+  assert.match(resetReplies.at(-1).text, /├ Timeout: 5s/);
   assert.match(resetReplies.at(-1).text, /└ Bot gate: Enabled/);
 });
 
@@ -1359,7 +2011,7 @@ test("wallet monitor normalizes and formats matching Helius swaps", () => {
   assert.match(trailingScheduledMessage || "", /📉 Trailing Sells/);
   assert.match(trailingScheduledMessage || "", /🟢 Sell schedule created/);
   assert.match(trailingScheduledMessage || "", /Sell 20% after 2s/);
-  assert.match(trailingScheduledMessage || "", /Sell 100% after 4s/);
+  assert.match(trailingScheduledMessage || "", /Sell 100% 2s later/);
   assert.doesNotMatch(trailingScheduledMessage || "", /Build-only/);
 
   const trailingSkippedMessage = formatCopyTradeTrailingSellSkippedMessage({

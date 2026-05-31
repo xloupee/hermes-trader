@@ -28,6 +28,7 @@ import type {
   TelegramUpdate,
   TradingWallet,
   TrailingSellConfig,
+  TrailingSellMode,
   TrailingSellPercentBasis,
   TrailingSellStep,
   WatchedWallet
@@ -98,6 +99,7 @@ interface CommandPollerOptions {
   testMessage: () => string;
   subscribers?: SubscriberStore;
   onWalletWatchlistChange?: () => string | void | Promise<string | void>;
+  isCopyTradeEmergencyStopped?: () => boolean;
   onCopyTradeEmergencyStop?: (chatId: TelegramChatId) => string | void | Promise<string | void>;
   onCopyTradeEmergencyResume?: (chatId: TelegramChatId) => string | void | Promise<string | void>;
   cashback?: {
@@ -242,12 +244,17 @@ export function formatCopyTradeRiskSettingConfirmText(action: PendingCopyInputAc
   const formatted = formatCopyTradeInputValue(action, value);
 
   return [
-    `<b>Confirm ${label}</b>`,
+    `<b>✨ Confirm ${label}</b>`,
     "",
-    `<b>New value:</b> <code>${formatted}</code>`,
+    "<b>🧾 Pending Change</b>",
+    `└ New value: <code>${formatted}</code>`,
     "",
-    "This setting can affect live SOL trades when copy trading is enabled and dry-run is off.",
-    "Tap Confirm to save it."
+    "<b>⚠️ Live Trade Warning</b>",
+    "├ Can affect live SOL trades.",
+    "├ Applies when copy trading is enabled.",
+    "└ Dry-run must be off.",
+    "",
+    "Tap Confirm to save."
   ].join("\n");
 }
 
@@ -262,19 +269,19 @@ export function copyTradeRiskSettingConfirmReplyMarkup(): TelegramReplyMarkup {
 
 export function formatCopyTradeEmergencyStopConfirmText(): string {
   return [
-    "<b>🚨 Emergency Stop Live Copy Trading?</b>",
+    "<b>🛑 Stop Live Copy Trading?</b>",
     "",
     "This disables live copy-trade submissions in this running bot process.",
     "",
     "It will not remove Target Wallets, trading wallet config, saved settings, or token alerts.",
-    "Tap Confirm Emergency Stop to disable live execution now."
+    "Tap Confirm Stop to disable live execution now."
   ].join("\n");
 }
 
 export function copyTradeEmergencyStopConfirmReplyMarkup(): TelegramReplyMarkup {
   return {
     inline_keyboard: [
-      [{ text: "🚨 Confirm Emergency Stop", callback_data: "copytrade:emergency_stop_confirm" }],
+      [{ text: "🛑 Confirm Stop", callback_data: "copytrade:emergency_stop_confirm" }],
       [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]
     ]
   };
@@ -301,19 +308,23 @@ export function formatCopyTradeEmergencyStopUnavailableText(): string {
 
 export function formatCopyTradeEmergencyResumeConfirmText(): string {
   return [
-    "<b>🟢 Clear Emergency Stop?</b>",
+    "<b>🟢 Resume Live Copy Trading?</b>",
     "",
-    "This clears the runtime emergency stop for live copy-trade submissions.",
+    "This turns live copy-trade submissions back on for this running bot.",
     "",
-    "It does not change COPY_TRADE_ENABLED, COPY_TRADE_DRY_RUN, wallet balances, caps, slippage, or saved copytrade settings.",
-    "Tap Confirm Clear to allow the bot to use its current execution settings again."
+    "<b>🧾 What stays the same</b>",
+    "├ Target Wallets stay saved.",
+    "├ Trading wallet and balances stay unchanged.",
+    "└ Amount, slippage, priority, and other settings stay unchanged.",
+    "",
+    "Tap Confirm Resume when you are ready for the bot to copy trades again."
   ].join("\n");
 }
 
 export function copyTradeEmergencyResumeConfirmReplyMarkup(): TelegramReplyMarkup {
   return {
     inline_keyboard: [
-      [{ text: "🟢 Confirm Clear", callback_data: "copytrade:emergency_resume_confirm" }],
+      [{ text: "🟢 Confirm Resume", callback_data: "copytrade:emergency_resume_confirm" }],
       [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]
     ]
   };
@@ -357,10 +368,11 @@ export function tradingWalletCreationBlockedText(chatType?: string | null): stri
 export function tradingWalletBackupWarningText(): string {
   return [
     "<b>🔐 Hot-wallet/private-key warning</b>",
-    "This is a hot wallet the bot can use for copy buys.",
-    "The private key or secret key is shown once. Back it up somewhere private before depositing SOL.",
-    "Anyone with that key can spend the wallet.",
-    "The bot cannot recover it later."
+    "├ Bot can use it for copy buys.",
+    "├ Secret key is shown once.",
+    "├ Back it up privately before depositing SOL.",
+    "├ Anyone with the key can spend the wallet.",
+    "└ The bot cannot recover it later."
   ].join("\n");
 }
 
@@ -371,7 +383,7 @@ export function formatTradingWalletCreateConfirmText({
   existingPublicKey?: string | null;
   provider?: "pumpportal-lightning" | "local-solana";
 } = {}): string {
-  const walletType = provider === "local-solana" ? "local Solana signing wallet" : "PumpPortal trading wallet";
+  const walletType = provider === "local-solana" ? "Solana signing wallet" : "PumpPortal trading wallet";
 
   if (!existingPublicKey) {
     return [
@@ -411,7 +423,7 @@ export function parseSlippageInput(value: string): number | null {
 export function parsePriorityFeeInput(value: string): number | null {
   const parsed = Number(value.trim());
 
-  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1) {
+  if (!Number.isFinite(parsed) || parsed <= 0) {
     return null;
   }
 
@@ -426,6 +438,23 @@ function formatCopyTradeWalletSummary(wallet: WatchedWallet): string {
   return wallet.label ? escapeHtml(wallet.label) : shortWallet(wallet.address);
 }
 
+function copyTradeWalletEnabled(wallet: WatchedWallet): boolean {
+  return wallet.copyTradeEnabled !== false;
+}
+
+function formatCopyTradeWalletStatus(wallet: WatchedWallet): string {
+  return copyTradeWalletEnabled(wallet) ? "On" : "Off";
+}
+
+function pausedExplanationLines(): string[] {
+  return [
+    "<b>⏸️ Setup is paused</b>",
+    "├ /stop paused this chat.",
+    "├ Token alerts, wallet alerts, and copy trading are paused.",
+    "└ Send /start to resume this chat."
+  ];
+}
+
 export function formatCopyTradeDashboardText({
   tradingWalletPublicKey,
   copyAmountSol,
@@ -435,7 +464,8 @@ export function formatCopyTradeDashboardText({
   sellSlippagePercent = DEFAULT_COPY_TRADE_SLIPPAGE,
   sellPriorityFeeSol = DEFAULT_COPY_TRADE_PRIORITY_FEE,
   retryFailedCopyBuys = false,
-  notificationsPaused = false
+  notificationsPaused = false,
+  maxCopyAmountSol = null
 }: {
   tradingWalletPublicKey: string | null;
   copyAmountSol: number | null;
@@ -446,8 +476,16 @@ export function formatCopyTradeDashboardText({
   sellPriorityFeeSol?: number;
   retryFailedCopyBuys?: boolean;
   notificationsPaused?: boolean;
+  maxCopyAmountSol?: number | null;
 }): string {
-  const ready = Boolean(!notificationsPaused && tradingWalletPublicKey && copyAmountSol && copyTradeWallets.length > 0);
+  const enabledTargetWallets = copyTradeWallets.filter(copyTradeWalletEnabled);
+  const ready = Boolean(!notificationsPaused && tradingWalletPublicKey && copyAmountSol && enabledTargetWallets.length > 0);
+  const copyAmountLines = capEnabled(maxCopyAmountSol)
+    ? [
+        `├ Copy Amount: ${copyAmountSol ? `${formatSolAmount(copyAmountSol)} SOL` : "Not set"}`,
+        `├ Max Copy Amount: ${formatSolAmount(maxCopyAmountSol)} SOL`
+      ]
+    : [`├ Copy Amount: ${copyAmountSol ? `${formatSolAmount(copyAmountSol)} SOL` : "Not set"}`];
   const trailingSellStatus = copyTradeWallets.length === 0
     ? "Add wallets first"
     : copyTradeWallets.some((wallet) => wallet.trailingSellConfig)
@@ -455,7 +493,7 @@ export function formatCopyTradeDashboardText({
       : "Not configured";
   const walletLines = copyTradeWallets.length === 0
     ? ["No Target Wallets yet."]
-    : copyTradeWallets.map((wallet) => `└ ${formatCopyTradeWalletSummary(wallet)}`);
+    : copyTradeWallets.map((wallet) => `└ ${copyTradeWalletEnabled(wallet) ? "🟢" : "⚪"} ${formatCopyTradeWalletSummary(wallet)}`);
 
   return [
     "<b>🔎 Copy Trading</b>",
@@ -465,8 +503,8 @@ export function formatCopyTradeDashboardText({
     "<b>👛 Trading Wallet:</b>",
     tradingWalletPublicKey ? `└ ${shortWallet(tradingWalletPublicKey)}` : "└ Not created",
     "",
-    "<b>⚙️ Copy Settings</b>",
-    `├ Copy Amount: ${copyAmountSol ? `${formatSolAmount(copyAmountSol)} SOL` : "Not set"}`,
+    "<b>⚙️ Settings</b>",
+    ...copyAmountLines,
     `├ Buy: ${formatPercent(buySlippagePercent)}% slip / ${formatSolAmount(buyPriorityFeeSol)} SOL priority`,
     `├ Sell: ${formatPercent(sellSlippagePercent)}% slip / ${formatSolAmount(sellPriorityFeeSol)} SOL priority`,
     `└ Copy Repeat Buys: ${retryFailedCopyBuys ? "On" : "Off"}`,
@@ -474,7 +512,7 @@ export function formatCopyTradeDashboardText({
     `<b>🎯 Target Wallets:</b> ${copyTradeWallets.length}`,
     ...walletLines,
     "",
-    notificationsPaused ? "⏸️ Setup is <b>paused</b>" : ready ? "🟢 Setup is <b>active</b>" : "🔴 Setup is <b>inactive</b>",
+    ...(notificationsPaused ? pausedExplanationLines() : [ready ? "🟢 Setup is <b>active</b>" : "🔴 Setup is <b>inactive</b>"]),
     "",
     `<b>📉 Trailing Sells:</b> ${trailingSellStatus}`
   ].join("\n");
@@ -569,12 +607,22 @@ function formatTrailingSellSteps(steps: TrailingSellStep[]): string {
     : steps.map((step) => `${formatTrailingPercent(step.percent)}% after ${formatDuration(step.delayMs)}`).join(" | ");
 }
 
+function formatTrailingSellStepLine(step: TrailingSellStep, index: number, mode: TrailingSellMode): string {
+  const prefix = `├ ${index + 1}. Sell ${formatTrailingPercent(step.percent)}%`;
+
+  if (mode === "custom_steps" && index > 0) {
+    return `${prefix} then ${formatDuration(step.delayMs)} later`;
+  }
+
+  return `${prefix} after ${formatDuration(step.delayMs)}`;
+}
+
 function formatTrailingPercent(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 function parseDurationMs(value: string): number | null {
-  const match = value.trim().toLowerCase().match(/^(\d+(?:\.\d+)?)(s|m|h)?$/);
+  const match = value.trim().toLowerCase().match(/^(\d+(?:\.\d+)?|\.\d+)(s|m|h)?$/);
 
   if (!match) {
     return null;
@@ -625,6 +673,7 @@ function normalizeTrailingSellStepEntries(value: string): string[] {
   for (let index = 0; index < rawEntries.length; index += 1) {
     const current = rawEntries[index];
     const next = rawEntries[index + 1];
+    const currentParts = current.replace(/\s+after\s+/i, " ").split(/\s+/).filter(Boolean);
 
     if (
       current &&
@@ -634,6 +683,19 @@ function normalizeTrailingSellStepEntries(value: string): string[] {
     ) {
       entries.push(`${current} ${next}`);
       index += 1;
+      continue;
+    }
+
+    if (
+      currentParts.length > 2 &&
+      currentParts.length % 2 === 0 &&
+      currentParts.every((part, partIndex) =>
+        partIndex % 2 === 0 ? parsePercentToken(part) !== null : parseDurationMs(part) !== null
+      )
+    ) {
+      for (let partIndex = 0; partIndex < currentParts.length; partIndex += 2) {
+        entries.push(`${currentParts[partIndex]} ${currentParts[partIndex + 1]}`);
+      }
       continue;
     }
 
@@ -647,8 +709,7 @@ export function parseTrailingSellStepsInput(value: string): TrailingSellStep[] |
   const rawEntries = normalizeTrailingSellStepEntries(value);
   const steps = rawEntries
     .map((entry) => parseTrailingSellStepInput(entry))
-    .filter((step): step is TrailingSellStep => Boolean(step))
-    .sort((left, right) => left.delayMs - right.delayMs);
+    .filter((step): step is TrailingSellStep => Boolean(step));
 
   if (rawEntries.length === 0 || rawEntries.length !== steps.length || steps.length > MAX_TRAILING_SELL_STEPS) {
     return null;
@@ -748,10 +809,11 @@ function verificationPrompt(): string {
 export function formatStartDashboardText(subscriber: SubscriberRecord): string {
   const tokenAlertsActive = Boolean(!subscriber.notificationsPaused && subscriber.mode);
   const tradingWalletStatus = subscriber.tradingWallet ? shortWallet(subscriber.tradingWallet.publicKey) : "Not created";
-  const copyReady = Boolean(!subscriber.notificationsPaused && subscriber.tradingWallet && subscriber.copyAmountSol && subscriber.copyTradeWallets.length > 0);
+  const enabledCopyTradeWallets = subscriber.copyTradeWallets.filter(copyTradeWalletEnabled);
+  const copyReady = Boolean(!subscriber.notificationsPaused && subscriber.tradingWallet && subscriber.copyAmountSol && enabledCopyTradeWallets.length > 0);
   const copyWalletLines = subscriber.copyTradeWallets.length === 0
     ? ["└ No Target Wallets yet"]
-    : subscriber.copyTradeWallets.slice(0, 3).map((wallet) => `└ ${formatCopyTradeWalletSummary(wallet)}`);
+    : subscriber.copyTradeWallets.slice(0, 3).map((wallet) => `└ ${copyTradeWalletEnabled(wallet) ? "🟢" : "⚪"} ${formatCopyTradeWalletSummary(wallet)}`);
   const moreCopyWallets = subscriber.copyTradeWallets.length > 3
     ? [`└ +${subscriber.copyTradeWallets.length - 3} more in /copytrade`]
     : [];
@@ -761,9 +823,9 @@ export function formatStartDashboardText(subscriber: SubscriberRecord): string {
     "",
     "Real-time token alerts, wallet tracking, and Bloom-style copy trading from Telegram.",
     "",
-    subscriber.notificationsPaused
-      ? "⏸️ Notifications are <b>paused</b>"
-      : tokenAlertsActive || copyReady ? "🟢 Setup is <b>active</b>" : "🔴 Setup is <b>inactive</b>",
+    ...(subscriber.notificationsPaused
+      ? pausedExplanationLines()
+      : [tokenAlertsActive || copyReady ? "🟢 Setup is <b>active</b>" : "🔴 Setup is <b>inactive</b>"]),
     "",
     "<b>🔔 Token Alerts</b>",
     `└ ${tokenAlertsActive ? modeLabel(subscriber.mode as AlertModeValue) : "Paused"}`,
@@ -807,7 +869,7 @@ export function helpText(_chatId?: TelegramChatId): string {
     "└ /trackwallets - Track wallets for normal trade alerts",
     "",
     "<b>👛 Trading Wallet</b>",
-    "└ /mywallets - Create or view your local signing trading wallet",
+    "└ /mywallets - Create or view your Solana trading wallet",
     "",
     "<b>⚡ Copy Trading</b>",
     "├ /copytrade - Configure copy amount, wallets, and trailing sells",
@@ -820,6 +882,7 @@ export function createTelegramCommandPoller({
   testMessage: _testMessage,
   subscribers,
   onWalletWatchlistChange,
+  isCopyTradeEmergencyStopped,
   onCopyTradeEmergencyStop,
   onCopyTradeEmergencyResume,
   cashback
@@ -1038,8 +1101,9 @@ export function createTelegramCommandPoller({
     }
 
     if (data === "copytrade:cancel_pending") {
+      const response = canceledPendingCopyInput(chatId);
       pendingCopyInputs.delete(String(chatId));
-      await reply(chatId, "Copy trade setting change canceled.", copyTradeDashboardReplyMarkup());
+      await reply(chatId, response.text, response.replyMarkup);
       return;
     }
 
@@ -1393,7 +1457,7 @@ export function createTelegramCommandPoller({
 
     if (data === "copytrade:stop_confirm") {
       const dashboard = copyTradeStopPicker(chatId);
-      await reply(chatId, `Choose which Target Wallet to stop.\n\n${dashboard.text}`, dashboard.replyMarkup);
+      await reply(chatId, `Choose which Target Wallet to toggle.\n\n${dashboard.text}`, dashboard.replyMarkup);
       return;
     }
 
@@ -1406,7 +1470,7 @@ export function createTelegramCommandPoller({
 
     if (data.startsWith("copytrade:stop_confirm:")) {
       const walletIndex = Number(data.slice("copytrade:stop_confirm:".length));
-      await stopCopyTradingByIndex(chatId, walletIndex);
+      await toggleCopyTradingByIndex(chatId, walletIndex);
       return;
     }
 
@@ -1509,16 +1573,21 @@ export function createTelegramCommandPoller({
       setPendingCopyInput(chatId, "trailing_steps", wallet.address);
       await reply(
         chatId,
-        "Send all trailing sell steps, separated by commas or new lines.\nExample: <code>20% 10s, 30% 2m, 100% 10m</code>."
-      );
-      return;
-    }
-
-    if (action === "preset") {
-      setPendingCopyInput(chatId, "trailing_formula", wallet.address);
-      await reply(
-        chatId,
-        "Send a formula as <code>first% firstDelay repeat% interval finalDelay</code>.\nExample: <code>20% 10s 20% 30s 5m</code>."
+        [
+          "<b>✏️ Edit Trailing Sell Schedule</b>",
+          "",
+          "<b>📉 What this does</b>",
+          "├ After a copied buy confirms, the bot follows this sell schedule.",
+          "└ Each step sells a percent after its delay.",
+          "",
+          "<b>🕒 Schedule</b>",
+          "├ Send steps separated by spaces, commas, or new lines.",
+          "├ Use as few or as many steps as you want.",
+          "└ Each step is a percent and delay, like <code>20% 10s</code>.",
+          "",
+          "<b>Example</b>",
+          "└ <code>50% 1s 100% .5s</code>"
+        ].join("\n")
       );
       return;
     }
@@ -1534,6 +1603,17 @@ export function createTelegramCommandPoller({
     const subscriber = subscribers?.get(chatId);
 
     if (subscriber) {
+      if (subscriber.notificationsPaused) {
+        await subscribers?.setNotificationsPaused(chatId, false);
+        const resumedSubscriber = subscribers?.get(chatId) || subscriber;
+        return [
+          "<b>▶️ Chat resumed</b>",
+          "└ Saved wallets and settings were kept.",
+          "",
+          formatStartDashboardText(resumedSubscriber)
+        ].join("\n");
+      }
+
       return formatStartDashboardText(subscriber);
     }
 
@@ -1880,7 +1960,7 @@ export function createTelegramCommandPoller({
       const syncWarning = await onWalletWatchlistChange?.();
       const dashboard = copyTradeDashboard(chatId);
       return {
-        text: `${label ? `<b>Target wallet saved:</b> ${escapeWalletLabel(label)}\n` : "<b>Target wallet saved:</b>\n"}<code>${wallet}</code>${syncWarning ? `\n\n${syncWarning}` : ""}\n\n${dashboard.text}`,
+        text: `${syncWarning ? `${syncWarning}\n\n` : ""}${dashboard.text}`,
         replyMarkup: dashboard.replyMarkup
       };
     }
@@ -2017,23 +2097,26 @@ export function createTelegramCommandPoller({
     const tradingWallets = subscribers?.listTradingWallets(chatId) || [];
     const otherWalletCount = Math.max(0, tradingWallets.length - (tradingWallet ? 1 : 0));
     const text = tradingWallet
-      ? [
-          "<b>👛 Trading Wallet</b>",
-          "",
-          "Deposit SOL here to enable auto copy buys.",
-          "",
-          "<b>📚 Saved Wallets</b>",
-          `└ ${tradingWallets.length}`,
-          "",
-          "<b>🧾 Active Wallet</b>",
-          `└ ${tradingWallet.label ? escapeWalletLabel(tradingWallet.label) : `<code>${tradingWallet.publicKey}</code>`}`,
-          "",
-          "<b>📥 Deposit Address</b>",
-          `└ <code>${tradingWallet.publicKey}</code>`,
-          otherWalletCount > 0 ? "" : null,
-          otherWalletCount > 0 ? "<b>🔁 Other Wallets</b>" : null,
-          otherWalletCount > 0 ? `└ ${otherWalletCount} saved. Use Switch Wallet to change active wallets.` : null
-        ].filter((line): line is string => line !== null).join("\n")
+      ? (() => {
+          const activeWalletLine = tradingWallet.label
+            ? `${escapeWalletLabel(tradingWallet.label)} · <code>${tradingWallet.publicKey}</code>`
+            : `<code>${tradingWallet.publicKey}</code>`;
+
+          return [
+            "<b>👛 Trading Wallet</b>",
+            "",
+            "Deposit SOL here to enable auto copy buys.",
+            "",
+            "<b>📚 Saved Wallets</b>",
+            `└ ${tradingWallets.length}`,
+            "",
+            "<b>🧾 Active Wallet</b>",
+            `└ ${activeWalletLine}`,
+            otherWalletCount > 0 ? "" : null,
+            otherWalletCount > 0 ? "<b>🔁 Other Wallets</b>" : null,
+            otherWalletCount > 0 ? `└ ${otherWalletCount} saved. Use Switch Wallet to change active wallets.` : null
+          ].filter((line): line is string => line !== null).join("\n");
+        })()
       : [
           "<b>👛 Trading Wallet</b>",
           "",
@@ -2042,9 +2125,6 @@ export function createTelegramCommandPoller({
           "",
           "<b>🧾 Active Wallet</b>",
           "└ Not created",
-          "",
-          "<b>📥 Deposit Address</b>",
-          "└ Create a wallet to get a deposit address."
         ].join("\n");
 
     return {
@@ -2275,8 +2355,7 @@ export function createTelegramCommandPoller({
   }
 
   function formatTradingWalletButtonLabel(wallet: TradingWallet): string {
-    const name = wallet.label ? escapeWalletLabel(wallet.label) : shortWallet(wallet.publicKey);
-    return `${name} (${wallet.provider === "local-solana" ? "Local" : "PumpPortal"})`;
+    return wallet.label ? escapeWalletLabel(wallet.label) : shortWallet(wallet.publicKey);
   }
 
   function myWalletCreateConfirm(
@@ -2481,7 +2560,7 @@ export function createTelegramCommandPoller({
     await reply(
       chatId,
       [
-        replaceExisting ? "<b>✨ New local signing wallet created</b>" : "<b>✨ Local signing wallet created</b>",
+        replaceExisting ? "<b>✨ New Solana signing wallet created</b>" : "<b>✨ Solana signing wallet created</b>",
         "",
         "<b>💰 Deposit SOL here</b>",
         `<code>${wallet.publicKey}</code>`,
@@ -2500,7 +2579,7 @@ export function createTelegramCommandPoller({
               ""
             ]
           : []),
-        "🟢 Direct execution can use this wallet after it has SOL and local signing is enabled."
+        "🟢 Direct execution can use this wallet after it has SOL and signing is enabled."
       ].join("\n"),
       myWalletDashboardReplyMarkup(wallet.publicKey)
     );
@@ -2579,6 +2658,32 @@ export function createTelegramCommandPoller({
     };
   }
 
+  function canceledPendingCopyInput(chatId: TelegramChatId): { text: string; replyMarkup?: TelegramReplyMarkup } {
+    const pending = pendingCopyInputs.get(String(chatId));
+    const label = pending ? copyTradeInputLabel(pending.action) : "Copy trade setting";
+    const dashboard =
+      pending?.action === "copy_amount"
+        ? copyTradeDashboard(chatId)
+        : pending?.action === "buy_pressure_timeout"
+          ? copyTradeBuyPressureSettingsDashboard(chatId)
+          : copyTradeSettingsDashboard(chatId);
+
+    return {
+      text: [
+        "<b>↩️ Change canceled</b>",
+        "",
+        "<b>🧾 Pending Change</b>",
+        `└ ${label} was not saved.`,
+        "",
+        "<b>✅ Saved Settings</b>",
+        "└ Everything stayed the same.",
+        "",
+        dashboard.text
+      ].join("\n"),
+      replyMarkup: dashboard.replyMarkup
+    };
+  }
+
   async function saveCopyTradeExecutionSetting(
     chatId: TelegramChatId,
     action: CopyTradeExecutionSettingInputAction,
@@ -2631,7 +2736,7 @@ export function createTelegramCommandPoller({
 
     const dashboard = copyTradeDashboard(chatId);
     return {
-      text: `<b>Copy amount saved:</b> ${formatSolAmount(amount)} SOL\n\n${dashboard.text}`,
+      text: dashboard.text,
       replyMarkup: dashboard.replyMarkup
     };
   }
@@ -2696,7 +2801,7 @@ export function createTelegramCommandPoller({
             ? parseTrailingSellStepsInput(value)
             : (() => {
                 const step = parseTrailingSellStepInput(value);
-                return step ? [...current.steps, step].sort((left, right) => left.delayMs - right.delayMs) : null;
+                return step ? [...current.steps, step] : null;
               })();
 
       if (!parsedSteps || parsedSteps.length === 0 || parsedSteps.length > MAX_TRAILING_SELL_STEPS) {
@@ -2751,7 +2856,7 @@ export function createTelegramCommandPoller({
             ? "That timeout is not valid. Send a positive number of seconds, like <code>5</code>, <code>30</code>, or <code>120</code>."
             : isSlippage
               ? "That slippage is not valid. Send a percent from <code>0.1</code> to <code>100</code>, like <code>10%</code>."
-              : "That priority fee is not valid. Send a SOL amount greater than <code>0</code> and no more than <code>1</code>, like <code>0.00005</code>."
+              : "That priority fee is not valid. Send a SOL amount greater than <code>0</code>, like <code>0.00005</code>."
         };
       }
 
@@ -2767,7 +2872,7 @@ export function createTelegramCommandPoller({
         };
       }
 
-      if (!isSlippage && capEnabled(config.copyTradeMaxPriorityFee) && parsed > config.copyTradeMaxPriorityFee) {
+      if (!isSlippage && !isBuyPressureTimeout && capEnabled(config.copyTradeMaxPriorityFee) && parsed > config.copyTradeMaxPriorityFee) {
         return {
           text: `That priority fee is above this bot's hard live-trading cap of <code>${formatSolAmount(config.copyTradeMaxPriorityFee)} SOL</code>.`
         };
@@ -2920,7 +3025,8 @@ export function createTelegramCommandPoller({
       sellSlippagePercent: effectiveSellSlippage(subscriber, config),
       sellPriorityFeeSol: effectiveSellPriorityFee(subscriber, config),
       retryFailedCopyBuys: subscriber?.copyTradeRetryFailedBuys === true,
-      notificationsPaused: subscriber?.notificationsPaused === true
+      notificationsPaused: subscriber?.notificationsPaused === true,
+      maxCopyAmountSol: config.copyTradeMaxBuySol
     });
 
     return {
@@ -2934,7 +3040,7 @@ export function createTelegramCommandPoller({
       inline_keyboard: [
         [
           { text: "💰 Amount", callback_data: "copytrade:set_amount" },
-          { text: "➕ Add Target", callback_data: "copytrade:add_wallet" }
+          { text: "🎯 Add Target", callback_data: "copytrade:add_wallet" }
         ],
         [
           { text: "✏️ Rename Target", callback_data: "copytrade:rename_wallet" },
@@ -2945,7 +3051,7 @@ export function createTelegramCommandPoller({
           { text: "⚙️ Settings", callback_data: "copytrade:settings" }
         ],
         [
-          { text: "⏹️ Stops", callback_data: "copytrade:stop" },
+          { text: "🔁 Toggle Trade", callback_data: "copytrade:stop" },
           { text: "📋 List Targets", callback_data: "copytrade:wallets" }
         ]
       ]
@@ -2964,10 +3070,6 @@ export function createTelegramCommandPoller({
 
     const subscriber = subscribers?.get(chatId) || null;
     const buyPressureTimeoutMs = effectiveBuyPressureTimeoutMs(subscriber, config);
-    const buyPressureTimeoutSource = subscriber?.copyTradeBuyPressureSellTimeoutMs === null ||
-      subscriber?.copyTradeBuyPressureSellTimeoutMs === undefined
-      ? "Inherited"
-      : "Custom";
     const text = [
       "<b>⚙️ Execution Settings</b>",
       "",
@@ -2986,7 +3088,7 @@ export function createTelegramCommandPoller({
       "",
       "<b>📈 Buy-Pressure Sell</b>",
       `├ Status: ${subscriber?.copyTradeBuyPressureSellEnabled ? "On" : "Off"}`,
-      `├ Timeout: ${buyPressureTimeoutSource} ${formatDuration(buyPressureTimeoutMs)}`,
+      `├ Timeout: ${formatDuration(buyPressureTimeoutMs)}`,
       `└ Bot gate: ${config.copyTradeBuyPressureSellEnabled ? "Enabled" : "Disabled"}`
     ].join("\n");
 
@@ -2994,14 +3096,14 @@ export function createTelegramCommandPoller({
       text,
       replyMarkup: {
         inline_keyboard: [
-          [
-            { text: "🟢 Buy Slippage", callback_data: "copytrade:settings:buy_slippage" },
-            { text: "🟢 Buy Priority", callback_data: "copytrade:settings:buy_priority" }
-          ],
-          [
-            { text: "🔴 Sell Slippage", callback_data: "copytrade:settings:sell_slippage" },
-            { text: "🔴 Sell Priority", callback_data: "copytrade:settings:sell_priority" }
-          ],
+        [
+            { text: "🛍️ Buy Slippage", callback_data: "copytrade:settings:buy_slippage" },
+            { text: "⛽ Buy Priority", callback_data: "copytrade:settings:buy_priority" }
+        ],
+        [
+            { text: "🛍️ Sell Slippage", callback_data: "copytrade:settings:sell_slippage" },
+            { text: "⛽ Sell Priority", callback_data: "copytrade:settings:sell_priority" }
+        ],
           [
             {
               text: `${subscriber?.copyTradeRetryFailedBuys ? "☑" : "☐"} Copy Repeat Buys`,
@@ -3033,17 +3135,20 @@ export function createTelegramCommandPoller({
 
     const subscriber = subscribers?.get(chatId) || null;
     const timeoutMs = effectiveBuyPressureTimeoutMs(subscriber, config);
-    const timeoutSource = subscriber?.copyTradeBuyPressureSellTimeoutMs === null ||
-      subscriber?.copyTradeBuyPressureSellTimeoutMs === undefined
-      ? "Inherited"
-      : "Custom";
     const text = [
       "<b>📈 Buy-Pressure Sell</b>",
       `├ Status: ${subscriber?.copyTradeBuyPressureSellEnabled ? "On" : "Off"}`,
-      `├ Timeout: ${timeoutSource} ${formatDuration(timeoutMs)}`,
+      `├ Timeout: ${formatDuration(timeoutMs)}`,
       `└ Bot gate: ${config.copyTradeBuyPressureSellEnabled ? "Enabled" : "Disabled"}`,
       "",
-      "When enabled, the bot watches copied tokens after entry and can sell on buy pressure or timeout."
+      "<b>🧭 How it works</b>",
+      "├ Starts after the bot copies a buy.",
+      "├ Watches the same token for fresh target-wallet buys.",
+      "├ If enough buy pressure appears, it can sell the copied position.",
+      `└ If no trigger appears within ${formatDuration(timeoutMs)}, it can sell on timeout.`,
+      "",
+      "<b>🔒 Scope</b>",
+      "└ Only applies to copied positions from this bot."
     ].join("\n");
 
     return {
@@ -3144,47 +3249,54 @@ export function createTelegramCommandPoller({
 
   function copyTradeStopPicker(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
     const wallets = subscribers?.listCopyTradeWallets(chatId) || [];
+    const emergencyStopped = isCopyTradeEmergencyStopped?.() === true;
     const liveStopControls = [
       [
-        { text: "🚨 Emergency Stop", callback_data: "copytrade:emergency_stop" },
-        { text: "🟢 Clear Stop", callback_data: "copytrade:emergency_resume" }
+        emergencyStopped
+          ? { text: "🟢 Resume Trading", callback_data: "copytrade:emergency_resume" }
+          : { text: "🛑 Stop Trading", callback_data: "copytrade:emergency_stop" },
+        { text: "↩️ Back", callback_data: "copytrade:dashboard" }
       ]
     ];
 
     if (wallets.length === 0) {
       return {
         text: [
-          "<b>⏹️ Stop Controls</b>",
+          "<b>🔁 Toggle Trade</b>",
           "",
-          "No Target Wallets are active.",
-          "Use Emergency Stop to pause live submissions without changing saved setup."
+          "<b>⚡ Live Submissions</b>",
+          "├ Stop or resume all live copy trading.",
+          "└ Saved wallets and settings stay unchanged.",
+          "",
+          "<b>🎯 Target Toggles</b>",
+          "└ No Target Wallets are saved."
         ].join("\n"),
         replyMarkup: {
-          inline_keyboard: [
-            ...liveStopControls,
-            [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]
-          ]
+          inline_keyboard: liveStopControls
         }
       };
     }
 
     return {
       text: [
-        "<b>⏹️ Stop Controls</b>",
+        "<b>🔁 Toggle Trade</b>",
         "",
-        "Use Emergency Stop to pause live submissions without changing saved setup.",
-        "Or choose a target wallet to stop copytrading that wallet only."
+        "<b>⚡ Live Submissions</b>",
+        "├ Stop or resume all live copy trading.",
+        "└ Saved wallets and settings stay unchanged.",
+        "",
+        "<b>🎯 Target Toggles</b>",
+        "└ Choose a Target Wallet to turn copying on or off."
       ].join("\n"),
       replyMarkup: {
         inline_keyboard: [
           ...liveStopControls,
           ...wallets.map((wallet, index) => [
             {
-              text: `⏹️ ${formatCopyTradeWalletSummary(wallet)}`,
+              text: `${copyTradeWalletEnabled(wallet) ? "🟢" : "⚪"} ${formatCopyTradeWalletSummary(wallet)}`,
               callback_data: `copytrade:stop_one:${index}`
             }
-          ]),
-          [{ text: "↩️ Back", callback_data: "copytrade:dashboard" }]
+          ])
         ]
       }
     };
@@ -3203,15 +3315,35 @@ export function createTelegramCommandPoller({
 
     return {
       text: [
-        "<b>Confirm stop</b>",
-        `Stop copytrading ${formatCopyTradeWalletSummary(wallet)}?`,
+        "<b>🔁 Toggle Target Trade?</b>",
         "",
-        "This only removes this wallet from Target Wallets.",
-        "Your trading wallet, amount, settings, and other targets stay saved."
+        "<b>🎯 Target Wallet</b>",
+        `└ ${formatCopyTradeWalletSummary(wallet)}`,
+        "",
+        "<b>📡 Current State</b>",
+        `└ ${formatCopyTradeWalletStatus(wallet)}`,
+        "",
+        "<b>🧾 What changes</b>",
+        copyTradeWalletEnabled(wallet)
+          ? "├ Copy trading turns off for this Target Wallet."
+          : "├ Copy trading turns on for this Target Wallet.",
+        copyTradeWalletEnabled(wallet)
+          ? "└ The wallet stays saved for later."
+          : "└ The bot can mirror this wallet again.",
+        "",
+        "<b>🔒 What stays saved</b>",
+        "├ Trading Wallet",
+        "├ Copy amount and settings",
+        "└ Other Target Wallets",
+        "",
+        "Tap the button below when you are sure."
       ].join("\n"),
       replyMarkup: {
         inline_keyboard: [
-          [{ text: "✅ Confirm Stop", callback_data: `copytrade:stop_confirm:${walletIndex}` }],
+          [{
+            text: copyTradeWalletEnabled(wallet) ? "⏸️ Turn Off" : "▶️ Turn On",
+            callback_data: `copytrade:stop_confirm:${walletIndex}`
+          }],
           [{ text: "↩️ Back", callback_data: "copytrade:stop" }]
         ]
       }
@@ -3262,7 +3394,7 @@ export function createTelegramCommandPoller({
     );
   }
 
-  async function stopCopyTradingByIndex(chatId: TelegramChatId, walletIndex: number): Promise<void> {
+  async function toggleCopyTradingByIndex(chatId: TelegramChatId, walletIndex: number): Promise<void> {
     const wallet = copyTradeWalletByIndex(chatId, walletIndex);
 
     if (!wallet) {
@@ -3271,9 +3403,10 @@ export function createTelegramCommandPoller({
       return;
     }
 
-    const removed = await subscribers?.unwatchCopyTradeWallet(chatId, wallet.address);
+    const nextEnabled = !copyTradeWalletEnabled(wallet);
+    const updated = await subscribers?.setCopyTradeWalletEnabled(chatId, wallet.address, nextEnabled);
 
-    if (!removed) {
+    if (!updated) {
       const picker = copyTradeStopPicker(chatId);
       await reply(chatId, `That Target Wallet is no longer available.\n\n${picker.text}`, picker.replyMarkup);
       return;
@@ -3283,7 +3416,7 @@ export function createTelegramCommandPoller({
     const dashboard = copyTradeDashboard(chatId);
     await reply(
       chatId,
-      `<b>⏹️ Copy trading stopped for:</b> ${formatCopyTradeWalletSummary(wallet)}${syncWarning ? `\n\n${syncWarning}` : ""}\n\n${dashboard.text}`,
+      `<b>${nextEnabled ? "🟢" : "⚪"} Target trade ${nextEnabled ? "enabled" : "disabled"}:</b> ${formatCopyTradeWalletSummary(wallet)}${syncWarning ? `\n\n${syncWarning}` : ""}\n\n${dashboard.text}`,
       dashboard.replyMarkup
     );
   }
@@ -3375,10 +3508,9 @@ export function createTelegramCommandPoller({
       `<b>🧩 Mode:</b> ${effective.mode === "formula" ? "Formula preset" : "Custom steps"}`,
       "",
       "<b>🕒 Sell Schedule</b>",
-      ...effective.steps.map((step, index) => `├ ${index + 1}. Sell ${formatTrailingPercent(step.percent)}% after ${formatDuration(step.delayMs)}`),
-      "",
+      ...effective.steps.map((step, index) => formatTrailingSellStepLine(step, index, effective.mode)),
       inherited
-        ? "⚪ Using inherited defaults until you customize this wallet."
+        ? null
         : "♻️ Reset returns this wallet to inherited defaults."
     ]
       .filter((line): line is string => line !== null)
@@ -3401,14 +3533,10 @@ export function createTelegramCommandPoller({
           { text: "♻️ Reset", callback_data: `copytrade:trail:reset:${walletIndex}` }
         ],
         [
-          { text: "⚙️ Preset", callback_data: `copytrade:trail:preset:${walletIndex}` },
-          { text: "➕ Add Step", callback_data: `copytrade:trail:add:${walletIndex}` }
-        ],
-        [
-          { text: "✏️ Edit Steps", callback_data: `copytrade:trail:edit:${walletIndex}` },
-          { text: "🔁 Basis", callback_data: `copytrade:trail:basis:${walletIndex}` }
-        ],
-        [{ text: "↩️ Back", callback_data: "copytrade:trailing" }]
+          { text: "✏️ Edit Schedule", callback_data: `copytrade:trail:edit:${walletIndex}` },
+          { text: "🔁 Basis", callback_data: `copytrade:trail:basis:${walletIndex}` },
+          { text: "↩️ Back", callback_data: "copytrade:trailing" }
+        ]
       ]
     };
   }
@@ -3423,15 +3551,30 @@ export function createTelegramCommandPoller({
     const wallets = subscribers?.listCopyTradeWallets(chatId) || [];
 
     if (wallets.length === 0) {
-      return "No Target Wallets for this chat. Send /copytrade and tap Add Target.";
+      return [
+        "<b>🎯 Target Wallets</b>",
+        "",
+        "<b>📚 Saved Targets</b>",
+        "└ 0",
+        "",
+        "<b>✨ Next Step</b>",
+        "└ Open /copytrade and tap Add Target."
+      ].join("\n");
     }
 
     return [
-      "<b>Target Wallets</b>",
-      ...wallets.map((wallet) =>
-        wallet.label ? `${escapeWalletLabel(wallet.label)}\n<code>${wallet.address}</code>` : `<code>${wallet.address}</code>`
-      )
-    ].join("\n\n");
+      "<b>🎯 Target Wallets</b>",
+      "",
+      "<b>📚 Saved Targets</b>",
+      `└ ${wallets.length}`,
+      "",
+      ...wallets.flatMap((wallet, index) => [
+        `<b>🎯 Target ${index + 1}</b>`,
+        wallet.label ? `├ Name: ${escapeWalletLabel(wallet.label)}` : null,
+        `├ Status: ${formatCopyTradeWalletStatus(wallet)}`,
+        `└ <code>${wallet.address}</code>`
+      ].filter((line): line is string => line !== null))
+    ].join("\n");
   }
 
   function escapeWalletLabel(value: string): string {

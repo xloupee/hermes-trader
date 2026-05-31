@@ -159,3 +159,25 @@ test("provider-neutral result log includes direct Pump buy-state timing", () => 
   assert.match(log, new RegExp(`tokenProgram=${TOKEN_2022_PROGRAM_ID.toBase58()}`));
   assert.match(log, /forceFreshBuyState=true/);
 });
+
+test("provider-neutral result log includes raw send fanout timing", () => {
+  const result = tradeExecutionSkippedResult({
+    provider: "direct-pump",
+    route: "pump-bonding-curve",
+    reason: "build-only",
+    metadata: {
+      directSolanaTiming: {
+        timeToSignatureMs: 88,
+        rawSendMs: 17,
+        rawSendWinner: "fanout-1",
+        rawSendRpcCount: 4
+      }
+    }
+  });
+
+  const log = formatTradeExecutionResultLog(result);
+  assert.match(log, /timeToSignatureMs=88/);
+  assert.match(log, /rawSendMs=17/);
+  assert.match(log, /rawSendWinner=fanout-1/);
+  assert.match(log, /rawSendRpcCount=4/);
+});

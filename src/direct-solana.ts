@@ -1176,12 +1176,14 @@ export async function fetchDirectPumpFastBuyStateFromChain({
 
 export function prefetchDirectPumpFastBuyStateFromChain({
   connection,
+  readConnections = [],
   mint,
   commitment = "processed",
   source = "rpc-bonding-curve-prefetch",
   cacheMs
 }: {
   connection: Pick<Connection, "getMultipleAccountsInfo">;
+  readConnections?: DirectSolanaReadConnection[];
   mint: PublicKey;
   commitment?: "processed" | "confirmed" | "finalized";
   source?: string;
@@ -1193,13 +1195,16 @@ export function prefetchDirectPumpFastBuyStateFromChain({
     return existing;
   }
 
-  const inflight = fetchDirectPumpFastBuyStateFromChain({
-    connection,
+  const candidates = readConnections.length > 0
+    ? readConnections
+    : [{ label: "primary", connection }];
+  const inflight = firstSuccessfulDirectPumpFastBuySnapshot({
+    candidates,
     mint,
     commitment
-  }).then((snapshot) => primeDirectPumpFastBuyState({
+  }).then(({ label, snapshot }) => primeDirectPumpFastBuyState({
     ...snapshot,
-    source,
+    source: `${source}:${label}`,
     ...(cacheMs !== undefined ? { cacheMs } : {})
   })).finally(() => {
     directPumpFastBuyStateInflightByMint.delete(key);
@@ -1207,6 +1212,37 @@ export function prefetchDirectPumpFastBuyStateFromChain({
 
   directPumpFastBuyStateInflightByMint.set(key, inflight);
   return inflight;
+}
+
+function firstSuccessfulDirectPumpFastBuySnapshot({
+  candidates,
+  mint,
+  commitment
+}: {
+  candidates: DirectSolanaReadConnection[];
+  mint: PublicKey;
+  commitment: "processed" | "confirmed" | "finalized";
+}): Promise<{ label: string; snapshot: DirectPumpFastBuyStateChainSnapshot }> {
+  let pending = candidates.length;
+  const errors: string[] = [];
+
+  return new Promise((resolve, reject) => {
+    for (const candidate of candidates) {
+      fetchDirectPumpFastBuyStateFromChain({
+        connection: candidate.connection,
+        mint,
+        commitment
+      }).then((snapshot) => {
+        resolve({ label: candidate.label, snapshot });
+      }).catch((error) => {
+        errors.push(`${candidate.label}: ${error instanceof Error ? error.message : String(error)}`);
+        pending -= 1;
+        if (pending <= 0) {
+          reject(new Error(`all direct Pump fast buy-state RPCs failed: ${errors.join("; ")}`));
+        }
+      });
+    }
+  });
 }
 
 async function awaitDirectPumpFastBuyStateInflight(mint: PublicKey): Promise<boolean> {
@@ -2055,16 +2091,36 @@ async function sendRawTransactionFanout({
   };
   const attempts = sendConnections.length > 0 ? sendConnections : [primary];
   const errors: Array<{ label: string; errorText: string }> = [];
+  const attemptStats: Array<{
+    label: string;
+    status: "submitted" | "failed";
+    durationMs: number;
+    errorText?: string;
+  }> = [];
   const promises = attempts.map(async (candidate) => {
+    const startedAtMs = Date.now();
     try {
+      const signature = await candidate.connection.sendRawTransaction(serializedTransaction, options);
+      attemptStats.push({
+        label: candidate.label,
+        status: "submitted",
+        durationMs: Math.max(0, Date.now() - startedAtMs)
+      });
       return {
-        signature: await candidate.connection.sendRawTransaction(serializedTransaction, options),
+        signature,
         winner: candidate
       };
     } catch (error) {
+      const errorText = error instanceof Error ? error.message : String(error);
+      attemptStats.push({
+        label: candidate.label,
+        status: "failed",
+        durationMs: Math.max(0, Date.now() - startedAtMs),
+        errorText
+      });
       errors.push({
         label: candidate.label,
-        errorText: error instanceof Error ? error.message : String(error)
+        errorText
       });
       throw error;
     }
@@ -2072,12 +2128,23 @@ async function sendRawTransactionFanout({
 
   try {
     const result = await Promise.any(promises);
+    void Promise.allSettled(promises).then(() => {
+      console.log(`Direct raw send fanout attempts: ${JSON.stringify({
+        signature: result.signature,
+        winner: result.winner.label,
+        attempts: attemptStats.slice().sort((a, b) => a.durationMs - b.durationMs)
+      })}`);
+    });
     return {
       ...result,
       errors: [...errors],
       rpcCount: attempts.length
     };
   } catch {
+    console.warn(`Direct raw send fanout attempts: ${JSON.stringify({
+      winner: null,
+      attempts: attemptStats.slice().sort((a, b) => a.durationMs - b.durationMs)
+    })}`);
     const error = new Error(errors.map((entry) => `${entry.label}: ${entry.errorText}`).join("; ") || "all direct send RPCs failed");
     (error as Error & { sendRpcErrors?: Array<{ label: string; errorText: string }> }).sendRpcErrors = [...errors];
     throw error;

@@ -315,9 +315,25 @@ export function formatTradeExecutionResultLog(result: TradeExecutionResult): str
 
   const timing = result.metadata.directSolanaTiming;
   if (timing && typeof timing === "object" && !Array.isArray(timing)) {
-    const durations = (timing as { timeToSignatureMs?: unknown; confirmationMs?: unknown; timeToConfirmationMs?: unknown });
+    const durations = (timing as {
+      timeToSignatureMs?: unknown;
+      confirmationMs?: unknown;
+      timeToConfirmationMs?: unknown;
+      rawSendMs?: unknown;
+      rawSendWinner?: unknown;
+      rawSendRpcCount?: unknown;
+    });
     if (typeof durations.timeToSignatureMs === "number") {
       parts.push(`timeToSignatureMs=${durations.timeToSignatureMs}`);
+    }
+    if (typeof durations.rawSendMs === "number") {
+      parts.push(`rawSendMs=${durations.rawSendMs}`);
+    }
+    if (typeof durations.rawSendWinner === "string") {
+      parts.push(`rawSendWinner=${durations.rawSendWinner}`);
+    }
+    if (typeof durations.rawSendRpcCount === "number") {
+      parts.push(`rawSendRpcCount=${durations.rawSendRpcCount}`);
     }
     if (typeof durations.confirmationMs === "number") {
       parts.push(`confirmationMs=${durations.confirmationMs}`);

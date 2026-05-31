@@ -77,6 +77,8 @@ export interface CopyTradeLatencySummaryUpdate {
   targetSlot?: number | null;
   copySlot?: number | null;
   winnerProvider?: string | null;
+  sendRpcWinner?: string | null;
+  sendRpcCount?: number | null;
 }
 
 export interface CopyTradeLatencySummaryMetadata {
@@ -98,6 +100,8 @@ export interface CopyTradeLatencySummaryMetadata {
   buildMs: number | null;
   sendMs: number | null;
   winnerProvider: string | null;
+  sendRpcWinner: string | null;
+  sendRpcCount: number | null;
 }
 
 export interface CopyTradeLatencyTracker {
@@ -311,7 +315,9 @@ export function formatCopyTradeLatencySummary(
     slotDelta,
     buildMs,
     sendMs,
-    winnerProvider: normalizeText(update.winnerProvider)
+    winnerProvider: normalizeText(update.winnerProvider),
+    sendRpcWinner: normalizeText(update.sendRpcWinner),
+    sendRpcCount: finiteNumber(update.sendRpcCount)
   };
 }
 

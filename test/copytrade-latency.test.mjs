@@ -202,7 +202,9 @@ test("copy trade latency summary flattens submit timing and slot delta", () => {
     slotDelta: 1,
     buildMs: 30,
     sendMs: 12,
-    winnerProvider: "shredstream"
+    winnerProvider: "shredstream",
+    sendRpcWinner: null,
+    sendRpcCount: null
   });
 });
 

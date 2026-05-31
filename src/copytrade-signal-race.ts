@@ -69,12 +69,12 @@ export function copyTradeSignalProviderAllows(
   provider: CopyTradeSignalProvider,
   source: CopyTradeSignalSource
 ): boolean {
-  if (source === "pumpportal") {
+  if (provider === "all") {
     return true;
   }
 
-  if (provider === "all") {
-    return true;
+  if (source === "pumpportal") {
+    return provider === "pumpportal" || provider === "parallel";
   }
 
   if (provider === "parallel") {

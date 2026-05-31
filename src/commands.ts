@@ -1624,7 +1624,10 @@ export function createTelegramCommandPoller({
       return verificationPrompt();
     }
 
-    return `<b>Now watching:</b> ${modeLabel(requestedMode)}`;
+    return [
+      "<b>🔔 Alerts Updated</b>",
+      `└ ${modeLabel(requestedMode)}`
+    ].join("\n");
   }
 
   function alertDashboard(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {

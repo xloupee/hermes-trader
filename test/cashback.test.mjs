@@ -3,9 +3,12 @@ import test from "node:test";
 import {
   buildCashbackAccrual,
   buildCashbackExecutionKey,
+  cashbackSummaryReplyMarkup,
   calculateCashbackLamports,
   claimCashback,
-  formatCashbackSol
+  formatCashbackSol,
+  formatCashbackSummaryText,
+  parseCashbackConfig
 } from "../dist/cashback.js";
 
 const payoutWallet = "11111111111111111111111111111111";
@@ -111,6 +114,37 @@ test("cashback fee share is computed from collected platform fee only", () => {
   assert.equal(calculateCashbackLamports(10_000n, 2000), 2_000n);
   assert.equal(calculateCashbackLamports(99n, 5000), 49n);
   assert.equal(formatCashbackSol(5_000_001n), "0.005000001");
+});
+
+test("cashback default claim minimum is 0.001 SOL", () => {
+  assert.equal(parseCashbackConfig({ CASHBACK_ENABLED: "true" }).minClaimLamports, 1_000_000n);
+});
+
+test("cashback dashboard does not mention minimum until claim attempt", () => {
+  const summary = {
+    enabled: true,
+    tradingWalletPublicKey: "Wallet111",
+    payoutWalletPublicKey: payoutWallet,
+    accruedLamports: 500_000n,
+    claimableLamports: 500_000n,
+    pendingLamports: 0n,
+    lifetimePaidLamports: 0n,
+    minClaimLamports: 1_000_000n,
+    payoutUnavailableReason: null
+  };
+
+  const text = formatCashbackSummaryText(summary);
+  assert.doesNotMatch(text, /minimum|cash out|cashout/i);
+  assert.equal(
+    cashbackSummaryReplyMarkup(summary).inline_keyboard.some((row) =>
+      row.some((button) => button.text === "Claim Cashback" && button.callback_data === "cashback:claim")
+    ),
+    true
+  );
+  assert.deepEqual(cashbackSummaryReplyMarkup(summary).inline_keyboard.at(-1), [
+    { text: "Change Payout Wallet", callback_data: "cashback:set_payout_wallet" },
+    { text: "Refresh", callback_data: "cashback:dashboard" }
+  ]);
 });
 
 test("cashback accrual is direct-only, successful, and idempotent by execution key", async () => {

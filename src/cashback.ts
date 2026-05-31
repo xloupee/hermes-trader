@@ -13,6 +13,7 @@ import type { TradeExecutionPlatformFee, TradeExecutionProvider } from "./trade-
 
 const BPS_DENOMINATOR = 10_000n;
 const LAMPORTS_PER_SOL = 1_000_000_000n;
+const DEFAULT_CASHBACK_MIN_CLAIM_SOL = 0.001;
 
 export type CashbackLedgerStatus = "pending" | "claimable" | "paid" | "voided";
 export type CashbackPayoutStatus = "pending" | "submitted" | "confirmed" | "failed";
@@ -226,13 +227,13 @@ export function solToCashbackLamports(amountSol: number): bigint {
 
 export function parseCashbackConfig(env: NodeJS.ProcessEnv): CashbackConfig {
   const feeShare = Number(env.CASHBACK_FEE_SHARE_BPS ?? 0);
-  const minClaim = Number(env.CASHBACK_MIN_CLAIM_SOL ?? 0.005);
+  const minClaim = Number(env.CASHBACK_MIN_CLAIM_SOL ?? DEFAULT_CASHBACK_MIN_CLAIM_SOL);
   const maxPerDay = Number(env.CASHBACK_MAX_PAYOUT_SOL_PER_DAY ?? 0);
 
   return {
     enabled: env.CASHBACK_ENABLED === "true",
     feeShareBps: Number.isFinite(feeShare) ? Math.floor(feeShare) : 0,
-    minClaimLamports: solToCashbackLamports(Number.isFinite(minClaim) ? minClaim : 0.005),
+    minClaimLamports: solToCashbackLamports(Number.isFinite(minClaim) ? minClaim : DEFAULT_CASHBACK_MIN_CLAIM_SOL),
     maxPayoutLamportsPerDay: solToCashbackLamports(Number.isFinite(maxPerDay) ? maxPerDay : 0),
     payoutWalletPublicKey: env.CASHBACK_PAYOUT_WALLET_PUBLIC_KEY || null,
     payoutWalletSecretKey: env.CASHBACK_PAYOUT_WALLET_SECRET_KEY || null
@@ -387,13 +388,15 @@ export function cashbackSummaryReplyMarkup(summary: CashbackSummary): { inline_k
     summary.tradingWalletPublicKey &&
     summary.payoutWalletPublicKey &&
     !summary.payoutUnavailableReason &&
-    summary.claimableLamports >= summary.minClaimLamports
+    summary.claimableLamports > 0n
   ) {
     keyboard.push([{ text: "Claim Cashback", callback_data: "cashback:claim" }]);
   }
 
-  keyboard.push([{ text: summary.payoutWalletPublicKey ? "Change Payout Wallet" : "Add Payout Wallet", callback_data: "cashback:set_payout_wallet" }]);
-  keyboard.push([{ text: "Refresh", callback_data: "cashback:dashboard" }]);
+  keyboard.push([
+    { text: summary.payoutWalletPublicKey ? "Change Payout Wallet" : "Add Payout Wallet", callback_data: "cashback:set_payout_wallet" },
+    { text: "Refresh", callback_data: "cashback:dashboard" }
+  ]);
 
   return {
     inline_keyboard: keyboard

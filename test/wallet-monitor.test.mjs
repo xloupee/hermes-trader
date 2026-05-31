@@ -486,10 +486,11 @@ test("cashback command renders summary and claim callback", async () => {
   assert.doesNotMatch(replies[0].text, /Accrued:/);
   assert.doesNotMatch(replies[0].text, /Pending:/);
   assert.deepEqual(
-    replies[0].reply_markup.inline_keyboard.some((row) =>
-      row.some((button) => button.text === "Add Payout Wallet" && button.callback_data === "cashback:set_payout_wallet")
-    ),
-    true
+    replies[0].reply_markup.inline_keyboard.at(-1),
+    [
+      { text: "Add Payout Wallet", callback_data: "cashback:set_payout_wallet" },
+      { text: "Refresh", callback_data: "cashback:dashboard" }
+    ]
   );
   assert.match(replies[1].text, /Set cashback payout wallet/);
   assert.match(replies[2].text, /Cashback payout wallet saved/);

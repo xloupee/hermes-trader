@@ -532,7 +532,7 @@ const config: BotConfig = {
   platformFeeTreasury: process.env.PLATFORM_FEE_TREASURY,
   cashbackEnabled: process.env.CASHBACK_ENABLED === "true",
   cashbackFeeShareBps: Math.floor(nonNegativeNumberFromEnv(process.env.CASHBACK_FEE_SHARE_BPS, 0)),
-  cashbackMinClaimSol: nonNegativeNumberFromEnv(process.env.CASHBACK_MIN_CLAIM_SOL, 0.005),
+  cashbackMinClaimSol: nonNegativeNumberFromEnv(process.env.CASHBACK_MIN_CLAIM_SOL, 0.001),
   cashbackPayoutWalletPublicKey: process.env.CASHBACK_PAYOUT_WALLET_PUBLIC_KEY,
   cashbackPayoutWalletSecretKey: process.env.CASHBACK_PAYOUT_WALLET_SECRET_KEY,
   cashbackMaxPayoutSolPerDay: nonNegativeNumberFromEnv(process.env.CASHBACK_MAX_PAYOUT_SOL_PER_DAY, 0)

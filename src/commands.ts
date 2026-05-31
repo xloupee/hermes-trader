@@ -2989,7 +2989,10 @@ export function createTelegramCommandPoller({
       const prefix = result.ok
         ? `<b>Cashback submitted.</b>\nTx: <code>${result.signature}</code>`
         : result.status === "below_threshold"
-          ? `<b>Cashback is below the claim minimum.</b>`
+          ? [
+              "<b>You don't have enough cashback to cash out yet.</b>",
+              `Minimum cashout: ${formatCashbackSol(result.summary.minClaimLamports)} SOL`
+            ].join("\n")
           : `<b>Cashback claim failed.</b>${result.errorText ? `\n<code>${escapeHtml(result.errorText)}</code>` : ""}`;
       const paidLine = result.ok ? `\nPaid: ${formatCashbackSol(result.summary.lifetimePaidLamports)} SOL\n` : "\n";
 

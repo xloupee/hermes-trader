@@ -60,7 +60,7 @@ test("telegram help exposes wallet and copy trade dashboards", () => {
   assert.match(help, /\/mywallets - Create or view your local signing trading wallet/);
   assert.match(help, /\/copytrade - Configure copy amount, wallets, and trailing sells/);
   assert.match(help, /\/cashback - View and claim platform-fee cashback/);
-  assert.match(help, /🕒 Last updated:/);
+  assert.doesNotMatch(help, /🕒 Last updated:/);
   assert.doesNotMatch(help, /Commands:/);
   assert.doesNotMatch(help, /\/wallets/);
   assert.doesNotMatch(help, /\/migrations/);
@@ -131,7 +131,7 @@ test("start dashboard uses polished status card", () => {
   assert.match(dashboard, /⚡ Copy Trading/);
   assert.match(dashboard, /\/cashback - Copytrade cashback/);
   assert.match(dashboard, /Cented/);
-  assert.match(dashboard, /🕒 Last updated:/);
+  assert.doesNotMatch(dashboard, /🕒 Last updated:/);
   assert.doesNotMatch(dashboard, /Commands:/);
 });
 
@@ -369,8 +369,7 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
         addedAt: "2026-05-23T00:00:00.000Z",
         updatedAt: "2026-05-23T00:00:00.000Z"
       }
-    ],
-    now: new Date("2026-05-23T14:48:25.107Z")
+    ]
   });
 
   assert.match(dashboard, /🔎 Copy Trading/);
@@ -386,7 +385,7 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
   assert.doesNotMatch(dashboard, new RegExp(wallet));
   assert.match(dashboard, /🟢 Setup is <b>active<\/b>/);
   assert.match(dashboard, /📉 Trailing Sells:<\/b> Not configured/);
-  assert.match(dashboard, /🕒 Last updated: 10:48:25/);
+  assert.doesNotMatch(dashboard, /🕒 Last updated:/);
 
   const missing = formatCopyTradeDashboardText({
     tradingWalletPublicKey: null,
@@ -403,8 +402,7 @@ test("copytrade dashboard text uses clean Bloom-style status card", () => {
     buyPriorityFeeSol: 0.00012,
     sellSlippagePercent: 20,
     sellPriorityFeeSol: 0.0002,
-    retryFailedCopyBuys: true,
-    now: new Date("2026-05-23T14:48:25.107Z")
+    retryFailedCopyBuys: true
   });
 
   assert.match(missing, /└ 39azUY\.\.\.5jUJjg/);

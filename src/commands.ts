@@ -438,8 +438,7 @@ export function formatCopyTradeDashboardText({
   buyPriorityFeeSol = DEFAULT_COPY_TRADE_PRIORITY_FEE,
   sellSlippagePercent = DEFAULT_COPY_TRADE_SLIPPAGE,
   sellPriorityFeeSol = DEFAULT_COPY_TRADE_PRIORITY_FEE,
-  retryFailedCopyBuys = false,
-  now = new Date()
+  retryFailedCopyBuys = false
 }: {
   tradingWalletPublicKey: string | null;
   copyAmountSol: number | null;
@@ -449,7 +448,6 @@ export function formatCopyTradeDashboardText({
   sellSlippagePercent?: number;
   sellPriorityFeeSol?: number;
   retryFailedCopyBuys?: boolean;
-  now?: Date;
 }): string {
   const ready = Boolean(tradingWalletPublicKey && copyAmountSol && copyTradeWallets.length > 0);
   const trailingSellStatus = copyTradeWallets.length === 0
@@ -480,19 +478,8 @@ export function formatCopyTradeDashboardText({
     "",
     ready ? "🟢 Setup is <b>active</b>" : "🔴 Setup is <b>inactive</b>",
     "",
-    `<b>📉 Trailing Sells:</b> ${trailingSellStatus}`,
-    "",
-    `🕒 Last updated: ${formatDashboardTime(now)}`
+    `<b>📉 Trailing Sells:</b> ${trailingSellStatus}`
   ].join("\n");
-}
-
-function formatDashboardTime(value: Date): string {
-  return value.toLocaleTimeString("en-US", {
-    hour12: false,
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit"
-  });
 }
 
 function modeLabel(mode: AlertModeValue): string {
@@ -756,9 +743,7 @@ function verificationPrompt(): string {
     "├ /trackwallets - Wallet tracking",
     "├ /mywallets - Trading wallet",
     "├ /copytrade - Copy trading",
-    "└ /cashback - Copytrade cashback",
-    "",
-    `🕒 Last updated: ${formatDashboardTime(new Date())}`
+    "└ /cashback - Copytrade cashback"
   ].join("\n");
 }
 
@@ -800,9 +785,7 @@ export function formatStartDashboardText(subscriber: SubscriberRecord): string {
     "├ /trackwallets - Wallet tracking",
     "├ /mywallets - Trading wallet",
     "├ /copytrade - Copy trading",
-    "└ /cashback - Copytrade cashback",
-    "",
-    `🕒 Last updated: ${formatDashboardTime(new Date())}`
+    "└ /cashback - Copytrade cashback"
   ].join("\n");
 }
 
@@ -828,9 +811,7 @@ export function helpText(_chatId?: TelegramChatId): string {
     "",
     "<b>⚡ Copy Trading</b>",
     "├ /copytrade - Configure copy amount, wallets, and trailing sells",
-    "└ /cashback - View and claim platform-fee cashback",
-    "",
-    `🕒 Last updated: ${formatDashboardTime(new Date())}`
+    "└ /cashback - View and claim platform-fee cashback"
   ].join("\n");
 }
 
@@ -3036,9 +3017,7 @@ export function createTelegramCommandPoller({
       "<b>📈 Buy-Pressure Sell</b>",
       `├ Status: ${subscriber?.copyTradeBuyPressureSellEnabled ? "On" : "Off"}`,
       `├ Timeout: ${buyPressureTimeoutSource} ${formatDuration(buyPressureTimeoutMs)}`,
-      `└ Bot gate: ${config.copyTradeBuyPressureSellEnabled ? "Enabled" : "Disabled"}`,
-      "",
-      `🕒 Last updated: ${formatDashboardTime(new Date())}`
+      `└ Bot gate: ${config.copyTradeBuyPressureSellEnabled ? "Enabled" : "Disabled"}`
     ].join("\n");
 
     return {
@@ -3430,9 +3409,7 @@ export function createTelegramCommandPoller({
       "",
       inherited
         ? "⚪ Using inherited defaults until you customize this wallet."
-        : "♻️ Reset returns this wallet to inherited defaults.",
-      "",
-      `🕒 Last updated: ${formatDashboardTime(new Date())}`
+        : "♻️ Reset returns this wallet to inherited defaults."
     ]
       .filter((line): line is string => line !== null)
       .join("\n");

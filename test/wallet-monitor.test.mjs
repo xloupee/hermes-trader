@@ -135,6 +135,73 @@ test("start dashboard uses polished status card", () => {
   assert.doesNotMatch(dashboard, /Commands:/);
 });
 
+test("unverified chats can open read-only dashboards", async () => {
+  const subscribers = createSubscriberStore({});
+  await subscribers.init();
+  const replies = [];
+  const commands = ["/alerts", "/trackwallets", "/mywallets", "/copytrade", "/cashback"];
+  let updateIndex = 0;
+  let poller;
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (url, init) => {
+    const href = String(url);
+
+    if (href.includes("/getMe")) {
+      return new Response(JSON.stringify({ ok: true, result: { username: "copybot" } }), { status: 200 });
+    }
+
+    if (href.includes("/deleteWebhook") || href.includes("/setMyCommands")) {
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    }
+
+    if (href.includes("/getUpdates")) {
+      if (updateIndex >= commands.length) {
+        poller?.stop();
+        return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+      }
+
+      const text = commands[updateIndex];
+      updateIndex += 1;
+      return new Response(JSON.stringify({
+        ok: true,
+        result: [{ update_id: updateIndex, message: { text, chat: { id: "guest-chat", type: "private" } } }]
+      }), { status: 200 });
+    }
+
+    if (href.includes("/sendMessage")) {
+      replies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+    }
+
+    throw new Error(`Unexpected Telegram request: ${href}`);
+  };
+
+  try {
+    poller = createTelegramCommandPoller({
+      config: {
+        ...config,
+        telegramToken: "token"
+      },
+      testMessage: () => "",
+      subscribers
+    });
+    await poller.start();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(replies.length, commands.length);
+  assert.match(replies[0].text, /🔔 Alerts/);
+  assert.match(replies[1].text, /👀 Tracked Wallets/);
+  assert.match(replies[2].text, /👛 Trading Wallet/);
+  assert.match(replies[3].text, /🔎 Copy Trading/);
+  assert.match(replies[4].text, /Cashback is not available/);
+  for (const reply of replies) {
+    assert.doesNotMatch(reply.text, /Verification/);
+  }
+});
+
 test("cashback command renders summary and claim callback", async () => {
   const subscribers = createSubscriberStore({});
   await subscribers.init();

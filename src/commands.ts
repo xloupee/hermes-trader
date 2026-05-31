@@ -734,8 +734,8 @@ function verificationPrompt(): string {
     "",
     "🔴 Setup is <b>inactive</b>",
     "",
-    "<b>🔐 Verification Required</b>",
-    "Send:",
+    "<b>🔐 Verification</b>",
+    "Verify this chat to save settings and receive alerts:",
     "<code>/verify your-code</code>",
     "",
     "📚 <b>Dashboards</b>",
@@ -949,12 +949,6 @@ export function createTelegramCommandPoller({
 
     const data = callbackQuery.data || "";
     const chatType = callbackQuery.message?.chat?.type;
-    const gate = requireVerified(chatId);
-
-    if (gate) {
-      await reply(chatId, gate);
-      return;
-    }
 
     if (data === "alerts:dashboard") {
       const dashboard = alertDashboard(chatId);
@@ -965,6 +959,36 @@ export function createTelegramCommandPoller({
     if (data === "cashback:dashboard") {
       const dashboard = await cashbackDashboard(chatId);
       await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data === "copytrade:status" || data === "copytrade:dashboard") {
+      const dashboard = copyTradeDashboard(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data === "trackwallets:dashboard") {
+      const dashboard = trackWalletDashboard(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    if (data === "trackwallets:list") {
+      await reply(chatId, listTrackWallets(chatId));
+      return;
+    }
+
+    if (data === "mywallets:dashboard" || data === "copytrade:mywallets") {
+      const dashboard = myWalletDashboard(chatId);
+      await reply(chatId, dashboard.text, dashboard.replyMarkup);
+      return;
+    }
+
+    const gate = requireVerified(chatId);
+
+    if (gate) {
+      await reply(chatId, gate);
       return;
     }
 
@@ -1007,12 +1031,6 @@ export function createTelegramCommandPoller({
       return;
     }
 
-    if (data === "copytrade:status" || data === "copytrade:dashboard") {
-      const dashboard = copyTradeDashboard(chatId);
-      await reply(chatId, dashboard.text, dashboard.replyMarkup);
-      return;
-    }
-
     if (data === "copytrade:confirm_pending") {
       const response = await confirmPendingCopyInput(chatId);
       await reply(chatId, response.text, response.replyMarkup);
@@ -1022,17 +1040,6 @@ export function createTelegramCommandPoller({
     if (data === "copytrade:cancel_pending") {
       pendingCopyInputs.delete(String(chatId));
       await reply(chatId, "Copy trade setting change canceled.", copyTradeDashboardReplyMarkup());
-      return;
-    }
-
-    if (data === "trackwallets:dashboard") {
-      const dashboard = trackWalletDashboard(chatId);
-      await reply(chatId, dashboard.text, dashboard.replyMarkup);
-      return;
-    }
-
-    if (data === "trackwallets:list") {
-      await reply(chatId, listTrackWallets(chatId));
       return;
     }
 
@@ -1051,12 +1058,6 @@ export function createTelegramCommandPoller({
     if (data === "trackwallets:remove") {
       setPendingWalletInput(chatId, "unwatch_wallet");
       await reply(chatId, "Send the wallet address you want to stop tracking.");
-      return;
-    }
-
-    if (data === "mywallets:dashboard" || data === "copytrade:mywallets") {
-      const dashboard = myWalletDashboard(chatId);
-      await reply(chatId, dashboard.text, dashboard.replyMarkup);
       return;
     }
 
@@ -1612,15 +1613,6 @@ export function createTelegramCommandPoller({
   }
 
   function alertDashboard(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
-    const gate = requireVerified(chatId);
-
-    if (gate) {
-      return {
-        text: gate,
-        replyMarkup: alertDashboardReplyMarkup()
-      };
-    }
-
     const mode = subscribers?.get(chatId)?.mode || null;
     const text = [
       "<b>🔔 Alerts</b>",
@@ -1765,12 +1757,6 @@ export function createTelegramCommandPoller({
   }
 
   function listTrackWallets(chatId: TelegramChatId): string {
-    const gate = requireVerified(chatId);
-
-    if (gate) {
-      return gate;
-    }
-
     const wallets = subscribers?.listWatchedWallets(chatId) || [];
 
     if (wallets.length === 0) {
@@ -1971,15 +1957,6 @@ export function createTelegramCommandPoller({
   }
 
   function trackWalletDashboard(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
-    const gate = requireVerified(chatId);
-
-    if (gate) {
-      return {
-        text: gate,
-        replyMarkup: trackWalletDashboardReplyMarkup()
-      };
-    }
-
     const wallets = subscribers?.listWatchedWallets(chatId) || [];
     const walletLines = wallets.length === 0
       ? ["└ None yet"]
@@ -2020,15 +1997,6 @@ export function createTelegramCommandPoller({
   }
 
   function myWalletDashboard(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
-    const gate = requireVerified(chatId);
-
-    if (gate) {
-      return {
-        text: gate,
-        replyMarkup: myWalletDashboardReplyMarkup(null)
-      };
-    }
-
     const tradingWallet = subscribers?.getTradingWallet(chatId) || null;
     const tradingWallets = subscribers?.listTradingWallets(chatId) || [];
     const otherWalletCount = Math.max(0, tradingWallets.length - (tradingWallet ? 1 : 0));
@@ -2826,12 +2794,6 @@ export function createTelegramCommandPoller({
   }
 
   async function cashbackDashboard(chatId: TelegramChatId): Promise<{ text: string; replyMarkup?: TelegramReplyMarkup }> {
-    const gate = requireVerified(chatId);
-
-    if (gate) {
-      return { text: gate };
-    }
-
     if (!cashback) {
       return {
         text: [
@@ -2930,15 +2892,6 @@ export function createTelegramCommandPoller({
   }
 
   function copyTradeDashboard(chatId: TelegramChatId): { text: string; replyMarkup: TelegramReplyMarkup } {
-    const gate = requireVerified(chatId);
-
-    if (gate) {
-      return {
-        text: gate,
-        replyMarkup: copyTradeDashboardReplyMarkup()
-      };
-    }
-
     const subscriber = subscribers?.get(chatId) || null;
     const copyTradeWallets = subscribers?.listCopyTradeWallets(chatId) || [];
     const tradingWallet = subscribers?.getTradingWallet(chatId) || null;

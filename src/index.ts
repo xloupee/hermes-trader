@@ -532,7 +532,7 @@ const config: BotConfig = {
   platformFeeBps: Math.floor(nonNegativeNumberFromEnv(process.env.PLATFORM_FEE_BPS, 100)),
   platformFeeTreasury: process.env.PLATFORM_FEE_TREASURY,
   cashbackEnabled: process.env.CASHBACK_ENABLED === "true",
-  cashbackFeeShareBps: Math.floor(nonNegativeNumberFromEnv(process.env.CASHBACK_FEE_SHARE_BPS, 0)),
+  cashbackFeeShareBps: Math.floor(nonNegativeNumberFromEnv(process.env.CASHBACK_FEE_SHARE_BPS, 4000)),
   cashbackMinClaimSol: nonNegativeNumberFromEnv(process.env.CASHBACK_MIN_CLAIM_SOL, 0.001),
   cashbackPayoutWalletPublicKey: process.env.CASHBACK_PAYOUT_WALLET_PUBLIC_KEY,
   cashbackPayoutWalletSecretKey: process.env.CASHBACK_PAYOUT_WALLET_SECRET_KEY,
@@ -4374,6 +4374,17 @@ async function accrueCashbackFromCopyTradeExecution({
     trailingSellStepIndex,
     trailingSellTotalSteps
   });
+  let resolvedCashbackConfig = cashbackConfig;
+  try {
+    resolvedCashbackConfig = (await cashbackStore.getSubscriberConfig({
+      chatId: record.chatId,
+      config: cashbackConfig
+    })).config;
+  } catch (error) {
+    console.warn(`Could not resolve cashback config for ${record.chatId}: ${errorMessage(error)}`);
+    return;
+  }
+
   const accrual = buildCashbackAccrual({
     chatId: record.chatId,
     tradingWalletPublicKey: record.tradingWalletPublicKey,
@@ -4386,7 +4397,7 @@ async function accrueCashbackFromCopyTradeExecution({
     platformFee: result.platformFee,
     trailingSellStepIndex,
     trailingSellTotalSteps,
-    config: cashbackConfig
+    config: resolvedCashbackConfig
   });
 
   if (!accrual) {
@@ -5084,19 +5095,23 @@ const commandPoller = createTelegramCommandPoller({
   onCopyTradeEmergencyResume: (chatId) => {
     return clearCopyTradeEmergencyStop(chatId);
   },
-  cashback: cashbackConfig.enabled && cashbackStore
+  cashback: cashbackStore
     ? {
-        getSummary: ({ chatId, tradingWalletPublicKey, payoutWalletPublicKey }) =>
-          cashbackStore.getSummary({ chatId, tradingWalletPublicKey, payoutWalletPublicKey, config: cashbackConfig }),
-        claim: ({ chatId, tradingWalletPublicKey, payoutWalletPublicKey }) =>
-          claimCashback({
+        getSummary: async ({ chatId, tradingWalletPublicKey, payoutWalletPublicKey }) => {
+          const resolvedConfig = (await cashbackStore.getSubscriberConfig({ chatId, config: cashbackConfig })).config;
+          return cashbackStore.getSummary({ chatId, tradingWalletPublicKey, payoutWalletPublicKey, config: resolvedConfig });
+        },
+        claim: async ({ chatId, tradingWalletPublicKey, payoutWalletPublicKey }) => {
+          const resolvedConfig = (await cashbackStore.getSubscriberConfig({ chatId, config: cashbackConfig })).config;
+          return claimCashback({
             store: cashbackStore,
-            config: cashbackConfig,
+            config: resolvedConfig,
             connection: directSolanaConnection,
             chatId,
             tradingWalletPublicKey,
             payoutWalletPublicKey
-          })
+          });
+        }
       }
     : undefined
 });

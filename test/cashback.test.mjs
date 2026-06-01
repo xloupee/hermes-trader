@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildCashbackManualAdjustment,
   buildCashbackAccrual,
   buildCashbackExecutionKey,
   cashbackSummaryReplyMarkup,
@@ -8,7 +9,11 @@ import {
   claimCashback,
   formatCashbackSol,
   formatCashbackSummaryText,
-  parseCashbackConfig
+  normalizeCashbackChatId,
+  parseCashbackConfig,
+  requireKnownCashbackSubscriber,
+  resolveCashbackConfig,
+  validateCashbackFeeShareBps
 } from "../dist/cashback.js";
 
 const payoutWallet = "11111111111111111111111111111111";
@@ -120,6 +125,67 @@ test("cashback default claim minimum is 0.001 SOL", () => {
   assert.equal(parseCashbackConfig({ CASHBACK_ENABLED: "true" }).minClaimLamports, 1_000_000n);
 });
 
+test("cashback default fee share is 40 percent", () => {
+  assert.equal(parseCashbackConfig({ CASHBACK_ENABLED: "true" }).feeShareBps, 4000);
+});
+
+test("cashback subscriber config falls back to global defaults without overrides", () => {
+  const resolved = resolveCashbackConfig({
+    chatId: "12345",
+    config: config({ enabled: true, feeShareBps: 2000 }),
+    override: {
+      chatId: "12345",
+      enabledOverride: null,
+      feeShareBpsOverride: null,
+      note: null,
+      updatedBy: null,
+      updatedAt: null
+    }
+  });
+
+  assert.equal(resolved.config.enabled, true);
+  assert.equal(resolved.config.feeShareBps, 2000);
+  assert.equal(resolved.enabledSource, "global");
+  assert.equal(resolved.feeShareBpsSource, "global");
+});
+
+test("cashback subscriber config applies and clears overrides without changing global defaults", () => {
+  const base = config({ enabled: false, feeShareBps: 2000 });
+  const overridden = resolveCashbackConfig({
+    chatId: "12345",
+    config: base,
+    override: {
+      chatId: "12345",
+      enabledOverride: true,
+      feeShareBpsOverride: 5000,
+      note: "VIP",
+      updatedBy: "ops",
+      updatedAt: "2026-06-01T00:00:00.000Z"
+    }
+  });
+  const cleared = resolveCashbackConfig({
+    chatId: "12345",
+    config: base,
+    override: {
+      chatId: "12345",
+      enabledOverride: null,
+      feeShareBpsOverride: null,
+      note: "cleared",
+      updatedBy: "ops",
+      updatedAt: "2026-06-01T00:05:00.000Z"
+    }
+  });
+
+  assert.equal(overridden.config.enabled, true);
+  assert.equal(overridden.config.feeShareBps, 5000);
+  assert.equal(overridden.enabledSource, "subscriber_override");
+  assert.equal(overridden.feeShareBpsSource, "subscriber_override");
+  assert.equal(cleared.config.enabled, false);
+  assert.equal(cleared.config.feeShareBps, 2000);
+  assert.equal(base.enabled, false);
+  assert.equal(base.feeShareBps, 2000);
+});
+
 test("cashback dashboard does not mention minimum until claim attempt", () => {
   const summary = {
     enabled: true,
@@ -189,6 +255,101 @@ test("cashback accrual is direct-only, successful, and idempotent by execution k
   await store.accrue(entry);
   await store.accrue(entry);
   assert.equal(store.entries.length, 1);
+});
+
+test("cashback accrual uses subscriber override rate at accrual time only", async () => {
+  const firstConfig = resolveCashbackConfig({
+    chatId: "12345",
+    config: config({ feeShareBps: 2000 }),
+    override: {
+      chatId: "12345",
+      enabledOverride: null,
+      feeShareBpsOverride: 5000,
+      note: "VIP",
+      updatedBy: "ops",
+      updatedAt: "2026-06-01T00:00:00.000Z"
+    }
+  }).config;
+  const secondConfig = resolveCashbackConfig({
+    chatId: "12345",
+    config: config({ feeShareBps: 2000 }),
+    override: {
+      chatId: "12345",
+      enabledOverride: null,
+      feeShareBpsOverride: null,
+      note: "cleared",
+      updatedBy: "ops",
+      updatedAt: "2026-06-01T00:10:00.000Z"
+    }
+  }).config;
+
+  const first = buildCashbackAccrual({
+    chatId: "12345",
+    tradingWalletPublicKey: "Wallet111",
+    executionKey: "first",
+    sourceSignature: "source-1",
+    executionSignature: "copy-1",
+    action: "buy",
+    status: "submitted",
+    provider: "direct-pump",
+    platformFee: platformFee(),
+    config: firstConfig
+  });
+  const second = buildCashbackAccrual({
+    chatId: "12345",
+    tradingWalletPublicKey: "Wallet111",
+    executionKey: "second",
+    sourceSignature: "source-2",
+    executionSignature: "copy-2",
+    action: "buy",
+    status: "submitted",
+    provider: "direct-pump",
+    platformFee: platformFee(),
+    config: secondConfig
+  });
+  const store = new MemoryCashbackStore();
+
+  await store.accrue(first);
+  await store.accrue(second);
+
+  assert.equal(store.entries[0].cashbackLamports, 5_000n);
+  assert.equal(store.entries[0].cashbackFeeShareBps, 5000);
+  assert.equal(store.entries[1].cashbackLamports, 2_000n);
+  assert.equal(store.entries[1].cashbackFeeShareBps, 2000);
+});
+
+test("manual cashback adjustment rows are auditable explicit ledger entries", () => {
+  const entry = buildCashbackManualAdjustment({
+    chatId: "12345",
+    tradingWalletPublicKey: "Wallet111",
+    cashbackLamports: -1_000n,
+    reason: "correction",
+    adjustedBy: "ops",
+    executionKey: "manual-key"
+  });
+
+  assert.equal(entry.executionKey, "manual-key");
+  assert.equal(entry.action, "adjustment");
+  assert.equal(entry.entryType, "manual_adjustment");
+  assert.equal(entry.cashbackLamports, -1_000n);
+  assert.equal(entry.adjustmentReason, "correction");
+  assert.equal(entry.adjustedBy, "ops");
+  assert.equal(entry.status, "claimable");
+});
+
+test("cashback override validation fails closed for invalid values", () => {
+  assert.throws(() => validateCashbackFeeShareBps(-1), /0 to 10000/);
+  assert.throws(() => validateCashbackFeeShareBps(10_001), /0 to 10000/);
+  assert.throws(() => validateCashbackFeeShareBps(1.5), /0 to 10000/);
+  assert.throws(() => normalizeCashbackChatId("abc"), /numeric/);
+  assert.throws(() => requireKnownCashbackSubscriber(null, "12345"), /unknown Telegram subscriber/);
+  assert.throws(() => buildCashbackManualAdjustment({
+    chatId: "12345",
+    tradingWalletPublicKey: "Wallet111",
+    cashbackLamports: 0n,
+    reason: "noop",
+    adjustedBy: "ops"
+  }), /non-zero/);
 });
 
 test("claim threshold blocks small balances", async () => {

@@ -525,6 +525,7 @@ const config: BotConfig = {
   directExecutionSendRpcUrls: rawListFromEnv(process.env.DIRECT_EXECUTION_SEND_RPC_URLS),
   directExecutionJitoSendUrls: rawListFromEnv(process.env.DIRECT_EXECUTION_JITO_SEND_URLS),
   directExecutionJitoAuthUuid: process.env.DIRECT_EXECUTION_JITO_AUTH_UUID,
+  directExecutionAllowAllChats: process.env.DIRECT_EXECUTION_ALLOW_ALL_CHATS === "true",
   directExecutionCanaryChatIds: rawListFromEnv(process.env.DIRECT_EXECUTION_CANARY_CHAT_IDS),
   directExecutionCanaryWallets: rawListFromEnv(process.env.DIRECT_EXECUTION_CANARY_WALLETS),
   platformFeeEnabled: process.env.PLATFORM_FEE_ENABLED === "true",
@@ -776,8 +777,12 @@ function directCanaryBlockedReason({
     return null;
   }
 
+  if (config.directExecutionAllowAllChats) {
+    return null;
+  }
+
   if (config.directExecutionCanaryChatIds.length === 0 && config.directExecutionCanaryWallets.length === 0) {
-    return "direct execution requires DIRECT_EXECUTION_CANARY_CHAT_IDS or DIRECT_EXECUTION_CANARY_WALLETS";
+    return "direct execution requires DIRECT_EXECUTION_ALLOW_ALL_CHATS=true, DIRECT_EXECUTION_CANARY_CHAT_IDS, or DIRECT_EXECUTION_CANARY_WALLETS";
   }
 
   if (config.directExecutionCanaryChatIds.length > 0 && !config.directExecutionCanaryChatIds.includes(chatId)) {
@@ -1124,6 +1129,7 @@ function logCopyTradeExecutionState(): void {
       `sdkWarmMs=${config.directExecutionSdkWarmIntervalMs}`,
       `observedCreatorVaultLookup=${config.directExecutionObservedCreatorVaultLookup ? "true" : "false"}`,
       `sendRpcFanout=${directSolanaSendConnections.length}`,
+      `allowAllChats=${config.directExecutionAllowAllChats ? "true" : "false"}`,
       `canaryChats=${config.directExecutionCanaryChatIds.length || "none"}`,
       `canaryWallets=${config.directExecutionCanaryWallets.length || "none"}`,
       `platformFee=${config.platformFeeEnabled ? `${config.platformFeeBps}bps` : "disabled"}`,
@@ -2595,6 +2601,7 @@ async function sendCopyTradeSimulationAlert(
       const durableCopyBuyKey = copyTradeBuyIdempotencyKey({
         chatId: subscriber.chatId,
         mint: trade.mint,
+        observedSignature: subscriber.copyTradeRetryFailedBuys ? trade.signature : null,
         action: "buy"
       });
 
@@ -2611,7 +2618,7 @@ async function sendCopyTradeSimulationAlert(
         return;
       }
 
-      if (fastDirectCopyBuyPath) {
+      if (fastDirectCopyBuyPath && !subscriber.copyTradeRetryFailedBuys) {
         copyBuySemanticKey = durableCopyBuyKey;
 
         if (!copyBuySemanticSubmissionGuard.reserve(copyBuySemanticKey)) {
@@ -2636,7 +2643,8 @@ async function sendCopyTradeSimulationAlert(
         amountSol,
         provider: trade.provider,
         request,
-        retryFailed: subscriber.copyTradeRetryFailedBuys
+        retryFailed: subscriber.copyTradeRetryFailedBuys,
+        allowRepeat: subscriber.copyTradeRetryFailedBuys
       };
 
       if (fastDirectCopyBuyPath) {

@@ -71,7 +71,7 @@ function snakeCaseClaimRow(input, status = "claimed") {
   };
 }
 
-function createFakeSupabaseIdempotencyClient(seedRows = []) {
+function createFakeSupabaseIdempotencyClient(seedRows = [], { semanticUnique = true } = {}) {
   const rows = seedRows.map((row) => ({ ...row }));
   const matches = (row, filters) => filters.every(({ column, value }) => row[column] === value);
 
@@ -85,7 +85,7 @@ function createFakeSupabaseIdempotencyClient(seedRows = []) {
           insert(row) {
             const duplicate = rows.some((entry) =>
               entry.idempotency_key === row.idempotency_key ||
-              (
+              (semanticUnique &&
                 entry.chat_id === row.chat_id &&
                 entry.mint === row.mint &&
                 entry.action === row.action
@@ -359,6 +359,46 @@ test("JSON copy buy idempotency retries failed same mint when enabled", async (t
   assert.equal(stored.records[0].claimedAt, "2026-05-24T12:05:00.000Z");
 });
 
+test("JSON copy buy idempotency allows repeat same-mint buys when enabled", async (t) => {
+  const path = await tempStorePath(t);
+  const store = createJsonCopyTradeBuyIdempotencyStore({ path });
+  const firstInput = claimInput({
+    key: copyTradeBuyIdempotencyKey({
+      chatId: "chat-1",
+      mint: request.mint,
+      observedSignature: "target-buy-signature-1"
+    })
+  });
+  const secondInput = claimInput({
+    key: copyTradeBuyIdempotencyKey({
+      chatId: "chat-1",
+      mint: request.mint,
+      observedSignature: "target-buy-signature-2"
+    }),
+    observedSignature: "target-buy-signature-2",
+    allowRepeat: true
+  });
+
+  const first = await store.claimBuy(firstInput);
+  await store.completeBuy(firstInput.key, {
+    ok: true,
+    status: 200,
+    signature: "copy-buy-signature-1",
+    errorText: null,
+    raw: { signature: "copy-buy-signature-1" }
+  });
+  const second = await store.claimBuy(secondInput);
+  const exactDuplicate = await store.claimBuy(secondInput);
+  const stored = JSON.parse(await readFile(path, "utf8"));
+
+  assert.equal(first.claimed, true);
+  assert.equal(second.claimed, true);
+  assert.equal(second.existing, null);
+  assert.equal(exactDuplicate.claimed, false);
+  assert.equal(exactDuplicate.existing?.observedSignature, "target-buy-signature-2");
+  assert.equal(stored.records.length, 2);
+});
+
 test("JSON copy buy idempotency retry toggle still blocks claimed and submitted buys", async (t) => {
   const path = await tempStorePath(t);
   const store = createJsonCopyTradeBuyIdempotencyStore({ path });
@@ -442,6 +482,41 @@ test("Supabase copy buy idempotency retries only failed semantic records when en
   assert.equal(submittedDuplicate.claimed, false);
   assert.equal(submittedDuplicate.existing?.status, "submitted");
   assert.equal(submittedDuplicate.existing?.resultSignature, "copy-buy-signature-1");
+});
+
+test("Supabase copy buy idempotency allows repeat same-mint buys when enabled", async () => {
+  const firstInput = claimInput({
+    key: copyTradeBuyIdempotencyKey({
+      chatId: "chat-1",
+      mint: request.mint,
+      observedSignature: "target-buy-signature-1"
+    })
+  });
+  const fake = createFakeSupabaseIdempotencyClient([
+    {
+      ...snakeCaseClaimRow(firstInput, "submitted"),
+      result_signature: "copy-buy-signature-1"
+    }
+  ], { semanticUnique: false });
+  const store = createSupabaseCopyTradeBuyIdempotencyStore({ client: fake.client });
+  const secondInput = claimInput({
+    key: copyTradeBuyIdempotencyKey({
+      chatId: "chat-1",
+      mint: request.mint,
+      observedSignature: "target-buy-signature-2"
+    }),
+    observedSignature: "target-buy-signature-2",
+    allowRepeat: true
+  });
+
+  const second = await store.claimBuy(secondInput);
+  const exactDuplicate = await store.claimBuy(secondInput);
+
+  assert.equal(second.claimed, true);
+  assert.equal(second.existing, null);
+  assert.equal(exactDuplicate.claimed, false);
+  assert.equal(exactDuplicate.existing?.observedSignature, "target-buy-signature-2");
+  assert.equal(fake.rows.length, 2);
 });
 
 test("Supabase copy buy idempotency blocks failed semantic records by default", async () => {

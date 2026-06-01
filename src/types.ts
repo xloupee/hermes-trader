@@ -129,6 +129,7 @@ export interface BotConfig extends MigrationFormatConfig {
   directExecutionSendRpcUrls: string[];
   directExecutionJitoSendUrls: string[];
   directExecutionJitoAuthUuid?: string;
+  directExecutionAllowAllChats: boolean;
   directExecutionCanaryChatIds: string[];
   directExecutionCanaryWallets: string[];
   platformFeeEnabled: boolean;

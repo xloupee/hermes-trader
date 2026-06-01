@@ -43,6 +43,7 @@ export interface CopyTradeBuyIdempotencyClaimInput {
   provider: WalletTradeData["provider"];
   request: PumpPortalLightningTradeRequest;
   retryFailed?: boolean;
+  allowRepeat?: boolean;
   now?: string;
 }
 
@@ -60,10 +61,12 @@ export interface CopyTradeBuyIdempotencyStore {
 export function copyTradeBuyIdempotencyKey({
   chatId,
   mint,
+  observedSignature,
   action = "buy"
 }: {
   chatId: string | null | undefined;
   mint: string | null | undefined;
+  observedSignature?: string | null | undefined;
   action?: "buy";
 }): string | null {
   const normalizedChatId = chatId?.trim();
@@ -73,7 +76,10 @@ export function copyTradeBuyIdempotencyKey({
     return null;
   }
 
-  return [normalizedChatId, normalizedMint, action].join(":");
+  const normalizedObservedSignature = observedSignature?.trim();
+  return normalizedObservedSignature
+    ? [normalizedChatId, normalizedMint, action, normalizedObservedSignature].join(":")
+    : [normalizedChatId, normalizedMint, action].join(":");
 }
 
 interface StoredCopyTradeBuyIdempotencyFile {
@@ -328,7 +334,9 @@ export function createJsonCopyTradeBuyIdempotencyStore({
     claimBuy(input) {
       return withLock(async () => {
         const data = await readLocalFile(path);
-        const existing = data.records.find((record) => record.key === input.key || sameSemanticBuy(record, input)) || null;
+        const existing = data.records.find((record) =>
+          record.key === input.key || (!input.allowRepeat && sameSemanticBuy(record, input))
+        ) || null;
 
         if (existing) {
           if (input.retryFailed && existing.status === "failed") {
@@ -463,6 +471,10 @@ export function createSupabaseCopyTradeBuyIdempotencyStore({
 
     if (byKey.data) {
       return recordFromSupabaseRow(byKey.data as SupabaseCopyTradeBuyIdempotencyRow);
+    }
+
+    if (input.allowRepeat) {
+      return null;
     }
 
     const bySemantic = await client

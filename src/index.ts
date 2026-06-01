@@ -57,6 +57,7 @@ import {
   buildDirectSolanaPayload,
   fetchDirectPumpFastBuyStateFromChain,
   prefetchDirectPumpFastBuyStateFromChain,
+  prefetchDirectPumpSwapState,
   primeDirectPumpFastBuyState,
   refreshDirectPumpFastBuyStateReserves,
   resolveMintTokenProgram,
@@ -1585,6 +1586,7 @@ async function handleWalletTradeSignal(
       normalizedAtMs
     });
     prefetchDirectPumpFastBuyStateForTrade(trade);
+    prefetchDirectPumpSwapStateForTrade(trade);
   }
 
   const eventId = walletTradeSeenEventId(trade);
@@ -2066,6 +2068,7 @@ async function handleShredstreamWalletTrade(
   if (!diagnostic && copyTradeSignalProviderAllows(config.copyTradeSignalProvider, "shredstream")) {
     if (activeCopyTradeEntriesForTarget(observedTrade.targetWallet).length > 0) {
       prefetchDirectPumpFastBuyStateForTrade(observedTrade);
+      prefetchDirectPumpSwapStateForTrade(observedTrade);
     }
     await handleWalletTradeSignal(observedTrade, { receivedAtMs, normalizedAtMs });
     return;
@@ -4865,6 +4868,63 @@ function prefetchDirectPumpFastBuyStateForTrade(trade: WalletTradeData): boolean
     console.warn(`Direct Pump observed-buy prefetch failed for ${trade.mint}: ${errorMessage(error)}`);
   });
   return true;
+}
+
+function pumpSwapPoolHint(trade: WalletTradeData): boolean {
+  const values = [
+    trade.pool,
+    stringValue(trade.raw?.pool),
+    stringValue(trade.raw?.source),
+    stringValue(trade.raw?.route)
+  ]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.trim().toLowerCase());
+
+  return values.some((value) => value === "pump-amm" || value === "pumpswap" || value.includes("pump-amm") || value.includes("pumpswap"));
+}
+
+function prefetchDirectPumpSwapStateForTrade(trade: WalletTradeData): boolean {
+  if (
+    !(config.copyTradeExecutionProvider === "direct-auto" || config.copyTradeExecutionProvider === "direct-pumpswap") ||
+    trade.action !== "buy" ||
+    !trade.mint ||
+    !pumpSwapPoolHint(trade)
+  ) {
+    return false;
+  }
+
+  let mint: PublicKey;
+  try {
+    mint = new PublicKey(trade.mint);
+  } catch {
+    return false;
+  }
+
+  let scheduled = false;
+  for (const { subscriber } of activeCopyTradeEntriesForTarget(trade.targetWallet)) {
+    if (!subscriber.tradingWallet) {
+      continue;
+    }
+
+    let user: PublicKey;
+    try {
+      user = new PublicKey(subscriber.tradingWallet.publicKey);
+    } catch {
+      continue;
+    }
+
+    scheduled = true;
+    prefetchDirectPumpSwapState({
+      connection: directSolanaConnection,
+      mint,
+      user,
+      source: `${trade.provider}-observed-buy-prefetch`
+    }).catch((error) => {
+      console.warn(`Direct PumpSwap observed-buy prefetch failed for ${trade.mint}:${subscriber.chatId}: ${errorMessage(error)}`);
+    });
+  }
+
+  return scheduled;
 }
 
 function activeCopyTradeEntriesForTarget(targetWallet: string): Array<{

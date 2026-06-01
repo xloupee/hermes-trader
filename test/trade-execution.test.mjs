@@ -181,3 +181,44 @@ test("provider-neutral result log includes raw send fanout timing", () => {
   assert.match(log, /rawSendWinner=fanout-1/);
   assert.match(log, /rawSendRpcCount=4/);
 });
+
+test("provider-neutral result log includes PumpSwap build timing", () => {
+  const result = tradeExecutionSkippedResult({
+    provider: "direct-pumpswap",
+    route: "pumpswap-amm",
+    reason: "build-only",
+    metadata: {
+      directBuildTiming: {
+        totalMs: 123,
+        stages: [
+          {
+            stage: "swap_state_ready",
+            durationMs: 87,
+            source: "cache",
+            cachedStateSource: "shredstream-observed-buy-prefetch",
+            cachedStateAgeMs: 12
+          },
+          {
+            stage: "quote_ready",
+            durationMs: 3
+          },
+          {
+            stage: "instructions_ready",
+            durationMs: 14,
+            buyInstructionBuilder: "local-pump-amm"
+          }
+        ]
+      }
+    }
+  });
+
+  const log = formatTradeExecutionResultLog(result);
+  assert.match(log, /directBuildMs=123/);
+  assert.match(log, /directPumpSwapStateMs=87/);
+  assert.match(log, /directPumpSwapState=cache/);
+  assert.match(log, /directPumpSwapStateSource=shredstream-observed-buy-prefetch/);
+  assert.match(log, /directPumpSwapStateAgeMs=12/);
+  assert.match(log, /directQuoteMs=3/);
+  assert.match(log, /directBuyBuilder=local-pump-amm/);
+  assert.match(log, /directInstructionsMs=14/);
+});

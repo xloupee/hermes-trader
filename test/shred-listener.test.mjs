@@ -107,11 +107,20 @@ console.log(JSON.stringify({
   addressTableLookups: [{ accountKey: "flashx-lookup-table", writableIndexes: [0], readonlyIndexes: [1, 2] }],
   instructions: [{ programIdIndex: 2, accounts: [0, 0, 12, 11, 2, 13, 3, 3, 14, 12, 10, 4, 5, 1, 0, 11, 14, 6, 3, 13, 3, 7, 14, 3], dataBase64: flashxData.toString("base64") }]
 }));
+console.log(JSON.stringify({
+  slot: 8,
+  signature: "grpc-flashx-pumpswap-alt-sig",
+  receivedAtMs: 303,
+  accountKeys: ["A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS", "83DqVhmHb3RmZa8ieYC7VtHB5upyC5GHAr6g4WYfMjg4", "TipOrFee111111111111111111111111111111111", "11111111111111111111111111111111", "${FLASHX_ROUTER_PROGRAM_ID}"],
+  addressTableLookups: [{ accountKey: "flashx-pumpswap-lookup-table", writableIndexes: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14], readonlyIndexes: [] }],
+  instructions: [{ programIdIndex: 4, accounts: [1, 0, 2, 3, 4, 5, 6, 7, 8, 9, 0, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19], dataBase64: flashxData.toString("base64") }]
+}));
 `,
     "utf8"
   );
 
   let flashxLookupCalls = 0;
+  let flashxPumpSwapLookupCalls = 0;
   let staticAmmLookupCalls = 0;
   const source = createShredstreamSource({
     mode: "grpc",
@@ -127,6 +136,27 @@ console.log(JSON.stringify({
         return ["unused-static-amm-ata", "unused-static-amm-mint"];
       }
 
+      if (lookup.accountKey === "flashx-pumpswap-lookup-table") {
+        flashxPumpSwapLookupCalls += 1;
+        return [
+          PUMPSWAP_AMM_PROGRAM_ID,
+          "GlobalConfig111111111111111111111111111111",
+          "ProtocolFeeRecipient1111111111111111111111",
+          "ProtocolFeeAta11111111111111111111111111111",
+          "PumpSwapPool111111111111111111111111111111",
+          "GlobalOrRouter11111111111111111111111111111",
+          "C7cmYazouxohuDdTNbBkDwZnpp2SvW8hgjXn1cQFGG34",
+          "So11111111111111111111111111111111111111112",
+          "UserBaseAta1111111111111111111111111111111",
+          "UserQuoteAta111111111111111111111111111111",
+          "PoolBaseAta1111111111111111111111111111111",
+          "PoolQuoteAta111111111111111111111111111111",
+          "CreatorVaultAuthority111111111111111111111",
+          "BuybackFeeRecipient11111111111111111111111",
+          "BuybackQuoteAta111111111111111111111111111"
+        ];
+      }
+
       assert.equal(lookup.accountKey, "flashx-lookup-table");
       flashxLookupCalls += 1;
       return ["loaded-router-ata", PUMP_BONDING_CURVE_PROGRAM_ID, "loaded-token-program"];
@@ -136,9 +166,9 @@ console.log(JSON.stringify({
   const lines = (await readFile(eventLogPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
 
   assert.deepEqual(stats, {
-    linesRead: 4,
-    recordsAccepted: 4,
-    eventsWritten: 4,
+    linesRead: 5,
+    recordsAccepted: 5,
+    eventsWritten: 5,
     parseErrors: 0
   });
   assert.equal(lines[0].signature, "grpc-pump-sig");
@@ -156,8 +186,18 @@ console.log(JSON.stringify({
   assert.equal(lines[3].routerProgramId, FLASHX_ROUTER_PROGRAM_ID);
   assert.equal(lines[3].mint, "flashx-mint-pump");
   assert.equal(lines[3].trader, "trader");
-  assert.equal(lines[3].sourceTiming.altLookupStatus, "not_needed");
+  assert.equal(lines[3].sourceTiming.altLookupStatus, "static_decoded");
+  assert.equal(lines[4].signature, "grpc-flashx-pumpswap-alt-sig");
+  assert.equal(lines[4].eventType, "buy");
+  assert.equal(lines[4].routerProgramId, FLASHX_ROUTER_PROGRAM_ID);
+  assert.equal(lines[4].programId, PUMPSWAP_AMM_PROGRAM_ID);
+  assert.equal(lines[4].pool, "pump-amm");
+  assert.equal(lines[4].mint, "C7cmYazouxohuDdTNbBkDwZnpp2SvW8hgjXn1cQFGG34");
+  assert.notEqual(lines[4].mint, "A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS");
+  assert.equal(lines[4].trader, "A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS");
+  assert.equal(lines[4].sourceTiming.altLookupStatus, "hydrated");
   assert.equal(flashxLookupCalls, 0);
+  assert.equal(flashxPumpSwapLookupCalls, 1);
   assert.equal(staticAmmLookupCalls, 0);
 });
 

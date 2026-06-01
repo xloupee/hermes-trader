@@ -362,6 +362,72 @@ test("decodes FLASHX router Pump buys from Pump-looking accounts before fixed te
   assert.equal(events[0].tokenAmountRaw, undefined);
 });
 
+test("decodes FLASHX router PumpSwap buys from AMM account shape before fixed fallback", () => {
+  const targetWallet = "A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS";
+  const actualMint = "C7cmYazouxohuDdTNbBkDwZnpp2SvW8hgjXn1cQFGG34";
+  const tempQuoteAccount = "83DqVhmHb3RmZa8ieYC7VtHB5upyC5GHAr6g4WYfMjg4";
+  const events = normalizeShredstreamTransaction(
+    {
+      slot: 423681129,
+      signature: "flashx-pumpswap-router-buy-sig",
+      accountKeys: [
+        targetWallet,
+        tempQuoteAccount,
+        "TipOrFee111111111111111111111111111111111",
+        systemProgram,
+        FLASHX_ROUTER_PROGRAM_ID,
+        PUMPSWAP_AMM_PROGRAM_ID,
+        "GlobalConfig111111111111111111111111111111",
+        "ProtocolFeeRecipient1111111111111111111111",
+        "ProtocolFeeAta11111111111111111111111111111",
+        pool,
+        "GlobalOrRouter11111111111111111111111111111",
+        actualMint,
+        "So11111111111111111111111111111111111111112",
+        "UserBaseAta1111111111111111111111111111111",
+        "UserQuoteAta111111111111111111111111111111",
+        "PoolBaseAta1111111111111111111111111111111",
+        "PoolQuoteAta111111111111111111111111111111",
+        "CreatorVaultAuthority111111111111111111111",
+        "BuybackFeeRecipient11111111111111111111111",
+        "BuybackQuoteAta111111111111111111111111111"
+      ],
+      instructions: [
+        {
+          programIdIndex: 4,
+          accounts: [1, 0, 2, 3, 4, 5, 6, 7, 8, 9, 0, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+          dataBase64: flashxBuyDataBase64("9900", "1959001863")
+        }
+      ]
+    },
+    { receivedAtMs }
+  );
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].eventType, "buy");
+  assert.equal(events[0].programId, PUMPSWAP_AMM_PROGRAM_ID);
+  assert.equal(events[0].routerProgramId, FLASHX_ROUTER_PROGRAM_ID);
+  assert.equal(events[0].pool, "pump-amm");
+  assert.equal(events[0].mint, actualMint);
+  assert.notEqual(events[0].mint, targetWallet);
+  assert.equal(events[0].baseMint, actualMint);
+  assert.equal(events[0].quoteMint, "So11111111111111111111111111111111111111112");
+
+  const trade = rawPumpDiscoveryEventToWalletTrade({
+    event: events[0],
+    wallet: { address: targetWallet, label: null },
+    explorer: {
+      pumpFunBaseUrl: "https://pump.fun/coin",
+      solscanBaseUrl: "https://solscan.io"
+    }
+  });
+  assert.equal(trade?.source, "SHREDSTREAM_PUMP_AMM");
+  assert.equal(trade?.pool, "pump-amm");
+  assert.equal(trade?.mint, actualMint);
+  assert.equal(trade?.input?.symbol, "SOL");
+  assert.equal(trade?.output?.mint, actualMint);
+});
+
 test("guards FLASHX router sells from being decoded as copyable buys with balance deltas", () => {
   const actualMint = "FRjGWFQEw7qZQAhvsafzqoV7SvAepSL1Dpgx5giRpump";
   const targetWallet = "A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS";

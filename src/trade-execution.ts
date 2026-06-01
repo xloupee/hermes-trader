@@ -361,12 +361,46 @@ export function formatTradeExecutionResultLog(result: TradeExecutionResult): str
           (record as { stage?: unknown }).stage === "instructions_ready";
       }) as Record<string, unknown> | undefined
       : undefined;
+    const swapState = Array.isArray(stages)
+      ? stages.find((record) => {
+        return record &&
+          typeof record === "object" &&
+          (record as { stage?: unknown }).stage === "swap_state_ready";
+      }) as Record<string, unknown> | undefined
+      : undefined;
+    const quoteReady = Array.isArray(stages)
+      ? stages.find((record) => {
+        return record &&
+          typeof record === "object" &&
+          (record as { stage?: unknown }).stage === "quote_ready";
+      }) as Record<string, unknown> | undefined
+      : undefined;
 
     if (typeof totalMs === "number") {
       parts.push(`directBuildMs=${totalMs}`);
     }
+    if (swapState) {
+      if (typeof swapState.durationMs === "number") {
+        parts.push(`directPumpSwapStateMs=${swapState.durationMs}`);
+      }
+      if (typeof swapState.source === "string") {
+        parts.push(`directPumpSwapState=${swapState.source}`);
+      }
+      if (typeof swapState.cachedStateSource === "string") {
+        parts.push(`directPumpSwapStateSource=${swapState.cachedStateSource}`);
+      }
+      if (typeof swapState.cachedStateAgeMs === "number") {
+        parts.push(`directPumpSwapStateAgeMs=${swapState.cachedStateAgeMs}`);
+      }
+    }
+    if (typeof quoteReady?.durationMs === "number") {
+      parts.push(`directQuoteMs=${quoteReady.durationMs}`);
+    }
     if (typeof instructionsReady?.buyInstructionBuilder === "string") {
       parts.push(`directBuyBuilder=${instructionsReady.buyInstructionBuilder}`);
+    }
+    if (typeof instructionsReady?.durationMs === "number") {
+      parts.push(`directInstructionsMs=${instructionsReady.durationMs}`);
     }
     if (buyAccounts) {
       if (typeof buyAccounts.source === "string") {

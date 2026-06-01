@@ -3,12 +3,13 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import BN from "bn.js";
 import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
-import { NATIVE_MINT, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { getAssociatedTokenAddressSync, NATIVE_MINT, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { buildDirectAutoTransactionPayload } from "../dist/direct-auto.js";
 import { buildDirectPumpTransaction } from "../dist/direct-pump.js";
 import { buildDirectPumpSwapTransaction } from "../dist/direct-pumpswap.js";
 import { sendDirectTransaction } from "../dist/direct-sender.js";
 import {
+  buildDirectPumpSwapLocalBuyInstructions,
   buildDirectPumpLocalBuyInstructions,
   buildDirectSolanaSendConnections,
   directAutoProviderOrderForRequest,
@@ -25,6 +26,12 @@ import { tradeExecutionSkippedResult } from "../dist/trade-execution.js";
 
 const require = createRequire(import.meta.url);
 const { PUMP_SDK } = require("@pump-fun/pump-sdk");
+const {
+  canonicalPumpPoolPda,
+  PUMP_AMM_PROGRAM_ID,
+  PUMP_AMM_SDK,
+  buyQuoteInput: pumpSwapBuyQuoteInput
+} = require("@pump-fun/pump-swap-sdk");
 
 const baseRequest = {
   action: "buy",
@@ -184,6 +191,99 @@ test("local Solana Pump buy builder matches SDK legacy and Token-2022 instructio
     assert.deepEqual(
       token2022Local.map(instructionShape),
       token2022Sdk.map(instructionShape)
+    );
+  } finally {
+    Math.random = originalRandom;
+  }
+});
+
+test("local PumpSwap buy builder matches SDK quote-input instructions", async () => {
+  const originalRandom = Math.random;
+  Math.random = () => 0;
+
+  try {
+    const user = Keypair.generate().publicKey;
+    const baseMint = Keypair.generate().publicKey;
+    const creator = Keypair.generate().publicKey;
+    const coinCreator = Keypair.generate().publicKey;
+    const poolKey = canonicalPumpPoolPda(baseMint, NATIVE_MINT);
+    const quoteMint = NATIVE_MINT;
+    const pool = {
+      poolBump: 0,
+      index: 0,
+      creator,
+      baseMint,
+      quoteMint,
+      lpMint: Keypair.generate().publicKey,
+      poolBaseTokenAccount: getAssociatedTokenAddressSync(baseMint, poolKey, true, TOKEN_PROGRAM_ID),
+      poolQuoteTokenAccount: getAssociatedTokenAddressSync(quoteMint, poolKey, true, TOKEN_PROGRAM_ID),
+      lpSupply: new BN(0),
+      coinCreator,
+      isMayhemMode: false,
+      isCashbackCoin: false
+    };
+    const state = {
+      globalConfig: {
+        admin: Keypair.generate().publicKey,
+        lpFeeBasisPoints: new BN(20),
+        protocolFeeBasisPoints: new BN(5),
+        disableFlags: 0,
+        protocolFeeRecipients: [Keypair.generate().publicKey],
+        coinCreatorFeeBasisPoints: new BN(5),
+        adminSetCoinCreatorAuthority: Keypair.generate().publicKey,
+        whitelistPda: Keypair.generate().publicKey,
+        reservedFeeRecipient: Keypair.generate().publicKey,
+        mayhemModeEnabled: false,
+        reservedFeeRecipients: [Keypair.generate().publicKey],
+        buybackFeeRecipients: [Keypair.generate().publicKey],
+        buybackBasisPoints: new BN(0)
+      },
+      feeConfig: null,
+      poolKey,
+      poolAccountInfo: {
+        data: Buffer.alloc(300),
+        executable: false,
+        lamports: 1,
+        owner: PUMP_AMM_PROGRAM_ID
+      },
+      pool,
+      poolBaseAmount: new BN(1_000_000_000),
+      poolQuoteAmount: new BN(1_000_000_000),
+      baseTokenProgram: TOKEN_PROGRAM_ID,
+      quoteTokenProgram: TOKEN_PROGRAM_ID,
+      baseMint,
+      baseMintAccount: { supply: 1_000_000_000n },
+      user,
+      userBaseTokenAccount: getAssociatedTokenAddressSync(baseMint, user, true, TOKEN_PROGRAM_ID),
+      userQuoteTokenAccount: getAssociatedTokenAddressSync(quoteMint, user, true, TOKEN_PROGRAM_ID),
+      userBaseAccountInfo: null,
+      userQuoteAccountInfo: null
+    };
+    const quoteAmount = new BN(1_000_000);
+    const slippage = 1;
+    const quote = pumpSwapBuyQuoteInput({
+      quote: quoteAmount,
+      slippage,
+      baseReserve: state.poolBaseAmount,
+      quoteReserve: state.poolQuoteAmount,
+      baseMintAccount: state.baseMintAccount,
+      baseMint: state.baseMint,
+      coinCreator: state.pool.coinCreator,
+      creator: state.pool.creator,
+      feeConfig: state.feeConfig,
+      globalConfig: state.globalConfig
+    });
+
+    const sdkInstructions = await PUMP_AMM_SDK.buyQuoteInput(state, quoteAmount, slippage);
+    const localInstructions = buildDirectPumpSwapLocalBuyInstructions({
+      state,
+      baseOut: quote.base,
+      maxQuoteIn: quote.maxQuote
+    });
+
+    assert.deepEqual(
+      localInstructions.map(instructionShape),
+      sdkInstructions.map(instructionShape)
     );
   } finally {
     Math.random = originalRandom;

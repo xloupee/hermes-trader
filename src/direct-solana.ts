@@ -12,7 +12,9 @@ import {
 } from "@solana/web3.js";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
+  createCloseAccountInstruction,
   createAssociatedTokenAccountIdempotentInstruction,
+  createSyncNativeInstruction,
   getAssociatedTokenAddressSync,
   NATIVE_MINT,
   TOKEN_2022_PROGRAM_ID,
@@ -44,8 +46,12 @@ const PUMP_GLOBAL_PDA = new PublicKey("4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjax
 const PUMP_EVENT_AUTHORITY_PDA = new PublicKey("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1");
 const PUMP_GLOBAL_VOLUME_ACCUMULATOR_PDA = new PublicKey("Hq2wp8uJ9jCPsYgNHex8RtqdvMPfVGoYwjvF1ATiwn2Y");
 const PUMP_FEE_CONFIG_PDA = new PublicKey("8Wf5TiAheLUqBrKXeYg2JtAFFMWtKdG2BSFgqUcPVwTt");
+const PUMP_AMM_PROGRAM_ID = new PublicKey("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
+const PUMP_AMM_FEE_CONFIG_PDA = new PublicKey("5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx");
 const PUMP_BUY_DISCRIMINATOR = Buffer.from([102, 6, 61, 18, 1, 218, 235, 234]);
 const PUMP_BUY_V2_DISCRIMINATOR = Buffer.from([184, 23, 238, 97, 103, 197, 211, 61]);
+const PUMPSWAP_BUY_DISCRIMINATOR = Buffer.from([102, 6, 61, 18, 1, 218, 235, 234]);
+const PUMPSWAP_EXTEND_ACCOUNT_DISCRIMINATOR = Buffer.from([234, 102, 194, 203, 150, 72, 62, 229]);
 const PUMP_BUYBACK_FEE_RECIPIENTS = [
   "5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD",
   "9M4giFFMxmFGXtc3feFzRai56WbBqehoSeRE5GK7gf7",
@@ -68,6 +74,7 @@ type OnlinePumpSdkInstance = InstanceType<PumpSdkModule["OnlinePumpSdk"]>;
 type OnlinePumpAmmSdkInstance = InstanceType<PumpSwapSdkModule["OnlinePumpAmmSdk"]>;
 type PumpGlobal = Awaited<ReturnType<OnlinePumpSdkInstance["fetchGlobal"]>>;
 type PumpFeeConfig = Awaited<ReturnType<OnlinePumpSdkInstance["fetchFeeConfig"]>>;
+type PumpSwapSolanaState = Awaited<ReturnType<OnlinePumpAmmSdkInstance["swapSolanaState"]>>;
 type LatestBlockhash = Awaited<ReturnType<Connection["getLatestBlockhash"]>>;
 
 let pumpSdkModule: PumpSdkModule | null = null;
@@ -77,6 +84,7 @@ const pumpAmmSdkByConnection = new WeakMap<Connection, OnlinePumpAmmSdkInstance>
 const PUMP_CONFIG_CACHE_MS = 60_000;
 const MINT_TOKEN_PROGRAM_CACHE_MS = 10 * 60_000;
 const PUMP_FAST_BUY_STATE_CACHE_MS = 2 * 60_000;
+const PUMPSWAP_FAST_STATE_CACHE_MS = 1_000;
 const OBSERVED_BUY_FAST_STATE_MAX_AGE_MS = 1_000;
 const PUMP_TOKEN_2022_VERIFIED_CREATOR_CACHE_MS = 60_000;
 const MAX_BLOCKHASH_CACHE_MS = 30_000;
@@ -98,6 +106,13 @@ let pumpFeeConfigCache: { value: PumpFeeConfig | null; expiresAtMs: number } | n
 let pumpFeeConfigInflight: Promise<PumpFeeConfig | null> | null = null;
 const directPumpFastBuyStateByMint = new Map<string, DirectPumpFastBuyStateCacheEntry>();
 const directPumpFastBuyStateInflightByMint = new Map<string, Promise<boolean>>();
+const directPumpSwapStateByPoolAndUser = new Map<string, {
+  value: PumpSwapSolanaState;
+  source: string | null;
+  observedAtMs: number;
+  expiresAtMs: number;
+}>();
+const directPumpSwapStateInflightByPoolAndUser = new Map<string, Promise<PumpSwapSolanaState>>();
 
 export interface DirectPumpFastBuyStateInput {
   mint: string;
@@ -574,6 +589,109 @@ function publicKey(value: string, label: string): PublicKey {
   }
 }
 
+function pumpSwapStateCacheKey(pool: PublicKey, user: PublicKey): string {
+  return `${pool.toBase58()}:${user.toBase58()}`;
+}
+
+function cachedDirectPumpSwapState({
+  pool,
+  user,
+  maxAgeMs = PUMPSWAP_FAST_STATE_CACHE_MS,
+  sourceIncludes
+}: {
+  pool: PublicKey;
+  user: PublicKey;
+  maxAgeMs?: number;
+  sourceIncludes?: string;
+}): ({ value: PumpSwapSolanaState; source: string | null; observedAtMs: number; ageMs: number } | null) {
+  const key = pumpSwapStateCacheKey(pool, user);
+  const entry = directPumpSwapStateByPoolAndUser.get(key);
+  if (!entry) {
+    return null;
+  }
+
+  const ageMs = Math.max(0, Date.now() - entry.observedAtMs);
+  if (entry.expiresAtMs <= Date.now() || ageMs > maxAgeMs) {
+    directPumpSwapStateByPoolAndUser.delete(key);
+    return null;
+  }
+
+  if (sourceIncludes && !entry.source?.includes(sourceIncludes)) {
+    return null;
+  }
+
+  return {
+    value: entry.value,
+    source: entry.source,
+    observedAtMs: entry.observedAtMs,
+    ageMs
+  };
+}
+
+async function fetchDirectPumpSwapState({
+  sdk,
+  pool,
+  user,
+  source = "pumpswap-state-fetch",
+  cacheMs = PUMPSWAP_FAST_STATE_CACHE_MS
+}: {
+  sdk: OnlinePumpAmmSdkInstance;
+  pool: PublicKey;
+  user: PublicKey;
+  source?: string;
+  cacheMs?: number;
+}): Promise<PumpSwapSolanaState> {
+  const key = pumpSwapStateCacheKey(pool, user);
+  const cached = cachedDirectPumpSwapState({ pool, user, maxAgeMs: cacheMs });
+  if (cached) {
+    return cached.value;
+  }
+
+  const existing = directPumpSwapStateInflightByPoolAndUser.get(key);
+  if (existing) {
+    return existing;
+  }
+
+  const inflight = sdk.swapSolanaState(pool, user).then((value) => {
+    directPumpSwapStateByPoolAndUser.set(key, {
+      value,
+      source,
+      observedAtMs: Date.now(),
+      expiresAtMs: Date.now() + cacheMs
+    });
+    return value;
+  }).finally(() => {
+    directPumpSwapStateInflightByPoolAndUser.delete(key);
+  });
+  directPumpSwapStateInflightByPoolAndUser.set(key, inflight);
+  return inflight;
+}
+
+export function prefetchDirectPumpSwapState({
+  connection,
+  mint,
+  user,
+  source = "pumpswap-observed-buy-prefetch",
+  cacheMs = PUMPSWAP_FAST_STATE_CACHE_MS
+}: {
+  connection: Connection;
+  mint: PublicKey;
+  user: PublicKey;
+  source?: string;
+  cacheMs?: number;
+}): Promise<boolean> {
+  const pumpSwapModule = loadPumpSwapSdk();
+  const sdk = getOnlinePumpAmmSdk(connection, pumpSwapModule);
+  const pool = pumpSwapModule.canonicalPumpPoolPda(mint, NATIVE_MINT);
+  return fetchDirectPumpSwapState({
+    sdk,
+    pool,
+    user,
+    source,
+    cacheMs
+  }).then(() => true);
+}
+
 function solToMicroLamportsPerComputeUnit(priorityFeeSol: number): number | null {
   if (!Number.isFinite(priorityFeeSol) || priorityFeeSol <= 0) {
     return null;
@@ -620,6 +738,10 @@ function pumpFeeProgramPda(seeds: Buffer[]): PublicKey {
   return PublicKey.findProgramAddressSync(seeds, PUMP_FEE_PROGRAM_ID)[0];
 }
 
+function pumpAmmProgramPda(seeds: Buffer[]): PublicKey {
+  return PublicKey.findProgramAddressSync(seeds, PUMP_AMM_PROGRAM_ID)[0];
+}
+
 function pumpBondingCurvePda(mint: PublicKey): PublicKey {
   return pumpProgramPda([Buffer.from("bonding-curve"), mint.toBuffer()]);
 }
@@ -638,6 +760,30 @@ function pumpUserVolumeAccumulatorPda(user: PublicKey): PublicKey {
 
 function pumpSharingConfigPda(mint: PublicKey): PublicKey {
   return pumpFeeProgramPda([Buffer.from("sharing-config"), mint.toBuffer()]);
+}
+
+function pumpSwapPoolV2Pda(baseMint: PublicKey): PublicKey {
+  return pumpAmmProgramPda([Buffer.from("pool-v2"), baseMint.toBuffer()]);
+}
+
+function pumpSwapCoinCreatorVaultAuthorityPda(coinCreator: PublicKey): PublicKey {
+  return pumpAmmProgramPda([Buffer.from("creator_vault"), coinCreator.toBuffer()]);
+}
+
+function pumpSwapUserVolumeAccumulatorPda(user: PublicKey): PublicKey {
+  return pumpAmmProgramPda([Buffer.from("user_volume_accumulator"), user.toBuffer()]);
+}
+
+function pumpSwapGlobalVolumeAccumulatorPda(): PublicKey {
+  return pumpAmmProgramPda([Buffer.from("global_volume_accumulator")]);
+}
+
+function pumpSwapGlobalConfigPda(): PublicKey {
+  return pumpAmmProgramPda([Buffer.from("global_config")]);
+}
+
+function pumpSwapEventAuthorityPda(): PublicKey {
+  return pumpAmmProgramPda([Buffer.from("__event_authority")]);
 }
 
 function isLegacyQuoteMint(quoteMint: PublicKey): boolean {
@@ -812,6 +958,196 @@ export function buildDirectPumpLocalBuyInstructions({
       trackVolume: true
     })
   }));
+  return instructions;
+}
+
+function pumpSwapFeeRecipient(state: PumpSwapSolanaState): PublicKey {
+  const recipients = state.pool.isMayhemMode
+    ? [state.globalConfig.reservedFeeRecipient, ...state.globalConfig.reservedFeeRecipients]
+    : state.globalConfig.protocolFeeRecipients;
+  return recipients[Math.floor(Math.random() * recipients.length)] || recipients[0] || PublicKey.default;
+}
+
+function pumpSwapBuybackFeeRecipient(state: PumpSwapSolanaState): PublicKey {
+  const recipients = state.globalConfig.buybackFeeRecipients;
+  return recipients[Math.floor(Math.random() * recipients.length)] || recipients[0] || PublicKey.default;
+}
+
+function pumpSwapAccountExists(accountInfo: { owner: PublicKey } | null, owner: PublicKey): boolean {
+  return accountInfo !== null && accountInfo.owner.equals(owner);
+}
+
+function pumpSwapBuyInstructionData({
+  baseOut,
+  maxQuoteIn
+}: {
+  baseOut: BN;
+  maxQuoteIn: BN;
+}): Buffer {
+  return Buffer.concat([
+    PUMPSWAP_BUY_DISCRIMINATOR,
+    u64Le(baseOut),
+    u64Le(maxQuoteIn),
+    Buffer.from([1])
+  ]);
+}
+
+export function buildDirectPumpSwapLocalBuyInstructions({
+  state,
+  baseOut,
+  maxQuoteIn
+}: {
+  state: PumpSwapSolanaState;
+  baseOut: BN;
+  maxQuoteIn: BN;
+}): TransactionInstruction[] {
+  const instructions: TransactionInstruction[] = [];
+  const {
+    pool,
+    poolKey,
+    poolAccountInfo,
+    user,
+    userBaseTokenAccount,
+    userQuoteTokenAccount,
+    userBaseAccountInfo,
+    userQuoteAccountInfo,
+    baseTokenProgram,
+    quoteTokenProgram
+  } = state;
+  const {
+    baseMint,
+    quoteMint,
+    poolBaseTokenAccount,
+    poolQuoteTokenAccount,
+    coinCreator
+  } = pool;
+
+  if (poolAccountInfo === null || poolAccountInfo.data.length < 300) {
+    instructions.push(new TransactionInstruction({
+      programId: PUMP_AMM_PROGRAM_ID,
+      keys: [
+        { pubkey: poolKey, isWritable: true, isSigner: false },
+        { pubkey: user, isWritable: false, isSigner: true },
+        { pubkey: SystemProgram.programId, isWritable: false, isSigner: false },
+        { pubkey: pumpSwapEventAuthorityPda(), isWritable: false, isSigner: false },
+        { pubkey: PUMP_AMM_PROGRAM_ID, isWritable: false, isSigner: false }
+      ],
+      data: PUMPSWAP_EXTEND_ACCOUNT_DISCRIMINATOR
+    }));
+  }
+
+  if (quoteMint.equals(NATIVE_MINT)) {
+    if (!pumpSwapAccountExists(userQuoteAccountInfo, quoteTokenProgram)) {
+      instructions.push(createAssociatedTokenAccountIdempotentInstruction(
+        user,
+        userQuoteTokenAccount,
+        user,
+        NATIVE_MINT
+      ));
+    }
+    if (maxQuoteIn.gtn(0)) {
+      instructions.push(
+        SystemProgram.transfer({
+          fromPubkey: user,
+          toPubkey: userQuoteTokenAccount,
+          lamports: BigInt(maxQuoteIn.toString())
+        }),
+        createSyncNativeInstruction(userQuoteTokenAccount)
+      );
+    }
+  }
+
+  if (!pumpSwapAccountExists(userBaseAccountInfo, baseTokenProgram)) {
+    instructions.push(createAssociatedTokenAccountIdempotentInstruction(
+      user,
+      userBaseTokenAccount,
+      user,
+      baseMint,
+      baseTokenProgram
+    ));
+  }
+
+  const protocolFeeRecipient = pumpSwapFeeRecipient(state);
+  const buybackFeeRecipient = pumpSwapBuybackFeeRecipient(state);
+  const coinCreatorVaultAuthority = pumpSwapCoinCreatorVaultAuthorityPda(coinCreator);
+  const userVolumeAccumulator = pumpSwapUserVolumeAccumulatorPda(user);
+  const remainingAccounts = [
+    ...(pool.isCashbackCoin
+      ? [{
+          pubkey: getAssociatedTokenAddressSync(quoteMint, userVolumeAccumulator, true, quoteTokenProgram),
+          isWritable: true,
+          isSigner: false
+        }]
+      : []),
+    ...(!coinCreator.equals(PublicKey.default)
+      ? [{
+          pubkey: pumpSwapPoolV2Pda(baseMint),
+          isWritable: false,
+          isSigner: false
+        }]
+      : []),
+    {
+      pubkey: buybackFeeRecipient,
+      isWritable: false,
+      isSigner: false
+    },
+    {
+      pubkey: getAssociatedTokenAddressSync(quoteMint, buybackFeeRecipient, true, quoteTokenProgram),
+      isWritable: true,
+      isSigner: false
+    }
+  ];
+
+  instructions.push(new TransactionInstruction({
+    programId: PUMP_AMM_PROGRAM_ID,
+    keys: [
+      { pubkey: poolKey, isWritable: true, isSigner: false },
+      { pubkey: user, isWritable: true, isSigner: true },
+      { pubkey: pumpSwapGlobalConfigPda(), isWritable: false, isSigner: false },
+      { pubkey: baseMint, isWritable: false, isSigner: false },
+      { pubkey: quoteMint, isWritable: false, isSigner: false },
+      { pubkey: userBaseTokenAccount, isWritable: true, isSigner: false },
+      { pubkey: userQuoteTokenAccount, isWritable: true, isSigner: false },
+      { pubkey: poolBaseTokenAccount, isWritable: true, isSigner: false },
+      { pubkey: poolQuoteTokenAccount, isWritable: true, isSigner: false },
+      { pubkey: protocolFeeRecipient, isWritable: false, isSigner: false },
+      { pubkey: getAssociatedTokenAddressSync(quoteMint, protocolFeeRecipient, true, quoteTokenProgram), isWritable: true, isSigner: false },
+      { pubkey: baseTokenProgram, isWritable: false, isSigner: false },
+      { pubkey: quoteTokenProgram, isWritable: false, isSigner: false },
+      { pubkey: SystemProgram.programId, isWritable: false, isSigner: false },
+      { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isWritable: false, isSigner: false },
+      { pubkey: pumpSwapEventAuthorityPda(), isWritable: false, isSigner: false },
+      { pubkey: PUMP_AMM_PROGRAM_ID, isWritable: false, isSigner: false },
+      { pubkey: getAssociatedTokenAddressSync(quoteMint, coinCreatorVaultAuthority, true, quoteTokenProgram), isWritable: true, isSigner: false },
+      { pubkey: coinCreatorVaultAuthority, isWritable: false, isSigner: false },
+      { pubkey: pumpSwapGlobalVolumeAccumulatorPda(), isWritable: false, isSigner: false },
+      { pubkey: userVolumeAccumulator, isWritable: true, isSigner: false },
+      { pubkey: PUMP_AMM_FEE_CONFIG_PDA, isWritable: false, isSigner: false },
+      { pubkey: PUMP_FEE_PROGRAM_ID, isWritable: false, isSigner: false },
+      ...remainingAccounts
+    ],
+    data: pumpSwapBuyInstructionData({ baseOut, maxQuoteIn })
+  }));
+
+  if (baseMint.equals(NATIVE_MINT)) {
+    instructions.push(createCloseAccountInstruction(
+      userBaseTokenAccount,
+      user,
+      user,
+      undefined,
+      TOKEN_PROGRAM_ID
+    ));
+  }
+  if (quoteMint.equals(NATIVE_MINT)) {
+    instructions.push(createCloseAccountInstruction(
+      userQuoteTokenAccount,
+      user,
+      user,
+      undefined,
+      TOKEN_PROGRAM_ID
+    ));
+  }
+
   return instructions;
 }
 
@@ -1906,8 +2242,10 @@ async function buildDirectPumpSwapSolanaPayload({
   connection: Connection;
   request: DirectSolanaBuildRequest & { provider: "direct-pumpswap" };
 }): Promise<TradeExecutionResult | DirectTransactionPayload> {
+  const buildTiming = createBuildTimingTracker();
   const mint = publicKey(request.mint, "mint");
   const user = publicKey(request.walletPublicKey, "walletPublicKey");
+  buildTiming.mark("keys_ready");
   const pumpSwapModule = loadPumpSwapSdk();
   const {
     canonicalPumpPoolPda,
@@ -1915,6 +2253,7 @@ async function buildDirectPumpSwapSolanaPayload({
   } = pumpSwapModule;
   const pool = canonicalPumpPoolPda(mint, NATIVE_MINT);
   const sdk = getOnlinePumpAmmSdk(connection, pumpSwapModule);
+  buildTiming.mark("sdk_ready");
   const route = buildDirectRouteMetadata({
     provider: "direct-pumpswap",
     mint: request.mint,
@@ -1925,40 +2264,92 @@ async function buildDirectPumpSwapSolanaPayload({
     amount: request.amountLamports.toString(),
     amountBasis: request.amountBasis
   });
+  buildTiming.mark("pool_ready", { poolAddress: pool.toBase58() });
+  const metadataWithBuildTiming = (extra: Record<string, unknown> = {}) => ({
+    ...(request.metadata || {}),
+    ...extra,
+    directBuildTiming: buildTiming.metadata()
+  });
 
   try {
-    const state = await sdk.swapSolanaState(pool, user);
+    buildTiming.mark("swap_state_started");
+    const cachedState = cachedDirectPumpSwapState({
+      pool,
+      user,
+      sourceIncludes: request.forceFreshBuyState ? "observed-buy-prefetch" : undefined
+    });
+    const state = cachedState?.value ?? await fetchDirectPumpSwapState({
+      sdk,
+      pool,
+      user,
+      source: "pumpswap-build-fetch"
+    });
+    buildTiming.mark("swap_state_ready", {
+      source: cachedState ? "cache" : "rpc",
+      cachedStateSource: cachedState?.source ?? null,
+      cachedStateAgeMs: cachedState?.ageMs ?? null,
+      poolAddress: pool.toBase58()
+    });
     const instructions = [...computeBudgetInstructions(request.priorityFeeSol)];
     let appliedPlatformFee = request.platformFee;
+    buildTiming.mark("compute_budget_ready", { instructionCount: instructions.length });
 
     if (request.action === "buy") {
       instructions.push(...platformFeeInstruction({
         split: request.platformFee,
         fromPubkey: user
       }));
+      buildTiming.mark("platform_fee_ready", { instructionCount: instructions.length });
 
       if (request.amountBasis !== "sol") {
+        buildTiming.mark("skipped", { status: "wrong_amount_basis" });
         return tradeExecutionSkippedResult({
           provider: "direct-pumpswap",
           route: route.route,
           reason: `direct PumpSwap buy requires SOL amount basis; got ${amountBasisLabel(request.amountBasis)}`,
-          metadata: { route },
+          metadata: metadataWithBuildTiming({ route }),
           platformFee: platformFeeResult(request.platformFee)
         });
       }
 
       const sdkQuoteLamports = maxQuoteLamportsForSlippageCap(request.amountLamports, request.slippagePercent);
       if (sdkQuoteLamports <= 0n) {
+        buildTiming.mark("skipped", { status: "amount_too_small" });
         return tradeExecutionSkippedResult({
           provider: "direct-pumpswap",
           route: route.route,
           reason: "direct PumpSwap buy amount is too small after slippage cap",
-          metadata: { ...(request.metadata || {}), route },
+          metadata: metadataWithBuildTiming({ route }),
           platformFee: platformFeeResult(request.platformFee)
         });
       }
 
-      instructions.push(...await PUMP_AMM_SDK.buyQuoteInput(state, bn(sdkQuoteLamports), request.slippagePercent));
+      const quote = pumpSwapModule.buyQuoteInput({
+        quote: bn(sdkQuoteLamports),
+        slippage: request.slippagePercent,
+        baseReserve: state.poolBaseAmount,
+        quoteReserve: state.poolQuoteAmount,
+        baseMintAccount: state.baseMintAccount,
+        baseMint: state.baseMint,
+        coinCreator: state.pool.coinCreator,
+        creator: state.pool.creator,
+        feeConfig: state.feeConfig,
+        globalConfig: state.globalConfig
+      });
+      buildTiming.mark("quote_ready", {
+        sdkQuoteLamports: sdkQuoteLamports.toString(),
+        baseOut: quote.base.toString(),
+        maxQuoteIn: quote.maxQuote.toString()
+      });
+      instructions.push(...buildDirectPumpSwapLocalBuyInstructions({
+        state,
+        baseOut: quote.base,
+        maxQuoteIn: quote.maxQuote
+      }));
+      buildTiming.mark("instructions_ready", {
+        instructionCount: instructions.length,
+        buyInstructionBuilder: "local-pump-amm"
+      });
     } else {
       const amount = request.amountBasis === "percent"
         ? percentOfRawBalance(
@@ -1971,17 +2362,21 @@ async function buildDirectPumpSwapSolanaPayload({
             request.amountLamports
         )
         : bn(request.amountLamports);
+      buildTiming.mark("sell_amount_ready", {
+        amountBasis: request.amountBasis,
+        amount: amount.toString()
+      });
       if (amount.lte(new BN(0))) {
+        buildTiming.mark("skipped", { status: "zero_sell_amount" });
         return tradeExecutionSkippedResult({
           provider: "direct-pumpswap",
           route: route.route,
           reason: "direct PumpSwap sell has no token balance left",
           platformFee: platformFeeResult(request.platformFee),
-          metadata: {
-            ...(request.metadata || {}),
+          metadata: metadataWithBuildTiming({
             route,
             poolAddress: pool.toBase58()
-          }
+          })
         });
       }
       const quote = pumpSwapModule.sellBaseInput({
@@ -1997,13 +2392,18 @@ async function buildDirectPumpSwapSolanaPayload({
         globalConfig: state.globalConfig
       });
       appliedPlatformFee = platformFeeForProceeds(request.platformFee, BigInt(quote.minQuote.toString()));
+      buildTiming.mark("quote_ready", {
+        minQuote: quote.minQuote.toString()
+      });
 
       instructions.push(...await PUMP_AMM_SDK.sellBaseInput(state, amount, request.slippagePercent));
       instructions.push(...platformFeeInstruction({
         split: appliedPlatformFee,
         fromPubkey: user
       }));
+      buildTiming.mark("instructions_ready", { instructionCount: instructions.length });
     }
+    buildTiming.mark("build_finished", { instructionCount: instructions.length });
 
     return {
       provider: "direct-pumpswap",
@@ -2011,7 +2411,7 @@ async function buildDirectPumpSwapSolanaPayload({
       instructions,
       signers: [],
       metadata: {
-        ...(request.metadata || {}),
+        ...metadataWithBuildTiming(),
         route,
         poolAddress: pool.toBase58(),
         ...(request.action === "buy"
@@ -2030,11 +2430,15 @@ async function buildDirectPumpSwapSolanaPayload({
       platformFee: appliedPlatformFee
     };
   } catch (error) {
+    buildTiming.mark("build_failed", {
+      status: "failed",
+      errorText: error instanceof Error ? error.message : String(error)
+    });
     return tradeExecutionFailedResult({
       provider: "direct-pumpswap",
       route: route.route,
       errorText: error instanceof Error ? error.message : String(error),
-      metadata: { ...(request.metadata || {}), route, poolAddress: pool.toBase58() },
+      metadata: metadataWithBuildTiming({ route, poolAddress: pool.toBase58() }),
       platformFee: platformFeeResult(request.platformFee)
     });
   }

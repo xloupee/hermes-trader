@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { Connection, PublicKey } from "@solana/web3.js";
 import {
+  isKnownPumpRouterProgram,
   isPumpProgram,
   normalizeShredstreamTransaction,
   type RawPumpDiscoveryEvent,
@@ -343,18 +344,18 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
 }
 
 function transactionMayNeedAddressTableLookups(transaction: ShredstreamTransactionInput): boolean {
-  if (transaction.accountKeys.some(isPumpProgram)) {
+  if (transaction.accountKeys.some((accountKey) => isPumpProgram(accountKey) || isKnownPumpRouterProgram(accountKey))) {
     return true;
   }
 
   return transaction.instructions.some((instruction) => {
-    if (instruction.programId && isPumpProgram(instruction.programId)) {
+    if (instruction.programId && (isPumpProgram(instruction.programId) || isKnownPumpRouterProgram(instruction.programId))) {
       return true;
     }
 
     if (typeof instruction.programIdIndex === "number") {
       const programId = transaction.accountKeys[instruction.programIdIndex] || null;
-      return isPumpProgram(programId);
+      return isPumpProgram(programId) || isKnownPumpRouterProgram(programId);
     }
 
     return false;
@@ -372,6 +373,10 @@ function eventHasFastPathAccounts(event: RawPumpDiscoveryEvent): boolean {
   }
 
   if (event.eventType === "buy" || event.eventType === "sell") {
+    if (event.mint && event.trader && event.mint === event.trader) {
+      return false;
+    }
+
     return Boolean(event.mint && event.trader);
   }
 

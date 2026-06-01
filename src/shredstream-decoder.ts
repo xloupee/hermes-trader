@@ -383,12 +383,15 @@ function decodeFlashxPumpInstruction({
     return null;
   }
 
+  const pumpSwapMint = resolveFlashxPumpSwapBaseMint(resolvedAccounts);
   const mint =
     balanceDelta?.mint ||
+    pumpSwapMint ||
     resolvedAccounts.find((account) => account && looksLikePumpMint(account)) ||
     resolvedAccounts[10] ||
     undefined;
   const bondingCurve = resolveFlashxBondingCurve(resolvedAccounts, mint);
+  const isPumpSwapRoute = Boolean(pumpSwapMint || resolvedAccounts.includes(PUMPSWAP_AMM_PROGRAM_ID));
 
   if (!mint || !trader || !spendableSolLamports) {
     return null;
@@ -400,15 +403,15 @@ function decodeFlashxPumpInstruction({
     signature: transaction.signature,
     receivedAtMs,
     ...(transaction.sourceTiming ? { sourceTiming: transaction.sourceTiming } : {}),
-    programId: PUMP_BONDING_CURVE_PROGRAM_ID,
+    programId: isPumpSwapRoute ? PUMPSWAP_AMM_PROGRAM_ID : PUMP_BONDING_CURVE_PROGRAM_ID,
     routerProgramId,
     eventType: "buy",
     mint,
     trader,
-    bondingCurve: bondingCurve || undefined,
+    bondingCurve: isPumpSwapRoute ? undefined : bondingCurve || undefined,
     baseMint: mint,
     quoteMint: WSOL_MINT,
-    pool: "pump",
+    pool: isPumpSwapRoute ? "pump-amm" : "pump",
     amountSemantics: "flashx_spendable_sol_in_with_min_tokens_out",
     spendableSolLamports,
     solAmountLamports: spendableSolLamports,
@@ -441,6 +444,24 @@ function readRouterU64(data: Buffer | null, offset: number): string | null {
 
 function looksLikePumpMint(account: string): boolean {
   return account.endsWith("pump") || account.endsWith("bonk");
+}
+
+function resolveFlashxPumpSwapBaseMint(resolvedAccounts: Array<string | null>): string | undefined {
+  const programIndex = resolvedAccounts.indexOf(PUMPSWAP_AMM_PROGRAM_ID);
+  if (programIndex < 0) {
+    return undefined;
+  }
+
+  const quoteMintIndex = resolvedAccounts.findIndex((account, index) => index > programIndex && account === WSOL_MINT);
+  if (quoteMintIndex > programIndex + 1) {
+    const baseMint = resolvedAccounts[quoteMintIndex - 1];
+    if (baseMint && baseMint !== PUMPSWAP_AMM_PROGRAM_ID) {
+      return baseMint;
+    }
+  }
+
+  const shapedBaseMint = resolvedAccounts[programIndex + 7];
+  return shapedBaseMint && shapedBaseMint !== WSOL_MINT ? shapedBaseMint : undefined;
 }
 
 function resolveFlashxBondingCurve(resolvedAccounts: Array<string | null>, mint: string | undefined): string | undefined {

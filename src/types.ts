@@ -79,6 +79,7 @@ export interface BotConfig extends MigrationFormatConfig {
   notifyOnShutdown: boolean;
   copyTradeEnabled: boolean;
   copyTradeDryRun: boolean;
+  copyTradeSignalProvider: "pumpportal" | "geyser" | "parallel";
   copyTradeExecutionProvider: "pumpportal-lightning" | "direct-pump" | "direct-pumpswap" | "direct-auto";
   copyTradeSlippage: number;
   copyTradePriorityFee: number;

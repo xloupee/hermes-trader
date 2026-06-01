@@ -19,6 +19,12 @@ import {
 } from "./copytrade-execution-mode.js";
 import { copyBuySubmissionKey, createCopyBuySubmissionGuard } from "./copytrade-guard.js";
 import {
+  copyTradeSignalProviderAllows,
+  copyTradeSignalProviderConfigError,
+  copyTradeSignalSourceForWalletTradeProvider,
+  parseCopyTradeSignalProvider
+} from "./copytrade-signal-provider.js";
+import {
   createJsonCopyTradeBuyIdempotencyStore,
   createSupabaseCopyTradeBuyIdempotencyStore,
   copyTradeBuyIdempotencyKey,
@@ -44,6 +50,7 @@ import {
   warmDirectSolanaBlockhash,
   warmDirectSolanaSdk
 } from "./direct-solana.js";
+import { directCanaryBlockedReason } from "./direct-canary.js";
 import type { DirectSolanaSendStage } from "./direct-solana.js";
 import type { DirectTransactionPayload } from "./direct-pump.js";
 import { createHeliusWebhookServer, missingHeliusConfigWarning, syncHeliusWebhook } from "./helius.js";
@@ -61,6 +68,7 @@ import {
 import type { PumpPortalSubscription } from "./pumpportal.js";
 import { decryptLocalSolanaKeypair, decryptSecret, encryptionSecretReady } from "./secrets.js";
 import { calculatePlatformFeeSplit, platformFeeConfigBlockedReason } from "./platform-fee.js";
+import { formatSolanaRpcEndpointLog } from "./rpc-endpoint.js";
 import {
   formatTradeExecutionResultLog,
   isDirectTradeExecutionProvider,
@@ -179,6 +187,14 @@ function yellowstoneCommitmentFromEnv(value: string | undefined): BotConfig["yel
   return normalized === "confirmed" || normalized === "finalized" ? normalized : "processed";
 }
 
+function booleanFromEnv(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  return value === "true";
+}
+
 function copyTradeLatencyMilestoneForDirectStage(stage: DirectSolanaSendStage): CopyTradeLatencyMilestone | null {
   if (stage === "transaction_build_started") {
     return null;
@@ -237,6 +253,8 @@ function copyTradeLatencyMilestoneForDirectStage(stage: DirectSolanaSendStage): 
 
 const rawCopyTradeExecutionProvider = process.env.COPY_TRADE_EXECUTION_PROVIDER || process.env.TRADE_EXECUTION_PROVIDER;
 const copyTradeExecutionProviderError = tradeExecutionProviderConfigError(rawCopyTradeExecutionProvider);
+const rawCopyTradeSignalProvider = process.env.COPY_TRADE_SIGNAL_PROVIDER;
+const copyTradeSignalProviderError = copyTradeSignalProviderConfigError(rawCopyTradeSignalProvider);
 
 const config: BotConfig = {
   telegramToken: process.env.TELEGRAM_BOT_TOKEN,
@@ -263,12 +281,16 @@ const config: BotConfig = {
   heliusWebhookId: process.env.HELIUS_WEBHOOK_ID,
   heliusWebhookPublicUrl: process.env.HELIUS_WEBHOOK_PUBLIC_URL,
   heliusWebhookStatePath: process.env.HELIUS_WEBHOOK_STATE_PATH || "data/helius-webhook.json",
-  yellowstoneEnabled: process.env.YELLOWSTONE_ENABLED === "true",
-  yellowstoneEndpoint: process.env.YELLOWSTONE_ENDPOINT,
-  yellowstoneToken: process.env.YELLOWSTONE_TOKEN || process.env.QUICKNODE_YELLOWSTONE_TOKEN,
-  yellowstoneCommitment: yellowstoneCommitmentFromEnv(process.env.YELLOWSTONE_COMMITMENT),
-  yellowstoneShadowOnly: process.env.YELLOWSTONE_SHADOW_ONLY !== "false",
-  yellowstoneReconnectMs: positiveIntegerFromEnv(process.env.YELLOWSTONE_RECONNECT_MS, 2000),
+  yellowstoneEnabled: process.env.GEYSER_ENABLED === "true" || process.env.YELLOWSTONE_ENABLED === "true",
+  yellowstoneEndpoint: process.env.GEYSER_GRPC_URL || process.env.YELLOWSTONE_ENDPOINT,
+  yellowstoneToken:
+    process.env.GEYSER_GRPC_TOKEN ||
+    process.env.GEYSER_X_TOKEN ||
+    process.env.YELLOWSTONE_TOKEN ||
+    process.env.QUICKNODE_YELLOWSTONE_TOKEN,
+  yellowstoneCommitment: yellowstoneCommitmentFromEnv(process.env.GEYSER_COMMITMENT || process.env.YELLOWSTONE_COMMITMENT),
+  yellowstoneShadowOnly: booleanFromEnv(process.env.GEYSER_SHADOW_ONLY, process.env.YELLOWSTONE_SHADOW_ONLY !== "false"),
+  yellowstoneReconnectMs: positiveIntegerFromEnv(process.env.GEYSER_RECONNECT_MS || process.env.YELLOWSTONE_RECONNECT_MS, 2000),
   webhookPort: Number(process.env.WEBHOOK_PORT || 3000),
   pumpFunCoinApiBaseUrl: process.env.PUMPFUN_COIN_API_BASE_URL || "https://frontend-api-v3.pump.fun/coins",
   solUsdPriceUrl: process.env.SOL_USD_PRICE_URL || "https://api.coinbase.com/v2/prices/SOL-USD/spot",
@@ -279,6 +301,7 @@ const config: BotConfig = {
   notifyOnShutdown: process.env.BOT_NOTIFY_ON_SHUTDOWN === "true",
   copyTradeEnabled: process.env.COPY_TRADE_ENABLED === "true",
   copyTradeDryRun: process.env.COPY_TRADE_DRY_RUN !== "false",
+  copyTradeSignalProvider: parseCopyTradeSignalProvider(rawCopyTradeSignalProvider),
   copyTradeExecutionProvider: parseTradeExecutionProvider(rawCopyTradeExecutionProvider),
   copyTradeSlippage: numberFromEnv(process.env.COPY_TRADE_SLIPPAGE, 10),
   copyTradePriorityFee: numberFromEnv(process.env.COPY_TRADE_PRIORITY_FEE, 0.00005),
@@ -446,6 +469,44 @@ function resolveExecutionProviderForTrade(trade: WalletTradeData): TradeExecutio
   return config.copyTradeExecutionProvider;
 }
 
+function copyTradeSignalEnabledForTrade(trade: WalletTradeData): boolean {
+  const source = copyTradeSignalSourceForWalletTradeProvider(trade.provider);
+  return source
+    ? copyTradeSignalProviderAllows({
+        configured: config.copyTradeSignalProvider,
+        source
+      })
+    : true;
+}
+
+function copyTradeSignalDisabledReason(trade: WalletTradeData): string | null {
+  return copyTradeSignalEnabledForTrade(trade)
+    ? null
+    : `copy trade signal provider ${config.copyTradeSignalProvider} does not allow ${trade.provider} triggers`;
+}
+
+function withWalletTradeFeedTiming(
+  trade: WalletTradeData,
+  { receivedAtMs, normalizedAtMs }: { receivedAtMs?: number; normalizedAtMs?: number } = {}
+): WalletTradeData {
+  if (receivedAtMs === undefined && normalizedAtMs === undefined) {
+    return trade;
+  }
+
+  return {
+    ...trade,
+    raw: {
+      ...trade.raw,
+      feedTiming: {
+        provider: trade.provider,
+        receivedAtMs: receivedAtMs ?? null,
+        normalizedAtMs: normalizedAtMs ?? null,
+        observedAtMs: Date.parse(trade.observedAt)
+      }
+    }
+  };
+}
+
 function directExecutionGate(provider: TradeExecutionProvider) {
   return {
     provider,
@@ -510,45 +571,6 @@ function copyTradeSubmissionBlockedReason(provider: TradeExecutionProvider): str
 
 function shouldReserveDailyBudget(provider: TradeExecutionProvider): boolean {
   return !directBuildOrSimulateMode(provider);
-}
-
-function directCanaryBlockedReason({
-  provider,
-  chatId,
-  tradingWalletPublicKey
-}: {
-  provider: TradeExecutionProvider;
-  chatId: string;
-  tradingWalletPublicKey: string;
-}): string | null {
-  if (!isDirectTradeExecutionProvider(provider)) {
-    return null;
-  }
-
-  const directExecutionModeEnabled =
-    config.directExecutionEnabled &&
-    (config.directExecutionLiveEnabled || config.directExecutionBuildOnly || config.directExecutionSimulateOnly);
-
-  if (!directExecutionModeEnabled) {
-    return null;
-  }
-
-  if (config.directExecutionCanaryChatIds.length === 0 && config.directExecutionCanaryWallets.length === 0) {
-    return "direct execution requires DIRECT_EXECUTION_CANARY_CHAT_IDS or DIRECT_EXECUTION_CANARY_WALLETS";
-  }
-
-  if (config.directExecutionCanaryChatIds.length > 0 && !config.directExecutionCanaryChatIds.includes(chatId)) {
-    return `chat ${chatId} is not in DIRECT_EXECUTION_CANARY_CHAT_IDS`;
-  }
-
-  if (
-    config.directExecutionCanaryWallets.length > 0 &&
-    !config.directExecutionCanaryWallets.includes(tradingWalletPublicKey)
-  ) {
-    return `trading wallet ${tradingWalletPublicKey} is not in DIRECT_EXECUTION_CANARY_WALLETS`;
-  }
-
-  return null;
 }
 
 function validateSolanaPublicKey(value: string): string | null {
@@ -724,6 +746,8 @@ function logCopyTradeExecutionState(): void {
   }
 
   console.log(formatCopyTradeRiskControlLog(config));
+  console.log(formatSolanaRpcEndpointLog(config.solanaRpcUrl));
+  console.log(`Copy trade signal provider: ${config.copyTradeSignalProvider}`);
   console.log(
     [
       "Direct execution controls",
@@ -735,7 +759,7 @@ function logCopyTradeExecutionState(): void {
       `confirmationMode=${config.directExecutionConfirmationMode}`,
       `blockhashCacheMs=${config.directExecutionBlockhashCacheMs}`,
       `blockhashWarmMs=${config.directExecutionBlockhashWarmIntervalMs}`,
-      `canaryChats=${config.directExecutionCanaryChatIds.length || "none"}`,
+      "chatGate=disabled",
       `canaryWallets=${config.directExecutionCanaryWallets.length || "none"}`,
       `platformFee=${config.platformFeeEnabled ? `${config.platformFeeBps}bps` : "disabled"}`
     ].join(" | ")
@@ -753,6 +777,10 @@ function logCopyTradeExecutionState(): void {
 
   if (copyTradeExecutionProviderError) {
     console.warn(`Copy trade execution provider config blocks live submissions: ${copyTradeExecutionProviderError}`);
+  }
+
+  if (copyTradeSignalProviderError) {
+    console.warn(`Copy trade signal provider config blocks configured signal routing: ${copyTradeSignalProviderError}`);
   }
 }
 
@@ -1096,36 +1124,47 @@ async function handlePumpPortalAccountTrade(event: LooseRecord): Promise<boolean
     return false;
   }
 
-  const eventId = walletTradeSeenEventId(trade);
+  const receivedAtMs = Date.now();
+  const loggedTrade = withWalletTradeFeedTiming(trade, {
+    receivedAtMs,
+    normalizedAtMs: receivedAtMs
+  });
+  const signalDisabledReason = copyTradeSignalDisabledReason(loggedTrade);
+  const eventId = walletTradeSeenEventId(loggedTrade);
 
-  if (rememberEvent(eventId)) {
+  if (!signalDisabledReason && rememberEvent(eventId)) {
     return true;
   }
 
-  const receivedAtMs = Date.now();
-  await handleCopyTradeBuyPressureTrade(trade);
-  await Promise.all(copyTradeEntries.map((entry) =>
-    sendCopyTradeSimulationAlert(
-      entry.subscriber,
-      {
-        ...trade,
-        label: entry.label
-      },
-      entry.wallet,
-      {
-        receivedAtMs,
-        normalizedAtMs: receivedAtMs
-      }
-    )
-  ));
+  await handleCopyTradeBuyPressureTrade(loggedTrade);
+  if (signalDisabledReason) {
+    if (copyTradeEntries.length > 0) {
+      console.log(`PumpPortal copy trade signal skipped: ${signalDisabledReason}`);
+    }
+  } else {
+    await Promise.all(copyTradeEntries.map((entry) =>
+      sendCopyTradeSimulationAlert(
+        entry.subscriber,
+        {
+          ...loggedTrade,
+          label: entry.label
+        },
+        entry.wallet,
+        {
+          receivedAtMs,
+          normalizedAtMs: receivedAtMs
+        }
+      )
+    ));
+  }
 
   runAfterHotPath("PumpPortal wallet trade post-processing", (async () => {
-    await writeWalletTradeLog(trade);
-    console.log(`Wallet trade event: ${JSON.stringify(trade)}`);
+    await writeWalletTradeLog(loggedTrade);
+    console.log(`Wallet trade event: ${JSON.stringify(loggedTrade)}`);
 
     await Promise.all(entries.map((entry) =>
       sendWalletTradeAlert(entry.subscriber, {
-        ...trade,
+        ...loggedTrade,
         label: entry.label
       })
     ));
@@ -1186,37 +1225,48 @@ async function handleHeliusSwap(event: LooseRecord, { receivedAtMs = Date.now() 
       config
     });
     const normalizedAtMs = Date.now();
-    const eventId = walletTradeSeenEventId(loggedTrade);
+    const timedTrade = withWalletTradeFeedTiming(loggedTrade, {
+      receivedAtMs,
+      normalizedAtMs
+    });
+    const signalDisabledReason = copyTradeSignalDisabledReason(timedTrade);
+    const eventId = walletTradeSeenEventId(timedTrade);
 
-    if (rememberEvent(eventId)) {
+    if (!signalDisabledReason && rememberEvent(eventId)) {
       continue;
     }
 
-    await writeWalletTradeLog(loggedTrade);
-    console.log(`Wallet trade event: ${JSON.stringify(loggedTrade)}`);
+    await writeWalletTradeLog(timedTrade);
+    console.log(`Wallet trade event: ${JSON.stringify(timedTrade)}`);
 
-    await handleCopyTradeBuyPressureTrade(loggedTrade);
+    await handleCopyTradeBuyPressureTrade(timedTrade);
 
     const copyTradeEntries = copyTradeSubscribersByWallet.get(targetWallet) || [];
-    await Promise.all(copyTradeEntries.map((entry) =>
-      sendCopyTradeSimulationAlert(
-        entry.subscriber,
-        {
-          ...loggedTrade,
-          label: entry.label
-        },
-        entry.wallet,
-        {
-          receivedAtMs,
-          normalizedAtMs
-        }
-      )
-    ));
+    if (signalDisabledReason) {
+      if (copyTradeEntries.length > 0) {
+        console.log(`Helius copy trade signal skipped: ${signalDisabledReason}`);
+      }
+    } else {
+      await Promise.all(copyTradeEntries.map((entry) =>
+        sendCopyTradeSimulationAlert(
+          entry.subscriber,
+          {
+            ...timedTrade,
+            label: entry.label
+          },
+          entry.wallet,
+          {
+            receivedAtMs,
+            normalizedAtMs
+          }
+        )
+      ));
+    }
 
     const entries = subscribersByWallet.get(targetWallet) || [];
     await Promise.all(entries.map((entry) =>
       sendWalletTradeAlert(entry.subscriber, {
-        ...loggedTrade,
+        ...timedTrade,
         label: entry.label
       })
     ));
@@ -1229,21 +1279,33 @@ async function handleYellowstoneWalletTrade(
   trade: WalletTradeData,
   { receivedAtMs = Date.now(), normalizedAtMs = Date.now() }: { receivedAtMs?: number; normalizedAtMs?: number } = {}
 ): Promise<void> {
+  const timedTrade = withWalletTradeFeedTiming(trade, {
+    receivedAtMs,
+    normalizedAtMs
+  });
+
   if (config.yellowstoneShadowOnly) {
-    await writeWalletTradeLog(trade);
-    console.log(`Yellowstone shadow wallet trade event: ${JSON.stringify(trade)}`);
+    await writeWalletTradeLog(timedTrade);
+    console.log(`Yellowstone shadow wallet trade event: ${JSON.stringify(timedTrade)}`);
     return;
   }
 
-  const eventId = walletTradeSeenEventId(trade);
+  const signalDisabledReason = copyTradeSignalDisabledReason(timedTrade);
+  if (signalDisabledReason) {
+    await writeWalletTradeLog(timedTrade);
+    console.log(`Yellowstone copy trade signal skipped: ${signalDisabledReason}; event=${JSON.stringify(timedTrade)}`);
+    return;
+  }
+
+  const eventId = walletTradeSeenEventId(timedTrade);
   if (rememberEvent(eventId)) {
     return;
   }
 
-  await writeWalletTradeLog(trade);
-  console.log(`Wallet trade event: ${JSON.stringify(trade)}`);
+  await writeWalletTradeLog(timedTrade);
+  console.log(`Wallet trade event: ${JSON.stringify(timedTrade)}`);
 
-  await handleCopyTradeBuyPressureTrade(trade);
+  await handleCopyTradeBuyPressureTrade(timedTrade);
 
   const copyTradeEntries = subscribers
     .list()
@@ -1256,7 +1318,7 @@ async function handleYellowstoneWalletTrade(
     sendCopyTradeSimulationAlert(
       entry.subscriber,
       {
-        ...trade,
+        ...timedTrade,
         label: entry.label
       },
       entry.wallet,
@@ -1271,12 +1333,12 @@ async function handleYellowstoneWalletTrade(
     .list()
     .flatMap((subscriber) =>
       (subscriber.watchedWallets || [])
-        .filter((wallet) => wallet.address === trade.targetWallet)
+        .filter((wallet) => wallet.address === timedTrade.targetWallet)
         .map((wallet) => ({ subscriber, label: wallet.label }))
     );
   await Promise.all(entries.map((entry) =>
     sendWalletTradeAlert(entry.subscriber, {
-      ...trade,
+      ...timedTrade,
       label: entry.label
     })
   ));
@@ -1333,7 +1395,8 @@ async function executeDirectCopyTrade({
   const canaryBlockedReason = directCanaryBlockedReason({
     provider,
     chatId: subscriber.chatId,
-    tradingWalletPublicKey: tradingWallet.publicKey
+    tradingWalletPublicKey: tradingWallet.publicKey,
+    config
   });
   if (canaryBlockedReason) {
     return tradeExecutionSkippedResult({
@@ -1711,7 +1774,8 @@ async function sendCopyTradeSimulationAlert(
     const canaryBlockedReason = directCanaryBlockedReason({
       provider: executionProvider,
       chatId: subscriber.chatId,
-      tradingWalletPublicKey: subscriber.tradingWallet.publicKey
+      tradingWalletPublicKey: subscriber.tradingWallet.publicKey,
+      config
     });
     if (canaryBlockedReason) {
       skipWithLatencyLog(canaryBlockedReason);

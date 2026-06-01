@@ -9,6 +9,7 @@
     "bot": "npm run build && node dist/bot.js",
     "chat-id": "npm run build && node dist/get-chat-id.js",
     "past-migrations": "npm run build && node dist/past-migrations.js",
+    "feed-latency": "node scripts/compare-wallet-feed-latency.mjs",
     "import-subscribers": "npm run build && node dist/import-subscribers.js",
     "check": "tsc --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",

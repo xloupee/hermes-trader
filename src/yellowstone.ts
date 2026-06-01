@@ -7,12 +7,16 @@ import { errorMessage } from "./types.js";
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+const PUMP_AMM_PROGRAM_ID = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
 const PUMP_FUN_FEE_ACCOUNT = "CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM";
 const PUMP_FUN_BUY_DISCRIMINATOR = Buffer.from([102, 6, 61, 18, 1, 218, 235, 234]);
 const PUMP_FUN_SELL_DISCRIMINATOR = Buffer.from([51, 230, 133, 164, 1, 127, 131, 173]);
 const PUMP_FUN_TOKEN_DECIMALS = 6;
 const PUMP_FUN_MINT_ACCOUNT_INDEX = 2;
 const PUMP_FUN_USER_ACCOUNT_INDEX = 6;
+const PUMP_AMM_USER_ACCOUNT_INDEX = 1;
+const PUMP_AMM_BASE_MINT_ACCOUNT_INDEX = 3;
+const PUMP_AMM_QUOTE_MINT_ACCOUNT_INDEX = 4;
 
 export interface YellowstoneWalletMonitor {
   start: () => void;
@@ -46,6 +50,7 @@ interface YellowstoneStream {
 }
 
 interface YellowstoneClient {
+  connect: () => Promise<void>;
   subscribe: () => Promise<YellowstoneStream>;
 }
 
@@ -61,15 +66,42 @@ interface YellowstoneInstruction {
   data: Uint8Array;
 }
 
-interface PumpFunInstructionMatch {
+interface PumpTradeInstructionMatch {
   instruction: YellowstoneInstruction;
+  route: YellowstoneRoute;
   action: Extract<WalletTradeAction, "buy" | "sell">;
+  user: string;
+  mint: string;
+  quoteMint: string | null;
   tokenAmount: number;
   solLamports: number;
 }
 
+type YellowstoneRoute = "pump" | "pump-amm";
+
+interface TokenDelta {
+  mint: string;
+  decimals: number;
+  rawDelta: bigint;
+  amount: number;
+}
+
+interface TokenBalance {
+  mint?: string;
+  owner?: string;
+  uiTokenAmount?: {
+    amount?: string;
+    decimals?: number;
+  };
+}
+
+interface YellowstoneTradeParseResult {
+  trade: WalletTradeData | null;
+  reason: string | null;
+}
+
 export function missingYellowstoneConfigWarning(): string {
-  return "Yellowstone wallet monitor disabled; set YELLOWSTONE_ENABLED=true, YELLOWSTONE_ENDPOINT, and YELLOWSTONE_TOKEN to test QuickNode gRPC.";
+  return "Geyser wallet monitor disabled; set GEYSER_ENABLED=true and GEYSER_GRPC_URL to test Yellowstone gRPC.";
 }
 
 function commitmentLevel(value: BotConfig["yellowstoneCommitment"]): CommitmentLevel {
@@ -84,18 +116,28 @@ function commitmentLevel(value: BotConfig["yellowstoneCommitment"]): CommitmentL
   return CommitmentLevel.PROCESSED;
 }
 
-function buildSubscribeRequest(wallets: string[], commitment: BotConfig["yellowstoneCommitment"]): SubscribeRequest {
+export function buildYellowstoneSubscribeRequest(wallets: string[], commitment: BotConfig["yellowstoneCommitment"]): SubscribeRequest {
+  const accountInclude = [...new Set(wallets.filter(Boolean))].sort();
+
   return {
     accounts: {},
     slots: {},
     transactions: {
-      watchedWallets: {
+      pumpWallets: {
         vote: false,
         failed: false,
         signature: undefined,
-        accountInclude: wallets,
+        accountInclude,
         accountExclude: [],
-        accountRequired: [PUMP_FUN_FEE_ACCOUNT, PUMP_FUN_PROGRAM_ID]
+        accountRequired: [PUMP_FUN_PROGRAM_ID]
+      },
+      pumpAmmWallets: {
+        vote: false,
+        failed: false,
+        signature: undefined,
+        accountInclude,
+        accountExclude: [],
+        accountRequired: [PUMP_AMM_PROGRAM_ID]
       }
     },
     transactionsStatus: {},
@@ -131,7 +173,18 @@ function discriminatorMatches(data: Uint8Array, discriminator: Buffer): boolean 
   return data.length >= discriminator.length && Buffer.from(data.slice(0, discriminator.length)).equals(discriminator);
 }
 
-function pumpFunInstructionMatch(instruction: YellowstoneInstruction): PumpFunInstructionMatch | null {
+function pumpTradeInstructionMatch(instruction: YellowstoneInstruction, accountKeys: string[]): PumpTradeInstructionMatch | null {
+  const programId = accountKeys[instruction.programIdIndex];
+  const route = programId === PUMP_FUN_PROGRAM_ID
+    ? "pump"
+    : programId === PUMP_AMM_PROGRAM_ID
+      ? "pump-amm"
+      : null;
+
+  if (!route) {
+    return null;
+  }
+
   const action = discriminatorMatches(instruction.data, PUMP_FUN_BUY_DISCRIMINATOR)
     ? "buy"
     : discriminatorMatches(instruction.data, PUMP_FUN_SELL_DISCRIMINATOR)
@@ -149,9 +202,28 @@ function pumpFunInstructionMatch(instruction: YellowstoneInstruction): PumpFunIn
     return null;
   }
 
+  const accounts = instructionAccountIndexes(instruction.accounts);
+  const user = route === "pump"
+    ? accountKeys[accounts[PUMP_FUN_USER_ACCOUNT_INDEX]]
+    : accountKeys[accounts[PUMP_AMM_USER_ACCOUNT_INDEX]];
+  const mint = route === "pump"
+    ? accountKeys[accounts[PUMP_FUN_MINT_ACCOUNT_INDEX]]
+    : accountKeys[accounts[PUMP_AMM_BASE_MINT_ACCOUNT_INDEX]];
+  const quoteMint = route === "pump-amm"
+    ? accountKeys[accounts[PUMP_AMM_QUOTE_MINT_ACCOUNT_INDEX]] || null
+    : null;
+
+  if (!user || !mint) {
+    return null;
+  }
+
   return {
     instruction,
+    route,
     action,
+    user,
+    mint,
+    quoteMint,
     tokenAmount: tokenAmountRaw / 10 ** PUMP_FUN_TOKEN_DECIMALS,
     solLamports
   };
@@ -167,11 +239,117 @@ function allInstructions(
   ];
 }
 
-function normalizeYellowstoneTrade(
+function lamports(value: string | number | bigint | undefined): bigint {
+  if (typeof value === "bigint") {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    return BigInt(Math.trunc(value));
+  }
+
+  if (!value) {
+    return 0n;
+  }
+
+  try {
+    return BigInt(value);
+  } catch {
+    return 0n;
+  }
+}
+
+function numberFromRawAmount(rawAmount: bigint, decimals: number): number {
+  return Number(rawAmount) / 10 ** decimals;
+}
+
+function tokenBalanceRawAmount(balance: TokenBalance): bigint {
+  return lamports(balance.uiTokenAmount?.amount);
+}
+
+function tokenBalanceDecimals(balance: TokenBalance): number {
+  return balance.uiTokenAmount?.decimals ?? 0;
+}
+
+function aggregateTokenBalancesByMint(balances: TokenBalance[] | undefined, owner: string): Map<string, { raw: bigint; decimals: number }> {
+  const byMint = new Map<string, { raw: bigint; decimals: number }>();
+
+  for (const balance of balances || []) {
+    if (balance.owner !== owner || !balance.mint || balance.mint === SOL_MINT) {
+      continue;
+    }
+
+    const existing = byMint.get(balance.mint) || { raw: 0n, decimals: tokenBalanceDecimals(balance) };
+    byMint.set(balance.mint, {
+      raw: existing.raw + tokenBalanceRawAmount(balance),
+      decimals: existing.decimals
+    });
+  }
+
+  return byMint;
+}
+
+function tokenDeltas(preBalances: TokenBalance[] | undefined, postBalances: TokenBalance[] | undefined, owner: string): TokenDelta[] {
+  const pre = aggregateTokenBalancesByMint(preBalances, owner);
+  const post = aggregateTokenBalancesByMint(postBalances, owner);
+  const mints = [...new Set([...pre.keys(), ...post.keys()])].sort();
+
+  return mints
+    .map((mint) => {
+      const before = pre.get(mint);
+      const after = post.get(mint);
+      const decimals = after?.decimals ?? before?.decimals ?? 0;
+      const rawDelta = (after?.raw ?? 0n) - (before?.raw ?? 0n);
+
+      return {
+        mint,
+        decimals,
+        rawDelta,
+        amount: numberFromRawAmount(rawDelta < 0n ? -rawDelta : rawDelta, decimals)
+      };
+    })
+    .filter((delta) => delta.rawDelta !== 0n);
+}
+
+function nativeDeltaLamports(accountKeys: string[], preBalances: string[] | undefined, postBalances: string[] | undefined, owner: string): bigint | null {
+  let seen = false;
+  let delta = 0n;
+
+  for (const [index, account] of accountKeys.entries()) {
+    if (account !== owner) {
+      continue;
+    }
+
+    seen = true;
+    delta += lamports(postBalances?.[index]) - lamports(preBalances?.[index]);
+  }
+
+  return seen ? delta : null;
+}
+
+function routeFromPrograms(accountKeys: string[], instructions: YellowstoneInstruction[]): YellowstoneRoute | null {
+  const programIds = new Set(instructions.map((instruction) => accountKeys[instruction.programIdIndex]).filter(Boolean));
+
+  if (programIds.has(PUMP_AMM_PROGRAM_ID)) {
+    return "pump-amm";
+  }
+
+  if (programIds.has(PUMP_FUN_PROGRAM_ID)) {
+    return "pump";
+  }
+
+  return null;
+}
+
+function sourceForRoute(route: YellowstoneRoute): string {
+  return route === "pump-amm" ? "GEYSER_PUMPSWAP" : "GEYSER_PUMP_BONDING_CURVE";
+}
+
+function normalizeYellowstoneTradeResult(
   update: SubscribeUpdate,
   targetWallet: string,
   explorer: YellowstoneWalletMonitorOptions["explorer"]
-): WalletTradeData | null {
+): YellowstoneTradeParseResult {
   const tx = update.transaction;
   const info = tx?.transaction;
   const transaction = info?.transaction;
@@ -179,7 +357,15 @@ function normalizeYellowstoneTrade(
   const meta = info?.meta;
 
   if (!tx || !info || !transaction || !message || !meta) {
-    return null;
+    return { trade: null, reason: "missing transaction payload" };
+  }
+
+  if (info.isVote) {
+    return { trade: null, reason: "vote transaction" };
+  }
+
+  if (meta.err) {
+    return { trade: null, reason: "failed transaction" };
   }
 
   const accountKeys = [
@@ -187,73 +373,155 @@ function normalizeYellowstoneTrade(
     ...decodeKeys(meta.loadedWritableAddresses),
     ...decodeKeys(meta.loadedReadonlyAddresses)
   ];
-  const matches = allInstructions(message.instructions, meta.innerInstructions)
-    .filter((instruction) => accountKeys[instruction.programIdIndex] === PUMP_FUN_PROGRAM_ID)
-    .map(pumpFunInstructionMatch)
-    .filter((match): match is PumpFunInstructionMatch => Boolean(match));
-  const targetMatch = matches.find((match) => {
-    const accounts = instructionAccountIndexes(match.instruction.accounts);
-    const user = accountKeys[accounts[PUMP_FUN_USER_ACCOUNT_INDEX]];
-    return user === targetWallet;
-  });
+  const instructions = allInstructions(message.instructions, meta.innerInstructions);
+  const route = routeFromPrograms(accountKeys, instructions);
 
-  if (!targetMatch) {
-    return null;
+  if (!route) {
+    return { trade: null, reason: "unsupported program" };
   }
 
-  const accounts = instructionAccountIndexes(targetMatch.instruction.accounts);
-  const mint = accountKeys[accounts[PUMP_FUN_MINT_ACCOUNT_INDEX]];
-  const user = accountKeys[accounts[PUMP_FUN_USER_ACCOUNT_INDEX]];
+  const targetTokenDeltas = tokenDeltas(meta.preTokenBalances, meta.postTokenBalances, targetWallet);
+  const targetNativeDelta = nativeDeltaLamports(accountKeys, meta.preBalances, meta.postBalances, targetWallet);
+  const matches = instructions
+    .map((instruction) => pumpTradeInstructionMatch(instruction, accountKeys))
+    .filter((match): match is PumpTradeInstructionMatch => Boolean(match));
+  const targetMatches = matches.filter((match) => match.user === targetWallet);
+  const unsupportedPumpSwapQuote = targetMatches.find((match) => match.route === "pump-amm" && match.quoteMint !== SOL_MINT);
 
-  if (!mint || user !== targetWallet) {
-    return null;
+  if (unsupportedPumpSwapQuote) {
+    return { trade: null, reason: `unsupported PumpSwap quote mint ${unsupportedPumpSwapQuote.quoteMint || "unknown"}` };
+  }
+
+  const distinctTargetMatches = [...new Map(targetMatches.map((match) => [
+    [match.route, match.action, match.mint].join(":"),
+    match
+  ])).values()];
+
+  if (distinctTargetMatches.length === 0) {
+    return { trade: null, reason: "target wallet not matched to pump trade instruction" };
+  }
+
+  if (distinctTargetMatches.length > 1) {
+    return { trade: null, reason: "ambiguous target pump trade instructions" };
+  }
+
+  const targetMatch = distinctTargetMatches[0];
+
+  const relevantTokenDeltas = targetTokenDeltas.length > 0
+    ? targetTokenDeltas
+    : [
+        {
+          mint: targetMatch.mint,
+          decimals: PUMP_FUN_TOKEN_DECIMALS,
+          rawDelta: targetMatch.action === "buy" ? 1n : -1n,
+          amount: targetMatch.tokenAmount
+        }
+      ];
+
+  if (relevantTokenDeltas.length !== 1) {
+    return { trade: null, reason: relevantTokenDeltas.length === 0 ? "missing target token delta" : "ambiguous target token deltas" };
+  }
+
+  const tokenDelta = relevantTokenDeltas[0];
+  const inferredAction =
+    tokenDelta.rawDelta > 0n
+      ? "buy"
+      : tokenDelta.rawDelta < 0n
+        ? "sell"
+        : null;
+  const action = targetMatch.action || inferredAction;
+
+  if (!action) {
+    return { trade: null, reason: "could not infer trade action" };
+  }
+
+  if (targetMatch.action !== inferredAction && targetTokenDeltas.length > 0) {
+    return { trade: null, reason: "target token delta conflicts with pump instruction action" };
   }
 
   const signature = bs58.encode(info.signature);
-  const solAmount = targetMatch.solLamports / LAMPORTS_PER_SOL;
-  const tokenAmount = targetMatch.tokenAmount;
-  const input = targetMatch.action === "buy"
+  const slot = Number(tx.slot);
+  const observedAt = new Date().toISOString();
+  const timestamp = update.createdAt instanceof Date
+    ? Math.floor(update.createdAt.getTime() / 1000)
+    : Math.floor(Date.now() / 1000);
+  const solLamports = targetNativeDelta !== null && targetNativeDelta !== 0n
+    ? (targetNativeDelta < 0n ? -targetNativeDelta : targetNativeDelta)
+    : BigInt(targetMatch.solLamports || 0);
+  const solAmount = Number(solLamports) / LAMPORTS_PER_SOL;
+  const tokenAmount = tokenDelta.amount || targetMatch.tokenAmount || null;
+  const source = sourceForRoute(targetMatch.route);
+  const input = action === "buy"
     ? { mint: SOL_MINT, symbol: "SOL", amount: solAmount }
-    : { mint, symbol: null, amount: tokenAmount };
-  const output = targetMatch.action === "buy"
-    ? { mint, symbol: null, amount: tokenAmount }
+    : { mint: tokenDelta.mint, symbol: null, amount: tokenAmount };
+  const output = action === "buy"
+    ? { mint: tokenDelta.mint, symbol: null, amount: tokenAmount }
     : { mint: SOL_MINT, symbol: "SOL", amount: solAmount };
   const raw: LooseRecord = {
     provider: "yellowstone",
-    parser: "pumpfun-instruction",
-    slot: tx.slot,
+    parser: targetTokenDeltas.length > 0 ? "balance-delta" : "pump-trade-instruction",
+    source,
+    route: targetMatch.route,
+    slot,
     filters: update.filters,
     index: info.index,
     accountKeyCount: accountKeys.length,
     mentionedTargetWallet: targetWallet,
-    instructionAccounts: accounts,
+    targetNativeDeltaLamports: targetNativeDelta?.toString() ?? null,
+    targetTokenDeltas: targetTokenDeltas.map((delta) => ({
+      mint: delta.mint,
+      rawDelta: delta.rawDelta.toString(),
+      decimals: delta.decimals,
+      amount: delta.amount
+    })),
     pumpFunProgramId: PUMP_FUN_PROGRAM_ID,
+    pumpAmmProgramId: PUMP_AMM_PROGRAM_ID,
     pumpFunFeeAccount: PUMP_FUN_FEE_ACCOUNT,
+    targetPumpInstruction: {
+      route: targetMatch.route,
+      action: targetMatch.action,
+      user: targetMatch.user,
+      mint: targetMatch.mint,
+      quoteMint: targetMatch.quoteMint
+    },
+    geyserParser: {
+      action,
+      copyable: action === "buy",
+      reason: null
+    },
     logMessages: meta.logMessages?.slice(0, 20) || []
   };
 
-  return {
-    observedAt: new Date().toISOString(),
+  return { trade: {
+    observedAt,
     provider: "yellowstone",
     targetWallet,
     label: null,
-    action: targetMatch.action,
-    mint,
+    action,
+    mint: tokenDelta.mint,
     signature,
-    timestamp: Math.floor(Date.now() / 1000),
+    timestamp,
     feePayer: accountKeys[0] || null,
-    source: "YELLOWSTONE_PUMPFUN",
+    source,
     input,
     output,
     solAmount,
     tokenAmount,
-    pool: "pump",
+    pool: targetMatch.route,
     marketCapSol: null,
-    pumpFunUrl: `${explorer.pumpFunBaseUrl}/${mint}`,
-    solscanTokenUrl: `${explorer.solscanBaseUrl}/token/${mint}`,
+    pumpFunUrl: `${explorer.pumpFunBaseUrl}/${tokenDelta.mint}`,
+    solscanTokenUrl: `${explorer.solscanBaseUrl}/token/${tokenDelta.mint}`,
     solscanTxUrl: `${explorer.solscanBaseUrl}/tx/${signature}`,
     raw
-  };
+  }, reason: null };
+}
+
+export function normalizeYellowstoneTrade(
+  update: SubscribeUpdate,
+  targetWallet: string,
+  explorer: YellowstoneWalletMonitorOptions["explorer"]
+): WalletTradeData | null {
+  return normalizeYellowstoneTradeResult(update, targetWallet, explorer).trade;
 }
 
 export function createYellowstoneWalletMonitor({
@@ -305,7 +573,7 @@ export function createYellowstoneWalletMonitor({
     clearReconnectTimer();
     destroyStream();
 
-    if (!running || !enabled || !endpoint || !token || activeWallets.length === 0) {
+    if (!running || !enabled || !endpoint || activeWallets.length === 0) {
       return;
     }
 
@@ -313,6 +581,7 @@ export function createYellowstoneWalletMonitor({
       const { default: Client } = await import("@triton-one/yellowstone-grpc");
       const YellowstoneClient = Client as unknown as YellowstoneClientConstructor;
       const client = new YellowstoneClient(endpoint, token, {});
+      await client.connect();
       const nextStream = await client.subscribe();
 
       if (!running || generation !== subscriptionGeneration) {
@@ -324,8 +593,19 @@ export function createYellowstoneWalletMonitor({
       stream.on("data", (update: SubscribeUpdate) => {
         const receivedAtMs = Date.now();
         for (const targetWallet of activeWallets) {
-          const trade = normalizeYellowstoneTrade(update, targetWallet, explorer);
+          const { trade, reason } = normalizeYellowstoneTradeResult(update, targetWallet, explorer);
           if (!trade) {
+            if (reason && update.transaction?.transaction) {
+              onStatus(`Yellowstone wallet trade rejected: ${JSON.stringify({
+                reason,
+                targetWallet,
+                slot: update.transaction.slot,
+                signature: update.transaction.transaction.signature
+                  ? bs58.encode(update.transaction.transaction.signature)
+                  : null,
+                filters: update.filters
+              })}`);
+            }
             continue;
           }
 
@@ -351,7 +631,7 @@ export function createYellowstoneWalletMonitor({
         onStatus("Yellowstone gRPC stream closed");
         scheduleReconnect();
       });
-      stream.write(buildSubscribeRequest(activeWallets, commitment));
+      stream.write(buildYellowstoneSubscribeRequest(activeWallets, commitment));
       onStatus(`Yellowstone gRPC subscribed to ${activeWallets.length} wallet(s) at ${commitment} commitment${shadowOnly ? " in shadow mode" : ""}`);
     } catch (error) {
       onError(new Error(`Yellowstone gRPC connection failed: ${errorMessage(error)}`));
@@ -362,7 +642,7 @@ export function createYellowstoneWalletMonitor({
   return {
     start() {
       running = true;
-      if (!enabled || !endpoint || !token) {
+      if (!enabled || !endpoint) {
         onStatus(missingYellowstoneConfigWarning());
         return;
       }

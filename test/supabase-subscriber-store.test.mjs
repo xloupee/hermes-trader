@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createSupabaseSubscriberStore, importSubscribersToSupabase, subscriberFromRow } from "../dist/subscribers-supabase.js";
+import {
+  copyTradeExecutionRow,
+  createSupabaseSubscriberStore,
+  importSubscribersToSupabase,
+  subscriberFromRow
+} from "../dist/subscribers-supabase.js";
 
 const wallet = "Wallet111111111111111111111111111111111111111";
 const otherWallet = "Other111111111111111111111111111111111111111";
@@ -211,6 +216,72 @@ test("Supabase subscriber store can load stored rows plus explicit seeded chat i
   assert.equal(store.get("seed-chat")?.mode, "migrations");
   const stored = await repository.listSubscribers();
   assert.equal(stored.some((entry) => entry.chatId === "seed-chat"), true);
+});
+
+test("copy trade execution rows include latency dashboard fields and redact secrets", () => {
+  const row = copyTradeExecutionRow({
+    chatId: "chat-1",
+    sourceWalletAddress: wallet,
+    sourceWalletLabel: "Target",
+    tradingWalletPublicKey: otherWallet,
+    mint: "Mint1111111111111111111111111111111111111111",
+    action: "buy",
+    amount: "0.001",
+    denominatedInSol: "true",
+    status: "submitted",
+    signature: "copy-sig",
+    errorText: null,
+    httpStatus: null,
+    observedTrade: {
+      signature: "target-sig",
+      privateKey: "do-not-store"
+    },
+    request: {
+      encryptedSecretKey: "secret"
+    },
+    response: {
+      status: "submitted"
+    },
+    latencySummary: {
+      event: "copy_trade_latency_summary",
+      chatId: "chat-1",
+      sourceWallet: wallet,
+      tradingWallet: otherWallet,
+      observedSignature: "target-sig",
+      mint: "Mint1111111111111111111111111111111111111111",
+      mode: "live",
+      status: "submitted",
+      reason: null,
+      signature: "copy-sig",
+      targetObservedToSubmitMs: 47,
+      targetBlockTimeToSubmitMs: 321,
+      targetSlot: 10,
+      copySlot: 12,
+      slotDelta: 2,
+      buildMs: 21,
+      sendMs: 13,
+      winnerProvider: "pumpportal",
+      sendRpcWinner: "jito-1",
+      sendRpcCount: 4
+    }
+  });
+
+  assert.equal(row.observed_signature, "target-sig");
+  assert.equal(row.target_observed_to_submit_ms, 47);
+  assert.equal(row.target_blocktime_to_submit_ms, 321);
+  assert.equal(row.build_ms, 21);
+  assert.equal(row.send_ms, 13);
+  assert.equal(row.winner_provider, "pumpportal");
+  assert.equal(row.send_rpc_winner, "jito-1");
+  assert.equal(row.send_rpc_count, 4);
+  assert.equal(row.target_slot, 10);
+  assert.equal(row.copy_slot, 12);
+  assert.equal(row.slot_delta, 2);
+  assert.equal(row.latency_status, "submitted");
+  assert.equal(row.latency_summary.signature, "copy-sig");
+  assert.equal(row.response.latencySummary.signature, "copy-sig");
+  assert.equal(row.observed_trade.privateKey, "[redacted]");
+  assert.equal(row.request.encryptedSecretKey, "[redacted]");
 });
 
 test("Supabase subscriber store mirrors JSON store mutations", async () => {

@@ -36,7 +36,10 @@ function claimInput(overrides = {}) {
 
   return {
     ...input,
-    key: overrides.key || copyTradeBuyIdempotencyKey(input)
+    key: overrides.key || copyTradeBuyIdempotencyKey({
+      ...input,
+      allowRepeat: input.retryFailed === true
+    })
   };
 }
 
@@ -85,10 +88,15 @@ function createFakeSupabaseIdempotencyClient(seedRows = [], { semanticUnique = t
           insert(row) {
             const duplicate = rows.some((entry) =>
               entry.idempotency_key === row.idempotency_key ||
-              (semanticUnique &&
-                entry.chat_id === row.chat_id &&
-                entry.mint === row.mint &&
-                entry.action === row.action
+              (
+                semanticUnique
+                  ? entry.chat_id === row.chat_id && entry.mint === row.mint && entry.action === row.action
+                  : (
+                      entry.chat_id === row.chat_id &&
+                      entry.source_wallet_address === row.source_wallet_address &&
+                      entry.observed_signature === row.observed_signature &&
+                      entry.action === row.action
+                    )
               )
             );
 
@@ -351,12 +359,12 @@ test("JSON copy buy idempotency retries failed same mint when enabled", async (t
 
   assert.equal(retry.claimed, true);
   assert.equal(retry.existing, null);
-  assert.equal(stored.records.length, 1);
-  assert.equal(stored.records[0].status, "claimed");
-  assert.equal(stored.records[0].observedSignature, "target-buy-signature-2");
-  assert.equal(stored.records[0].sourceWalletAddress, "RetrySourceWallet11111111111111111111111111");
-  assert.equal(stored.records[0].errorText, null);
-  assert.equal(stored.records[0].claimedAt, "2026-05-24T12:05:00.000Z");
+  assert.equal(stored.records.length, 2);
+  assert.equal(stored.records[1].status, "claimed");
+  assert.equal(stored.records[1].observedSignature, "target-buy-signature-2");
+  assert.equal(stored.records[1].sourceWalletAddress, "RetrySourceWallet11111111111111111111111111");
+  assert.equal(stored.records[1].errorText, null);
+  assert.equal(stored.records[1].claimedAt, "2026-05-24T12:05:00.000Z");
 });
 
 test("JSON copy buy idempotency allows repeat same-mint buys when enabled", async (t) => {
@@ -399,20 +407,19 @@ test("JSON copy buy idempotency allows repeat same-mint buys when enabled", asyn
   assert.equal(stored.records.length, 2);
 });
 
-test("JSON copy buy idempotency retry toggle still blocks claimed and submitted buys", async (t) => {
+test("JSON copy buy idempotency repeat toggle blocks exact replays and allows new observed signatures", async (t) => {
+
   const path = await tempStorePath(t);
   const store = createJsonCopyTradeBuyIdempotencyStore({ path });
+  const firstInput = claimInput({ retryFailed: true });
 
-  assert.equal((await store.claimBuy(claimInput())).claimed, true);
-  const claimedDuplicate = await store.claimBuy(claimInput({
-    observedSignature: "target-buy-signature-2",
-    retryFailed: true
-  }));
+  assert.equal((await store.claimBuy(firstInput)).claimed, true);
+  const claimedDuplicate = await store.claimBuy(claimInput({ retryFailed: true }));
 
   assert.equal(claimedDuplicate.claimed, false);
   assert.equal(claimedDuplicate.existing?.status, "claimed");
 
-  await store.completeBuy(claimInput().key, {
+  await store.completeBuy(firstInput.key, {
     ok: true,
     status: 200,
     signature: "copy-buy-signature-1",
@@ -420,21 +427,26 @@ test("JSON copy buy idempotency retry toggle still blocks claimed and submitted 
     raw: { signature: "copy-buy-signature-1" }
   });
 
-  const submittedDuplicate = await store.claimBuy(claimInput({
-    observedSignature: "target-buy-signature-3",
-    retryFailed: true
-  }));
+  const submittedDuplicate = await store.claimBuy(claimInput({ retryFailed: true }));
 
   assert.equal(submittedDuplicate.claimed, false);
   assert.equal(submittedDuplicate.existing?.status, "submitted");
   assert.equal(submittedDuplicate.existing?.resultSignature, "copy-buy-signature-1");
+
+  const submittedRepeat = await store.claimBuy(claimInput({
+    observedSignature: "target-buy-signature-2",
+    retryFailed: true
+  }));
+
+  assert.equal(submittedRepeat.claimed, true);
+  assert.equal(submittedRepeat.existing, null);
 });
 
-test("Supabase copy buy idempotency retries only failed semantic records when enabled", async () => {
+test("Supabase copy buy idempotency allows repeat same-mint records when enabled", async () => {
   const failedInput = claimInput();
   const fake = createFakeSupabaseIdempotencyClient([
     snakeCaseClaimRow(failedInput, "failed")
-  ]);
+  ], { semanticUnique: false });
   const store = createSupabaseCopyTradeBuyIdempotencyStore({ client: fake.client });
   const retry = await store.claimBuy(claimInput({
     observedSignature: "target-buy-signature-2",
@@ -445,26 +457,29 @@ test("Supabase copy buy idempotency retries only failed semantic records when en
 
   assert.equal(retry.claimed, true);
   assert.equal(retry.existing, null);
-  assert.equal(fake.rows.length, 1);
-  assert.equal(fake.rows[0].status, "claimed");
-  assert.equal(fake.rows[0].idempotency_key, failedInput.key);
-  assert.equal(fake.rows[0].observed_signature, "target-buy-signature-2");
-  assert.equal(fake.rows[0].source_wallet_address, "RetrySourceWallet11111111111111111111111111");
-  assert.equal(fake.rows[0].error_text, null);
-  assert.equal(fake.rows[0].claimed_at, "2026-05-24T12:05:00.000Z");
+  assert.equal(fake.rows.length, 2);
+  assert.equal(fake.rows[1].status, "claimed");
+  assert.equal(fake.rows[1].observed_signature, "target-buy-signature-2");
+  assert.equal(fake.rows[1].source_wallet_address, "RetrySourceWallet11111111111111111111111111");
+  assert.equal(fake.rows[1].error_text, null);
+  assert.equal(fake.rows[1].claimed_at, "2026-05-24T12:05:00.000Z");
 
   const claimedFake = createFakeSupabaseIdempotencyClient([
     snakeCaseClaimRow(claimInput(), "claimed")
-  ]);
+  ], { semanticUnique: false });
   const claimedStore = createSupabaseCopyTradeBuyIdempotencyStore({ client: claimedFake.client });
-  const claimedDuplicate = await claimedStore.claimBuy(claimInput({
+  const claimedRepeat = await claimedStore.claimBuy(claimInput({
     observedSignature: "target-buy-signature-3",
     retryFailed: true
   }));
 
+  assert.equal(claimedRepeat.claimed, true);
+  assert.equal(claimedRepeat.existing, null);
+  assert.equal(claimedFake.rows.length, 2);
+
+  const claimedDuplicate = await claimedStore.claimBuy(claimInput({ retryFailed: true }));
   assert.equal(claimedDuplicate.claimed, false);
   assert.equal(claimedDuplicate.existing?.status, "claimed");
-  assert.equal(claimedFake.rows.length, 1);
   assert.equal(claimedFake.rows[0].observed_signature, "target-buy-signature-1");
 
   const submittedFake = createFakeSupabaseIdempotencyClient([
@@ -472,13 +487,18 @@ test("Supabase copy buy idempotency retries only failed semantic records when en
       ...snakeCaseClaimRow(claimInput(), "submitted"),
       result_signature: "copy-buy-signature-1"
     }
-  ]);
+  ], { semanticUnique: false });
   const submittedStore = createSupabaseCopyTradeBuyIdempotencyStore({ client: submittedFake.client });
-  const submittedDuplicate = await submittedStore.claimBuy(claimInput({
+  const submittedRepeat = await submittedStore.claimBuy(claimInput({
     observedSignature: "target-buy-signature-3",
     retryFailed: true
   }));
 
+  assert.equal(submittedRepeat.claimed, true);
+  assert.equal(submittedRepeat.existing, null);
+  assert.equal(submittedFake.rows.length, 2);
+
+  const submittedDuplicate = await submittedStore.claimBuy(claimInput({ retryFailed: true }));
   assert.equal(submittedDuplicate.claimed, false);
   assert.equal(submittedDuplicate.existing?.status, "submitted");
   assert.equal(submittedDuplicate.existing?.resultSignature, "copy-buy-signature-1");
@@ -554,9 +574,9 @@ test("Supabase copy buy idempotency delegates to JSON fallback when table is una
   const stored = JSON.parse(await readFile(path, "utf8"));
 
   assert.equal(retry.claimed, true);
-  assert.equal(stored.records.length, 1);
-  assert.equal(stored.records[0].observedSignature, "target-buy-signature-2");
-  assert.equal(stored.records[0].status, "claimed");
+  assert.equal(stored.records.length, 2);
+  assert.equal(stored.records[1].observedSignature, "target-buy-signature-2");
+  assert.equal(stored.records[1].status, "claimed");
 });
 
 test("Supabase copy buy idempotency delegates to JSON fallback when provider check is outdated", async (t) => {

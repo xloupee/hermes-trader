@@ -20,6 +20,7 @@
     "test": "npm run build && node --test test/*.test.mjs",
     "wallet-feed-readiness-report": "node scripts/wallet-feed-readiness-report.mjs",
     "wallet-feed-report": "node scripts/wallet-feed-comparison-report.mjs",
+    "copytrade-latency-backfill": "node scripts/backfill-copytrade-latency-dashboard.mjs",
     "cashback-reconciliation-report": "node scripts/cashback-reconciliation-report.mjs",
     "cashback-admin": "npm run build && node dist/cashback-admin.js",
     "stop-local": "bash scripts/stop-local.sh",

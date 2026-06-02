@@ -392,6 +392,29 @@ export interface PumpPortalLightningTradeResult {
 export type CopyTradeExecutionAction = "buy" | "sell";
 export type CopyTradeExecutionStatus = "submitted" | "failed" | "skipped" | "simulated" | "confirmed" | "expired";
 
+export interface CopyTradeLatencySummaryRecord {
+  event: "copy_trade_latency_summary";
+  chatId: string | null;
+  sourceWallet: string | null;
+  tradingWallet: string | null;
+  observedSignature: string | null;
+  mint: string | null;
+  mode: "dry" | "live";
+  status: string;
+  reason: string | null;
+  signature: string | null;
+  targetObservedToSubmitMs: number;
+  targetBlockTimeToSubmitMs: number | null;
+  targetSlot: number | null;
+  copySlot: number | null;
+  slotDelta: number | null;
+  buildMs: number | null;
+  sendMs: number | null;
+  winnerProvider: string | null;
+  sendRpcWinner: string | null;
+  sendRpcCount: number | null;
+}
+
 export interface CopyTradeExecutionRecord {
   chatId: string;
   sourceWalletAddress: string;
@@ -408,6 +431,7 @@ export interface CopyTradeExecutionRecord {
   observedTrade: WalletTradeData;
   request: unknown;
   response: unknown;
+  latencySummary?: CopyTradeLatencySummaryRecord | null;
   trailingSellStepIndex?: number | null;
   trailingSellTotalSteps?: number | null;
   createdAt?: string;
@@ -420,6 +444,7 @@ export interface CopyTradeExecutionStatusUpdate {
   status: CopyTradeExecutionStatus;
   errorText?: string | null;
   response?: unknown;
+  latencySummary?: CopyTradeLatencySummaryRecord | null;
   trailingSellStepIndex?: number | null;
   trailingSellTotalSteps?: number | null;
 }

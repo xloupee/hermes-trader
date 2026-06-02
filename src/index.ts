@@ -194,6 +194,18 @@ function rawListFromEnv(value: string | undefined): string[] {
     : [];
 }
 
+function rawListAllowsAll(values: string[]): boolean {
+  return values.some((value) => value === "*" || value.toLowerCase() === "all");
+}
+
+function formatCanaryListForLog(values: string[]): string | number {
+  if (values.length === 0) {
+    return "none";
+  }
+
+  return rawListAllowsAll(values) ? "all" : values.length;
+}
+
 function diagnosticWalletsFromEnv(value: string | undefined): WatchedWallet[] {
   const now = new Date().toISOString();
 
@@ -786,12 +798,17 @@ function directCanaryBlockedReason({
     return "direct execution requires DIRECT_EXECUTION_ALLOW_ALL_CHATS=true, DIRECT_EXECUTION_CANARY_CHAT_IDS, or DIRECT_EXECUTION_CANARY_WALLETS";
   }
 
-  if (config.directExecutionCanaryChatIds.length > 0 && !config.directExecutionCanaryChatIds.includes(chatId)) {
+  if (
+    config.directExecutionCanaryChatIds.length > 0 &&
+    !rawListAllowsAll(config.directExecutionCanaryChatIds) &&
+    !config.directExecutionCanaryChatIds.includes(chatId)
+  ) {
     return `chat ${chatId} is not in DIRECT_EXECUTION_CANARY_CHAT_IDS`;
   }
 
   if (
     config.directExecutionCanaryWallets.length > 0 &&
+    !rawListAllowsAll(config.directExecutionCanaryWallets) &&
     !config.directExecutionCanaryWallets.includes(tradingWalletPublicKey)
   ) {
     return `trading wallet ${tradingWalletPublicKey} is not in DIRECT_EXECUTION_CANARY_WALLETS`;
@@ -1131,8 +1148,8 @@ function logCopyTradeExecutionState(): void {
       `observedCreatorVaultLookup=${config.directExecutionObservedCreatorVaultLookup ? "true" : "false"}`,
       `sendRpcFanout=${directSolanaSendConnections.length}`,
       `allowAllChats=${config.directExecutionAllowAllChats ? "true" : "false"}`,
-      `canaryChats=${config.directExecutionCanaryChatIds.length || "none"}`,
-      `canaryWallets=${config.directExecutionCanaryWallets.length || "none"}`,
+      `canaryChats=${formatCanaryListForLog(config.directExecutionCanaryChatIds)}`,
+      `canaryWallets=${formatCanaryListForLog(config.directExecutionCanaryWallets)}`,
       `platformFee=${config.platformFeeEnabled ? `${config.platformFeeBps}bps` : "disabled"}`,
       `cashback=${cashbackConfig.enabled ? `${cashbackConfig.feeShareBps}bps` : "disabled"}`
     ].join(" | ")
@@ -2873,7 +2890,8 @@ async function sendCopyTradeSimulationAlert(
       copyTradeWallet,
       tradingWalletPublicKey: subscriber.tradingWallet.publicKey,
       request,
-      result
+      result,
+      latencySummary: submittedLatencySummary
     }).catch((error) => {
       console.warn(`Could not record copy buy execution for ${subscriber.chatId}: ${errorMessage(error)}`);
     });
@@ -3053,13 +3071,15 @@ async function updateRecordedCopyTradeBuyStatus({
   trade,
   buySignature,
   status,
-  errorText = null
+  errorText = null,
+  latencySummary = null
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
   buySignature: string;
   status: Extract<CopyTradeExecutionStatus, "confirmed" | "expired" | "failed">;
   errorText?: string | null;
+  latencySummary?: CopyTradeLatencySummaryMetadata | null;
 }): Promise<void> {
   if (!copyTradeRecorder?.updateCopyTradeExecutionStatus) {
     return;
@@ -3071,7 +3091,8 @@ async function updateRecordedCopyTradeBuyStatus({
       action: "buy",
       signature: buySignature,
       status,
-      errorText
+      errorText,
+      latencySummary
     });
   } catch (error) {
     console.warn(`Could not update copy buy confirmation status for ${subscriber.chatId}:${buySignature}: ${errorMessage(error)}`);
@@ -3111,8 +3132,9 @@ async function watchSubmittedCopyTradeBuy({
   if (!confirmation.confirmed) {
     const errorText = confirmation.errorText || "copy buy was not confirmed before trailing sell scheduling timeout";
     console.warn(`Submitted copy buy did not confirm: ${buySignature}: ${errorText}`);
+    let finalLatencySummary: CopyTradeLatencySummaryMetadata | null = null;
     if (submittedLatencySummary) {
-      logCopyTradeConfirmationLatencySummary(submittedLatencySummary, {
+      finalLatencySummary = logCopyTradeConfirmationLatencySummary(submittedLatencySummary, {
         status: confirmation.timedOut ? "expired" : "failed",
         reason: errorText,
         copySlot: confirmation.slot
@@ -3123,7 +3145,8 @@ async function watchSubmittedCopyTradeBuy({
       trade,
       buySignature,
       status: confirmation.timedOut ? "expired" : "failed",
-      errorText
+      errorText,
+      latencySummary: finalLatencySummary
     });
     await sendCopyTradeBuyConfirmationUpdate({
       subscriber,
@@ -3137,18 +3160,19 @@ async function watchSubmittedCopyTradeBuy({
     return;
   }
 
-  if (submittedLatencySummary) {
-    logCopyTradeConfirmationLatencySummary(submittedLatencySummary, {
+  const finalLatencySummary = submittedLatencySummary
+    ? logCopyTradeConfirmationLatencySummary(submittedLatencySummary, {
       status: "confirmed",
       copySlot: confirmation.slot
-    });
-  }
+    })
+    : null;
 
   await updateRecordedCopyTradeBuyStatus({
     subscriber,
     trade,
     buySignature,
-    status: "confirmed"
+    status: "confirmed",
+    latencySummary: finalLatencySummary
   });
 
   await sendCopyTradeBuyConfirmationUpdate({
@@ -4288,6 +4312,7 @@ async function recordCopyTradeExecution({
   tradingWalletPublicKey,
   request,
   result,
+  latencySummary = null,
   trailingSellStepIndex = null,
   trailingSellTotalSteps = null
 }: {
@@ -4297,6 +4322,7 @@ async function recordCopyTradeExecution({
   tradingWalletPublicKey: string;
   request: PumpPortalLightningTradeRequest;
   result: CopyTradeExecutionResult;
+  latencySummary?: CopyTradeLatencySummaryMetadata | null;
   trailingSellStepIndex?: number | null;
   trailingSellTotalSteps?: number | null;
 }): Promise<void> {
@@ -4333,6 +4359,7 @@ async function recordCopyTradeExecution({
           raw: result.raw
         }
       : result.raw,
+    latencySummary,
     trailingSellStepIndex,
     trailingSellTotalSteps
   };

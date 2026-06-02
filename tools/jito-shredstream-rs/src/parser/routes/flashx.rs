@@ -50,22 +50,26 @@ mod tests {
     use super::*;
     use crate::{
         event::normalized_event,
-        parser::{static_account_keys, FLASHX_ROUTER_PROGRAM_ID, SOL_MINT},
+        parser::{
+            static_account_keys, versioned_tx_signature_string, FLASHX_ROUTER_PROGRAM_ID, SOL_MINT,
+        },
     };
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
     use solana_hash::Hash;
     use solana_message::{legacy::Message, MessageHeader, VersionedMessage};
     use solana_pubkey::Pubkey;
     use solana_transaction::versioned::VersionedTransaction;
     use std::str::FromStr;
 
+    const TARGET_WALLET: &str = "A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS";
+    const FLASHX_MINT: &str = "E3wDF3hJtojFit9RQ1aX3SDiJh5ygYuj2bBPyJfUpump";
+
     #[test]
     fn parses_flashx_pump_buy_from_router_outer_instruction() {
-        let target_wallet = "A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS";
-        let mint = "E3wDF3hJtojFit9RQ1aX3SDiJh5ygYuj2bBPyJfUpump";
-        let transaction = fixture_transaction(Action::Buy, target_wallet, mint);
+        let transaction = fixture_transaction(Action::Buy, TARGET_WALLET, FLASHX_MINT);
         let account_keys = static_account_keys(&transaction);
         let parsed =
-            crate::parser::parse_trade(&transaction, &account_keys, &[target_wallet.to_string()])
+            crate::parser::parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
                 .expect("FLASHX buy should parse");
 
         let event = normalized_event(
@@ -81,11 +85,11 @@ mod tests {
         assert_eq!(value["schema"], "copytrade.feed.event.v1");
         assert_eq!(value["action"], "buy");
         assert_eq!(value["route"], "flashx-pump");
-        assert_eq!(value["targetWallet"], target_wallet);
-        assert_eq!(value["mint"], mint);
+        assert_eq!(value["targetWallet"], TARGET_WALLET);
+        assert_eq!(value["mint"], FLASHX_MINT);
         assert_eq!(value["copyable"], true);
         assert_eq!(value["input"]["mint"], SOL_MINT);
-        assert_eq!(value["output"]["mint"], mint);
+        assert_eq!(value["output"]["mint"], FLASHX_MINT);
         assert!((value["solAmount"].as_f64().unwrap() - 0.00099).abs() < f64::EPSILON);
         assert!(value.get("tokenAmount").is_none());
         assert!(value["output"].get("amount").is_none());
@@ -93,12 +97,10 @@ mod tests {
 
     #[test]
     fn parses_flashx_pump_sell_from_router_outer_instruction() {
-        let target_wallet = "A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS";
-        let mint = "E3wDF3hJtojFit9RQ1aX3SDiJh5ygYuj2bBPyJfUpump";
-        let transaction = fixture_transaction(Action::Sell, target_wallet, mint);
+        let transaction = fixture_transaction(Action::Sell, TARGET_WALLET, FLASHX_MINT);
         let account_keys = static_account_keys(&transaction);
         let parsed =
-            crate::parser::parse_trade(&transaction, &account_keys, &[target_wallet.to_string()])
+            crate::parser::parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
                 .expect("FLASHX sell should parse");
 
         let event = normalized_event(
@@ -114,11 +116,108 @@ mod tests {
         assert_eq!(value["action"], "sell");
         assert_eq!(value["route"], "flashx-pump");
         assert_eq!(value["copyable"], false);
-        assert_eq!(value["input"]["mint"], mint);
+        assert_eq!(value["input"]["mint"], FLASHX_MINT);
         assert_eq!(value["output"]["mint"], SOL_MINT);
         assert!((value["tokenAmount"].as_f64().unwrap() - 104_905.207_774).abs() < f64::EPSILON);
         assert!(value.get("solAmount").is_none());
         assert!(value["output"].get("amount").is_none());
+    }
+
+    #[test]
+    fn replays_real_flashx_router_transactions_from_raw_bytes() {
+        let cases = [
+            ReplayCase {
+                signature: "2vA8ofU1vmTTnqLUwD8c8gj3ShPG4nTovgFvMaxMP5EMHtCKZ1bm4jVQmS9AjaSTseRApW5ZsbPRHk8rwnSkLzVf",
+                fixture: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/flashx/buy-2vA8ofU1vmTTnqLUwD8c8gj3ShPG4nTovgFvMaxMP5EMHtCKZ1bm4jVQmS9AjaSTseRApW5ZsbPRHk8rwnSkLzVf.tx.base64"
+                )),
+                action: Action::Buy,
+                sol_amount: Some(0.00099),
+                token_amount: None,
+                copyable: true,
+            },
+            ReplayCase {
+                signature: "iuJwKCiEDeaKZ4C3FMPZ8hSNh93fsdK1fXJCZYxRhjLxyFmGjA3v83ipgoqJECtMwZFVQtgKgW8S46JLy7xx8Wy",
+                fixture: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/flashx/buy-iuJwKCiEDeaKZ4C3FMPZ8hSNh93fsdK1fXJCZYxRhjLxyFmGjA3v83ipgoqJECtMwZFVQtgKgW8S46JLy7xx8Wy.tx.base64"
+                )),
+                action: Action::Buy,
+                sol_amount: Some(0.00099),
+                token_amount: None,
+                copyable: true,
+            },
+            ReplayCase {
+                signature: "4m7URrfKhTFWVFuQfyBDMaYDGbKMWLrEeLn3XmB4PPHmPSBeiu18uZyukBXSHd22oqLUXtuqvpHuCjFiu7VPzCF6",
+                fixture: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/flashx/sell-4m7URrfKhTFWVFuQfyBDMaYDGbKMWLrEeLn3XmB4PPHmPSBeiu18uZyukBXSHd22oqLUXtuqvpHuCjFiu7VPzCF6.tx.base64"
+                )),
+                action: Action::Sell,
+                sol_amount: None,
+                token_amount: Some(104_905.207_774),
+                copyable: false,
+            },
+        ];
+
+        for case in cases {
+            let transaction = replay_transaction(case.fixture);
+            assert_eq!(versioned_tx_signature_string(&transaction), case.signature);
+
+            let account_keys = static_account_keys(&transaction);
+            let parsed = crate::parser::parse_trade(
+                &transaction,
+                &account_keys,
+                &[TARGET_WALLET.to_string()],
+            )
+            .expect("real FLASHX replay should parse");
+
+            let event = normalized_event(
+                123,
+                "replay".to_string(),
+                case.signature.to_string(),
+                456,
+                account_keys.len(),
+                parsed,
+            );
+            let value = serde_json::to_value(event).expect("event serializes");
+
+            assert_eq!(value["schema"], "copytrade.feed.event.v1");
+            assert_eq!(value["signature"], case.signature);
+            assert_eq!(value["targetWallet"], TARGET_WALLET);
+            assert_eq!(value["action"], serde_json::to_value(case.action).unwrap());
+            assert_eq!(value["route"], "flashx-pump");
+            assert_eq!(value["mint"], FLASHX_MINT);
+            assert_eq!(value["copyable"], case.copyable);
+            assert_optional_amount(&value, "solAmount", case.sol_amount);
+            assert_optional_amount(&value, "tokenAmount", case.token_amount);
+        }
+    }
+
+    struct ReplayCase {
+        signature: &'static str,
+        fixture: &'static str,
+        action: Action,
+        sol_amount: Option<f64>,
+        token_amount: Option<f64>,
+        copyable: bool,
+    }
+
+    fn replay_transaction(base64_fixture: &str) -> VersionedTransaction {
+        let compact = base64_fixture.split_whitespace().collect::<String>();
+        let bytes = STANDARD.decode(compact).expect("fixture is valid base64");
+        bincode::deserialize(&bytes).expect("fixture decodes as a VersionedTransaction")
+    }
+
+    fn assert_optional_amount(value: &serde_json::Value, field: &str, expected: Option<f64>) {
+        match expected {
+            Some(expected) => {
+                let actual = value[field].as_f64().expect("amount should be present");
+                assert!((actual - expected).abs() < f64::EPSILON);
+            }
+            None => assert!(value.get(field).is_none()),
+        }
     }
 
     fn fixture_transaction(

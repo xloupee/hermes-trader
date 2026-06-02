@@ -25,6 +25,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tonic = "0.14"
 tonic-prost = "0.14"
 
+[dev-dependencies]
+base64 = "0.22"
+
 [build-dependencies]
 protoc-bin-vendored = "3"
 tonic-prost-build = "0.14"

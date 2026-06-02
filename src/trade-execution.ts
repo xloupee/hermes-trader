@@ -94,6 +94,9 @@ export interface DirectExecutionTimingMetadata {
   blockhashCacheMs: number | null;
   rawSendRpcCount: number | null;
   rawSendWinner: string | null;
+  rawSendJitoEnabled: boolean | null;
+  rawSendJitoRpcCount: number | null;
+  rawSendJitoWinner: boolean | null;
   rawSendErrors: Array<{ label: string; errorText: string }> | null;
   instructionCount: number | null;
   txBytes: number | null;
@@ -126,7 +129,7 @@ export function normalizeTradeExecutionProvider(value: string | null | undefined
 
 export function parseTradeExecutionProvider(
   value: string | null | undefined,
-  fallback: TradeExecutionProvider = "pumpportal-lightning"
+  fallback: TradeExecutionProvider = "direct-auto"
 ): TradeExecutionProvider {
   return normalizeTradeExecutionProvider(value) || fallback;
 }
@@ -322,6 +325,8 @@ export function formatTradeExecutionResultLog(result: TradeExecutionResult): str
       rawSendMs?: unknown;
       rawSendWinner?: unknown;
       rawSendRpcCount?: unknown;
+      rawSendJitoEnabled?: unknown;
+      rawSendJitoWinner?: unknown;
     });
     if (typeof durations.timeToSignatureMs === "number") {
       parts.push(`timeToSignatureMs=${durations.timeToSignatureMs}`);
@@ -334,6 +339,12 @@ export function formatTradeExecutionResultLog(result: TradeExecutionResult): str
     }
     if (typeof durations.rawSendRpcCount === "number") {
       parts.push(`rawSendRpcCount=${durations.rawSendRpcCount}`);
+    }
+    if (typeof durations.rawSendJitoEnabled === "boolean") {
+      parts.push(`jitoSend=${durations.rawSendJitoEnabled ? "enabled" : "off"}`);
+    }
+    if (durations.rawSendJitoWinner === true) {
+      parts.push("jitoWinner=true");
     }
     if (typeof durations.confirmationMs === "number") {
       parts.push(`confirmationMs=${durations.confirmationMs}`);

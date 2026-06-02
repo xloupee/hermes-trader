@@ -942,8 +942,8 @@ test("Solana direct sender can fan out raw sends and returns the first RPC signa
           }
         },
         {
-          label: "fanout-1",
-          url: "https://fanout.example",
+          label: "jito-1",
+          url: "https://jito.example/api/v1/transactions",
           connection: {
             sendRawTransaction: () => "signature-fanout"
           }
@@ -956,8 +956,12 @@ test("Solana direct sender can fan out raw sends and returns the first RPC signa
   assert.equal(result.ok, true);
   assert.equal(result.signature, "signature-fanout");
   assert.equal(result.metadata.directSolanaTiming.rawSendRpcCount, 2);
-  assert.equal(result.metadata.directSolanaTiming.rawSendWinner, "fanout-1");
+  assert.equal(result.metadata.directSolanaTiming.rawSendWinner, "jito-1");
+  assert.equal(result.metadata.directSolanaTiming.rawSendJitoEnabled, true);
+  assert.equal(result.metadata.directSolanaTiming.rawSendJitoRpcCount, 1);
+  assert.equal(result.metadata.directSolanaTiming.rawSendJitoWinner, true);
   assert.equal(stages.find((stage) => stage.stage === "raw_send_started").rpcCount, 2);
+  assert.equal(stages.find((stage) => stage.stage === "raw_send_started").jitoRpcCount, 1);
 });
 
 test("Solana direct send connection builder dedupes primary and labels fanout/Jito RPCs", async () => {

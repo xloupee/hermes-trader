@@ -428,6 +428,7 @@ export interface DirectSolanaSendStageDetails {
   status?: string;
   errorText?: string;
   rpcCount?: number;
+  jitoRpcCount?: number;
   sendRpcLabel?: string;
   sendRpcUrl?: string | null;
   sendRpcErrors?: Array<{ label: string; errorText: string }>;
@@ -1831,6 +1832,11 @@ function directSolanaTimingMetadata(stages: DirectSolanaSendStageRecord[]): Dire
     const record = [...stages].reverse().find((candidate) => candidate.stage === stage);
     return record && record[key] !== undefined ? record[key] : null;
   };
+  const rawSendStartedRecord = [...stages].reverse().find((candidate) => candidate.stage === "raw_send_started");
+  const rawSendWinner = stageDetail("signature_returned", "sendRpcLabel");
+  const rawSendJitoEnabled = rawSendStartedRecord?.jitoRpcCount !== undefined
+    ? Number(rawSendStartedRecord.jitoRpcCount) > 0
+    : null;
 
   return {
     stages: stages.map((stage) => ({ ...stage })),
@@ -1864,7 +1870,10 @@ function directSolanaTimingMetadata(stages: DirectSolanaSendStageRecord[]): Dire
     maxRetries: null,
     blockhashCacheMs: null,
     rawSendRpcCount: stageDetail("raw_send_started", "rpcCount") ?? null,
-    rawSendWinner: stageDetail("signature_returned", "sendRpcLabel") ?? null,
+    rawSendWinner: rawSendWinner ?? null,
+    rawSendJitoEnabled,
+    rawSendJitoRpcCount: rawSendStartedRecord?.jitoRpcCount ?? null,
+    rawSendJitoWinner: typeof rawSendWinner === "string" ? rawSendWinner.startsWith("jito-") : null,
     rawSendErrors: stageDetail("signature_returned", "sendRpcErrors") ?? stageDetail("raw_send_failed", "sendRpcErrors") ?? null,
     instructionCount: stageDetail("transaction_build_started", "instructionCount") ?? null,
     txBytes: stageDetail("signature_returned", "txBytes") ?? stageDetail("raw_send_failed", "txBytes") ?? null,
@@ -2744,7 +2753,8 @@ export async function sendSolanaDirectTransaction({
         blockhash,
         lastValidBlockHeight,
         txBytes: serializedTransaction.length,
-        rpcCount: config.sendConnections?.length || 1
+        rpcCount: config.sendConnections?.length || 1,
+        jitoRpcCount: (config.sendConnections || []).filter((candidate) => candidate.label.startsWith("jito-")).length
       });
       const sendResult = await sendRawTransactionFanout({
         primaryConnection: connection,
@@ -2773,6 +2783,7 @@ export async function sendSolanaDirectTransaction({
         lastValidBlockHeight,
         txBytes: serializedTransaction.length,
         rpcCount: config.sendConnections?.length || 1,
+        jitoRpcCount: (config.sendConnections || []).filter((candidate) => candidate.label.startsWith("jito-")).length,
         sendRpcErrors,
         status: "failed",
         errorText: error instanceof Error ? error.message : String(error)

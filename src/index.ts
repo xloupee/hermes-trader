@@ -77,7 +77,6 @@ import {
   buildPumpPortalLightningBuyRequest,
   buildPumpPortalLightningSellRequest,
   createPumpPortalMigrationListener,
-  executePumpPortalLightningTrade,
   PUMPPORTAL_CREATE_WALLET_URL,
   PUMPPORTAL_LIGHTNING_TRADE_URL,
   PUMPPORTAL_TRADE_LOCAL_URL
@@ -1147,6 +1146,9 @@ function logCopyTradeExecutionState(): void {
       `sdkWarmMs=${config.directExecutionSdkWarmIntervalMs}`,
       `observedCreatorVaultLookup=${config.directExecutionObservedCreatorVaultLookup ? "true" : "false"}`,
       `sendRpcFanout=${directSolanaSendConnections.length}`,
+      `jitoSend=${config.directExecutionJitoSendUrls.length > 0 ? "enabled" : "off"}`,
+      `jitoSendEndpoints=${config.directExecutionJitoSendUrls.length}`,
+      `jitoAuth=${config.directExecutionJitoAuthUuid ? "set" : "not_set"}`,
       `allowAllChats=${config.directExecutionAllowAllChats ? "true" : "false"}`,
       `canaryChats=${formatCanaryListForLog(config.directExecutionCanaryChatIds)}`,
       `canaryWallets=${formatCanaryListForLog(config.directExecutionCanaryWallets)}`,
@@ -2323,30 +2325,15 @@ async function executeCopyTradeBuy({
   onLatencyMilestone?: (milestone: CopyTradeLatencyMilestone, details?: CopyTradeLatencyMilestoneDetails) => void;
 }): Promise<CopyTradeExecutionResult> {
   if (!isDirectTradeExecutionProvider(provider)) {
-    if (platformFee.enabled) {
-      return tradeExecutionSkippedResult({
-        provider: "pumpportal-lightning",
-        route: "pumpportal-lightning",
-        reason: "PLATFORM_FEE_ENABLED requires a direct execution provider",
-        platformFee: platformFeeResultFields(platformFee),
-        metadata: { observedSignature: trade.signature }
-      });
-    }
-
-    if (subscriber.tradingWallet?.provider === "local-solana") {
-      return tradeExecutionSkippedResult({
-        provider: "pumpportal-lightning",
-        route: "pumpportal-lightning",
-        reason: "PumpPortal Lightning execution requires a PumpPortal-backed trading wallet",
-        metadata: { observedSignature: trade.signature }
-      });
-    }
-
-    const apiKey = decryptSecret(subscriber.tradingWallet?.encryptedApiKey || "", config.pumpPortalWalletKeyEncryptionSecret || "");
-    return executePumpPortalLightningTrade({
-      url: config.pumpPortalLightningTradeUrl,
-      apiKey,
-      request
+    return tradeExecutionSkippedResult({
+      provider: "pumpportal-lightning",
+      route: "pumpportal-lightning",
+      reason: "PumpPortal Lightning copytrade execution is disabled; use a direct execution provider",
+      platformFee: platformFee.enabled ? platformFeeResultFields(platformFee) : null,
+      metadata: {
+        observedSignature: trade.signature,
+        requestedProvider: provider
+      }
     });
   }
 
@@ -2395,37 +2382,19 @@ async function executeCopyTradeSell({
   platformFee: ReturnType<typeof calculatePlatformFeeSplit>;
 }): Promise<{ result: CopyTradeExecutionResult; duplicateSignature: boolean }> {
   if (!isDirectTradeExecutionProvider(provider)) {
-    if (platformFee.enabled) {
-      return {
-        result: tradeExecutionSkippedResult({
-          provider: "pumpportal-lightning",
-          route: "pumpportal-lightning",
-          reason: "PLATFORM_FEE_ENABLED requires a direct execution provider",
-          platformFee: platformFeeResultFields(platformFee),
-          metadata: { observedSignature: trade.signature }
-        }),
-        duplicateSignature: false
-      };
-    }
-
-    if (subscriber.tradingWallet?.provider === "local-solana") {
-      return {
-        result: tradeExecutionSkippedResult({
-          provider: "pumpportal-lightning",
-          route: "pumpportal-lightning",
-          reason: "PumpPortal Lightning execution requires a PumpPortal-backed trading wallet",
-          metadata: { observedSignature: trade.signature }
-        }),
-        duplicateSignature: false
-      };
-    }
-
-    const apiKey = decryptSecret(subscriber.tradingWallet?.encryptedApiKey || "", config.pumpPortalWalletKeyEncryptionSecret || "");
-    return executeTrailingSellWithDuplicateRetry({
-      apiKey,
-      request,
-      seenSellSignatures
-    });
+    return {
+      result: tradeExecutionSkippedResult({
+        provider: "pumpportal-lightning",
+        route: "pumpportal-lightning",
+        reason: "PumpPortal Lightning copytrade execution is disabled; use a direct execution provider",
+        platformFee: platformFee.enabled ? platformFeeResultFields(platformFee) : null,
+        metadata: {
+          observedSignature: trade.signature,
+          requestedProvider: provider
+        }
+      }),
+      duplicateSignature: false
+    };
   }
 
   const percentBasisPoints = percentAmountToBasisPoints(request.amount);
@@ -4171,69 +4140,6 @@ async function buildAndNotifyTrailingSell({
   }
 
   return result;
-}
-
-async function executeTrailingSellWithDuplicateRetry({
-  apiKey,
-  request,
-  seenSellSignatures
-}: {
-  apiKey: string;
-  request: PumpPortalLightningTradeRequest;
-  seenSellSignatures: Set<string>;
-}): Promise<{ result: PumpPortalLightningTradeResult; duplicateSignature: boolean }> {
-  let duplicateSignature = false;
-  let result: PumpPortalLightningTradeResult | null = null;
-
-  for (let attempt = 0; attempt < 12; attempt += 1) {
-    const blockedReason = copyTradeLiveExecutionBlockedReason(copyTradeExecutionModeConfig());
-    if (blockedReason) {
-      result = {
-        ok: false,
-        status: null,
-        signature: null,
-        errorText: `Trailing sell skipped: ${blockedReason}`,
-        raw: null
-      };
-      break;
-    }
-
-    result = await executePumpPortalLightningTrade({
-      url: config.pumpPortalLightningTradeUrl,
-      apiKey,
-      request
-    });
-    duplicateSignature = Boolean(result.ok && result.signature && seenSellSignatures.has(result.signature));
-
-    if (isTokenAccountNotReadyError(result) && attempt < 11) {
-      console.warn(`PumpPortal could not find token account for trailing sell; retrying after account indexing delay`);
-      await trackedDelay(3000);
-      continue;
-    }
-
-    if (!duplicateSignature || !result.signature || attempt === 2) {
-      break;
-    }
-
-    console.warn(`PumpPortal returned duplicate trailing sell signature ${result.signature}; retrying after confirmation delay`);
-    await waitForSignatureConfirmation(result.signature);
-    await trackedDelay(5000);
-  }
-
-  return {
-    result: result || {
-      ok: false,
-      status: null,
-      signature: null,
-      errorText: "Trailing sell request was not submitted",
-      raw: null
-    },
-    duplicateSignature
-  };
-}
-
-function isTokenAccountNotReadyError(result: PumpPortalLightningTradeResult): boolean {
-  return !result.ok && /could not find account|token account balance/i.test(result.errorText || "");
 }
 
 function trackedDelay(ms: number): Promise<void> {

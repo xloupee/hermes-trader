@@ -12,10 +12,10 @@ import {
   tradeExecutionSkippedResult
 } from "../dist/trade-execution.js";
 
-test("trade execution provider parsing defaults safely to PumpPortal Lightning", () => {
-  assert.equal(parseTradeExecutionProvider(null), "pumpportal-lightning");
+test("trade execution provider parsing defaults to direct auto execution", () => {
+  assert.equal(parseTradeExecutionProvider(null), "direct-auto");
   assert.equal(parseTradeExecutionProvider(" DIRECT-PUMP "), "direct-pump");
-  assert.equal(parseTradeExecutionProvider("nope"), "pumpportal-lightning");
+  assert.equal(parseTradeExecutionProvider("nope"), "direct-auto");
   assert.equal(tradeExecutionProviderConfigError("nope")?.includes("unsupported trade execution provider"), true);
   assert.equal(tradeExecutionProviderConfigError("direct-pumpswap"), null);
 });
@@ -169,8 +169,11 @@ test("provider-neutral result log includes raw send fanout timing", () => {
       directSolanaTiming: {
         timeToSignatureMs: 88,
         rawSendMs: 17,
-        rawSendWinner: "fanout-1",
-        rawSendRpcCount: 4
+        rawSendWinner: "jito-1",
+        rawSendRpcCount: 4,
+        rawSendJitoEnabled: true,
+        rawSendJitoRpcCount: 1,
+        rawSendJitoWinner: true
       }
     }
   });
@@ -178,8 +181,10 @@ test("provider-neutral result log includes raw send fanout timing", () => {
   const log = formatTradeExecutionResultLog(result);
   assert.match(log, /timeToSignatureMs=88/);
   assert.match(log, /rawSendMs=17/);
-  assert.match(log, /rawSendWinner=fanout-1/);
+  assert.match(log, /rawSendWinner=jito-1/);
   assert.match(log, /rawSendRpcCount=4/);
+  assert.match(log, /jitoSend=enabled/);
+  assert.match(log, /jitoWinner=true/);
 });
 
 test("provider-neutral result log includes PumpSwap build timing", () => {

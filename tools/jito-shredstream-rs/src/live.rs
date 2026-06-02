@@ -1,7 +1,11 @@
 use crate::{
-    event::{normalized_event, now_ms, print_json, RejectionLine, WalletMentionLine},
+    event::{
+        normalized_event, now_ms, print_json, wallet_mention_schema, RejectionLine,
+        WalletMentionLine,
+    },
     parser::{
-        mentioned_target_wallet, parse_trade, static_account_keys, versioned_tx_signature_string,
+        classify_wallet_mention, mentioned_target_wallet, parse_trade, static_account_keys,
+        versioned_tx_signature_string,
     },
     proto::jito_shredstream::{
         shredstream_proxy_client::ShredstreamProxyClient, SubscribeEntriesRequest,
@@ -114,8 +118,10 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                         if let Some(target_wallet) =
                             mentioned_target_wallet(&account_keys, &target_wallets)
                         {
+                            let classification =
+                                classify_wallet_mention(&versioned_tx, &account_keys);
                             print_json(&WalletMentionLine {
-                                schema: "copytrade.feed.walletMention.v1",
+                                schema: wallet_mention_schema(classification.kind),
                                 observed_at_ms: now_ms(),
                                 provider: "shredstream",
                                 source: "jito-proxy",
@@ -123,6 +129,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 target_wallet,
                                 signature,
                                 slot: slot_entry.slot,
+                                reason: classification.reason,
                                 account_key_count: account_keys.len(),
                             })?;
                         }

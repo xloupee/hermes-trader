@@ -5,6 +5,11 @@ use std::collections::HashSet;
 pub(crate) mod routes;
 
 pub(crate) const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
+pub(crate) const SYSTEM_PROGRAM_ID: &str = "11111111111111111111111111111111";
+pub(crate) const COMPUTE_BUDGET_PROGRAM_ID: &str = "ComputeBudget111111111111111111111111111111";
+pub(crate) const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+pub(crate) const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+pub(crate) const ASSOCIATED_TOKEN_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 pub(crate) const PUMP_FUN_PROGRAM_ID: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 pub(crate) const PUMP_AMM_PROGRAM_ID: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
 pub(crate) const FLASHX_ROUTER_PROGRAM_ID: &str = "FLASHX8DrLbgeR8FcfNV1F5krxYcYMUdBkrP1EPBtxB9";
@@ -36,6 +41,19 @@ pub(crate) struct ParsedTrade {
     pub(crate) route: Route,
     pub(crate) sol_amount: Option<f64>,
     pub(crate) token_amount: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WalletMentionKind {
+    NonTrade,
+    UnsupportedRoute,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WalletMentionClassification {
+    pub(crate) kind: WalletMentionKind,
+    pub(crate) reason: String,
 }
 
 pub(crate) fn parse_trade(
@@ -76,6 +94,51 @@ pub(crate) fn mentioned_target_wallet(
         .cloned()
 }
 
+pub(crate) fn classify_wallet_mention(
+    versioned_tx: &VersionedTransaction,
+    account_keys: &[String],
+) -> WalletMentionClassification {
+    let mut programs = Vec::new();
+    for instruction in versioned_tx.message.instructions() {
+        if let Some(program_id) = account_keys.get(instruction.program_id_index as usize) {
+            programs.push(program_id.as_str());
+        }
+    }
+
+    if programs.is_empty() {
+        return WalletMentionClassification {
+            kind: WalletMentionKind::Unknown,
+            reason: "no outer instructions".to_string(),
+        };
+    }
+
+    if programs
+        .iter()
+        .all(|program_id| is_non_trade_program(program_id))
+    {
+        return WalletMentionClassification {
+            kind: WalletMentionKind::NonTrade,
+            reason: "only system/compute/token housekeeping programs".to_string(),
+        };
+    }
+
+    if programs
+        .iter()
+        .any(|program_id| is_supported_trade_program(program_id))
+    {
+        return WalletMentionClassification {
+            kind: WalletMentionKind::UnsupportedRoute,
+            reason: "supported trade program mentioned but account/data layout did not parse"
+                .to_string(),
+        };
+    }
+
+    WalletMentionClassification {
+        kind: WalletMentionKind::Unknown,
+        reason: "target wallet mentioned by unsupported non-housekeeping program".to_string(),
+    }
+}
+
 pub(crate) fn static_account_keys(versioned_tx: &VersionedTransaction) -> Vec<String> {
     versioned_tx
         .message
@@ -112,9 +175,28 @@ pub(crate) fn read_u64_le(data: &[u8], offset: usize) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.try_into().ok()?))
 }
 
+fn is_non_trade_program(program_id: &str) -> bool {
+    matches!(
+        program_id,
+        SYSTEM_PROGRAM_ID
+            | COMPUTE_BUDGET_PROGRAM_ID
+            | TOKEN_PROGRAM_ID
+            | TOKEN_2022_PROGRAM_ID
+            | ASSOCIATED_TOKEN_PROGRAM_ID
+    )
+}
+
+fn is_supported_trade_program(program_id: &str) -> bool {
+    matches!(
+        program_id,
+        PUMP_FUN_PROGRAM_ID | PUMP_AMM_PROGRAM_ID | FLASHX_ROUTER_PROGRAM_ID
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
     use solana_hash::Hash;
     use solana_message::{
         compiled_instruction::CompiledInstruction, legacy::Message, MessageHeader, VersionedMessage,
@@ -152,6 +234,111 @@ mod tests {
             mentioned_target_wallet(&account_keys, &[target_wallet.to_string()]),
             Some(target_wallet.to_string())
         );
+    }
+
+    #[test]
+    fn classifies_system_only_wallet_mention_as_non_trade() {
+        let target_wallet = "CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o";
+        let transaction = VersionedTransaction {
+            signatures: vec![],
+            message: VersionedMessage::Legacy(Message {
+                header: MessageHeader {
+                    num_required_signatures: 0,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                account_keys: vec![
+                    pubkey(target_wallet),
+                    pubkey("SysvarRent111111111111111111111111111111111"),
+                    pubkey(SYSTEM_PROGRAM_ID),
+                ],
+                recent_blockhash: Hash::default(),
+                instructions: vec![CompiledInstruction {
+                    program_id_index: 2,
+                    accounts: vec![1, 0],
+                    data: vec![1, 2, 3],
+                }],
+            }),
+        };
+        let account_keys = static_account_keys(&transaction);
+
+        assert_eq!(
+            classify_wallet_mention(&transaction, &account_keys).kind,
+            WalletMentionKind::NonTrade
+        );
+    }
+
+    #[test]
+    fn classifies_supported_trade_program_parse_miss_as_unsupported_route() {
+        let target_wallet = "CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o";
+        let transaction = VersionedTransaction {
+            signatures: vec![],
+            message: VersionedMessage::Legacy(Message {
+                header: MessageHeader {
+                    num_required_signatures: 0,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                account_keys: vec![pubkey(target_wallet), pubkey(PUMP_FUN_PROGRAM_ID)],
+                recent_blockhash: Hash::default(),
+                instructions: vec![CompiledInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0],
+                    data: vec![1, 2, 3],
+                }],
+            }),
+        };
+        let account_keys = static_account_keys(&transaction);
+
+        assert_eq!(
+            classify_wallet_mention(&transaction, &account_keys).kind,
+            WalletMentionKind::UnsupportedRoute
+        );
+    }
+
+    #[test]
+    fn replays_live_mention_misses_as_non_trade_system_fanout() {
+        let cases = [
+            (
+                "SvXrppD5RmfngsWtVH72fVT45B4eUnVCdszjkjeic3BM3oRQrucgJxkxX5TSVw8iQvCG2HjzvpLRxcBjN1CfQJB",
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/nontrade/system-fanout-SvXrppD5RmfngsWtVH72fVT45B4eUnVCdszjkjeic3BM3oRQrucgJxkxX5TSVw8iQvCG2HjzvpLRxcBjN1CfQJB.tx.base64"
+                )),
+            ),
+            (
+                "2tdBpJVSa33CD2tFgva41Dv2Vivwb9tfKNc2yPDBHd9oeWfdHXv2ykSKsJfPDdq3UCu9wHUqm818iyUFzDhKyNMd",
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/nontrade/system-fanout-2tdBpJVSa33CD2tFgva41Dv2Vivwb9tfKNc2yPDBHd9oeWfdHXv2ykSKsJfPDdq3UCu9wHUqm818iyUFzDhKyNMd.tx.base64"
+                )),
+            ),
+        ];
+
+        let target_wallet = "A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS";
+        for (signature, fixture) in cases {
+            let transaction = replay_transaction(fixture);
+            assert_eq!(versioned_tx_signature_string(&transaction), signature);
+
+            let account_keys = static_account_keys(&transaction);
+            assert!(
+                parse_trade(&transaction, &account_keys, &[target_wallet.to_string()]).is_none()
+            );
+            assert_eq!(
+                mentioned_target_wallet(&account_keys, &[target_wallet.to_string()]),
+                Some(target_wallet.to_string())
+            );
+            assert_eq!(
+                classify_wallet_mention(&transaction, &account_keys).kind,
+                WalletMentionKind::NonTrade
+            );
+        }
+    }
+
+    fn replay_transaction(base64_fixture: &str) -> VersionedTransaction {
+        let compact = base64_fixture.split_whitespace().collect::<String>();
+        let bytes = STANDARD.decode(compact).expect("fixture is valid base64");
+        bincode::deserialize(&bytes).expect("fixture decodes as a VersionedTransaction")
     }
 
     fn pubkey(value: &str) -> Pubkey {

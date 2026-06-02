@@ -31,6 +31,10 @@ cargo run --manifest-path tools/jito-shredstream-rs/Cargo.toml -- live
 Use `--include-rejections` only for short debugging runs. It prints one line per
 non-matching transaction and gets noisy fast.
 
+Use `--print-mentions` during parser coverage work. Mention-only lines are
+classified as `nonTrade`, `unsupportedRoute`, or `unknown` so parser misses do
+not get mixed with simple wallet activity.
+
 ## Output
 
 Matched trades are emitted as JSONL with schema `copytrade.feed.event.v1`.
@@ -53,5 +57,18 @@ metadata.
   "input": { "mint": "So11111111111111111111111111111111111111112", "amount": 0.00099 },
   "output": { "mint": "..." },
   "copyable": true
+}
+```
+
+Mention-only transactions are emitted as classified JSONL:
+
+```json
+{
+  "schema": "copytrade.feed.walletMention.nonTrade.v1",
+  "provider": "shredstream",
+  "source": "jito-proxy",
+  "targetWallet": "...",
+  "signature": "...",
+  "reason": "only system/compute/token housekeeping programs"
 }
 ```

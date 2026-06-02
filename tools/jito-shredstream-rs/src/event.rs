@@ -1,4 +1,4 @@
-use crate::parser::{Action, ParsedTrade, SOL_MINT};
+use crate::parser::{Action, ParsedTrade, WalletMentionKind, SOL_MINT};
 use anyhow::Result;
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -54,6 +54,7 @@ pub(crate) struct WalletMentionLine {
     pub(crate) target_wallet: String,
     pub(crate) signature: String,
     pub(crate) slot: u64,
+    pub(crate) reason: String,
     pub(crate) account_key_count: usize,
 }
 
@@ -128,4 +129,12 @@ pub(crate) fn now_ms() -> u128 {
 pub(crate) fn print_json<T: Serialize>(value: &T) -> Result<()> {
     println!("{}", serde_json::to_string(value)?);
     Ok(())
+}
+
+pub(crate) fn wallet_mention_schema(kind: WalletMentionKind) -> &'static str {
+    match kind {
+        WalletMentionKind::NonTrade => "copytrade.feed.walletMention.nonTrade.v1",
+        WalletMentionKind::UnsupportedRoute => "copytrade.feed.walletMention.unsupportedRoute.v1",
+        WalletMentionKind::Unknown => "copytrade.feed.walletMention.unknown.v1",
+    }
 }

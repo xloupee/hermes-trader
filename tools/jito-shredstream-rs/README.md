@@ -3,6 +3,8 @@
 Rust-only probe for the local Jito ShredStream proxy. It connects to
 `ShredstreamProxy.SubscribeEntries`, decodes bincode `Vec<Entry>` payloads,
 scans transactions for tracked wallets, and prints normalized copytrade events.
+It currently recognizes direct Pump bonding-curve instructions, Pump AMM
+instructions, and the observed FLASHX-routed Pump buy/sell layout.
 
 This is observe-only tooling. It does not submit trades, write to Telegram, or
 touch Supabase.
@@ -32,6 +34,10 @@ non-matching transaction and gets noisy fast.
 ## Output
 
 Matched trades are emitted as JSONL with schema `copytrade.feed.event.v1`.
+Amounts are included only when the shred-visible outer instruction exposes
+them directly. FLASHX-routed buys include the SOL input amount but not the exact
+post-trade token output, because Jito entries do not include inner token balance
+metadata.
 
 ```json
 {
@@ -42,9 +48,10 @@ Matched trades are emitted as JSONL with schema `copytrade.feed.event.v1`.
   "action": "buy",
   "mint": "...",
   "signature": "...",
-  "route": "pump",
-  "input": { "mint": "So11111111111111111111111111111111111111112", "amount": 0.1 },
-  "output": { "mint": "...", "amount": 12345.67 },
+  "route": "flashx-pump",
+  "solAmount": 0.00099,
+  "input": { "mint": "So11111111111111111111111111111111111111112", "amount": 0.00099 },
+  "output": { "mint": "..." },
   "copyable": true
 }
 ```

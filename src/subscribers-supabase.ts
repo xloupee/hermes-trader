@@ -95,6 +95,19 @@ export interface CopyTradeExecutionRow {
   observed_trade: unknown;
   request: unknown;
   response: unknown;
+  observed_signature?: string | null;
+  target_observed_to_submit_ms?: number | null;
+  target_blocktime_to_submit_ms?: number | null;
+  build_ms?: number | null;
+  send_ms?: number | null;
+  winner_provider?: string | null;
+  send_rpc_winner?: string | null;
+  send_rpc_count?: number | null;
+  target_slot?: number | null;
+  copy_slot?: number | null;
+  slot_delta?: number | null;
+  latency_status?: string | null;
+  latency_summary?: unknown;
   trailing_sell_step_index: number | null;
   trailing_sell_total_steps: number | null;
   created_at?: string;
@@ -330,7 +343,20 @@ function redactSensitivePayload(value: unknown): unknown {
   return redacted;
 }
 
-function copyTradeExecutionRow(record: CopyTradeExecutionRecord): CopyTradeExecutionRow {
+function responseWithLatencySummary(response: unknown, latencySummary: unknown): unknown {
+  if (!latencySummary || !response || typeof response !== "object" || Array.isArray(response)) {
+    return response;
+  }
+
+  return {
+    ...(response as Record<string, unknown>),
+    latencySummary
+  };
+}
+
+export function copyTradeExecutionRow(record: CopyTradeExecutionRecord): CopyTradeExecutionRow {
+  const latency = record.latencySummary || null;
+  const redactedLatency = latency ? redactSensitivePayload(latency) : null;
   const row: CopyTradeExecutionRow = {
     chat_id: record.chatId,
     source_wallet_address: record.sourceWalletAddress,
@@ -346,7 +372,20 @@ function copyTradeExecutionRow(record: CopyTradeExecutionRecord): CopyTradeExecu
     http_status: record.httpStatus,
     observed_trade: redactSensitivePayload(record.observedTrade),
     request: redactSensitivePayload(record.request),
-    response: redactSensitivePayload(record.response),
+    response: responseWithLatencySummary(redactSensitivePayload(record.response), redactedLatency),
+    observed_signature: latency?.observedSignature ?? record.observedTrade.signature ?? null,
+    target_observed_to_submit_ms: latency?.targetObservedToSubmitMs ?? null,
+    target_blocktime_to_submit_ms: latency?.targetBlockTimeToSubmitMs ?? null,
+    build_ms: latency?.buildMs ?? null,
+    send_ms: latency?.sendMs ?? null,
+    winner_provider: latency?.winnerProvider ?? null,
+    send_rpc_winner: latency?.sendRpcWinner ?? null,
+    send_rpc_count: latency?.sendRpcCount ?? null,
+    target_slot: latency?.targetSlot ?? null,
+    copy_slot: latency?.copySlot ?? null,
+    slot_delta: latency?.slotDelta ?? null,
+    latency_status: latency?.status ?? null,
+    latency_summary: redactedLatency,
     trailing_sell_step_index: record.trailingSellStepIndex ?? null,
     trailing_sell_total_steps: record.trailingSellTotalSteps ?? null
   };
@@ -356,6 +395,41 @@ function copyTradeExecutionRow(record: CopyTradeExecutionRecord): CopyTradeExecu
   }
 
   return row;
+}
+
+function legacyCopyTradeExecutionRow(row: CopyTradeExecutionRow): Omit<CopyTradeExecutionRow,
+  "observed_signature" |
+  "target_observed_to_submit_ms" |
+  "target_blocktime_to_submit_ms" |
+  "build_ms" |
+  "send_ms" |
+  "winner_provider" |
+  "send_rpc_winner" |
+  "send_rpc_count" |
+  "target_slot" |
+  "copy_slot" |
+  "slot_delta" |
+  "latency_status" |
+  "latency_summary"
+> {
+  const {
+    observed_signature: _observedSignature,
+    target_observed_to_submit_ms: _targetObserved,
+    target_blocktime_to_submit_ms: _targetBlocktime,
+    build_ms: _buildMs,
+    send_ms: _sendMs,
+    winner_provider: _winnerProvider,
+    send_rpc_winner: _sendRpcWinner,
+    send_rpc_count: _sendRpcCount,
+    target_slot: _targetSlot,
+    copy_slot: _copySlot,
+    slot_delta: _slotDelta,
+    latency_status: _latencyStatus,
+    latency_summary: _latencySummary,
+    ...legacyRow
+  } = row;
+
+  return legacyRow;
 }
 
 export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
@@ -460,7 +534,17 @@ export function createSupabaseCopyTradeRecorder({
 
   return {
     async recordCopyTradeExecution(record) {
-      const { error } = await client.from("telegram_copytrade_executions").insert(copyTradeExecutionRow(record));
+      const row = copyTradeExecutionRow(record);
+      const { error } = await client.from("telegram_copytrade_executions").insert(row);
+      if (isMissingSupabaseColumn(error) && record.latencySummary) {
+        const retry = await client.from("telegram_copytrade_executions").insert(legacyCopyTradeExecutionRow(row));
+        const retryError = formatSupabaseError(retry.error);
+
+        if (retryError) {
+          throw retryError;
+        }
+        return;
+      }
       const formattedError = formatSupabaseError(error);
 
       if (formattedError) {
@@ -472,9 +556,27 @@ export function createSupabaseCopyTradeRecorder({
         status: update.status,
         error_text: update.errorText ?? null
       };
+      const latency = update.latencySummary || null;
+      const redactedLatency = latency ? redactSensitivePayload(latency) : null;
+
+      if (latency) {
+        values.observed_signature = latency.observedSignature;
+        values.target_observed_to_submit_ms = latency.targetObservedToSubmitMs;
+        values.target_blocktime_to_submit_ms = latency.targetBlockTimeToSubmitMs;
+        values.build_ms = latency.buildMs;
+        values.send_ms = latency.sendMs;
+        values.winner_provider = latency.winnerProvider;
+        values.send_rpc_winner = latency.sendRpcWinner;
+        values.send_rpc_count = latency.sendRpcCount;
+        values.target_slot = latency.targetSlot;
+        values.copy_slot = latency.copySlot;
+        values.slot_delta = latency.slotDelta;
+        values.latency_status = latency.status;
+        values.latency_summary = redactedLatency;
+      }
 
       if ("response" in update) {
-        values.response = redactSensitivePayload(update.response ?? null);
+        values.response = responseWithLatencySummary(redactSensitivePayload(update.response ?? null), redactedLatency);
       }
 
       let query = client
@@ -497,6 +599,49 @@ export function createSupabaseCopyTradeRecorder({
       }
 
       const { error } = await query;
+      if (isMissingSupabaseColumn(error) && latency) {
+        const legacyValues = { ...values };
+        delete legacyValues.observed_signature;
+        delete legacyValues.target_observed_to_submit_ms;
+        delete legacyValues.target_blocktime_to_submit_ms;
+        delete legacyValues.build_ms;
+        delete legacyValues.send_ms;
+        delete legacyValues.winner_provider;
+        delete legacyValues.send_rpc_winner;
+        delete legacyValues.send_rpc_count;
+        delete legacyValues.target_slot;
+        delete legacyValues.copy_slot;
+        delete legacyValues.slot_delta;
+        delete legacyValues.latency_status;
+        delete legacyValues.latency_summary;
+
+        let retry = client
+          .from("telegram_copytrade_executions")
+          .update(legacyValues)
+          .eq("chat_id", update.chatId)
+          .eq("action", update.action)
+          .eq("signature", update.signature);
+
+        if (typeof update.trailingSellStepIndex === "number") {
+          retry = retry.eq("trailing_sell_step_index", update.trailingSellStepIndex);
+        } else {
+          retry = retry.is("trailing_sell_step_index", null);
+        }
+
+        if (typeof update.trailingSellTotalSteps === "number") {
+          retry = retry.eq("trailing_sell_total_steps", update.trailingSellTotalSteps);
+        } else {
+          retry = retry.is("trailing_sell_total_steps", null);
+        }
+
+        const retryResult = await retry;
+        const retryError = formatSupabaseError(retryResult.error);
+
+        if (retryError) {
+          throw retryError;
+        }
+        return;
+      }
       const formattedError = formatSupabaseError(error);
 
       if (formattedError) {

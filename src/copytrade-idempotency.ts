@@ -266,6 +266,10 @@ function failedRecord(
 }
 
 function sameSemanticBuy(record: CopyTradeBuyIdempotencyRecord, input: CopyTradeBuyIdempotencyClaimInput): boolean {
+  if (input.retryFailed) {
+    return false;
+  }
+
   return record.chatId === input.chatId && record.mint === input.mint && record.action === (input.action || "buy");
 }
 

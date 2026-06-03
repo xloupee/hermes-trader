@@ -1,7 +1,10 @@
 use crate::parser::{
-    read_u64_le, Action, ParsedTrade, Route, LAMPORTS_PER_SOL, PUMP_FUN_TOKEN_DECIMALS,
+    read_u64_le, Action, FlashxPumpLayout, FlashxPumpRouteContext, ParsedTrade,
+    ResolvedRouteAccount, Route, RouteContext, RouteInstructionAccount, FLASHX_ROUTER_PROGRAM_ID,
+    LAMPORTS_PER_SOL, PUMP_FUN_TOKEN_DECIMALS,
 };
 use solana_message::compiled_instruction::CompiledInstruction;
+use solana_message::VersionedMessage;
 use std::collections::HashSet;
 
 pub(crate) fn parse(
@@ -43,6 +46,7 @@ pub(crate) fn parse(
             route: Route::FlashxPump,
             sol_amount: Some(amount_in as f64 / LAMPORTS_PER_SOL),
             token_amount: None,
+            route_context: None,
         });
     }
 
@@ -54,6 +58,7 @@ pub(crate) fn parse(
             route: Route::FlashxPump,
             sol_amount: None,
             token_amount: Some(amount_in as f64 / PUMP_FUN_TOKEN_DECIMALS),
+            route_context: None,
         });
     }
 
@@ -85,6 +90,7 @@ fn parse_migrated_amm_layout(
             route: Route::FlashxPump,
             sol_amount: Some(amount_in as f64 / LAMPORTS_PER_SOL),
             token_amount: None,
+            route_context: None,
         }),
         1 => Some(ParsedTrade {
             target_wallet: target_wallet.to_string(),
@@ -93,6 +99,7 @@ fn parse_migrated_amm_layout(
             route: Route::FlashxPump,
             sol_amount: None,
             token_amount: Some(amount_in as f64 / PUMP_FUN_TOKEN_DECIMALS),
+            route_context: None,
         }),
         _ => None,
     }
@@ -122,6 +129,7 @@ fn parse_long_v2_layout(
             route: Route::FlashxPump,
             sol_amount: Some(amount_in as f64 / LAMPORTS_PER_SOL),
             token_amount: None,
+            route_context: None,
         });
     }
 
@@ -134,10 +142,166 @@ fn parse_long_v2_layout(
             route: Route::FlashxPump,
             sol_amount: None,
             token_amount: Some(amount_in as f64 / PUMP_FUN_TOKEN_DECIMALS),
+            route_context: None,
         });
     }
 
     None
+}
+
+pub(crate) fn route_context(
+    message: &VersionedMessage,
+    instruction: &CompiledInstruction,
+    account_keys: &[String],
+    parsed: &ParsedTrade,
+) -> Option<RouteContext> {
+    if parsed.action != Action::Buy {
+        return None;
+    }
+
+    let accounts = instruction
+        .accounts
+        .iter()
+        .map(|index| *index as usize)
+        .collect::<Vec<_>>();
+
+    if is_migrated_amm_buy_layout(&accounts, account_keys, parsed, &instruction.data) {
+        return Some(RouteContext::FlashxPump(FlashxPumpRouteContext {
+            layout: FlashxPumpLayout::MigratedAmm,
+            program_id: FLASHX_ROUTER_PROGRAM_ID.to_string(),
+            accounts: route_instruction_accounts(message, instruction, account_keys)?,
+            data: instruction.data.clone(),
+            resolved_accounts: migrated_amm_resolved_accounts(&accounts, account_keys)?,
+        }));
+    }
+
+    if is_direct_pump_buy_layout(&accounts, account_keys, parsed, &instruction.data) {
+        return Some(RouteContext::FlashxPump(FlashxPumpRouteContext {
+            layout: FlashxPumpLayout::DirectPump,
+            program_id: FLASHX_ROUTER_PROGRAM_ID.to_string(),
+            accounts: route_instruction_accounts(message, instruction, account_keys)?,
+            data: instruction.data.clone(),
+            resolved_accounts: direct_pump_resolved_accounts(&accounts, account_keys)?,
+        }));
+    }
+
+    None
+}
+
+fn is_migrated_amm_buy_layout(
+    accounts: &[usize],
+    account_keys: &[String],
+    parsed: &ParsedTrade,
+    data: &[u8],
+) -> bool {
+    accounts.len() >= 40
+        && data.get(17).copied() == Some(0)
+        && account_key_at(accounts, account_keys, 1) == Some(&parsed.target_wallet)
+        && account_key_at(accounts, account_keys, 12) == Some(&parsed.mint)
+}
+
+fn is_direct_pump_buy_layout(
+    accounts: &[usize],
+    account_keys: &[String],
+    parsed: &ParsedTrade,
+    data: &[u8],
+) -> bool {
+    accounts.len() >= 32
+        && data.get(17).copied() == Some(0)
+        && account_key_at(accounts, account_keys, 0) == Some(&parsed.target_wallet)
+        && account_key_at(accounts, account_keys, 10) == Some(&parsed.mint)
+}
+
+fn route_instruction_accounts(
+    message: &VersionedMessage,
+    instruction: &CompiledInstruction,
+    account_keys: &[String],
+) -> Option<Vec<RouteInstructionAccount>> {
+    instruction
+        .accounts
+        .iter()
+        .map(|index| {
+            let account_index = *index as usize;
+            Some(RouteInstructionAccount {
+                pubkey: account_keys.get(account_index)?.to_string(),
+                is_signer: message.is_signer(account_index),
+                is_writable: message.is_maybe_writable(account_index, None),
+            })
+        })
+        .collect()
+}
+
+fn migrated_amm_resolved_accounts(
+    accounts: &[usize],
+    account_keys: &[String],
+) -> Option<Vec<ResolvedRouteAccount>> {
+    let roles = [
+        ("payer", 1),
+        ("targetWallet", 1),
+        ("flashxRouterProgram", 4),
+        ("pumpAmmProgram", 5),
+        ("poolState", 9),
+        ("globalConfig", 11),
+        ("mint", 12),
+        ("quoteMint", 13),
+        ("userBaseTokenAccount", 14),
+        ("userQuoteTokenAccount", 15),
+        ("poolBaseTokenAccount", 16),
+        ("poolQuoteTokenAccount", 17),
+        ("protocolFeeRecipient", 18),
+        ("baseTokenProgram", 20),
+        ("quoteTokenProgram", 21),
+        ("systemProgram", 22),
+        ("associatedTokenProgram", 23),
+        ("eventAuthority", 24),
+        ("globalVolumeAccumulator", 28),
+        ("userVolumeAccumulator", 29),
+        ("feeConfig", 30),
+        ("feeProgram", 31),
+    ];
+
+    roles
+        .into_iter()
+        .map(|(role, account_position)| {
+            Some(ResolvedRouteAccount {
+                role,
+                pubkey: account_key_at(accounts, account_keys, account_position)?.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn direct_pump_resolved_accounts(
+    accounts: &[usize],
+    account_keys: &[String],
+) -> Option<Vec<ResolvedRouteAccount>> {
+    let roles = [
+        ("payer", 0),
+        ("targetWallet", 0),
+        ("flashxRouterProgram", 4),
+        ("pumpProgram", 5),
+        ("globalConfig", 8),
+        ("bondingCurve", 9),
+        ("mint", 10),
+        ("associatedBondingCurve", 11),
+        ("userTokenAccount", 13),
+        ("systemProgram", 15),
+        ("tokenProgram", 16),
+        ("eventAuthority", 20),
+        ("creatorVault", 21),
+        ("feeProgram", 23),
+        ("feeRecipient", 24),
+    ];
+
+    roles
+        .into_iter()
+        .map(|(role, account_position)| {
+            Some(ResolvedRouteAccount {
+                role,
+                pubkey: account_key_at(accounts, account_keys, account_position)?.to_string(),
+            })
+        })
+        .collect()
 }
 
 fn account_key_at<'a>(
@@ -172,6 +336,7 @@ mod tests {
     const FLASHX_MINT: &str = "E3wDF3hJtojFit9RQ1aX3SDiJh5ygYuj2bBPyJfUpump";
     const FLASHX_V2_MINT: &str = "6QPqSGYksJgxJmMfPzsTc7jK32YEFqTiCRYGZLvHpump";
     const MIGRATED_MINT: &str = "wXfe7vz2t8an9Ca5dy72ChU54fRvtefDRmb4rzUpump";
+    const LIVE_DIRECT_PUMP_MINT: &str = "8VigmMkK7f9FvTBDd8S2UmweezCgeBX4y5Xp4jMfpump";
 
     #[test]
     fn parses_flashx_pump_buy_from_router_outer_instruction() {
@@ -318,6 +483,18 @@ mod tests {
                 sol_amount: None,
                 token_amount: Some(1_187.998_876),
                 copyable: false,
+            },
+            ReplayCase {
+                signature: "2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo",
+                fixture: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/flashx/live-buy-2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo.tx.base64"
+                )),
+                action: Action::Buy,
+                mint: LIVE_DIRECT_PUMP_MINT,
+                sol_amount: Some(0.00099),
+                token_amount: None,
+                copyable: true,
             },
         ];
 

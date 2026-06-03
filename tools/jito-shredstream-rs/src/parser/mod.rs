@@ -1,4 +1,5 @@
 use serde::Serialize;
+use solana_message::{compiled_instruction::CompiledInstruction, VersionedMessage};
 use solana_transaction::versioned::VersionedTransaction;
 use std::collections::HashSet;
 
@@ -41,6 +42,50 @@ pub(crate) struct ParsedTrade {
     pub(crate) route: Route,
     pub(crate) sol_amount: Option<f64>,
     pub(crate) token_amount: Option<f64>,
+    pub(crate) route_context: Option<RouteContext>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum RouteContext {
+    FlashxPump(FlashxPumpRouteContext),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FlashxPumpRouteContext {
+    pub(crate) layout: FlashxPumpLayout,
+    pub(crate) program_id: String,
+    pub(crate) accounts: Vec<RouteInstructionAccount>,
+    pub(crate) data: Vec<u8>,
+    pub(crate) resolved_accounts: Vec<ResolvedRouteAccount>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FlashxPumpLayout {
+    MigratedAmm,
+    DirectPump,
+}
+
+impl FlashxPumpLayout {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::MigratedAmm => "migrated-amm",
+            Self::DirectPump => "direct-pump",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RouteInstructionAccount {
+    pub(crate) pubkey: String,
+    pub(crate) is_signer: bool,
+    pub(crate) is_writable: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ResolvedRouteAccount {
+    pub(crate) role: &'static str,
+    pub(crate) pubkey: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,12 +120,28 @@ pub(crate) fn parse_trade(
             }
             _ => None,
         };
-        if parsed.is_some() {
-            return parsed;
+        if let Some(mut parsed) = parsed {
+            parsed.route_context =
+                route_context(&versioned_tx.message, instruction, account_keys, &parsed);
+            return Some(parsed);
         }
     }
 
     None
+}
+
+fn route_context(
+    message: &VersionedMessage,
+    instruction: &CompiledInstruction,
+    account_keys: &[String],
+    parsed: &ParsedTrade,
+) -> Option<RouteContext> {
+    match parsed.route {
+        Route::FlashxPump => {
+            routes::flashx::route_context(message, instruction, account_keys, parsed)
+        }
+        Route::Pump | Route::PumpAmm => None,
+    }
 }
 
 pub(crate) fn mentioned_target_wallet(
@@ -139,6 +200,7 @@ pub(crate) fn classify_wallet_mention(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn static_account_keys(versioned_tx: &VersionedTransaction) -> Vec<String> {
     versioned_tx
         .message

@@ -1,15 +1,18 @@
 use crate::{
+    address_lookup::AddressLookupTableCache,
+    blockhash::spawn_blockhash_cache,
     event::{
         normalized_event, now_ms, print_json, shadow_signal_line, wallet_mention_schema,
         RejectionLine, ShadowSignalLine, WalletMentionLine,
     },
     parser::{
-        classify_wallet_mention, mentioned_target_wallet, parse_trade, static_account_keys,
+        classify_wallet_mention, mentioned_target_wallet, parse_trade,
         versioned_tx_signature_string,
     },
     planner::{
-        execution_plan_line, tx_build_plan_line, ExecutionPlanLine, PlannerOptions,
-        TxBuildPlanLine, TxBuildPlannerOptions,
+        copy_tx_plan_line, execution_plan_line, tx_build_plan_line, unsigned_tx_plan_line,
+        CopyTxPlanLine, CopyTxPlannerOptions, ExecutionPlanLine, PlannerOptions, TxBuildPlanLine,
+        TxBuildPlannerOptions, UnsignedTxPlanLine, UnsignedTxPlannerOptions,
     },
     proto::jito_shredstream::{
         shredstream_proxy_client::ShredstreamProxyClient, SubscribeEntriesRequest,
@@ -31,6 +34,17 @@ use std::{
 
 pub(crate) async fn run(options: LiveOptions) -> Result<()> {
     let target_wallets = parse_target_wallets(&options.target_wallets)?;
+    let address_lookup_tables = AddressLookupTableCache::load(
+        options.solana_rpc_url.as_deref(),
+        &options.address_lookup_tables,
+    )
+    .await
+    .context("preload address lookup tables")?;
+    let _blockhash_cache = spawn_blockhash_cache(
+        options.solana_rpc_url.clone(),
+        options.blockhash_refresh_ms,
+        options.stats,
+    );
     let mut client = ShredstreamProxyClient::connect(options.endpoint.clone())
         .await
         .with_context(|| format!("connect to {}", options.endpoint))?;
@@ -81,6 +95,30 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                     .unwrap_or_else(|| "(disabled)".to_string())
             )
         })?;
+    let mut copy_tx_plans = CopyTxPlanWriter::new(options.copy_tx_plans_path.as_deref())
+        .with_context(|| {
+            format!(
+                "open copy tx plans path {}",
+                options
+                    .copy_tx_plans_path
+                    .as_deref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "(disabled)".to_string())
+            )
+        })?;
+    let mut unsigned_tx_plans = UnsignedTxPlanWriter::new(
+        options.unsigned_tx_plans_path.as_deref(),
+    )
+    .with_context(|| {
+        format!(
+            "open unsigned tx plans path {}",
+            options
+                .unsigned_tx_plans_path
+                .as_deref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "(disabled)".to_string())
+        )
+    })?;
     let mut signal_observations = SignalObservationWriter::from_options(&options)?;
     let mut emitted = 0usize;
 
@@ -134,7 +172,14 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                     continue;
                 }
 
-                let account_keys = static_account_keys(&versioned_tx);
+                let expanded_account_keys =
+                    address_lookup_tables.expanded_account_keys(&versioned_tx);
+                if let Some(missing_lookup_table) = &expanded_account_keys.missing_lookup_table {
+                    if options.stats {
+                        eprintln!("missing address lookup table {missing_lookup_table}");
+                    }
+                }
+                let account_keys = expanded_account_keys.keys;
                 match parse_trade(&versioned_tx, &account_keys, &target_wallets) {
                     Some(parsed) => {
                         let trade_parsed_at = Instant::now();
@@ -175,6 +220,23 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             now_ms(),
                             TxBuildPlannerOptions {
                                 max_plan_age_ms: options.tx_build_plan_max_age_ms,
+                            },
+                        ))?;
+                        copy_tx_plans.write(&copy_tx_plan_line(
+                            &execution_plan,
+                            now_ms(),
+                            CopyTxPlannerOptions {
+                                max_plan_age_ms: options.tx_build_plan_max_age_ms,
+                                copy_wallet: options.copy_wallet.clone(),
+                            },
+                        ))?;
+                        unsigned_tx_plans.write(&unsigned_tx_plan_line(
+                            &execution_plan,
+                            now_ms(),
+                            UnsignedTxPlannerOptions {
+                                max_plan_age_ms: options.tx_build_plan_max_age_ms,
+                                copy_wallet: options.copy_wallet.clone(),
+                                simulate_copy_tx: options.simulate_copy_tx,
                             },
                         ))?;
 
@@ -260,6 +322,14 @@ struct TxBuildPlanWriter {
     file: Option<BufWriter<File>>,
 }
 
+struct CopyTxPlanWriter {
+    file: Option<BufWriter<File>>,
+}
+
+struct UnsignedTxPlanWriter {
+    file: Option<BufWriter<File>>,
+}
+
 impl ShadowSignalWriter {
     fn new(path: Option<&Path>) -> Result<Self> {
         let file = match path {
@@ -319,6 +389,48 @@ impl TxBuildPlanWriter {
     }
 
     fn write(&mut self, plan: &TxBuildPlanLine) -> Result<()> {
+        write_json_line(self.file.as_mut(), plan)
+    }
+}
+
+impl CopyTxPlanWriter {
+    fn new(path: Option<&Path>) -> Result<Self> {
+        let file = match path {
+            Some(path) => Some(BufWriter::new(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .with_context(|| format!("open {}", path.display()))?,
+            )),
+            None => None,
+        };
+
+        Ok(Self { file })
+    }
+
+    fn write(&mut self, plan: &CopyTxPlanLine) -> Result<()> {
+        write_json_line(self.file.as_mut(), plan)
+    }
+}
+
+impl UnsignedTxPlanWriter {
+    fn new(path: Option<&Path>) -> Result<Self> {
+        let file = match path {
+            Some(path) => Some(BufWriter::new(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .with_context(|| format!("open {}", path.display()))?,
+            )),
+            None => None,
+        };
+
+        Ok(Self { file })
+    }
+
+    fn write(&mut self, plan: &UnsignedTxPlanLine) -> Result<()> {
         write_json_line(self.file.as_mut(), plan)
     }
 }

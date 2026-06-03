@@ -1,4 +1,4 @@
-use crate::parser::{Action, ParsedTrade, WalletMentionKind, SOL_MINT};
+use crate::parser::{Action, ParsedTrade, RouteContext, WalletMentionKind, SOL_MINT};
 use anyhow::Result;
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -81,6 +81,8 @@ pub(crate) struct ShadowSignalLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reason: Option<&'static str>,
     pub(crate) account_key_count: usize,
+    #[serde(skip)]
+    pub(crate) route_context: Option<RouteContext>,
 }
 
 #[derive(Debug, Serialize)]
@@ -175,6 +177,7 @@ pub(crate) fn shadow_signal_line(
             Some("shadow mode only copies buy actions")
         },
         account_key_count,
+        route_context: parsed.route_context.clone(),
     }
 }
 
@@ -205,6 +208,7 @@ mod tests {
                 route: Route::FlashxPump,
                 sol_amount: Some(0.00099),
                 token_amount: None,
+                route_context: None,
             },
         );
         let value = serde_json::to_value(line).expect("shadow signal serializes");
@@ -234,6 +238,7 @@ mod tests {
                 route: Route::FlashxPump,
                 sol_amount: None,
                 token_amount: Some(42.0),
+                route_context: None,
             },
         );
         let value = serde_json::to_value(line).expect("shadow signal serializes");

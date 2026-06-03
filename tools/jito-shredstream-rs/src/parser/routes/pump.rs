@@ -30,6 +30,7 @@ pub(crate) fn parse(
         route: Route::Pump,
         sol_amount: Some(sol_amount),
         token_amount: Some(token_amount),
+        route_context: None,
     })
 }
 

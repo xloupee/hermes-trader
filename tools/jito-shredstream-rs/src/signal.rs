@@ -357,6 +357,7 @@ mod tests {
                 route: Route::FlashxPump,
                 sol_amount: Some(0.00099),
                 token_amount: None,
+                route_context: None,
             },
         );
 

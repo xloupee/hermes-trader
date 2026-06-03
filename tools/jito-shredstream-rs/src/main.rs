@@ -2,12 +2,15 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+mod address_lookup;
+mod blockhash;
 mod event;
 mod live;
 mod parser;
 mod planner;
 mod proto;
 mod signal;
+mod tx_builder;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -75,6 +78,21 @@ pub(crate) struct LiveOptions {
     #[arg(long, env = "JITO_TX_BUILD_PLAN_MAX_AGE_MS", default_value_t = 2_000)]
     pub(crate) tx_build_plan_max_age_ms: u128,
 
+    #[arg(long, env = "JITO_COPY_TX_PLANS_PATH")]
+    pub(crate) copy_tx_plans_path: Option<PathBuf>,
+
+    #[arg(long, env = "JITO_UNSIGNED_TX_PLANS_PATH")]
+    pub(crate) unsigned_tx_plans_path: Option<PathBuf>,
+
+    #[arg(long, env = "JITO_COPY_WALLET")]
+    pub(crate) copy_wallet: Option<String>,
+
+    #[arg(long, env = "JITO_BLOCKHASH_REFRESH_MS", default_value_t = 500)]
+    pub(crate) blockhash_refresh_ms: u64,
+
+    #[arg(long, env = "JITO_SIMULATE_COPY_TX", default_value_t = false)]
+    pub(crate) simulate_copy_tx: bool,
+
     #[arg(long, env = "SUPABASE_URL")]
     pub(crate) supabase_url: Option<String>,
 
@@ -90,6 +108,13 @@ pub(crate) struct LiveOptions {
 
     #[arg(long, env = "SOLANA_RPC_URL")]
     pub(crate) solana_rpc_url: Option<String>,
+
+    #[arg(
+        long = "address-lookup-table",
+        env = "JITO_ADDRESS_LOOKUP_TABLES",
+        value_delimiter = ','
+    )]
+    pub(crate) address_lookup_tables: Vec<String>,
 }
 
 #[tokio::main]

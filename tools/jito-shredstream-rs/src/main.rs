@@ -5,6 +5,7 @@ use std::path::PathBuf;
 mod address_lookup;
 mod blockhash;
 mod event;
+mod executor;
 mod live;
 mod parser;
 mod planner;
@@ -92,6 +93,21 @@ pub(crate) struct LiveOptions {
 
     #[arg(long, env = "JITO_SIMULATE_COPY_TX", default_value_t = false)]
     pub(crate) simulate_copy_tx: bool,
+
+    #[arg(long, env = "JITO_ENABLE_COPY_SEND", default_value_t = false)]
+    pub(crate) enable_copy_send: bool,
+
+    #[arg(long, env = "JITO_DRY_RUN", default_value_t = true)]
+    pub(crate) dry_run: bool,
+
+    #[arg(long, env = "JITO_MAX_COPY_SOL")]
+    pub(crate) max_copy_sol: Option<f64>,
+
+    #[arg(long, env = "JITO_COPY_KEYPAIR_PATH")]
+    pub(crate) copy_keypair_path: Option<PathBuf>,
+
+    #[arg(long, env = "JITO_COPY_EXECUTIONS_PATH")]
+    pub(crate) copy_executions_path: Option<PathBuf>,
 
     #[arg(long, env = "SUPABASE_URL")]
     pub(crate) supabase_url: Option<String>,

@@ -22,8 +22,10 @@ solana-address-lookup-table-interface = "2"
 solana-entry = "=2.2.1"
 solana-hash = "2"
 solana-instruction = "2"
+solana-keypair = "2"
 solana-message = "2"
 solana-pubkey = "2"
+solana-signer = "2"
 solana-transaction = { version = "2", features = ["serde"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tonic = "0.14"

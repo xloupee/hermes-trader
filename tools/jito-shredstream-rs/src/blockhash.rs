@@ -55,6 +55,12 @@ pub(crate) fn spawn_blockhash_cache(
     Some(cache)
 }
 
+pub(crate) fn cached_blockhash(cache: Option<&BlockhashCache>) -> Option<CachedBlockhash> {
+    cache
+        .and_then(|cache| cache.read().ok())
+        .and_then(|guard| guard.clone())
+}
+
 async fn fetch_latest_blockhash(
     client: &reqwest::Client,
     rpc_url: &str,

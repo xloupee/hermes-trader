@@ -5,6 +5,7 @@ use crate::{
         normalized_event, now_ms, print_json, shadow_signal_line, wallet_mention_schema,
         RejectionLine, ShadowSignalLine, WalletMentionLine,
     },
+    executor::{CopyExecutionLine, CopyExecutor},
     parser::{
         classify_wallet_mention, mentioned_target_wallet, parse_trade,
         versioned_tx_signature_string,
@@ -40,11 +41,12 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
     )
     .await
     .context("preload address lookup tables")?;
-    let _blockhash_cache = spawn_blockhash_cache(
+    let blockhash_cache = spawn_blockhash_cache(
         options.solana_rpc_url.clone(),
         options.blockhash_refresh_ms,
         options.stats,
     );
+    let copy_executor = CopyExecutor::from_options(&options, blockhash_cache.clone())?;
     let mut client = ShredstreamProxyClient::connect(options.endpoint.clone())
         .await
         .with_context(|| format!("connect to {}", options.endpoint))?;
@@ -119,6 +121,17 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                 .unwrap_or_else(|| "(disabled)".to_string())
         )
     })?;
+    let mut copy_executions = CopyExecutionWriter::new(options.copy_executions_path.as_deref())
+        .with_context(|| {
+            format!(
+                "open copy executions path {}",
+                options
+                    .copy_executions_path
+                    .as_deref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "(disabled)".to_string())
+            )
+        })?;
     let mut signal_observations = SignalObservationWriter::from_options(&options)?;
     let mut emitted = 0usize;
 
@@ -239,6 +252,11 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 simulate_copy_tx: options.simulate_copy_tx,
                             },
                         ))?;
+                        copy_executions.write(
+                            &copy_executor
+                                .handle(&execution_plan, parsed.action, parsed.sol_amount)
+                                .await,
+                        )?;
 
                         let event = normalized_event(
                             trade_parsed_at_ms,
@@ -327,6 +345,10 @@ struct CopyTxPlanWriter {
 }
 
 struct UnsignedTxPlanWriter {
+    file: Option<BufWriter<File>>,
+}
+
+struct CopyExecutionWriter {
     file: Option<BufWriter<File>>,
 }
 
@@ -432,6 +454,27 @@ impl UnsignedTxPlanWriter {
 
     fn write(&mut self, plan: &UnsignedTxPlanLine) -> Result<()> {
         write_json_line(self.file.as_mut(), plan)
+    }
+}
+
+impl CopyExecutionWriter {
+    fn new(path: Option<&Path>) -> Result<Self> {
+        let file = match path {
+            Some(path) => Some(BufWriter::new(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .with_context(|| format!("open {}", path.display()))?,
+            )),
+            None => None,
+        };
+
+        Ok(Self { file })
+    }
+
+    fn write(&mut self, line: &CopyExecutionLine) -> Result<()> {
+        write_json_line(self.file.as_mut(), line)
     }
 }
 

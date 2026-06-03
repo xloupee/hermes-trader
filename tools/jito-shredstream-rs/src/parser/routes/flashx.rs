@@ -288,7 +288,7 @@ fn direct_pump_resolved_accounts(
         ("systemProgram", 15),
         ("tokenProgram", 16),
         ("eventAuthority", 20),
-        ("creatorVault", 21),
+        ("userVolumeAccumulator", 21),
         ("feeProgram", 23),
         ("feeRecipient", 24),
     ];

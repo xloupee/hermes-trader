@@ -6,8 +6,10 @@ scans transactions for tracked wallets, and prints normalized copytrade events.
 It currently recognizes direct Pump bonding-curve instructions, Pump AMM
 instructions, and the observed FLASHX-routed Pump buy/sell layout.
 
-This is observe-only tooling. It does not submit trades, write to Telegram, or
-touch Supabase.
+The default live watcher is observe-only. It does not submit trades, write to
+Telegram, or touch Supabase. Local copy simulation/send harnesses exist for
+first-live testing, but they are disabled unless explicitly armed with local
+keypair and guard environment variables.
 
 ## Run
 
@@ -72,3 +74,69 @@ Mention-only transactions are emitted as classified JSONL:
   "reason": "only system/compute/token housekeeping programs"
 }
 ```
+
+## Local Copy Simulation
+
+Run this on the Mac, not the VPS. It opens an SSH tunnel to the VPS ShredStream
+proxy, uses the local copy wallet keypair, signs a copy transaction, and calls
+`simulateTransaction`. It cannot send because it forces
+`JITO_ENABLE_COPY_SEND=false` and `JITO_DRY_RUN=true`.
+
+```bash
+tools/jito-shredstream-rs/run-local-copy-sim-vps.sh
+```
+
+When a tiny tracked-wallet buy lands, verify the signed simulation gate:
+
+```bash
+node tools/jito-shredstream-rs/verify-copy-simulation.mjs
+```
+
+Or wait for the next simulation row and verify it automatically:
+
+```bash
+node tools/jito-shredstream-rs/wait-for-copy-simulation.mjs
+```
+
+The verifier requires a clean `copytrade.localExecution.v1` row with:
+
+- `simulationRequested: true`
+- `sendEnabled: false`
+- `dryRun: true`
+- `signed: true`
+- `simulated: true`
+- `sent: false`
+- `routeLayout: "direct-pump"`
+- `instructionCount: 3`
+- `maxCopySol <= 0.001`
+- no simulation error
+
+## Local Tiny Send
+
+Only run this after the simulation verifier passes for a live buy. This still
+runs on the Mac and still uses the local copy wallet keypair. It opens the VPS
+tunnel, simulates first, and sends only if explicitly armed:
+
+```bash
+JITO_ARM_LIVE_COPY_SEND=YES tools/jito-shredstream-rs/run-local-copy-send-vps.sh
+```
+
+The send harness forces:
+
+- `JITO_SIMULATE_COPY_TX=true`
+- `JITO_ENABLE_COPY_SEND=true`
+- `JITO_DRY_RUN=false`
+- `JITO_MAX_COPY_SOL=0.001` by default
+
+It refuses to run if `JITO_ARM_LIVE_COPY_SEND` is not exactly `YES`, or if
+`JITO_MAX_COPY_SOL` is above `0.001`.
+
+After a send, verify the on-chain result:
+
+```bash
+node tools/jito-shredstream-rs/verify-copy-execution.mjs
+```
+
+The execution verifier reads the local send JSONL, fetches the sent transaction
+from RPC, and reports the copy signature, mint, copy wallet token delta, SOL
+delta, status, and observed-to-submit/signature timing fields.

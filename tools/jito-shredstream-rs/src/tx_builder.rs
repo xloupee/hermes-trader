@@ -1,6 +1,6 @@
 use crate::parser::{
     FlashxPumpLayout, ResolvedRouteAccount, RouteContext, ASSOCIATED_TOKEN_PROGRAM_ID,
-    COMPUTE_BUDGET_PROGRAM_ID, SYSTEM_PROGRAM_ID,
+    COMPUTE_BUDGET_PROGRAM_ID, PUMP_FUN_PROGRAM_ID, SYSTEM_PROGRAM_ID,
 };
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
@@ -121,16 +121,20 @@ pub(crate) fn build_copy_unsigned_flashx_pump(
     let observed_wallet = resolved_pubkey(&context.resolved_accounts, "targetWallet")?;
     let observed_user_token_account =
         resolved_pubkey(&context.resolved_accounts, "userTokenAccount")?;
+    let observed_user_volume_accumulator =
+        resolved_pubkey(&context.resolved_accounts, "userVolumeAccumulator")?;
     let token_program = resolved_pubkey(&context.resolved_accounts, "tokenProgram")?;
     let copy_wallet = parse_pubkey(copy_wallet)?;
     let mint = parse_pubkey(mint)?;
     let associated_token_program = parse_pubkey(ASSOCIATED_TOKEN_PROGRAM_ID)?;
+    let pump_program = parse_pubkey(PUMP_FUN_PROGRAM_ID)?;
     let copy_wallet_token_account = associated_token_address(
         &copy_wallet,
         &mint,
         &token_program,
         &associated_token_program,
     );
+    let copy_user_volume_accumulator = user_volume_accumulator_address(&copy_wallet, &pump_program);
 
     let program_id = parse_pubkey(&context.program_id)?;
     let accounts = context
@@ -142,6 +146,8 @@ pub(crate) fn build_copy_unsigned_flashx_pump(
                 pubkey = copy_wallet;
             } else if pubkey == observed_user_token_account {
                 pubkey = copy_wallet_token_account;
+            } else if pubkey == observed_user_volume_accumulator {
+                pubkey = copy_user_volume_accumulator;
             }
 
             Ok(AccountMeta {
@@ -228,6 +234,10 @@ fn associated_token_address(
         associated_token_program,
     )
     .0
+}
+
+fn user_volume_accumulator_address(wallet: &Pubkey, pump_program: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"user_volume_accumulator", wallet.as_ref()], pump_program).0
 }
 
 fn compute_unit_limit_instruction(units: u32) -> Result<Instruction, TxBuildError> {
@@ -380,6 +390,16 @@ mod tests {
             .accounts
             .iter()
             .any(|account| account.pubkey.to_string() == build.copy_wallet_token_account));
+        assert!(build.instructions[0]
+            .accounts
+            .iter()
+            .any(|account| account.pubkey.to_string()
+                == "A6z9cMVt6RovLTYpLbkawnTDEGtFpLuEgE3t7BYHJCm2"));
+        assert!(!build.instructions[0]
+            .accounts
+            .iter()
+            .any(|account| account.pubkey.to_string()
+                == "8aHZJSt6frgjRTTfg4foDXjZHMyZ2ZQQjpwcWzzCvAGp"));
         assert!(!build.instructions[0]
             .accounts
             .iter()

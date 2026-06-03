@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync } from "node:fs";
 import { config as loadEnv } from "dotenv";
+import { blockPositionDiagnostics } from "./sync-local-copy-executions-to-supabase.mjs";
 
 loadEnv();
 
@@ -172,6 +173,7 @@ async function main() {
       : null;
   const slotDeltaFromObserved =
     Number.isFinite(transaction.slot) && Number.isFinite(row.slot) ? transaction.slot - row.slot : null;
+  const positionDiagnostics = await blockPositionDiagnostics(row, transaction, rpc);
 
   const summary = {
     sendSignature,
@@ -180,6 +182,15 @@ async function main() {
     slot: transaction.slot,
     observedSlot: row.slot,
     slotDeltaFromObserved,
+    blockPositionDiagnostics: positionDiagnostics,
+    targetSlot: positionDiagnostics.targetSlot,
+    copySlot: positionDiagnostics.copySlot,
+    slotDelta: positionDiagnostics.slotDelta,
+    targetTxIndex: positionDiagnostics.targetTxIndex,
+    copyTxIndex: positionDiagnostics.copyTxIndex,
+    sameSlotTxDelta: positionDiagnostics.sameSlotTxDelta,
+    crossSlotPositionSummary: positionDiagnostics.crossSlotPositionSummary,
+    positionUnavailableReason: positionDiagnostics.unavailableReason,
     blockTime: transaction.blockTime,
     err: transaction.meta?.err ?? null,
     copyWallet,

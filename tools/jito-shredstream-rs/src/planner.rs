@@ -209,10 +209,6 @@ fn plan_decision(signal: &ShadowSignalLine, options: PlannerOptions) -> PlanDeci
         return skipped("route is not allowed for execution planning");
     }
 
-    if !signal.mint.ends_with("pump") {
-        return skipped("mint is not a pump mint");
-    }
-
     let spend_sol_amount = options.copy_sol_amount.or(signal.sol_amount);
     if !spend_sol_amount.is_some_and(|amount| amount.is_finite() && amount > 0.0) {
         return skipped("missing positive SOL spend amount");
@@ -366,10 +362,6 @@ fn tx_build_decision(
         return tx_build_skipped("unsupported tx build route");
     }
 
-    if !execution_plan.mint.ends_with("pump") {
-        return tx_build_skipped("mint is not a pump mint");
-    }
-
     if !execution_plan
         .spend_sol_amount
         .is_some_and(|amount| amount.is_finite() && amount > 0.0)
@@ -455,10 +447,6 @@ fn copy_tx_decision(
 
     if execution_plan.route != Route::FlashxPump {
         return copy_tx_skipped("unsupported copy route");
-    }
-
-    if !execution_plan.mint.ends_with("pump") {
-        return copy_tx_skipped("mint is not a pump mint");
     }
 
     if !execution_plan
@@ -558,10 +546,6 @@ fn unsigned_tx_decision(
 
     if execution_plan.route != Route::FlashxPump {
         return unsigned_tx_skipped("unsupported unsigned tx route");
-    }
-
-    if !execution_plan.mint.ends_with("pump") {
-        return unsigned_tx_skipped("mint is not a pump mint");
     }
 
     if !execution_plan
@@ -771,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn non_pump_mint_is_skipped() {
+    fn supported_flashx_mint_without_pump_suffix_is_allowed() {
         let plan = execution_plan_line(
             &signal(Action::Buy, "not-a-pump-mint", true),
             234,
@@ -781,8 +765,8 @@ mod tests {
         );
         let value = serde_json::to_value(plan).expect("plan serializes");
 
-        assert_eq!(value["allowed"], false);
-        assert_eq!(value["reason"], "mint is not a pump mint");
+        assert_eq!(value["allowed"], true);
+        assert!(value.get("reason").is_none());
     }
 
     #[test]

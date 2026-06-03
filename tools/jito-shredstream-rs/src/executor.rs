@@ -18,6 +18,9 @@ use solana_transaction::Transaction;
 use std::{path::PathBuf, str::FromStr, time::Duration};
 
 const FIRST_LIVE_MAX_COPY_SOL_CAP: f64 = 0.001;
+const SEND_MAX_RETRIES: u64 = 3;
+const AUTO_SELL_BALANCE_ATTEMPTS: usize = 8;
+const AUTO_SELL_BALANCE_RETRY_MS: u64 = 250;
 
 pub(crate) struct CopyExecutor {
     options: CopyExecutionOptions,
@@ -382,7 +385,7 @@ impl CopyExecutor {
                         "encoding": "base64",
                         "skipPreflight": self.options.fast_copy_send,
                         "preflightCommitment": "processed",
-                        "maxRetries": 0
+                        "maxRetries": SEND_MAX_RETRIES
                     }
                 ]
             }))
@@ -448,10 +451,10 @@ impl CopyExecutor {
             }
         };
 
-        let token_amount_raw = match self.token_account_balance_raw(&token_account).await {
+        let token_amount_raw = match self.auto_sell_token_balance_raw(&token_account).await {
             Ok(amount) if amount > 0 => amount,
             Ok(_) => {
-                line.skip_auto_sell("copy wallet token balance is zero");
+                line.skip_auto_sell("copy wallet token balance is zero after retries");
                 return;
             }
             Err(error) => {
@@ -533,6 +536,27 @@ impl CopyExecutor {
                 line.auto_sell_decision = Some("sent");
             }
             Err(error) => line.error_auto_sell(error),
+        }
+    }
+
+    async fn auto_sell_token_balance_raw(&self, token_account: &str) -> Result<u64, String> {
+        let mut last_error = None;
+        for attempt in 0..AUTO_SELL_BALANCE_ATTEMPTS {
+            match self.token_account_balance_raw(token_account).await {
+                Ok(amount) if amount > 0 => return Ok(amount),
+                Ok(_) => last_error = None,
+                Err(error) => last_error = Some(error),
+            }
+
+            if attempt + 1 < AUTO_SELL_BALANCE_ATTEMPTS {
+                tokio::time::sleep(Duration::from_millis(AUTO_SELL_BALANCE_RETRY_MS)).await;
+            }
+        }
+
+        if let Some(error) = last_error {
+            Err(error)
+        } else {
+            Ok(0)
         }
     }
 

@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 
 const DEFAULT_EXECUTIONS_PATH = "/tmp/jito-copy-executions-local-send.jsonl";
+const DEFAULT_SUPABASE_CWD = `${process.env.HOME || ""}/Documents/pumpfunnoti`;
 
 function argValue(name, fallback = null) {
   const prefix = `--${name}=`;
@@ -12,6 +14,20 @@ function argValue(name, fallback = null) {
 
 function hasFlag(name) {
   return process.argv.includes(`--${name}`);
+}
+
+function supabaseCwd() {
+  const configured = process.env.JITO_SUPABASE_CWD || argValue("supabase-cwd");
+  if (configured) {
+    return configured;
+  }
+  if (existsSync("supabase/.temp/project-ref")) {
+    return process.cwd();
+  }
+  if (DEFAULT_SUPABASE_CWD && existsSync(`${DEFAULT_SUPABASE_CWD}/supabase/.temp/project-ref`)) {
+    return DEFAULT_SUPABASE_CWD;
+  }
+  return process.cwd();
 }
 
 function readJsonl(path) {
@@ -60,6 +76,153 @@ async function rpc(method, params) {
     throw new Error(`${method} RPC error: ${JSON.stringify(body.error)}`);
   }
   return body.result;
+}
+
+function signatureFromBlockTransaction(transaction) {
+  if (typeof transaction === "string") {
+    return transaction;
+  }
+  const firstSignature = transaction?.transaction?.signatures?.[0] ?? transaction?.signatures?.[0];
+  return typeof firstSignature === "string" ? firstSignature : null;
+}
+
+function blockSignatures(block) {
+  if (Array.isArray(block?.signatures)) {
+    return block.signatures.filter((signature) => typeof signature === "string");
+  }
+  if (Array.isArray(block?.transactions)) {
+    return block.transactions.map(signatureFromBlockTransaction).filter((signature) => typeof signature === "string");
+  }
+  return null;
+}
+
+async function fetchBlockSignatures(slot, rpcFn = rpc) {
+  if (!Number.isFinite(slot)) {
+    return { signatures: null, unavailableReason: "missing slot" };
+  }
+
+  try {
+    const block = await rpcFn("getBlock", [
+      slot,
+      {
+        commitment: "confirmed",
+        transactionDetails: "signatures",
+        rewards: false,
+        maxSupportedTransactionVersion: 0
+      }
+    ]);
+    const signatures = blockSignatures(block);
+    if (!signatures) {
+      return { signatures: null, unavailableReason: "block signatures unavailable" };
+    }
+    return { signatures, unavailableReason: null };
+  } catch (error) {
+    return { signatures: null, unavailableReason: `getBlock failed: ${error.message}` };
+  }
+}
+
+function baseBlockPositionDiagnostics(row, copyTransaction) {
+  const targetSlot = Number.isFinite(row.slot) ? row.slot : null;
+  const copySlot = Number.isFinite(copyTransaction?.slot) ? copyTransaction.slot : null;
+  const slotDelta =
+    targetSlot !== null && copySlot !== null ? copySlot - targetSlot : null;
+
+  return {
+    schema: "copytrade.blockPositionDiagnostics.v1",
+    status: "unknown",
+    targetSignature: row.observedSignature ?? null,
+    copySignature: row.sendSignature ?? null,
+    targetSlot,
+    copySlot,
+    slotDelta,
+    targetTxIndex: null,
+    copyTxIndex: null,
+    sameSlotTxDelta: null,
+    crossSlotPositionSummary: null,
+    unavailableReason: null
+  };
+}
+
+async function blockPositionDiagnostics(row, copyTransaction, rpcFn = rpc) {
+  const diagnostics = baseBlockPositionDiagnostics(row, copyTransaction);
+
+  if (!diagnostics.targetSignature || !diagnostics.copySignature) {
+    diagnostics.unavailableReason = "missing target or copy signature";
+    return diagnostics;
+  }
+  if (!Number.isFinite(diagnostics.targetSlot) || !Number.isFinite(diagnostics.copySlot)) {
+    diagnostics.unavailableReason = "missing target or copy slot";
+    return diagnostics;
+  }
+
+  const targetBlock = await fetchBlockSignatures(diagnostics.targetSlot, rpcFn);
+  if (!targetBlock.signatures) {
+    diagnostics.unavailableReason = `target block unavailable: ${targetBlock.unavailableReason}`;
+    return diagnostics;
+  }
+
+  diagnostics.targetTxIndex = targetBlock.signatures.indexOf(diagnostics.targetSignature);
+  if (diagnostics.targetTxIndex < 0) {
+    diagnostics.targetTxIndex = null;
+    diagnostics.unavailableReason = "target signature not found in confirmed block";
+    return diagnostics;
+  }
+
+  const copyBlock =
+    diagnostics.copySlot === diagnostics.targetSlot
+      ? targetBlock
+      : await fetchBlockSignatures(diagnostics.copySlot, rpcFn);
+  if (!copyBlock.signatures) {
+    diagnostics.unavailableReason = `copy block unavailable: ${copyBlock.unavailableReason}`;
+    return diagnostics;
+  }
+
+  diagnostics.copyTxIndex = copyBlock.signatures.indexOf(diagnostics.copySignature);
+  if (diagnostics.copyTxIndex < 0) {
+    diagnostics.copyTxIndex = null;
+    diagnostics.unavailableReason = "copy signature not found in confirmed block";
+    return diagnostics;
+  }
+
+  diagnostics.status = "found";
+  if (diagnostics.slotDelta === 0) {
+    diagnostics.sameSlotTxDelta = diagnostics.copyTxIndex - diagnostics.targetTxIndex;
+  } else if (diagnostics.slotDelta > 0) {
+    diagnostics.crossSlotPositionSummary = {
+      targetSlotTransactionCount: targetBlock.signatures.length,
+      copySlotTransactionCount: copyBlock.signatures.length,
+      targetTxIndex: diagnostics.targetTxIndex,
+      copyTxIndex: diagnostics.copyTxIndex
+    };
+  }
+
+  return diagnostics;
+}
+
+function unknownChainReport(row, unavailableReason) {
+  const diagnostics = baseBlockPositionDiagnostics(row, null);
+  diagnostics.unavailableReason = unavailableReason;
+  return {
+    slot: null,
+    slotDeltaFromObserved: null,
+    blockPositionDiagnostics: diagnostics,
+    targetSlot: diagnostics.targetSlot,
+    copySlot: diagnostics.copySlot,
+    slotDelta: diagnostics.slotDelta,
+    targetTxIndex: diagnostics.targetTxIndex,
+    copyTxIndex: diagnostics.copyTxIndex,
+    sameSlotTxDelta: diagnostics.sameSlotTxDelta,
+    crossSlotPositionSummary: diagnostics.crossSlotPositionSummary,
+    positionUnavailableReason: diagnostics.unavailableReason,
+    fillTokenDelta: null,
+    copyWalletSolDelta: null,
+    grossCopySpendSol: null,
+    networkFeeSol: null,
+    extraSpendBeyondObservedSol: null,
+    extraSpendBeyondObservedAndNetworkFeeSol: null,
+    err: null,
+    blockTime: null
+  };
 }
 
 function uiAmount(balance) {
@@ -127,18 +290,23 @@ function dedupeRows(rows) {
 
 async function chainReport(row) {
   if (!row.sendSignature) {
-    return null;
+    return unknownChainReport(row, "missing copy send signature");
   }
-  const transaction = await rpc("getTransaction", [
-    row.sendSignature,
-    {
-      encoding: "jsonParsed",
-      commitment: "confirmed",
-      maxSupportedTransactionVersion: 0
-    }
-  ]);
+  let transaction;
+  try {
+    transaction = await rpc("getTransaction", [
+      row.sendSignature,
+      {
+        encoding: "jsonParsed",
+        commitment: "confirmed",
+        maxSupportedTransactionVersion: 0
+      }
+    ]);
+  } catch (error) {
+    return unknownChainReport(row, `getTransaction failed: ${error.message}`);
+  }
   if (!transaction) {
-    return null;
+    return unknownChainReport(row, "copy transaction not found at confirmed commitment");
   }
 
   const copyWalletSolDelta = solDelta(transaction, row.copyWallet);
@@ -155,10 +323,20 @@ async function chainReport(row) {
     extraSpendBeyondObservedSol !== null && networkFeeSol !== null
       ? positiveOrNull(extraSpendBeyondObservedSol - networkFeeSol)
       : null;
+  const positionDiagnostics = await blockPositionDiagnostics(row, transaction);
 
   return {
     slot: transaction.slot,
     slotDeltaFromObserved: Number.isFinite(transaction.slot) && Number.isFinite(row.slot) ? transaction.slot - row.slot : null,
+    blockPositionDiagnostics: positionDiagnostics,
+    targetSlot: positionDiagnostics.targetSlot,
+    copySlot: positionDiagnostics.copySlot,
+    slotDelta: positionDiagnostics.slotDelta,
+    targetTxIndex: positionDiagnostics.targetTxIndex,
+    copyTxIndex: positionDiagnostics.copyTxIndex,
+    sameSlotTxDelta: positionDiagnostics.sameSlotTxDelta,
+    crossSlotPositionSummary: positionDiagnostics.crossSlotPositionSummary,
+    positionUnavailableReason: positionDiagnostics.unavailableReason,
     fillTokenDelta: tokenDelta(transaction, row.copyWallet, row.mint),
     copyWalletSolDelta,
     grossCopySpendSol,
@@ -184,6 +362,11 @@ async function buildSql(rows) {
     "slot",
     "copy_slot",
     "slot_delta_from_observed",
+    "target_slot",
+    "target_tx_index",
+    "copy_tx_index",
+    "same_slot_tx_delta",
+    "position_unavailable_reason",
     "selected_route",
     "route_layout",
     "mint",
@@ -254,6 +437,11 @@ async function buildSql(rows) {
       sqlNumber(row.slot),
       sqlNumber(report?.slot),
       sqlNumber(report?.slotDeltaFromObserved),
+      sqlNumber(report?.targetSlot),
+      sqlNumber(report?.targetTxIndex),
+      sqlNumber(report?.copyTxIndex),
+      sqlNumber(report?.sameSlotTxDelta),
+      sqlString(report?.positionUnavailableReason),
       sqlString(row.selectedRoute),
       sqlString(row.routeLayout),
       sqlString(row.mint),
@@ -314,7 +502,7 @@ async function syncOnce(path) {
 
   const sql = await buildSql(rows);
   const result = spawnSync("supabase", ["db", "query", "--linked", sql], {
-    cwd: process.cwd(),
+    cwd: supabaseCwd(),
     env: { ...process.env, SUPABASE_TELEMETRY_DISABLED: "1" },
     encoding: "utf8"
   });
@@ -344,7 +532,17 @@ async function main() {
   } while (watch);
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  process.exit(1);
-});
+export {
+  blockPositionDiagnostics,
+  blockSignatures,
+  dedupeRows,
+  executionKey,
+  fetchBlockSignatures
+};
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(error.message);
+    process.exit(1);
+  });
+}

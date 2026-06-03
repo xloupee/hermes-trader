@@ -9,6 +9,11 @@ if [[ -f .env ]]; then
   # shellcheck disable=SC1091
   source .env
   set +a
+elif [[ -f "${JITO_ENV_FILE:-$HOME/Documents/pumpfunnoti/.env}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${JITO_ENV_FILE:-$HOME/Documents/pumpfunnoti/.env}"
+  set +a
 fi
 
 : "${SOLANA_RPC_URL:?SOLANA_RPC_URL must be set in the environment or .env}"

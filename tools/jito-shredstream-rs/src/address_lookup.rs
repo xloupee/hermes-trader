@@ -4,6 +4,8 @@ use solana_address_lookup_table_interface::state::AddressLookupTable;
 use solana_transaction::versioned::VersionedTransaction;
 use std::collections::HashMap;
 
+const FLASHX_LOOKUP_TABLE: &str = "4vX5U9XsiY11infmC13d6VFPjvUqtuRw744r4o94dyow";
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AddressLookupTableCache {
     tables: HashMap<String, Vec<String>>,
@@ -21,9 +23,19 @@ impl AddressLookupTableCache {
         let mut tables = HashMap::with_capacity(table_keys.len());
 
         for table_key in table_keys {
-            let addresses = fetch_lookup_table_addresses(&client, rpc_url, table_key)
-                .await
-                .with_context(|| format!("load address lookup table {table_key}"))?;
+            let addresses = match fetch_lookup_table_addresses(&client, rpc_url, table_key).await {
+                Ok(addresses) => addresses,
+                Err(error) if table_key == FLASHX_LOOKUP_TABLE => {
+                    eprintln!(
+                        "using cached FLASHX lookup table after RPC preload failed: {error:#}"
+                    );
+                    flashx_lookup_table_addresses()
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("load address lookup table {table_key}"));
+                }
+            };
             tables.insert(table_key.to_string(), addresses);
         }
 
@@ -181,6 +193,37 @@ fn base64_decode(value: &str) -> Result<Vec<u8>> {
     base64::engine::general_purpose::STANDARD
         .decode(value)
         .context("base64 decode")
+}
+
+fn flashx_lookup_table_addresses() -> Vec<String> {
+    let mut addresses = vec!["11111111111111111111111111111111".to_string(); 187];
+    for (index, address) in [
+        (124, "86Vh4XGLW2b6nvWbRyDs4ScgMXbuvRCHT7WbUT3RFxKG"),
+        (117, "DKyUs1xXMDy8Z11zNsLnUg3dy9HZf6hYZidB6WodcaGy"),
+        (66, "7GFUN3bWzJMKMRZ34JLsvcqdssDbXnp589SiE33KVwcC"),
+        (58, "CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM"),
+        (52, "AktftA98kSWAxn6kVSoqBXBELUArjKu2H9WmKB48ULFY"),
+        (42, "5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD"),
+        (164, "ECDrSz47nXihe5kyK4oWEePPsPi9qz6u5d6Fa2sDj3uM"),
+        (5, "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"),
+        (11, "So11111111111111111111111111111111111111112"),
+        (4, "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
+        (32, "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"),
+        (33, "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf"),
+        (34, "Hq2wp8uJ9jCPsYgNHex8RtqdvMPfVGoYwjvF1ATiwn2Y"),
+        (35, "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"),
+        (36, "ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw"),
+        (65, "7VtfL8fvgNfhz17qKRMjzQEXgbdpnHHHQRh54R9jP2RJ"),
+        (40, "GS4CU59F31iL7aR2Q8zVS8DRrcRnXX1yjQ66TqNVQnaR"),
+        (38, "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1"),
+        (37, "C2aFPdENg4A2HQsmrd5rTw5TaYBX5Ku887cWjbFKtZpw"),
+        (39, "5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"),
+        (41, "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"),
+        (44, "GXPFM2caqTtQYC2cJ5yJRi9VDkpsYZXzYdwYpGnLmtDL"),
+    ] {
+        addresses[index] = address.to_string();
+    }
+    addresses
 }
 
 #[cfg(test)]

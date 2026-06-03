@@ -13,6 +13,11 @@ create table if not exists public.copytrade_local_executions (
   slot bigint not null,
   copy_slot bigint,
   slot_delta_from_observed integer,
+  target_slot bigint,
+  target_tx_index integer,
+  copy_tx_index integer,
+  same_slot_tx_delta integer,
+  position_unavailable_reason text,
   selected_route text not null,
   route_layout text,
   mint text not null,
@@ -67,7 +72,12 @@ alter table public.copytrade_local_executions
   add column if not exists auto_sell_token_amount_raw bigint,
   add column if not exists auto_sell_send_signature text,
   add column if not exists buy_signature_to_auto_sell_submitted_ms integer,
-  add column if not exists buy_signature_to_auto_sell_signature_returned_ms integer;
+  add column if not exists buy_signature_to_auto_sell_signature_returned_ms integer,
+  add column if not exists target_slot bigint,
+  add column if not exists target_tx_index integer,
+  add column if not exists copy_tx_index integer,
+  add column if not exists same_slot_tx_delta integer,
+  add column if not exists position_unavailable_reason text;
 
 create index if not exists copytrade_local_executions_created_at_idx
   on public.copytrade_local_executions (created_at desc);
@@ -86,6 +96,9 @@ create index if not exists copytrade_local_executions_decision_created_idx
 
 create index if not exists copytrade_local_executions_auto_sell_created_idx
   on public.copytrade_local_executions (auto_sell_decision, created_at desc);
+
+create index if not exists copytrade_local_executions_position_created_idx
+  on public.copytrade_local_executions (slot_delta_from_observed, same_slot_tx_delta, created_at desc);
 
 create unique index if not exists copytrade_local_executions_unique_idx
   on public.copytrade_local_executions (

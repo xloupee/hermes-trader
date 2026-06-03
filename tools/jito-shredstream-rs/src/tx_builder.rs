@@ -1,6 +1,6 @@
 use crate::parser::{
-    FlashxPumpLayout, ResolvedRouteAccount, RouteContext, ASSOCIATED_TOKEN_PROGRAM_ID,
-    COMPUTE_BUDGET_PROGRAM_ID, PUMP_FUN_PROGRAM_ID, SYSTEM_PROGRAM_ID,
+    read_u64_le, FlashxPumpLayout, ResolvedRouteAccount, RouteContext, ASSOCIATED_TOKEN_PROGRAM_ID,
+    COMPUTE_BUDGET_PROGRAM_ID, PUMP_FUN_PROGRAM_ID, PUMP_FUN_SELL_DISCRIMINATOR, SYSTEM_PROGRAM_ID,
 };
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
@@ -36,6 +36,9 @@ pub(crate) struct FullCopyUnsignedTxBuild {
     pub(crate) main_instruction_count: usize,
     pub(crate) instructions: Vec<Instruction>,
 }
+
+const PUMP_FUN_BUY_EXACT_SOL_IN_DISCRIMINATOR: [u8; 8] = [56, 252, 116, 8, 158, 223, 205, 95];
+const PUMP_FUN_COPY_MIN_TOKENS_OUT: u64 = 1;
 
 pub(crate) fn build_unsigned_flashx_pump(
     route_context: Option<&RouteContext>,
@@ -118,11 +121,6 @@ pub(crate) fn build_copy_unsigned_flashx_pump(
         ));
     }
 
-    let observed_wallet = resolved_pubkey(&context.resolved_accounts, "targetWallet")?;
-    let observed_user_token_account =
-        resolved_pubkey(&context.resolved_accounts, "userTokenAccount")?;
-    let observed_user_volume_accumulator =
-        resolved_pubkey(&context.resolved_accounts, "userVolumeAccumulator")?;
     let token_program = resolved_pubkey(&context.resolved_accounts, "tokenProgram")?;
     let copy_wallet = parse_pubkey(copy_wallet)?;
     let mint = parse_pubkey(mint)?;
@@ -136,35 +134,86 @@ pub(crate) fn build_copy_unsigned_flashx_pump(
     );
     let copy_user_volume_accumulator = user_volume_accumulator_address(&copy_wallet, &pump_program);
 
-    let program_id = parse_pubkey(&context.program_id)?;
-    let accounts = context
-        .accounts
-        .iter()
-        .map(|account| {
-            let mut pubkey = parse_pubkey(&account.pubkey)?;
-            if pubkey == observed_wallet {
-                pubkey = copy_wallet;
-            } else if pubkey == observed_user_token_account {
-                pubkey = copy_wallet_token_account;
-            } else if pubkey == observed_user_volume_accumulator {
-                pubkey = copy_user_volume_accumulator;
-            }
+    let spendable_sol_in = read_u64_le(&context.data, 1).ok_or(
+        TxBuildError::InvalidInstruction("missing flashx SOL amount"),
+    )?;
 
-            Ok(AccountMeta {
-                pubkey,
-                is_signer: account.is_signer,
-                is_writable: account.is_writable,
-            })
-        })
-        .collect::<Result<Vec<_>, TxBuildError>>()?;
+    let mut buy_data = Vec::with_capacity(25);
+    buy_data.extend_from_slice(&PUMP_FUN_BUY_EXACT_SOL_IN_DISCRIMINATOR);
+    buy_data.extend_from_slice(&spendable_sol_in.to_le_bytes());
+    buy_data.extend_from_slice(&PUMP_FUN_COPY_MIN_TOKENS_OUT.to_le_bytes());
+    buy_data.push(1);
+
+    let accounts = vec![
+        AccountMeta::new_readonly(
+            resolved_pubkey(&context.resolved_accounts, "globalConfig")?,
+            false,
+        ),
+        AccountMeta::new(
+            resolved_pubkey(&context.resolved_accounts, "feeRecipient")?,
+            false,
+        ),
+        AccountMeta::new_readonly(mint, false),
+        AccountMeta::new(
+            resolved_pubkey(&context.resolved_accounts, "bondingCurve")?,
+            false,
+        ),
+        AccountMeta::new(
+            resolved_pubkey(&context.resolved_accounts, "associatedBondingCurve")?,
+            false,
+        ),
+        AccountMeta::new(copy_wallet_token_account, false),
+        AccountMeta::new(copy_wallet, true),
+        AccountMeta::new_readonly(
+            resolved_pubkey(&context.resolved_accounts, "systemProgram")?,
+            false,
+        ),
+        AccountMeta::new_readonly(
+            resolved_pubkey(&context.resolved_accounts, "tokenProgram")?,
+            false,
+        ),
+        AccountMeta::new(
+            resolved_pubkey(&context.resolved_accounts, "creatorVault")?,
+            false,
+        ),
+        AccountMeta::new_readonly(
+            resolved_pubkey(&context.resolved_accounts, "eventAuthority")?,
+            false,
+        ),
+        AccountMeta::new_readonly(
+            resolved_pubkey(&context.resolved_accounts, "pumpProgram")?,
+            false,
+        ),
+        AccountMeta::new_readonly(
+            resolved_pubkey(&context.resolved_accounts, "globalVolumeAccumulator")?,
+            false,
+        ),
+        AccountMeta::new(copy_user_volume_accumulator, false),
+        AccountMeta::new_readonly(
+            resolved_pubkey(&context.resolved_accounts, "feeConfig")?,
+            false,
+        ),
+        AccountMeta::new_readonly(
+            resolved_pubkey(&context.resolved_accounts, "feeProgram")?,
+            false,
+        ),
+        AccountMeta::new_readonly(
+            resolved_pubkey(&context.resolved_accounts, "bondingCurveV2")?,
+            false,
+        ),
+        AccountMeta::new(
+            resolved_pubkey(&context.resolved_accounts, "buybackFeeRecipient")?,
+            false,
+        ),
+    ];
 
     Ok(CopyUnsignedTxBuild {
         route_layout: context.layout.as_str(),
         copy_wallet_token_account: copy_wallet_token_account.to_string(),
         instructions: vec![Instruction {
-            program_id,
+            program_id: pump_program,
             accounts,
-            data: context.data.clone(),
+            data: buy_data,
         }],
     })
 }
@@ -222,32 +271,92 @@ pub(crate) fn build_auto_sell_unsigned_flashx_pump(
         ));
     }
 
-    let mut copy_build = build_copy_unsigned_flashx_pump(route_context, copy_wallet, mint)?;
-    if copy_build.instructions.len() != 1 {
+    let copy_build = build_copy_unsigned_flashx_pump(route_context, copy_wallet, mint)?;
+    let Some(RouteContext::FlashxPump(context)) = route_context else {
         return Err(TxBuildError::UnsupportedLayout(
-            "unsupported auto-sell instruction layout",
-        ));
-    }
-
-    let Some(instruction) = copy_build.instructions.first_mut() else {
-        return Err(TxBuildError::UnsupportedLayout(
-            "unsupported auto-sell instruction layout",
+            "unsupported auto-sell layout",
         ));
     };
-    if instruction.data.len() < 18 {
-        return Err(TxBuildError::InvalidInstruction(
-            "unsupported auto-sell router data",
+    if context.layout != FlashxPumpLayout::DirectPump {
+        return Err(TxBuildError::UnsupportedLayout(
+            "unsupported auto-sell layout",
         ));
     }
 
-    instruction.data[1..9].copy_from_slice(&token_amount_raw.to_le_bytes());
-    instruction.data[9..17].copy_from_slice(&0u64.to_le_bytes());
-    instruction.data[17] = 1;
-
+    let pump_program = parse_pubkey(PUMP_FUN_PROGRAM_ID)?;
+    let copy_wallet_token_account = parse_pubkey(&copy_build.copy_wallet_token_account)?;
     let copy_wallet_pubkey = parse_pubkey(copy_wallet)?;
-    let mut instructions = Vec::with_capacity(copy_build.instructions.len() + 1);
+
+    let mut sell_data = Vec::with_capacity(24);
+    sell_data.extend_from_slice(&PUMP_FUN_SELL_DISCRIMINATOR);
+    sell_data.extend_from_slice(&token_amount_raw.to_le_bytes());
+    sell_data.extend_from_slice(&0u64.to_le_bytes());
+
+    let sell_instruction = Instruction {
+        program_id: pump_program,
+        accounts: vec![
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "globalConfig")?,
+                false,
+            ),
+            AccountMeta::new(
+                resolved_pubkey(&context.resolved_accounts, "feeRecipient")?,
+                false,
+            ),
+            AccountMeta::new_readonly(parse_pubkey(mint)?, false),
+            AccountMeta::new(
+                resolved_pubkey(&context.resolved_accounts, "bondingCurve")?,
+                false,
+            ),
+            AccountMeta::new(
+                resolved_pubkey(&context.resolved_accounts, "associatedBondingCurve")?,
+                false,
+            ),
+            AccountMeta::new(copy_wallet_token_account, false),
+            AccountMeta::new(copy_wallet_pubkey, true),
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "systemProgram")?,
+                false,
+            ),
+            AccountMeta::new(
+                resolved_pubkey(&context.resolved_accounts, "creatorVault")?,
+                false,
+            ),
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "tokenProgram")?,
+                false,
+            ),
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "eventAuthority")?,
+                false,
+            ),
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "pumpProgram")?,
+                false,
+            ),
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "feeConfig")?,
+                false,
+            ),
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "feeProgram")?,
+                false,
+            ),
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "bondingCurveV2")?,
+                false,
+            ),
+            AccountMeta::new(
+                resolved_pubkey(&context.resolved_accounts, "buybackFeeRecipient")?,
+                false,
+            ),
+        ],
+        data: sell_data,
+    };
+
+    let mut instructions = Vec::with_capacity(2);
     instructions.push(compute_unit_limit_instruction(400_000)?);
-    instructions.extend(copy_build.instructions);
+    instructions.push(sell_instruction);
 
     Ok(FullCopyUnsignedTxBuild {
         route_layout: copy_build.route_layout,
@@ -425,8 +534,22 @@ mod tests {
         assert_eq!(build.instructions.len(), 1);
         assert_eq!(
             build.instructions[0].program_id.to_string(),
-            FLASHX_ROUTER_PROGRAM_ID
+            PUMP_FUN_PROGRAM_ID
         );
+        assert_eq!(build.instructions[0].accounts.len(), 18);
+        assert_eq!(
+            &build.instructions[0].data[0..8],
+            &PUMP_FUN_BUY_EXACT_SOL_IN_DISCRIMINATOR
+        );
+        assert_eq!(
+            &build.instructions[0].data[8..16],
+            &990_000u64.to_le_bytes()
+        );
+        assert_eq!(
+            &build.instructions[0].data[16..24],
+            &PUMP_FUN_COPY_MIN_TOKENS_OUT.to_le_bytes()
+        );
+        assert_eq!(build.instructions[0].data[24], 1);
         assert_eq!(
             build.copy_wallet_token_account,
             "G2Bp3rC5GQHw8gWguLdujeZdTRoRgQia3Y1FmD5Ch4Vs"
@@ -494,7 +617,11 @@ mod tests {
         assert_eq!(build.instructions[1].data, vec![1]);
         assert_eq!(
             build.instructions[2].program_id.to_string(),
-            FLASHX_ROUTER_PROGRAM_ID
+            PUMP_FUN_PROGRAM_ID
+        );
+        assert_eq!(
+            &build.instructions[2].data[0..8],
+            &PUMP_FUN_BUY_EXACT_SOL_IN_DISCRIMINATOR
         );
     }
 
@@ -520,15 +647,25 @@ mod tests {
         assert_eq!(build.instructions.len(), 2);
         assert_eq!(
             build.instructions[1].program_id.to_string(),
-            FLASHX_ROUTER_PROGRAM_ID
+            PUMP_FUN_PROGRAM_ID
         );
-        assert_eq!(&build.instructions[1].data[1..9], &123_456u64.to_le_bytes());
-        assert_eq!(&build.instructions[1].data[9..17], &0u64.to_le_bytes());
-        assert_eq!(build.instructions[1].data[17], 1);
+        assert_eq!(
+            &build.instructions[1].data[0..8],
+            &PUMP_FUN_SELL_DISCRIMINATOR
+        );
+        assert_eq!(
+            &build.instructions[1].data[8..16],
+            &123_456u64.to_le_bytes()
+        );
+        assert_eq!(&build.instructions[1].data[16..24], &0u64.to_le_bytes());
         assert!(build.instructions[1]
             .accounts
             .iter()
             .any(|account| account.pubkey.to_string() == COPY_WALLET && account.is_signer));
+        assert!(build.instructions[1].accounts.iter().any(|account| {
+            account.pubkey.to_string() == "DhWQaUj4YBCyRvGuUfwcAjGNTvgB5murcVLT2VdTr1UZ"
+                && account.is_writable
+        }));
     }
 
     fn replay_transaction(base64_fixture: &str) -> VersionedTransaction {

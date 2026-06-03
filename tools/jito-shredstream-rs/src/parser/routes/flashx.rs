@@ -23,6 +23,16 @@ pub(crate) fn parse(
         return Some(parsed);
     }
 
+    if let Some(parsed) = parse_migrated_amm_layout(
+        &accounts,
+        account_keys,
+        target_wallets,
+        amount_in,
+        &instruction.data,
+    ) {
+        return Some(parsed);
+    }
+
     let mint = account_keys.get(*accounts.get(10)?)?;
 
     if target_wallets.contains(first_account) {
@@ -48,6 +58,44 @@ pub(crate) fn parse(
     }
 
     None
+}
+
+fn parse_migrated_amm_layout(
+    accounts: &[usize],
+    account_keys: &[String],
+    target_wallets: &HashSet<&String>,
+    amount_in: u64,
+    data: &[u8],
+) -> Option<ParsedTrade> {
+    if accounts.len() < 40 {
+        return None;
+    }
+
+    let target_wallet = account_key_at(accounts, account_keys, 1)?;
+    if !target_wallets.contains(target_wallet) {
+        return None;
+    }
+
+    let mint = account_key_at(accounts, account_keys, 12).filter(|mint| is_pump_mint(mint))?;
+    match data.get(17).copied()? {
+        0 => Some(ParsedTrade {
+            target_wallet: target_wallet.to_string(),
+            action: Action::Buy,
+            mint: mint.to_string(),
+            route: Route::FlashxPump,
+            sol_amount: Some(amount_in as f64 / LAMPORTS_PER_SOL),
+            token_amount: None,
+        }),
+        1 => Some(ParsedTrade {
+            target_wallet: target_wallet.to_string(),
+            action: Action::Sell,
+            mint: mint.to_string(),
+            route: Route::FlashxPump,
+            sol_amount: None,
+            token_amount: Some(amount_in as f64 / PUMP_FUN_TOKEN_DECIMALS),
+        }),
+        _ => None,
+    }
 }
 
 fn parse_long_v2_layout(
@@ -123,6 +171,7 @@ mod tests {
     const TARGET_WALLET: &str = "A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS";
     const FLASHX_MINT: &str = "E3wDF3hJtojFit9RQ1aX3SDiJh5ygYuj2bBPyJfUpump";
     const FLASHX_V2_MINT: &str = "6QPqSGYksJgxJmMfPzsTc7jK32YEFqTiCRYGZLvHpump";
+    const MIGRATED_MINT: &str = "wXfe7vz2t8an9Ca5dy72ChU54fRvtefDRmb4rzUpump";
 
     #[test]
     fn parses_flashx_pump_buy_from_router_outer_instruction() {
@@ -244,6 +293,30 @@ mod tests {
                 mint: FLASHX_V2_MINT,
                 sol_amount: None,
                 token_amount: Some(17_160.142_596),
+                copyable: false,
+            },
+            ReplayCase {
+                signature: "Jo9sxcrorVCGkmafhNDQKByQBDBTSqM99tS9R1mYs6DjvFZHxZFuFhAvdSemCxFqauPcqS1t17ir3iDScu7cQF5",
+                fixture: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/flashx/migrated-buy-Jo9sxcrorVCGkmafhNDQKByQBDBTSqM99tS9R1mYs6DjvFZHxZFuFhAvdSemCxFqauPcqS1t17ir3iDScu7cQF5.tx.base64"
+                )),
+                action: Action::Buy,
+                mint: MIGRATED_MINT,
+                sol_amount: Some(0.00099),
+                token_amount: None,
+                copyable: true,
+            },
+            ReplayCase {
+                signature: "5DAmMyL269Qip9c2JoXfa2XCkNZ1S2nVSoa3KuZ6oowthFCXuUwvvWfBZ3omjyi6BRpM9DAiwsaQ732cqG9u3vhx",
+                fixture: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/flashx/migrated-sell-5DAmMyL269Qip9c2JoXfa2XCkNZ1S2nVSoa3KuZ6oowthFCXuUwvvWfBZ3omjyi6BRpM9DAiwsaQ732cqG9u3vhx.tx.base64"
+                )),
+                action: Action::Sell,
+                mint: MIGRATED_MINT,
+                sol_amount: None,
+                token_amount: Some(1_187.998_876),
                 copyable: false,
             },
         ];

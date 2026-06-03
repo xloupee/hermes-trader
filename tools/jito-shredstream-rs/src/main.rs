@@ -1,10 +1,12 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 mod event;
 mod live;
 mod parser;
 mod proto;
+mod signal;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -56,6 +58,25 @@ pub(crate) struct LiveOptions {
         default_value_t = 50_000
     )]
     pub(crate) dedupe_capacity: usize,
+
+    #[arg(long, env = "JITO_SHADOW_SIGNALS_PATH")]
+    pub(crate) shadow_signals_path: Option<PathBuf>,
+
+    #[arg(long, env = "SUPABASE_URL")]
+    pub(crate) supabase_url: Option<String>,
+
+    #[arg(long, env = "SUPABASE_SERVICE_ROLE_KEY", hide_env_values = true)]
+    pub(crate) supabase_service_role_key: Option<String>,
+
+    #[arg(
+        long,
+        env = "JITO_SIGNAL_TABLE",
+        default_value = "copytrade_signal_observations"
+    )]
+    pub(crate) signal_table: String,
+
+    #[arg(long, env = "SOLANA_RPC_URL")]
+    pub(crate) solana_rpc_url: Option<String>,
 }
 
 #[tokio::main]

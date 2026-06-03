@@ -1,7 +1,7 @@
 use crate::{
     event::{
-        normalized_event, now_ms, print_json, wallet_mention_schema, RejectionLine,
-        WalletMentionLine,
+        normalized_event, now_ms, print_json, shadow_signal_line, wallet_mention_schema,
+        RejectionLine, ShadowSignalLine, WalletMentionLine,
     },
     parser::{
         classify_wallet_mention, mentioned_target_wallet, parse_trade, static_account_keys,
@@ -10,13 +10,19 @@ use crate::{
     proto::jito_shredstream::{
         shredstream_proxy_client::ShredstreamProxyClient, SubscribeEntriesRequest,
     },
+    signal::{SignalObservationWriter, SignalTimings},
     LiveOptions,
 };
 use anyhow::{Context, Result};
+use serde::Serialize;
 use solana_pubkey::Pubkey;
 use std::{
     collections::{HashSet, VecDeque},
+    fs::{File, OpenOptions},
+    io::{BufWriter, Write},
+    path::Path,
     str::FromStr,
+    time::Instant,
 };
 
 pub(crate) async fn run(options: LiveOptions) -> Result<()> {
@@ -38,6 +44,18 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
     );
 
     let mut seen = SeenSignatures::new(options.dedupe_capacity);
+    let mut shadow_signals = ShadowSignalWriter::new(options.shadow_signals_path.as_deref())
+        .with_context(|| {
+            format!(
+                "open shadow signals path {}",
+                options
+                    .shadow_signals_path
+                    .as_deref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "(disabled)".to_string())
+            )
+        })?;
+    let mut signal_observations = SignalObservationWriter::from_options(&options)?;
     let mut emitted = 0usize;
 
     while let Some(slot_entry) = stream
@@ -45,6 +63,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
         .await
         .context("receive Jito ShredStream entry")?
     {
+        let grpc_message_received_at = Instant::now();
+        let grpc_message_received_at_ms = now_ms();
         let entries =
             match bincode::deserialize::<Vec<solana_entry::entry::Entry>>(&slot_entry.entries) {
                 Ok(entries) => entries,
@@ -66,6 +86,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                     continue;
                 }
             };
+        let entries_deserialized_at = Instant::now();
+        let entries_deserialized_at_ms = now_ms();
 
         if options.stats {
             eprintln!(
@@ -89,14 +111,46 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                 let account_keys = static_account_keys(&versioned_tx);
                 match parse_trade(&versioned_tx, &account_keys, &target_wallets) {
                     Some(parsed) => {
-                        print_json(&normalized_event(
-                            now_ms(),
+                        let trade_parsed_at = Instant::now();
+                        let trade_parsed_at_ms = now_ms();
+                        let timings = SignalTimings {
+                            grpc_message_received_at_ms,
+                            entries_deserialized_at_ms,
+                            trade_parsed_at_ms,
+                            deserialize_us: entries_deserialized_at
+                                .duration_since(grpc_message_received_at)
+                                .as_micros(),
+                            parse_us: trade_parsed_at
+                                .duration_since(entries_deserialized_at)
+                                .as_micros(),
+                            local_detect_us: trade_parsed_at
+                                .duration_since(grpc_message_received_at)
+                                .as_micros(),
+                        };
+                        shadow_signals.write(&shadow_signal_line(
+                            trade_parsed_at_ms,
+                            options.endpoint.clone(),
+                            signature.clone(),
+                            slot_entry.slot,
+                            account_keys.len(),
+                            &parsed,
+                        ))?;
+
+                        let event = normalized_event(
+                            trade_parsed_at_ms,
                             options.endpoint.clone(),
                             signature,
                             slot_entry.slot,
                             account_keys.len(),
                             parsed,
-                        ))?;
+                        );
+                        if let Some(writer) = &mut signal_observations {
+                            if let Err(error) = writer.write(&event, timings).await {
+                                eprintln!("signal observation write failed: {error:#}");
+                            }
+                        }
+
+                        print_json(&event)?;
                         emitted += 1;
                         if options.limit > 0 && emitted >= options.limit {
                             return Ok(());
@@ -150,6 +204,42 @@ struct SeenSignatures {
     capacity: usize,
     set: HashSet<String>,
     order: VecDeque<String>,
+}
+
+struct ShadowSignalWriter {
+    file: Option<BufWriter<File>>,
+}
+
+impl ShadowSignalWriter {
+    fn new(path: Option<&Path>) -> Result<Self> {
+        let file = match path {
+            Some(path) => Some(BufWriter::new(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .with_context(|| format!("open {}", path.display()))?,
+            )),
+            None => None,
+        };
+
+        Ok(Self { file })
+    }
+
+    fn write(&mut self, signal: &ShadowSignalLine) -> Result<()> {
+        write_json_line(self.file.as_mut(), signal)
+    }
+}
+
+fn write_json_line<T: Serialize>(writer: Option<&mut BufWriter<File>>, value: &T) -> Result<()> {
+    let Some(writer) = writer else {
+        return Ok(());
+    };
+
+    serde_json::to_writer(&mut *writer, value)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    Ok(())
 }
 
 impl SeenSignatures {
@@ -211,7 +301,13 @@ fn parse_target_wallets(values: &[String]) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::SeenSignatures;
+    use super::{write_json_line, SeenSignatures};
+    use serde::Serialize;
+    use std::{
+        fs::{remove_file, File},
+        io::BufWriter,
+        path::PathBuf,
+    };
 
     #[test]
     fn seen_signatures_evicts_oldest_when_capacity_is_reached() {
@@ -235,5 +331,42 @@ mod tests {
         assert!(seen.insert("a".to_string()));
         assert!(seen.insert("a".to_string()));
         assert_eq!(seen.len(), 0);
+    }
+
+    #[test]
+    fn write_json_line_appends_one_serialized_record() {
+        #[derive(Serialize)]
+        struct Record {
+            schema: &'static str,
+            decision: &'static str,
+        }
+
+        let path = temp_path("jito-shadow-signal-writer.jsonl");
+        let file = File::create(&path).expect("temp file creates");
+        let mut writer = BufWriter::new(file);
+
+        write_json_line(
+            Some(&mut writer),
+            &Record {
+                schema: "copytrade.shadowSignal.v1",
+                decision: "wouldCopy",
+            },
+        )
+        .expect("line writes");
+
+        let contents = std::fs::read_to_string(&path).expect("temp file reads");
+        remove_file(&path).ok();
+
+        assert_eq!(
+            contents,
+            "{\"schema\":\"copytrade.shadowSignal.v1\",\"decision\":\"wouldCopy\"}\n"
+        );
+    }
+
+    fn temp_path(file_name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("{}-{file_name}", std::process::id()));
+        remove_file(&path).ok();
+        path
     }
 }

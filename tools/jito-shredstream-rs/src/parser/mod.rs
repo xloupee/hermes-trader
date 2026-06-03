@@ -33,7 +33,7 @@ pub(crate) enum Action {
     Sell,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ParsedTrade {
     pub(crate) target_wallet: String,
     pub(crate) action: Action,

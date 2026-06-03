@@ -16,9 +16,14 @@ pub(crate) fn parse(
         .collect::<Vec<_>>();
     let first_account = account_keys.get(*accounts.first()?)?;
     let second_account = account_keys.get(*accounts.get(1)?)?;
-    let mint = account_keys.get(*accounts.get(10)?)?;
     let amount_in = read_u64_le(&instruction.data, 1)?;
     let _minimum_out = read_u64_le(&instruction.data, 9)?;
+
+    if let Some(parsed) = parse_long_v2_layout(&accounts, account_keys, target_wallets, amount_in) {
+        return Some(parsed);
+    }
+
+    let mint = account_keys.get(*accounts.get(10)?)?;
 
     if target_wallets.contains(first_account) {
         return Some(ParsedTrade {
@@ -45,6 +50,60 @@ pub(crate) fn parse(
     None
 }
 
+fn parse_long_v2_layout(
+    accounts: &[usize],
+    account_keys: &[String],
+    target_wallets: &HashSet<&String>,
+    amount_in: u64,
+) -> Option<ParsedTrade> {
+    if accounts.len() < 50 {
+        return None;
+    }
+
+    let target_wallet = account_key_at(accounts, account_keys, 1)?;
+    if !target_wallets.contains(target_wallet) {
+        return None;
+    }
+
+    if let Some(mint) = account_key_at(accounts, account_keys, 19).filter(|mint| is_pump_mint(mint))
+    {
+        return Some(ParsedTrade {
+            target_wallet: target_wallet.to_string(),
+            action: Action::Buy,
+            mint: mint.to_string(),
+            route: Route::FlashxPump,
+            sol_amount: Some(amount_in as f64 / LAMPORTS_PER_SOL),
+            token_amount: None,
+        });
+    }
+
+    if let Some(mint) = account_key_at(accounts, account_keys, 9).filter(|mint| is_pump_mint(mint))
+    {
+        return Some(ParsedTrade {
+            target_wallet: target_wallet.to_string(),
+            action: Action::Sell,
+            mint: mint.to_string(),
+            route: Route::FlashxPump,
+            sol_amount: None,
+            token_amount: Some(amount_in as f64 / PUMP_FUN_TOKEN_DECIMALS),
+        });
+    }
+
+    None
+}
+
+fn account_key_at<'a>(
+    accounts: &[usize],
+    account_keys: &'a [String],
+    account_position: usize,
+) -> Option<&'a String> {
+    account_keys.get(*accounts.get(account_position)?)
+}
+
+fn is_pump_mint(account_key: &str) -> bool {
+    account_key.ends_with("pump")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,6 +122,7 @@ mod tests {
 
     const TARGET_WALLET: &str = "A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS";
     const FLASHX_MINT: &str = "E3wDF3hJtojFit9RQ1aX3SDiJh5ygYuj2bBPyJfUpump";
+    const FLASHX_V2_MINT: &str = "6QPqSGYksJgxJmMfPzsTc7jK32YEFqTiCRYGZLvHpump";
 
     #[test]
     fn parses_flashx_pump_buy_from_router_outer_instruction() {
@@ -133,6 +193,7 @@ mod tests {
                     "/fixtures/flashx/buy-2vA8ofU1vmTTnqLUwD8c8gj3ShPG4nTovgFvMaxMP5EMHtCKZ1bm4jVQmS9AjaSTseRApW5ZsbPRHk8rwnSkLzVf.tx.base64"
                 )),
                 action: Action::Buy,
+                mint: FLASHX_MINT,
                 sol_amount: Some(0.00099),
                 token_amount: None,
                 copyable: true,
@@ -144,6 +205,7 @@ mod tests {
                     "/fixtures/flashx/buy-iuJwKCiEDeaKZ4C3FMPZ8hSNh93fsdK1fXJCZYxRhjLxyFmGjA3v83ipgoqJECtMwZFVQtgKgW8S46JLy7xx8Wy.tx.base64"
                 )),
                 action: Action::Buy,
+                mint: FLASHX_MINT,
                 sol_amount: Some(0.00099),
                 token_amount: None,
                 copyable: true,
@@ -155,8 +217,33 @@ mod tests {
                     "/fixtures/flashx/sell-4m7URrfKhTFWVFuQfyBDMaYDGbKMWLrEeLn3XmB4PPHmPSBeiu18uZyukBXSHd22oqLUXtuqvpHuCjFiu7VPzCF6.tx.base64"
                 )),
                 action: Action::Sell,
+                mint: FLASHX_MINT,
                 sol_amount: None,
                 token_amount: Some(104_905.207_774),
+                copyable: false,
+            },
+            ReplayCase {
+                signature: "2w97Y3Ddyk1FsmftLRpFi5VngMmUZzVuRz1A9B6KAwcMkL8L2qnhvzJ9fP3WYYzdTmupjF9PCcBTCma9jYdVkBSx",
+                fixture: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/flashx/buyv2-2w97Y3Ddyk1FsmftLRpFi5VngMmUZzVuRz1A9B6KAwcMkL8L2qnhvzJ9fP3WYYzdTmupjF9PCcBTCma9jYdVkBSx.tx.base64"
+                )),
+                action: Action::Buy,
+                mint: FLASHX_V2_MINT,
+                sol_amount: Some(0.00099),
+                token_amount: None,
+                copyable: true,
+            },
+            ReplayCase {
+                signature: "2ww3fpS3SJmG6D1D8U9o8qpBGhhXEKLMxiPofTjJyqFttSrGEuXaiFqvWfqfbSn4JNaosAhLLVhLigTpMQUVaUav",
+                fixture: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/flashx/sellv2-2ww3fpS3SJmG6D1D8U9o8qpBGhhXEKLMxiPofTjJyqFttSrGEuXaiFqvWfqfbSn4JNaosAhLLVhLigTpMQUVaUav.tx.base64"
+                )),
+                action: Action::Sell,
+                mint: FLASHX_V2_MINT,
+                sol_amount: None,
+                token_amount: Some(17_160.142_596),
                 copyable: false,
             },
         ];
@@ -188,7 +275,7 @@ mod tests {
             assert_eq!(value["targetWallet"], TARGET_WALLET);
             assert_eq!(value["action"], serde_json::to_value(case.action).unwrap());
             assert_eq!(value["route"], "flashx-pump");
-            assert_eq!(value["mint"], FLASHX_MINT);
+            assert_eq!(value["mint"], case.mint);
             assert_eq!(value["copyable"], case.copyable);
             assert_optional_amount(&value, "solAmount", case.sol_amount);
             assert_optional_amount(&value, "tokenAmount", case.token_amount);
@@ -199,6 +286,7 @@ mod tests {
         signature: &'static str,
         fixture: &'static str,
         action: Action,
+        mint: &'static str,
         sol_amount: Option<f64>,
         token_amount: Option<f64>,
         copyable: bool,

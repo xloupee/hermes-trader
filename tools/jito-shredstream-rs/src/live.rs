@@ -7,6 +7,10 @@ use crate::{
         classify_wallet_mention, mentioned_target_wallet, parse_trade, static_account_keys,
         versioned_tx_signature_string,
     },
+    planner::{
+        execution_plan_line, tx_build_plan_line, ExecutionPlanLine, PlannerOptions,
+        TxBuildPlanLine, TxBuildPlannerOptions,
+    },
     proto::jito_shredstream::{
         shredstream_proxy_client::ShredstreamProxyClient, SubscribeEntriesRequest,
     },
@@ -50,6 +54,28 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                 "open shadow signals path {}",
                 options
                     .shadow_signals_path
+                    .as_deref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "(disabled)".to_string())
+            )
+        })?;
+    let mut execution_plans = ExecutionPlanWriter::new(options.execution_plans_path.as_deref())
+        .with_context(|| {
+            format!(
+                "open execution plans path {}",
+                options
+                    .execution_plans_path
+                    .as_deref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "(disabled)".to_string())
+            )
+        })?;
+    let mut tx_build_plans = TxBuildPlanWriter::new(options.tx_build_plans_path.as_deref())
+        .with_context(|| {
+            format!(
+                "open tx build plans path {}",
+                options
+                    .tx_build_plans_path
                     .as_deref()
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|| "(disabled)".to_string())
@@ -127,13 +153,29 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 .duration_since(grpc_message_received_at)
                                 .as_micros(),
                         };
-                        shadow_signals.write(&shadow_signal_line(
+                        let shadow_signal = shadow_signal_line(
                             trade_parsed_at_ms,
                             options.endpoint.clone(),
                             signature.clone(),
                             slot_entry.slot,
                             account_keys.len(),
                             &parsed,
+                        );
+                        shadow_signals.write(&shadow_signal)?;
+                        let execution_plan = execution_plan_line(
+                            &shadow_signal,
+                            now_ms(),
+                            PlannerOptions {
+                                copy_sol_amount: options.copy_plan_sol_amount,
+                            },
+                        );
+                        execution_plans.write(&execution_plan)?;
+                        tx_build_plans.write(&tx_build_plan_line(
+                            &execution_plan,
+                            now_ms(),
+                            TxBuildPlannerOptions {
+                                max_plan_age_ms: options.tx_build_plan_max_age_ms,
+                            },
                         ))?;
 
                         let event = normalized_event(
@@ -210,6 +252,14 @@ struct ShadowSignalWriter {
     file: Option<BufWriter<File>>,
 }
 
+struct ExecutionPlanWriter {
+    file: Option<BufWriter<File>>,
+}
+
+struct TxBuildPlanWriter {
+    file: Option<BufWriter<File>>,
+}
+
 impl ShadowSignalWriter {
     fn new(path: Option<&Path>) -> Result<Self> {
         let file = match path {
@@ -228,6 +278,48 @@ impl ShadowSignalWriter {
 
     fn write(&mut self, signal: &ShadowSignalLine) -> Result<()> {
         write_json_line(self.file.as_mut(), signal)
+    }
+}
+
+impl ExecutionPlanWriter {
+    fn new(path: Option<&Path>) -> Result<Self> {
+        let file = match path {
+            Some(path) => Some(BufWriter::new(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .with_context(|| format!("open {}", path.display()))?,
+            )),
+            None => None,
+        };
+
+        Ok(Self { file })
+    }
+
+    fn write(&mut self, plan: &ExecutionPlanLine) -> Result<()> {
+        write_json_line(self.file.as_mut(), plan)
+    }
+}
+
+impl TxBuildPlanWriter {
+    fn new(path: Option<&Path>) -> Result<Self> {
+        let file = match path {
+            Some(path) => Some(BufWriter::new(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .with_context(|| format!("open {}", path.display()))?,
+            )),
+            None => None,
+        };
+
+        Ok(Self { file })
+    }
+
+    fn write(&mut self, plan: &TxBuildPlanLine) -> Result<()> {
+        write_json_line(self.file.as_mut(), plan)
     }
 }
 

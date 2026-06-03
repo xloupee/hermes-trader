@@ -5,6 +5,7 @@ use std::path::PathBuf;
 mod event;
 mod live;
 mod parser;
+mod planner;
 mod proto;
 mod signal;
 
@@ -61,6 +62,18 @@ pub(crate) struct LiveOptions {
 
     #[arg(long, env = "JITO_SHADOW_SIGNALS_PATH")]
     pub(crate) shadow_signals_path: Option<PathBuf>,
+
+    #[arg(long, env = "JITO_EXECUTION_PLANS_PATH")]
+    pub(crate) execution_plans_path: Option<PathBuf>,
+
+    #[arg(long, env = "JITO_COPY_PLAN_SOL_AMOUNT")]
+    pub(crate) copy_plan_sol_amount: Option<f64>,
+
+    #[arg(long, env = "JITO_TX_BUILD_PLANS_PATH")]
+    pub(crate) tx_build_plans_path: Option<PathBuf>,
+
+    #[arg(long, env = "JITO_TX_BUILD_PLAN_MAX_AGE_MS", default_value_t = 2_000)]
+    pub(crate) tx_build_plan_max_age_ms: u128,
 
     #[arg(long, env = "SUPABASE_URL")]
     pub(crate) supabase_url: Option<String>,

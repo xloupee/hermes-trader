@@ -61,26 +61,26 @@ pub(crate) struct WalletMentionLine {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ShadowSignalLine {
-    schema: &'static str,
-    observed_at_ms: u128,
-    provider: &'static str,
-    source: &'static str,
-    endpoint: String,
-    target_wallet: String,
-    action: Action,
-    mint: String,
-    signature: String,
-    slot: u64,
-    route: crate::parser::Route,
+    pub(crate) schema: &'static str,
+    pub(crate) observed_at_ms: u128,
+    pub(crate) provider: &'static str,
+    pub(crate) source: &'static str,
+    pub(crate) endpoint: String,
+    pub(crate) target_wallet: String,
+    pub(crate) action: Action,
+    pub(crate) mint: String,
+    pub(crate) signature: String,
+    pub(crate) slot: u64,
+    pub(crate) route: crate::parser::Route,
     #[serde(skip_serializing_if = "Option::is_none")]
-    sol_amount: Option<f64>,
+    pub(crate) sol_amount: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    token_amount: Option<f64>,
-    copyable: bool,
-    decision: &'static str,
+    pub(crate) token_amount: Option<f64>,
+    pub(crate) copyable: bool,
+    pub(crate) decision: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<&'static str>,
-    account_key_count: usize,
+    pub(crate) reason: Option<&'static str>,
+    pub(crate) account_key_count: usize,
 }
 
 #[derive(Debug, Serialize)]

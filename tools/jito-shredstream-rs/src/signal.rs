@@ -26,6 +26,10 @@ pub(crate) struct SignalTimings {
 
 impl SignalObservationWriter {
     pub(crate) fn from_options(options: &LiveOptions) -> Result<Option<Self>> {
+        if options.disable_signal_observations {
+            return Ok(None);
+        }
+
         let has_url = options
             .supabase_url
             .as_deref()

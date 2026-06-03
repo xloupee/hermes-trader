@@ -105,6 +105,31 @@ pub(crate) struct LiveOptions {
     )]
     pub(crate) fast_copy_send: bool,
 
+    #[arg(
+        long,
+        env = "JITO_SEND_FANOUT",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) send_fanout: bool,
+
+    #[arg(
+        long = "send-rpc-url",
+        env = "JITO_SEND_RPC_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) send_rpc_urls: Vec<String>,
+
+    #[arg(
+        long = "jito-send-url",
+        env = "JITO_BLOCK_ENGINE_SEND_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) jito_send_urls: Vec<String>,
+
+    #[arg(long, env = "JITO_BLOCK_ENGINE_AUTH_UUID", hide_env_values = true)]
+    pub(crate) jito_auth_uuid: Option<String>,
+
     #[arg(long, env = "JITO_ONE_SHOT_COPY_SEND", default_value_t = false)]
     pub(crate) one_shot_copy_send: bool,
 
@@ -131,6 +156,14 @@ pub(crate) struct LiveOptions {
 
     #[arg(long, env = "SUPABASE_SERVICE_ROLE_KEY", hide_env_values = true)]
     pub(crate) supabase_service_role_key: Option<String>,
+
+    #[arg(
+        long,
+        env = "JITO_DISABLE_SIGNAL_OBSERVATIONS",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) disable_signal_observations: bool,
 
     #[arg(
         long,

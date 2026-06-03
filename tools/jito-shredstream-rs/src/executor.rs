@@ -15,7 +15,8 @@ use solana_hash::Hash;
 use solana_keypair::{read_keypair_file, Keypair};
 use solana_signer::Signer;
 use solana_transaction::Transaction;
-use std::{path::PathBuf, str::FromStr, time::Duration};
+use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+use tokio::task::JoinSet;
 
 const FIRST_LIVE_MAX_COPY_SOL_CAP: f64 = 0.001;
 const SEND_MAX_RETRIES: u64 = 3;
@@ -35,6 +36,10 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) dry_run: bool,
     pub(crate) simulate_copy_tx: bool,
     pub(crate) fast_copy_send: bool,
+    pub(crate) send_fanout: bool,
+    pub(crate) send_rpc_urls: Vec<String>,
+    pub(crate) jito_send_urls: Vec<String>,
+    pub(crate) jito_auth_uuid: Option<String>,
     pub(crate) max_copy_sol: Option<f64>,
     pub(crate) copy_wallet: Option<String>,
     pub(crate) copy_keypair_path: Option<PathBuf>,
@@ -104,6 +109,11 @@ pub(crate) struct CopyExecutionLine {
     simulation_logs: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     send_signature: Option<String>,
+    send_rpc_url_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    send_rpc_winner: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    send_rpc_errors: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
     auto_sell_enabled: bool,
@@ -130,8 +140,35 @@ pub(crate) struct CopyExecutionLine {
     auto_sell_copy_signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_sell_send_signature: Option<String>,
+    auto_sell_send_rpc_url_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_sell_send_rpc_winner: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    auto_sell_send_rpc_errors: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_sell_simulation_error: Option<serde_json::Value>,
+}
+
+#[derive(Debug)]
+struct SendTransactionResult {
+    signature: String,
+    rpc_url_count: usize,
+    rpc_winner: String,
+    rpc_errors: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct SendEndpoint {
+    label: String,
+    url: String,
+    kind: SendEndpointKind,
+    auth_uuid: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SendEndpointKind {
+    Rpc,
+    Jito,
 }
 
 impl CopyExecutor {
@@ -144,6 +181,18 @@ impl CopyExecutor {
             dry_run: options.dry_run,
             simulate_copy_tx: options.simulate_copy_tx && !options.fast_copy_send,
             fast_copy_send: options.fast_copy_send,
+            send_fanout: options.send_fanout,
+            send_rpc_urls: normalized_send_rpc_urls(
+                &options.send_rpc_urls,
+                options.solana_rpc_url.as_deref(),
+            ),
+            jito_send_urls: normalized_send_rpc_urls(&options.jito_send_urls, None),
+            jito_auth_uuid: options
+                .jito_auth_uuid
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
             max_copy_sol: options.max_copy_sol,
             copy_wallet: options.copy_wallet.clone(),
             copy_keypair_path: options.copy_keypair_path.clone(),
@@ -299,10 +348,13 @@ impl CopyExecutor {
             }
             line.mark_send_submitted();
             match self.send_transaction(&encoded_tx).await {
-                Ok(signature) => {
+                Ok(result) => {
                     line.sent = true;
                     line.mark_signature_returned();
-                    line.send_signature = Some(signature);
+                    line.send_signature = Some(result.signature);
+                    line.send_rpc_url_count = result.rpc_url_count;
+                    line.send_rpc_winner = Some(result.rpc_winner);
+                    line.send_rpc_errors = result.rpc_errors;
                     line.decision = "sent";
                     if self.options.auto_sell_after_buy {
                         self.handle_auto_sell(&mut line, execution_plan, keypair)
@@ -366,45 +418,72 @@ impl CopyExecutor {
             .ok_or_else(|| "simulateTransaction result missing".to_string())
     }
 
-    async fn send_transaction(&self, encoded_tx: &str) -> Result<String, String> {
-        let rpc_url = self
-            .options
-            .solana_rpc_url
-            .as_deref()
-            .ok_or_else(|| "missing SOLANA_RPC_URL".to_string())?;
-        let response = self
-            .client
-            .post(rpc_url)
-            .json(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "sendTransaction",
-                "params": [
-                    encoded_tx,
-                    {
-                        "encoding": "base64",
-                        "skipPreflight": self.options.fast_copy_send,
-                        "preflightCommitment": "processed",
-                        "maxRetries": SEND_MAX_RETRIES
-                    }
-                ]
-            }))
-            .send()
-            .await
-            .map_err(|error| format!("send sendTransaction request: {error}"))?
-            .error_for_status()
-            .map_err(|error| format!("sendTransaction HTTP status: {error}"))?
-            .json::<RpcResponse<String>>()
-            .await
-            .map_err(|error| format!("decode sendTransaction response: {error}"))?;
-
-        if let Some(error) = response.error {
-            return Err(format!("sendTransaction RPC error: {}", error.message));
+    async fn send_transaction(&self, encoded_tx: &str) -> Result<SendTransactionResult, String> {
+        let endpoints = self.options.selected_send_endpoints();
+        if endpoints.is_empty() {
+            return Err(
+                "missing SOLANA_RPC_URL, JITO_SEND_RPC_URLS, or JITO_BLOCK_ENGINE_SEND_URLS"
+                    .to_string(),
+            );
         }
 
-        response
-            .result
-            .ok_or_else(|| "sendTransaction result missing".to_string())
+        if endpoints.len() == 1 {
+            let endpoint = &endpoints[0];
+            let label = endpoint.label.clone();
+            let signature = send_transaction_to(
+                &self.client,
+                endpoint,
+                encoded_tx,
+                self.options.fast_copy_send,
+            )
+            .await
+            .map_err(|error| send_error_message(endpoint, &error))?;
+            return Ok(SendTransactionResult {
+                signature,
+                rpc_url_count: 1,
+                rpc_winner: label,
+                rpc_errors: Vec::new(),
+            });
+        }
+
+        let encoded_tx = Arc::<str>::from(encoded_tx.to_string());
+        let mut send_set = JoinSet::new();
+        for endpoint in &endpoints {
+            let client = self.client.clone();
+            let encoded_tx = encoded_tx.clone();
+            let endpoint = endpoint.clone();
+            let fast_copy_send = self.options.fast_copy_send;
+            send_set.spawn(async move {
+                let label = endpoint.label.clone();
+                let signature =
+                    send_transaction_to(&client, &endpoint, encoded_tx.as_ref(), fast_copy_send)
+                        .await
+                        .map_err(|error| send_error_message(&endpoint, &error))?;
+                Ok::<_, String>((label, signature))
+            });
+        }
+
+        let mut errors = Vec::new();
+        while let Some(result) = send_set.join_next().await {
+            match result {
+                Ok(Ok((label, signature))) => {
+                    send_set.abort_all();
+                    return Ok(SendTransactionResult {
+                        signature,
+                        rpc_url_count: endpoints.len(),
+                        rpc_winner: label,
+                        rpc_errors: errors,
+                    });
+                }
+                Ok(Err(error)) => errors.push(error),
+                Err(error) => errors.push(format!("join error: {error}")),
+            }
+        }
+
+        Err(format!(
+            "all sendTransaction fanout attempts failed: {}",
+            errors.join("; ")
+        ))
     }
 
     async fn handle_auto_sell(
@@ -529,10 +608,13 @@ impl CopyExecutor {
 
         line.mark_auto_sell_submitted();
         match self.send_transaction(&encoded_tx).await {
-            Ok(signature) => {
+            Ok(result) => {
                 line.auto_sell_sent = true;
                 line.mark_auto_sell_signature_returned();
-                line.auto_sell_send_signature = Some(signature);
+                line.auto_sell_send_signature = Some(result.signature);
+                line.auto_sell_send_rpc_url_count = result.rpc_url_count;
+                line.auto_sell_send_rpc_winner = Some(result.rpc_winner);
+                line.auto_sell_send_rpc_errors = result.rpc_errors;
                 line.auto_sell_decision = Some("sent");
             }
             Err(error) => line.error_auto_sell(error),
@@ -657,6 +739,9 @@ impl CopyExecutionLine {
             simulation_units_consumed: None,
             simulation_logs: Vec::new(),
             send_signature: None,
+            send_rpc_url_count: options.selected_send_rpc_url_count(),
+            send_rpc_winner: None,
+            send_rpc_errors: Vec::new(),
             reason: None,
             auto_sell_enabled: options.auto_sell_after_buy,
             auto_sell_delay_ms: options.auto_sell_delay_ms,
@@ -673,6 +758,9 @@ impl CopyExecutionLine {
             buy_signature_to_auto_sell_signature_returned_ms: None,
             auto_sell_copy_signature: None,
             auto_sell_send_signature: None,
+            auto_sell_send_rpc_url_count: options.selected_send_rpc_url_count(),
+            auto_sell_send_rpc_winner: None,
+            auto_sell_send_rpc_errors: Vec::new(),
             auto_sell_simulation_error: None,
         }
     }
@@ -744,6 +832,163 @@ impl CopyExecutionLine {
     }
 }
 
+impl CopyExecutionOptions {
+    fn selected_send_rpc_urls(&self) -> Vec<String> {
+        let mut urls =
+            normalized_send_rpc_urls(&self.send_rpc_urls, self.solana_rpc_url.as_deref());
+        if !self.send_fanout {
+            urls.truncate(1);
+        }
+        urls
+    }
+
+    fn selected_send_rpc_url_count(&self) -> usize {
+        self.selected_send_endpoints().len()
+    }
+
+    fn selected_send_endpoints(&self) -> Vec<SendEndpoint> {
+        let mut endpoints = self
+            .selected_send_rpc_urls()
+            .into_iter()
+            .enumerate()
+            .map(|(index, url)| SendEndpoint {
+                label: if index == 0 {
+                    format!("rpc-primary:{}", rpc_url_label(&url))
+                } else {
+                    format!("rpc-fanout-{}:{}", index, rpc_url_label(&url))
+                },
+                url,
+                kind: SendEndpointKind::Rpc,
+                auth_uuid: None,
+            })
+            .collect::<Vec<_>>();
+
+        if self.send_fanout {
+            endpoints.extend(self.jito_send_urls.iter().enumerate().map(|(index, url)| {
+                let url = jito_transaction_url(url);
+                SendEndpoint {
+                    label: format!("jito-{}:{}", index + 1, rpc_url_label(&url)),
+                    url,
+                    kind: SendEndpointKind::Jito,
+                    auth_uuid: self.jito_auth_uuid.clone(),
+                }
+            }));
+        }
+
+        endpoints
+    }
+}
+
+fn normalized_send_rpc_urls(configured: &[String], fallback: Option<&str>) -> Vec<String> {
+    let mut urls = Vec::new();
+    for value in configured {
+        for part in value.split(',') {
+            let trimmed = part.trim();
+            if !trimmed.is_empty() && !urls.iter().any(|url| url == trimmed) {
+                urls.push(trimmed.to_string());
+            }
+        }
+    }
+
+    if urls.is_empty() {
+        if let Some(fallback) = fallback {
+            let trimmed = fallback.trim();
+            if !trimmed.is_empty() {
+                urls.push(trimmed.to_string());
+            }
+        }
+    }
+
+    urls
+}
+
+fn rpc_url_label(rpc_url: &str) -> String {
+    let without_query = rpc_url
+        .trim()
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('/');
+    let after_scheme = without_query
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(without_query);
+    let host = after_scheme.split('/').next().unwrap_or("").trim();
+    if host.is_empty() {
+        "(unknown-rpc)".to_string()
+    } else {
+        host.to_string()
+    }
+}
+
+fn jito_transaction_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.ends_with("/api/v1/transactions") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/api/v1/transactions")
+    }
+}
+
+async fn send_transaction_to(
+    client: &reqwest::Client,
+    endpoint: &SendEndpoint,
+    encoded_tx: &str,
+    fast_copy_send: bool,
+) -> Result<String, String> {
+    let mut request = client.post(&endpoint.url);
+    if matches!(endpoint.kind, SendEndpointKind::Jito) {
+        if let Some(auth_uuid) = endpoint.auth_uuid.as_deref() {
+            request = request.header("x-jito-auth", auth_uuid);
+        }
+    }
+
+    let response = request
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendTransaction",
+            "params": [
+                encoded_tx,
+                {
+                    "encoding": "base64",
+                    "skipPreflight": fast_copy_send,
+                    "preflightCommitment": "processed",
+                    "maxRetries": SEND_MAX_RETRIES
+                }
+            ]
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("send sendTransaction request: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("sendTransaction HTTP status: {error}"))?
+        .json::<RpcResponse<String>>()
+        .await
+        .map_err(|error| format!("decode sendTransaction response: {error}"))?;
+
+    if let Some(error) = response.error {
+        return Err(format!("sendTransaction RPC error: {}", error.message));
+    }
+
+    response
+        .result
+        .ok_or_else(|| "sendTransaction result missing".to_string())
+}
+
+fn send_error_message(endpoint: &SendEndpoint, error: &str) -> String {
+    let mut sanitized = error.replace(&endpoint.url, "<redacted-rpc-url>");
+    if let Some((base, query)) = endpoint.url.split_once('?') {
+        sanitized = sanitized
+            .replace(query, "<redacted-query>")
+            .replace(base, "<redacted-rpc-url>")
+            .replace(base.trim_end_matches('/'), "<redacted-rpc-url>");
+    } else {
+        sanitized = sanitized.replace(endpoint.url.trim_end_matches('/'), "<redacted-rpc-url>");
+    }
+    format!("{}: {sanitized}", endpoint.label)
+}
+
 fn tx_build_error_reason(error: TxBuildError) -> &'static str {
     match error {
         TxBuildError::MissingRouteContext(reason)
@@ -799,6 +1044,10 @@ mod tests {
             dry_run: true,
             simulate_copy_tx: false,
             fast_copy_send: false,
+            send_fanout: false,
+            send_rpc_urls: Vec::new(),
+            jito_send_urls: Vec::new(),
+            jito_auth_uuid: None,
             max_copy_sol: None,
             copy_wallet: None,
             copy_keypair_path: None,
@@ -866,6 +1115,135 @@ mod tests {
     #[test]
     fn max_copy_sol_first_live_cap_is_one_milli_sol() {
         assert_eq!(FIRST_LIVE_MAX_COPY_SOL_CAP, 0.001);
+    }
+
+    #[test]
+    fn send_rpc_urls_fallback_to_primary_rpc() {
+        let options = CopyExecutionOptions {
+            solana_rpc_url: Some("https://primary.example.com/?api-key=secret".to_string()),
+            ..disabled_options()
+        };
+
+        assert_eq!(
+            options.selected_send_rpc_urls(),
+            vec!["https://primary.example.com/?api-key=secret".to_string()]
+        );
+        assert_eq!(options.selected_send_rpc_url_count(), 1);
+    }
+
+    #[test]
+    fn send_rpc_fanout_uses_deduped_configured_urls() {
+        let mut options = disabled_options();
+        options.send_fanout = true;
+        options.solana_rpc_url = Some("https://primary.example.com".to_string());
+        options.send_rpc_urls = vec![
+            " https://first.example.com ".to_string(),
+            "https://second.example.com,https://first.example.com".to_string(),
+        ];
+
+        assert_eq!(
+            options.selected_send_rpc_urls(),
+            vec![
+                "https://first.example.com".to_string(),
+                "https://second.example.com".to_string(),
+            ]
+        );
+        assert_eq!(options.selected_send_rpc_url_count(), 2);
+    }
+
+    #[test]
+    fn send_rpc_without_fanout_uses_first_configured_url() {
+        let mut options = disabled_options();
+        options.send_rpc_urls = vec![
+            "https://first.example.com".to_string(),
+            "https://second.example.com".to_string(),
+        ];
+
+        assert_eq!(
+            options.selected_send_rpc_urls(),
+            vec!["https://first.example.com".to_string()]
+        );
+        assert_eq!(options.selected_send_rpc_url_count(), 1);
+    }
+
+    #[test]
+    fn jito_block_engine_urls_join_fanout_when_enabled() {
+        let mut options = disabled_options();
+        options.send_fanout = true;
+        options.solana_rpc_url = Some("https://primary.example.com".to_string());
+        options.jito_send_urls = vec![
+            "https://frankfurt.mainnet.block-engine.jito.wtf".to_string(),
+            "https://london.mainnet.block-engine.jito.wtf/api/v1/transactions".to_string(),
+        ];
+        options.jito_auth_uuid = Some("uuid".to_string());
+
+        let endpoints = options.selected_send_endpoints();
+
+        assert_eq!(endpoints.len(), 3);
+        assert_eq!(endpoints[0].label, "rpc-primary:primary.example.com");
+        assert_eq!(
+            endpoints[1].url,
+            "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/transactions"
+        );
+        assert_eq!(
+            endpoints[2].url,
+            "https://london.mainnet.block-engine.jito.wtf/api/v1/transactions"
+        );
+        assert_eq!(
+            endpoints[1].label,
+            "jito-1:frankfurt.mainnet.block-engine.jito.wtf"
+        );
+        assert_eq!(endpoints[1].auth_uuid.as_deref(), Some("uuid"));
+        assert_eq!(options.selected_send_rpc_url_count(), 3);
+    }
+
+    #[test]
+    fn jito_block_engine_urls_are_not_used_without_fanout() {
+        let mut options = disabled_options();
+        options.send_fanout = false;
+        options.solana_rpc_url = Some("https://primary.example.com".to_string());
+        options.jito_send_urls =
+            vec!["https://frankfurt.mainnet.block-engine.jito.wtf".to_string()];
+
+        let endpoints = options.selected_send_endpoints();
+
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].label, "rpc-primary:primary.example.com");
+    }
+
+    #[test]
+    fn rpc_url_label_removes_secret_query_string() {
+        assert_eq!(
+            rpc_url_label("https://mainnet.helius-rpc.com/?api-key=secret"),
+            "mainnet.helius-rpc.com"
+        );
+        assert_eq!(
+            rpc_url_label("https://rpc.example.com/custom/path?token=secret"),
+            "rpc.example.com"
+        );
+        assert_eq!(
+            jito_transaction_url("https://frankfurt.mainnet.block-engine.jito.wtf"),
+            "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/transactions"
+        );
+    }
+
+    #[test]
+    fn send_error_message_redacts_rpc_url_queries() {
+        let endpoint = SendEndpoint {
+            label: "rpc-primary:mainnet.helius-rpc.com".to_string(),
+            url: "https://mainnet.helius-rpc.com/?api-key=secret".to_string(),
+            kind: SendEndpointKind::Rpc,
+            auth_uuid: None,
+        };
+
+        let message = send_error_message(
+            &endpoint,
+            "send sendTransaction request: error sending request for url (https://mainnet.helius-rpc.com/?api-key=secret)",
+        );
+
+        assert!(message.contains("rpc-primary:mainnet.helius-rpc.com"));
+        assert!(!message.contains("secret"));
+        assert!(!message.contains("api-key"));
     }
 
     #[tokio::test]

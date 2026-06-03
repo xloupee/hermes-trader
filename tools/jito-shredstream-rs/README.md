@@ -156,6 +156,39 @@ and submits with `skipPreflight: true`. It defaults
 `JITO_AUTO_SELL_AFTER_BUY=false` so the copied buy path is measured without the
 post-buy sell experiment.
 
+## VPS Tiny Send
+
+The production-shaped copy worker runs on the VPS, next to the local
+ShredStream proxy, without the Mac SSH tunnel:
+
+```bash
+JITO_ARM_LIVE_COPY_SEND=YES /opt/jito-feed-probe-watch/run-vps-copy-send.sh
+```
+
+The VPS launcher sources `/opt/pumpfun-migration-bot/.env`, then
+`/etc/jito-copy-live.env`, and runs the release `jito-feed-probe` binary. It
+keeps `JITO_MAX_COPY_SOL <= 0.001`, `JITO_FAST_COPY_SEND=YES`,
+`JITO_ONE_SHOT_COPY_SEND=false`, and `JITO_DISABLE_SIGNAL_OBSERVATIONS=true` by
+default. Dashboard/report syncing should run as a separate post-submit service.
+
+Send fanout is default-off:
+
+```bash
+JITO_SEND_FANOUT=YES
+JITO_SEND_RPC_URLS=https://rpc-a.example,https://rpc-b.example
+JITO_BLOCK_ENGINE_SEND_URLS=https://frankfurt.mainnet.block-engine.jito.wtf,https://london.mainnet.block-engine.jito.wtf
+```
+
+When fanout is enabled, the worker submits the same signed transaction to every
+configured RPC concurrently, records the first successful ACK as
+`sendRpcWinner`, and stores only a sanitized host label, not query strings or
+API keys. If `JITO_SEND_RPC_URLS` is unset, the VPS launcher falls back to
+`DIRECT_EXECUTION_SEND_RPC_URLS`, then `SOLANA_RPC_URL`. If
+`JITO_BLOCK_ENGINE_SEND_URLS` is unset, it falls back to
+`DIRECT_EXECUTION_JITO_SEND_URLS` and posts to Jito
+`/api/v1/transactions`, with `JITO_BLOCK_ENGINE_AUTH_UUID` inherited from
+`DIRECT_EXECUTION_JITO_AUTH_UUID` when present.
+
 After a send, verify the on-chain result:
 
 ```bash
@@ -166,3 +199,8 @@ The execution verifier reads the local send JSONL, fetches the sent transaction
 from RPC, and reports the copy signature, mint, copy wallet token delta, SOL
 delta, gross SOL spend, network fee, extra spend beyond the observed buy amount,
 status, slot delta, and observed-to-submit/signature timing fields.
+
+The Supabase sync helper also computes block-position diagnostics:
+`targetSlot`, `copySlot`, `slotDelta`, `targetTxIndex`, `copyTxIndex`, and
+`sameSlotTxDelta`. In watch mode it refreshes recent rows so transactions that
+were not visible at the first confirmed lookup can still fill in after landing.

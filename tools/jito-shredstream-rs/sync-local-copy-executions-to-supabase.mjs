@@ -30,13 +30,27 @@ function supabaseCwd() {
   return process.cwd();
 }
 
-function readJsonl(path) {
+function positiveInteger(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
+}
+
+function boolish(value, fallback = false) {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+  return ["1", "true", "yes", "y", "on"].includes(String(value).trim().toLowerCase());
+}
+
+function readJsonl(path, { recentLimit = 0 } = {}) {
   if (!existsSync(path)) {
     return [];
   }
-  return readFileSync(path, "utf8")
+  const lines = readFileSync(path, "utf8")
     .split(/\r?\n/)
-    .filter((line) => line.trim().length > 0)
+    .filter((line) => line.trim().length > 0);
+  const selectedLines = recentLimit > 0 ? lines.slice(-recentLimit) : lines;
+  return selectedLines
     .map((line, index) => {
       try {
         return JSON.parse(line);
@@ -60,6 +74,10 @@ function sqlNumber(value) {
 
 function sqlBoolean(value) {
   return value ? "true" : "false";
+}
+
+function sqlJson(value) {
+  return `${sqlString(JSON.stringify(value ?? null))}::jsonb`;
 }
 
 async function rpc(method, params) {
@@ -348,6 +366,140 @@ async function chainReport(row) {
   };
 }
 
+async function buildRestRows(rows) {
+  const records = [];
+  for (const row of rows) {
+    const report = await chainReport(row);
+    const chain = report
+      ? {
+          ...report,
+          sendSignature: row.sendSignature,
+          observedSignature: row.observedSignature,
+          copyWallet: row.copyWallet,
+          mint: row.mint,
+          intendedCopySpendSol: row.observedSolAmount ?? null,
+          maxCopySol: row.maxCopySol ?? null
+        }
+      : {};
+
+    records.push({
+      observed_at_ms: Number.isFinite(row.observedAtMs) ? row.observedAtMs : null,
+      execution_at_ms: Number.isFinite(row.executionAtMs) ? row.executionAtMs : null,
+      provider: row.provider ?? null,
+      source: row.source ?? null,
+      endpoint: row.endpoint ?? null,
+      observed_wallet: row.observedWallet ?? null,
+      copy_wallet: row.copyWallet ?? null,
+      observed_signature: row.observedSignature ?? null,
+      send_signature: row.sendSignature ?? null,
+      slot: Number.isFinite(row.slot) ? row.slot : null,
+      copy_slot: report?.slot ?? null,
+      slot_delta_from_observed: report?.slotDeltaFromObserved ?? null,
+      target_slot: report?.targetSlot ?? null,
+      target_tx_index: report?.targetTxIndex ?? null,
+      copy_tx_index: report?.copyTxIndex ?? null,
+      same_slot_tx_delta: report?.sameSlotTxDelta ?? null,
+      position_unavailable_reason: report?.positionUnavailableReason ?? null,
+      selected_route: row.selectedRoute ?? null,
+      route_layout: row.routeLayout ?? null,
+      mint: row.mint ?? null,
+      observed_action: row.observedAction ?? null,
+      observed_sol_amount: Number.isFinite(row.observedSolAmount) ? row.observedSolAmount : null,
+      max_copy_sol: Number.isFinite(row.maxCopySol) ? row.maxCopySol : null,
+      decision: row.decision ?? null,
+      reason: row.reason ?? null,
+      signed: Boolean(row.signed),
+      simulated: Boolean(row.simulated),
+      sent: Boolean(row.sent),
+      dry_run: Boolean(row.dryRun),
+      send_enabled: Boolean(row.sendEnabled),
+      send_rpc_winner: row.sendRpcWinner ?? null,
+      send_rpc_url_count: Number.isFinite(row.sendRpcUrlCount) ? row.sendRpcUrlCount : null,
+      send_rpc_errors: row.sendRpcErrors ?? [],
+      simulation_requested: Boolean(row.simulationRequested),
+      instruction_count: Number.isFinite(row.instructionCount) ? row.instructionCount : 0,
+      simulation_units_consumed: Number.isFinite(row.simulationUnitsConsumed)
+        ? row.simulationUnitsConsumed
+        : null,
+      fill_token_delta: report?.fillTokenDelta ?? null,
+      copy_wallet_sol_delta: report?.copyWalletSolDelta ?? null,
+      gross_copy_spend_sol: report?.grossCopySpendSol ?? null,
+      network_fee_sol: report?.networkFeeSol ?? null,
+      extra_spend_beyond_observed_sol: report?.extraSpendBeyondObservedSol ?? null,
+      extra_spend_beyond_observed_and_network_fee_sol:
+        report?.extraSpendBeyondObservedAndNetworkFeeSol ?? null,
+      observed_to_signed_ms: Number.isFinite(row.observedToSignedMs) ? row.observedToSignedMs : null,
+      observed_to_simulation_completed_ms: Number.isFinite(row.observedToSimulationCompletedMs)
+        ? row.observedToSimulationCompletedMs
+        : null,
+      observed_to_send_submitted_ms: Number.isFinite(row.observedToSendSubmittedMs)
+        ? row.observedToSendSubmittedMs
+        : null,
+      observed_to_signature_returned_ms: Number.isFinite(row.observedToSignatureReturnedMs)
+        ? row.observedToSignatureReturnedMs
+        : null,
+      auto_sell_enabled: Boolean(row.autoSellEnabled),
+      auto_sell_delay_ms: Number.isFinite(row.autoSellDelayMs) ? row.autoSellDelayMs : null,
+      auto_sell_attempted: Boolean(row.autoSellAttempted),
+      auto_sell_signed: Boolean(row.autoSellSigned),
+      auto_sell_simulated: Boolean(row.autoSellSimulated),
+      auto_sell_sent: Boolean(row.autoSellSent),
+      auto_sell_decision: row.autoSellDecision ?? null,
+      auto_sell_reason: row.autoSellReason ?? null,
+      auto_sell_token_amount_raw: Number.isFinite(row.autoSellTokenAmountRaw)
+        ? row.autoSellTokenAmountRaw
+        : null,
+      auto_sell_send_signature: row.autoSellSendSignature ?? null,
+      auto_sell_send_rpc_winner: row.autoSellSendRpcWinner ?? null,
+      auto_sell_send_rpc_url_count: Number.isFinite(row.autoSellSendRpcUrlCount)
+        ? row.autoSellSendRpcUrlCount
+        : null,
+      auto_sell_send_rpc_errors: row.autoSellSendRpcErrors ?? [],
+      buy_signature_to_auto_sell_submitted_ms: Number.isFinite(row.buySignatureToAutoSellSubmittedMs)
+        ? row.buySignatureToAutoSellSubmittedMs
+        : null,
+      buy_signature_to_auto_sell_signature_returned_ms: Number.isFinite(
+        row.buySignatureToAutoSellSignatureReturnedMs
+      )
+        ? row.buySignatureToAutoSellSignatureReturnedMs
+        : null,
+      raw_execution: row,
+      chain_report: chain
+    });
+  }
+
+  return records;
+}
+
+function hasSupabaseRestEnv() {
+  return Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
+}
+
+async function syncViaSupabaseRest(records) {
+  if (records.length === 0) {
+    return;
+  }
+
+  const base = process.env.SUPABASE_URL.trim().replace(/\/+$/, "");
+  const response = await fetch(
+    `${base}/rest/v1/copytrade_local_executions?on_conflict=provider,observed_signature,observed_wallet,observed_action,mint`,
+    {
+      method: "POST",
+      headers: {
+        apikey: process.env.SUPABASE_SERVICE_ROLE_KEY,
+        authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
+        "content-type": "application/json",
+        prefer: "resolution=merge-duplicates,return=minimal"
+      },
+      body: JSON.stringify(records)
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Supabase REST upsert failed: ${response.status} ${await response.text()}`);
+  }
+}
+
 async function buildSql(rows) {
   const columns = [
     "observed_at_ms",
@@ -380,6 +532,9 @@ async function buildSql(rows) {
     "sent",
     "dry_run",
     "send_enabled",
+    "send_rpc_winner",
+    "send_rpc_url_count",
+    "send_rpc_errors",
     "simulation_requested",
     "instruction_count",
     "simulation_units_consumed",
@@ -403,6 +558,9 @@ async function buildSql(rows) {
     "auto_sell_reason",
     "auto_sell_token_amount_raw",
     "auto_sell_send_signature",
+    "auto_sell_send_rpc_winner",
+    "auto_sell_send_rpc_url_count",
+    "auto_sell_send_rpc_errors",
     "buy_signature_to_auto_sell_submitted_ms",
     "buy_signature_to_auto_sell_signature_returned_ms",
     "raw_execution",
@@ -455,6 +613,9 @@ async function buildSql(rows) {
       sqlBoolean(row.sent),
       sqlBoolean(row.dryRun),
       sqlBoolean(row.sendEnabled),
+      sqlString(row.sendRpcWinner),
+      sqlNumber(row.sendRpcUrlCount),
+      sqlJson(row.sendRpcErrors ?? []),
       sqlBoolean(row.simulationRequested),
       sqlNumber(row.instructionCount ?? 0),
       sqlNumber(row.simulationUnitsConsumed),
@@ -478,6 +639,9 @@ async function buildSql(rows) {
       sqlString(row.autoSellReason),
       sqlNumber(row.autoSellTokenAmountRaw),
       sqlString(row.autoSellSendSignature),
+      sqlString(row.autoSellSendRpcWinner),
+      sqlNumber(row.autoSellSendRpcUrlCount),
+      sqlJson(row.autoSellSendRpcErrors ?? []),
       sqlNumber(row.buySignatureToAutoSellSubmittedMs),
       sqlNumber(row.buySignatureToAutoSellSignatureReturnedMs),
       `${sqlString(JSON.stringify(row))}::jsonb`,
@@ -493,11 +657,17 @@ async function buildSql(rows) {
   return `insert into public.copytrade_local_executions (${columns.join(",")}) values ${values.join(",")} on conflict (provider, observed_signature, observed_wallet, observed_action, mint) do update set ${updates};`;
 }
 
-async function syncOnce(path) {
-  const rawRows = readJsonl(path);
+async function syncOnce(path, { recentLimit = 0 } = {}) {
+  const rawRows = readJsonl(path, { recentLimit });
   const rows = dedupeRows(rawRows);
   if (rows.length === 0) {
     return 0;
+  }
+
+  if (hasSupabaseRestEnv()) {
+    const records = await buildRestRows(rows);
+    await syncViaSupabaseRest(records);
+    return rows.length;
   }
 
   const sql = await buildSql(rows);
@@ -517,14 +687,23 @@ async function main() {
   const path = argValue("executions", process.env.JITO_COPY_EXECUTIONS_PATH || DEFAULT_EXECUTIONS_PATH);
   const watch = hasFlag("watch");
   const intervalMs = Number(argValue("interval-ms", "5000"));
+  const recentLimit = positiveInteger(
+    argValue("recent-limit", process.env.JITO_SYNC_RECENT_LIMIT || (watch ? "100" : "0")),
+    watch ? 100 : 0
+  );
+  const refreshSentRows = boolish(
+    argValue("refresh-sent-rows", process.env.JITO_SYNC_REFRESH_SENT_ROWS),
+    true
+  );
 
   let lastSyncedCount = -1;
   do {
     const rowCount = readJsonl(path).length;
-    if (rowCount !== lastSyncedCount) {
-      const synced = await syncOnce(path);
+    if (rowCount !== lastSyncedCount || (watch && refreshSentRows && rowCount > 0)) {
+      const synced = await syncOnce(path, { recentLimit });
       lastSyncedCount = rowCount;
-      console.error(`synced ${synced} unique local copy executions to Supabase`);
+      const scope = recentLimit > 0 ? `last ${recentLimit} rows` : "all rows";
+      console.error(`synced ${synced} unique local copy executions to Supabase (${scope})`);
     }
     if (watch) {
       await new Promise((resolve) => setTimeout(resolve, Number.isFinite(intervalMs) ? intervalMs : 5000));

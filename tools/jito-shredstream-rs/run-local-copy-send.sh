@@ -30,6 +30,10 @@ export JITO_COPY_WALLET="${JITO_COPY_WALLET:-FqhpPL63symHForRGfxPbGi4wDpe5jQqAVj
 export JITO_COPY_KEYPAIR_PATH="${JITO_COPY_KEYPAIR_PATH:-$HOME/.config/solana/copytrade-planning-keypair.json}"
 export JITO_MAX_COPY_SOL="${JITO_MAX_COPY_SOL:-0.001}"
 export JITO_FAST_COPY_SEND="${JITO_FAST_COPY_SEND:-false}"
+export JITO_SEND_FANOUT="${JITO_SEND_FANOUT:-false}"
+export JITO_SEND_RPC_URLS="${JITO_SEND_RPC_URLS:-${DIRECT_EXECUTION_SEND_RPC_URLS:-$SOLANA_RPC_URL}}"
+export JITO_BLOCK_ENGINE_SEND_URLS="${JITO_BLOCK_ENGINE_SEND_URLS:-${DIRECT_EXECUTION_JITO_SEND_URLS:-}}"
+export JITO_BLOCK_ENGINE_AUTH_UUID="${JITO_BLOCK_ENGINE_AUTH_UUID:-${DIRECT_EXECUTION_JITO_AUTH_UUID:-}}"
 FAST_COPY_SEND_NORMALIZED="$(printf '%s' "$JITO_FAST_COPY_SEND" | tr '[:upper:]' '[:lower:]')"
 case "$FAST_COPY_SEND_NORMALIZED" in
   yes|true|1|on)
@@ -69,6 +73,13 @@ echo "  copy wallet: $JITO_COPY_WALLET"
 echo "  max copy SOL: $JITO_MAX_COPY_SOL"
 echo "  executions: $JITO_COPY_EXECUTIONS_PATH"
 echo "  fast copy send: $JITO_FAST_COPY_SEND"
+echo "  send fanout: $JITO_SEND_FANOUT"
+echo "  send rpc urls: $(printf '%s' "$JITO_SEND_RPC_URLS" | awk -F, '{print NF}') configured"
+if [[ -n "$JITO_BLOCK_ENGINE_SEND_URLS" ]]; then
+  echo "  jito send urls: $(printf '%s' "$JITO_BLOCK_ENGINE_SEND_URLS" | awk -F, '{print NF}') configured"
+else
+  echo "  jito send urls: 0 configured"
+fi
 echo "  simulate copy tx: $JITO_SIMULATE_COPY_TX"
 echo "  send enabled: $JITO_ENABLE_COPY_SEND"
 echo "  one shot: $JITO_ONE_SHOT_COPY_SEND"

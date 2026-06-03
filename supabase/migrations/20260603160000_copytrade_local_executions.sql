@@ -31,6 +31,9 @@ create table if not exists public.copytrade_local_executions (
   sent boolean not null default false,
   dry_run boolean not null default true,
   send_enabled boolean not null default false,
+  send_rpc_winner text,
+  send_rpc_url_count integer,
+  send_rpc_errors jsonb not null default '[]'::jsonb,
   simulation_requested boolean not null default false,
   instruction_count integer not null default 0,
   simulation_units_consumed bigint,
@@ -54,6 +57,9 @@ create table if not exists public.copytrade_local_executions (
   auto_sell_reason text,
   auto_sell_token_amount_raw bigint,
   auto_sell_send_signature text,
+  auto_sell_send_rpc_winner text,
+  auto_sell_send_rpc_url_count integer,
+  auto_sell_send_rpc_errors jsonb not null default '[]'::jsonb,
   buy_signature_to_auto_sell_submitted_ms integer,
   buy_signature_to_auto_sell_signature_returned_ms integer,
   raw_execution jsonb not null default '{}'::jsonb,
@@ -77,7 +83,13 @@ alter table public.copytrade_local_executions
   add column if not exists target_tx_index integer,
   add column if not exists copy_tx_index integer,
   add column if not exists same_slot_tx_delta integer,
-  add column if not exists position_unavailable_reason text;
+  add column if not exists position_unavailable_reason text,
+  add column if not exists send_rpc_winner text,
+  add column if not exists send_rpc_url_count integer,
+  add column if not exists send_rpc_errors jsonb not null default '[]'::jsonb,
+  add column if not exists auto_sell_send_rpc_winner text,
+  add column if not exists auto_sell_send_rpc_url_count integer,
+  add column if not exists auto_sell_send_rpc_errors jsonb not null default '[]'::jsonb;
 
 create index if not exists copytrade_local_executions_created_at_idx
   on public.copytrade_local_executions (created_at desc);

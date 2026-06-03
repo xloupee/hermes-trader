@@ -49,6 +49,13 @@ pub(crate) struct LiveOptions {
 
     #[arg(long, default_value_t = false)]
     pub(crate) print_mentions: bool,
+
+    #[arg(
+        long,
+        env = "JITO_FEED_PROBE_DEDUPE_CAPACITY",
+        default_value_t = 50_000
+    )]
+    pub(crate) dedupe_capacity: usize,
 }
 
 #[tokio::main]

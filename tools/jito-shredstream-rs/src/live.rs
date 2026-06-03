@@ -14,7 +14,10 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use solana_pubkey::Pubkey;
-use std::{collections::HashSet, str::FromStr};
+use std::{
+    collections::{HashSet, VecDeque},
+    str::FromStr,
+};
 
 pub(crate) async fn run(options: LiveOptions) -> Result<()> {
     let target_wallets = parse_target_wallets(&options.target_wallets)?;
@@ -34,7 +37,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
         options.limit
     );
 
-    let mut seen = HashSet::new();
+    let mut seen = SeenSignatures::new(options.dedupe_capacity);
     let mut emitted = 0usize;
 
     while let Some(slot_entry) = stream
@@ -143,6 +146,49 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
     Ok(())
 }
 
+struct SeenSignatures {
+    capacity: usize,
+    set: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl SeenSignatures {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            set: HashSet::with_capacity(capacity),
+            order: VecDeque::with_capacity(capacity),
+        }
+    }
+
+    fn insert(&mut self, signature: String) -> bool {
+        if self.capacity == 0 {
+            return true;
+        }
+
+        if self.set.contains(&signature) {
+            return false;
+        }
+
+        while self.order.len() >= self.capacity {
+            if let Some(expired) = self.order.pop_front() {
+                self.set.remove(&expired);
+            } else {
+                break;
+            }
+        }
+
+        self.set.insert(signature.clone());
+        self.order.push_back(signature);
+        true
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.set.len()
+    }
+}
+
 fn parse_target_wallets(values: &[String]) -> Result<Vec<String>> {
     let mut wallets = Vec::new();
     for value in values {
@@ -161,4 +207,33 @@ fn parse_target_wallets(values: &[String]) -> Result<Vec<String>> {
     wallets.sort();
     wallets.dedup();
     Ok(wallets)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SeenSignatures;
+
+    #[test]
+    fn seen_signatures_evicts_oldest_when_capacity_is_reached() {
+        let mut seen = SeenSignatures::new(2);
+
+        assert!(seen.insert("a".to_string()));
+        assert!(seen.insert("b".to_string()));
+        assert!(!seen.insert("a".to_string()));
+        assert_eq!(seen.len(), 2);
+
+        assert!(seen.insert("c".to_string()));
+        assert_eq!(seen.len(), 2);
+        assert!(seen.insert("a".to_string()));
+        assert_eq!(seen.len(), 2);
+    }
+
+    #[test]
+    fn seen_signatures_capacity_zero_disables_dedupe() {
+        let mut seen = SeenSignatures::new(0);
+
+        assert!(seen.insert("a".to_string()));
+        assert!(seen.insert("a".to_string()));
+        assert_eq!(seen.len(), 0);
+    }
 }

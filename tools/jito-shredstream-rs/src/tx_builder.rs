@@ -6,6 +6,13 @@ use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
 use std::str::FromStr;
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TxFeeConfig {
+    pub(crate) compute_unit_price_micro_lamports: Option<u64>,
+    pub(crate) jito_tip_lamports: Option<u64>,
+    pub(crate) jito_tip_account: Option<String>,
+}
+
 #[derive(Debug)]
 pub(crate) struct UnsignedTxBuild {
     pub(crate) route_layout: &'static str,
@@ -109,18 +116,27 @@ pub(crate) fn build_copy_unsigned_flashx_pump(
         ));
     };
 
-    if context.layout != FlashxPumpLayout::DirectPump {
-        return Err(TxBuildError::UnsupportedLayout(
-            "unsupported flashx-pump copy layout",
-        ));
-    }
-
     if context.accounts.is_empty() || context.data.is_empty() {
         return Err(TxBuildError::MissingRouteContext(
-            "missing flashx-pump direct route accounts",
+            "missing flashx-pump route accounts",
         ));
     }
 
+    match context.layout {
+        FlashxPumpLayout::DirectPump => {
+            build_copy_unsigned_flashx_direct_pump(context, copy_wallet, mint)
+        }
+        FlashxPumpLayout::MigratedAmm => {
+            build_copy_unsigned_flashx_migrated_amm(context, copy_wallet, mint)
+        }
+    }
+}
+
+fn build_copy_unsigned_flashx_direct_pump(
+    context: &crate::parser::FlashxPumpRouteContext,
+    copy_wallet: &str,
+    mint: &str,
+) -> Result<CopyUnsignedTxBuild, TxBuildError> {
     let token_program = resolved_pubkey(&context.resolved_accounts, "tokenProgram")?;
     let copy_wallet = parse_pubkey(copy_wallet)?;
     let mint = parse_pubkey(mint)?;
@@ -218,10 +234,119 @@ pub(crate) fn build_copy_unsigned_flashx_pump(
     })
 }
 
+fn build_copy_unsigned_flashx_migrated_amm(
+    context: &crate::parser::FlashxPumpRouteContext,
+    copy_wallet: &str,
+    mint: &str,
+) -> Result<CopyUnsignedTxBuild, TxBuildError> {
+    let copy_wallet = parse_pubkey(copy_wallet)?;
+    let mint = parse_pubkey(mint)?;
+    let flashx_program = parse_pubkey(&context.program_id)?;
+    let pump_amm_program = resolved_pubkey(&context.resolved_accounts, "pumpAmmProgram")?;
+    let base_token_program = resolved_pubkey(&context.resolved_accounts, "baseTokenProgram")?;
+    let associated_token_program =
+        resolved_pubkey(&context.resolved_accounts, "associatedTokenProgram")?;
+    let system_program = resolved_pubkey(&context.resolved_accounts, "systemProgram")?;
+    let quote_mint = resolved_pubkey(&context.resolved_accounts, "quoteMint")?;
+    let quote_token_program = resolved_pubkey(&context.resolved_accounts, "quoteTokenProgram")?;
+    let target_quote_token_account =
+        resolved_pubkey(&context.resolved_accounts, "userQuoteTokenAccount")?;
+    let target_wallet = resolved_pubkey(&context.resolved_accounts, "targetWallet")?;
+    let target_base_token_account =
+        resolved_pubkey(&context.resolved_accounts, "userBaseTokenAccount")?;
+    let target_user_volume_accumulator =
+        resolved_pubkey(&context.resolved_accounts, "userVolumeAccumulator")?;
+    let copy_base_token_account = associated_token_address(
+        &copy_wallet,
+        &mint,
+        &base_token_program,
+        &associated_token_program,
+    );
+    let (copy_quote_token_account, copy_quote_bump) =
+        flashx_wrapped_sol_account_address(&copy_wallet, &flashx_program);
+    let copy_user_volume_accumulator =
+        user_volume_accumulator_address(&copy_wallet, &pump_amm_program);
+
+    let spendable_sol_in = read_u64_le(&context.data, 1).ok_or(
+        TxBuildError::InvalidInstruction("missing flashx SOL amount"),
+    )?;
+
+    let mut setup_data = Vec::with_capacity(10);
+    setup_data.push(1);
+    setup_data.extend_from_slice(&spendable_sol_in.to_le_bytes());
+    setup_data.push(copy_quote_bump);
+
+    let setup_instruction = Instruction {
+        program_id: flashx_program,
+        accounts: vec![
+            AccountMeta::new(copy_quote_token_account, false),
+            AccountMeta::new(copy_wallet, true),
+            AccountMeta::new_readonly(quote_mint, false),
+            AccountMeta::new_readonly(quote_token_program, false),
+            AccountMeta::new_readonly(system_program, false),
+        ],
+        data: setup_data,
+    };
+
+    let route_accounts = context
+        .accounts
+        .iter()
+        .map(|account| {
+            let mut pubkey = parse_pubkey(&account.pubkey)?;
+            let mut is_signer = account.is_signer;
+            let mut is_writable = account.is_writable;
+            if pubkey == target_wallet {
+                pubkey = copy_wallet;
+                is_signer = true;
+                is_writable = true;
+            } else if pubkey == target_base_token_account {
+                pubkey = copy_base_token_account;
+            } else if pubkey == target_quote_token_account {
+                pubkey = copy_quote_token_account;
+            } else if pubkey == target_user_volume_accumulator {
+                pubkey = copy_user_volume_accumulator;
+            }
+
+            Ok(AccountMeta {
+                pubkey,
+                is_signer,
+                is_writable,
+            })
+        })
+        .collect::<Result<Vec<_>, TxBuildError>>()?;
+
+    Ok(CopyUnsignedTxBuild {
+        route_layout: context.layout.as_str(),
+        copy_wallet_token_account: copy_base_token_account.to_string(),
+        instructions: vec![
+            setup_instruction,
+            Instruction {
+                program_id: flashx_program,
+                accounts: route_accounts,
+                data: context.data.clone(),
+            },
+        ],
+    })
+}
+
 pub(crate) fn build_full_copy_unsigned_flashx_pump(
     route_context: Option<&RouteContext>,
     copy_wallet: &str,
     mint: &str,
+) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
+    build_full_copy_unsigned_flashx_pump_with_fees(
+        route_context,
+        copy_wallet,
+        mint,
+        &TxFeeConfig::default(),
+    )
+}
+
+pub(crate) fn build_full_copy_unsigned_flashx_pump_with_fees(
+    route_context: Option<&RouteContext>,
+    copy_wallet: &str,
+    mint: &str,
+    fee_config: &TxFeeConfig,
 ) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
     let copy_build = build_copy_unsigned_flashx_pump(route_context, copy_wallet, mint)?;
     let Some(RouteContext::FlashxPump(context)) = route_context else {
@@ -233,12 +358,25 @@ pub(crate) fn build_full_copy_unsigned_flashx_pump(
     let copy_wallet_pubkey = parse_pubkey(copy_wallet)?;
     let copy_wallet_token_account = parse_pubkey(&copy_build.copy_wallet_token_account)?;
     let mint = parse_pubkey(mint)?;
-    let token_program = resolved_pubkey(&context.resolved_accounts, "tokenProgram")?;
+    let token_program = match context.layout {
+        FlashxPumpLayout::DirectPump => {
+            resolved_pubkey(&context.resolved_accounts, "tokenProgram")?
+        }
+        FlashxPumpLayout::MigratedAmm => {
+            resolved_pubkey(&context.resolved_accounts, "baseTokenProgram")?
+        }
+    };
     let associated_token_program = parse_pubkey(ASSOCIATED_TOKEN_PROGRAM_ID)?;
     let system_program = parse_pubkey(SYSTEM_PROGRAM_ID)?;
 
-    let mut instructions = Vec::with_capacity(copy_build.instructions.len() + 2);
+    let mut instructions = Vec::with_capacity(copy_build.instructions.len() + 4);
     instructions.push(compute_unit_limit_instruction(400_000)?);
+    if let Some(micro_lamports) = fee_config
+        .compute_unit_price_micro_lamports
+        .filter(|v| *v > 0)
+    {
+        instructions.push(compute_unit_price_instruction(micro_lamports)?);
+    }
     instructions.push(create_associated_token_account_idempotent_instruction(
         &copy_wallet_pubkey,
         &copy_wallet_token_account,
@@ -247,14 +385,33 @@ pub(crate) fn build_full_copy_unsigned_flashx_pump(
         &associated_token_program,
         &system_program,
     ));
+    if let Some(tip_lamports) = fee_config.jito_tip_lamports.filter(|v| *v > 0) {
+        let Some(tip_account) = fee_config
+            .jito_tip_account
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(TxBuildError::MissingRouteContext(
+                "missing Jito tip account",
+            ));
+        };
+        instructions.push(system_transfer_instruction(
+            &copy_wallet_pubkey,
+            &parse_pubkey(tip_account)?,
+            tip_lamports,
+        )?);
+    }
+    let main_instruction_count = copy_build.instructions.len();
     instructions.extend(copy_build.instructions);
+    let setup_instruction_count = instructions.len().saturating_sub(main_instruction_count);
 
     Ok(FullCopyUnsignedTxBuild {
         route_layout: copy_build.route_layout,
         copy_wallet_token_account: copy_wallet_token_account.to_string(),
         estimated_required_signer: copy_wallet_pubkey.to_string(),
-        setup_instruction_count: 2,
-        main_instruction_count: instructions.len().saturating_sub(2),
+        setup_instruction_count,
+        main_instruction_count,
         instructions,
     })
 }
@@ -398,6 +555,10 @@ fn user_volume_accumulator_address(wallet: &Pubkey, pump_program: &Pubkey) -> Pu
     Pubkey::find_program_address(&[b"user_volume_accumulator", wallet.as_ref()], pump_program).0
 }
 
+fn flashx_wrapped_sol_account_address(wallet: &Pubkey, flashx_program: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"wrapped_sol_account", wallet.as_ref()], flashx_program)
+}
+
 fn compute_unit_limit_instruction(units: u32) -> Result<Instruction, TxBuildError> {
     let program_id = parse_pubkey(COMPUTE_BUDGET_PROGRAM_ID)?;
     let mut data = Vec::with_capacity(5);
@@ -407,6 +568,36 @@ fn compute_unit_limit_instruction(units: u32) -> Result<Instruction, TxBuildErro
     Ok(Instruction {
         program_id,
         accounts: Vec::new(),
+        data,
+    })
+}
+
+fn compute_unit_price_instruction(micro_lamports: u64) -> Result<Instruction, TxBuildError> {
+    let program_id = parse_pubkey(COMPUTE_BUDGET_PROGRAM_ID)?;
+    let mut data = Vec::with_capacity(9);
+    data.push(3);
+    data.extend_from_slice(&micro_lamports.to_le_bytes());
+
+    Ok(Instruction {
+        program_id,
+        accounts: Vec::new(),
+        data,
+    })
+}
+
+fn system_transfer_instruction(
+    from: &Pubkey,
+    to: &Pubkey,
+    lamports: u64,
+) -> Result<Instruction, TxBuildError> {
+    let program_id = parse_pubkey(SYSTEM_PROGRAM_ID)?;
+    let mut data = Vec::with_capacity(12);
+    data.extend_from_slice(&2u32.to_le_bytes());
+    data.extend_from_slice(&lamports.to_le_bytes());
+
+    Ok(Instruction {
+        program_id,
+        accounts: vec![AccountMeta::new(*from, true), AccountMeta::new(*to, false)],
         data,
     })
 }
@@ -445,9 +636,12 @@ mod tests {
     const TARGET_WALLET: &str = "A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS";
     const MIGRATED_BUY_SIGNATURE: &str =
         "Jo9sxcrorVCGkmafhNDQKByQBDBTSqM99tS9R1mYs6DjvFZHxZFuFhAvdSemCxFqauPcqS1t17ir3iDScu7cQF5";
+    const LIVE_MIGRATED_BUY_SIGNATURE: &str =
+        "hYCB3CXxuEw4aofMSiNoenDwGJ9u3XQq1TVXBsSk33TztaUmypa1B2aPZbM7s7dpkW5qeCE7rEEPVMYWczDW33k";
     const LIVE_DIRECT_PUMP_BUY_SIGNATURE: &str =
         "2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo";
     const COPY_WALLET: &str = "FqhpPL63symHForRGfxPbGi4wDpe5jQqAVjntbbBqA5W";
+    const LIVE_MIGRATED_MINT: &str = "J6UVkdPVe4cbd6qGJHdoacMa7zvN3tiaordcyZRspump";
     const LIVE_DIRECT_PUMP_MINT: &str = "8VigmMkK7f9FvTBDd8S2UmweezCgeBX4y5Xp4jMfpump";
 
     #[test]
@@ -580,6 +774,84 @@ mod tests {
     }
 
     #[test]
+    fn builds_unsigned_copy_instructions_for_live_migrated_amm_with_copy_wallet_accounts() {
+        let transaction = replay_transaction(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/flashx/buy-hYCB3CXxuEw4aofMSiNoenDwGJ9u3XQq1TVXBsSk33TztaUmypa1B2aPZbM7s7dpkW5qeCE7rEEPVMYWczDW33k.tx.base64"
+        )));
+        assert_eq!(
+            versioned_tx_signature_string(&transaction),
+            LIVE_MIGRATED_BUY_SIGNATURE
+        );
+        let account_keys = live_migrated_buy_hydrated_account_keys(&transaction);
+        let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
+            .expect("live migrated FLASHX buy should parse");
+
+        let build = build_copy_unsigned_flashx_pump(
+            parsed.route_context.as_ref(),
+            COPY_WALLET,
+            &parsed.mint,
+        )
+        .expect("migrated AMM copy route should build unsigned instructions");
+
+        assert_eq!(build.route_layout, "migrated-amm");
+        assert_eq!(parsed.mint, LIVE_MIGRATED_MINT);
+        assert_eq!(build.instructions.len(), 2);
+        assert_eq!(
+            build.copy_wallet_token_account,
+            "C68p1PQWjCCbgoeApEAPnnB21bF3ccnv5yBrnFH7L3xz"
+        );
+        assert_eq!(
+            build.instructions[0].program_id.to_string(),
+            FLASHX_ROUTER_PROGRAM_ID
+        );
+        assert_eq!(build.instructions[0].accounts.len(), 5);
+        assert_eq!(
+            build.instructions[0].accounts[0].pubkey.to_string(),
+            "6tY2JS9eKJJ2pAD7FwXaCh5dwPp88htikrGoUXMnuHxE"
+        );
+        assert_eq!(
+            build.instructions[0].accounts[1].pubkey.to_string(),
+            COPY_WALLET
+        );
+        assert!(build.instructions[0].accounts[1].is_signer);
+        assert_eq!(
+            &build.instructions[0].data[0..9],
+            &[1, 0x30, 0x1b, 0x0f, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(build.instructions[0].data[9], 0xff);
+        assert_eq!(build.instructions[1].accounts.len(), 44);
+        assert!(build.instructions[1]
+            .accounts
+            .iter()
+            .any(|account| account.pubkey.to_string() == COPY_WALLET && account.is_signer));
+        assert!(build.instructions[1].accounts.iter().any(|account| {
+            account.pubkey.to_string() == "6tY2JS9eKJJ2pAD7FwXaCh5dwPp88htikrGoUXMnuHxE"
+                && account.is_writable
+        }));
+        assert!(build.instructions[1].accounts.iter().any(|account| {
+            account.pubkey.to_string() == build.copy_wallet_token_account && account.is_writable
+        }));
+        assert!(build.instructions[1].accounts.iter().any(|account| {
+            account.pubkey.to_string() == "D6EMAgGqecPhW7t9r7LvCnRCiS6uADBwc3Ki1tpc2Bud"
+                && account.is_writable
+        }));
+        assert!(!build.instructions[1]
+            .accounts
+            .iter()
+            .any(|account| account.pubkey.to_string() == TARGET_WALLET));
+        assert!(!build.instructions[1].accounts.iter().any(|account| {
+            account.pubkey.to_string() == "9tby86mfM4eLbh52yeoHHywLqQug8sB2ppwDVvnt6sgq"
+        }));
+        assert!(!build.instructions[1].accounts.iter().any(|account| {
+            account.pubkey.to_string() == "83DqVhmHb3RmZa8ieYC7VtHB5upyC5GHAr6g4WYfMjg4"
+        }));
+        assert!(!build.instructions[1].accounts.iter().any(|account| {
+            account.pubkey.to_string() == "82JokvYzsarTaVkeD2ecUnT3SewbyhStn9aZ4RQwxUs2"
+        }));
+    }
+
+    #[test]
     fn builds_full_unsigned_copy_transaction_shell_for_direct_pump() {
         let transaction = replay_transaction(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -622,6 +894,144 @@ mod tests {
         assert_eq!(
             &build.instructions[2].data[0..8],
             &PUMP_FUN_BUY_EXACT_SOL_IN_DISCRIMINATOR
+        );
+    }
+
+    #[test]
+    fn fee_config_adds_priority_fee_and_jito_tip_to_copy_transaction_shell() {
+        let transaction = replay_transaction(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/flashx/live-buy-2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo.tx.base64"
+        )));
+        let account_keys = live_direct_pump_buy_hydrated_account_keys(&transaction);
+        let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
+            .expect("live direct Pump FLASHX buy should parse");
+        let fee_config = TxFeeConfig {
+            compute_unit_price_micro_lamports: Some(250_000),
+            jito_tip_lamports: Some(1_000),
+            jito_tip_account: Some("96gYZGLnUQYgE8MWWpYJw8yRjnvB51rAhbG1SogE3uSG".to_string()),
+        };
+
+        let build = build_full_copy_unsigned_flashx_pump_with_fees(
+            parsed.route_context.as_ref(),
+            COPY_WALLET,
+            &parsed.mint,
+            &fee_config,
+        )
+        .expect("full copy transaction shell should build with fee config");
+
+        assert_eq!(build.setup_instruction_count, 4);
+        assert_eq!(build.main_instruction_count, 1);
+        assert_eq!(build.instructions.len(), 5);
+        assert_eq!(
+            build.instructions[0].program_id.to_string(),
+            COMPUTE_BUDGET_PROGRAM_ID
+        );
+        assert_eq!(
+            build.instructions[1].program_id.to_string(),
+            COMPUTE_BUDGET_PROGRAM_ID
+        );
+        assert_eq!(
+            build.instructions[1].data,
+            [vec![3], 250_000u64.to_le_bytes().to_vec()].concat()
+        );
+        assert_eq!(
+            build.instructions[2].program_id.to_string(),
+            ASSOCIATED_TOKEN_PROGRAM_ID
+        );
+        assert_eq!(
+            build.instructions[3].program_id.to_string(),
+            SYSTEM_PROGRAM_ID
+        );
+        assert_eq!(
+            build.instructions[3].accounts[0].pubkey.to_string(),
+            COPY_WALLET
+        );
+        assert!(build.instructions[3].accounts[0].is_signer);
+        assert_eq!(
+            build.instructions[3].accounts[1].pubkey.to_string(),
+            "96gYZGLnUQYgE8MWWpYJw8yRjnvB51rAhbG1SogE3uSG"
+        );
+        assert_eq!(
+            build.instructions[3].data,
+            [2u32.to_le_bytes().to_vec(), 1_000u64.to_le_bytes().to_vec()].concat()
+        );
+        assert_eq!(
+            build.instructions[4].program_id.to_string(),
+            PUMP_FUN_PROGRAM_ID
+        );
+    }
+
+    #[test]
+    fn positive_jito_tip_requires_tip_account() {
+        let transaction = replay_transaction(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/flashx/live-buy-2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo.tx.base64"
+        )));
+        let account_keys = live_direct_pump_buy_hydrated_account_keys(&transaction);
+        let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
+            .expect("live direct Pump FLASHX buy should parse");
+        let fee_config = TxFeeConfig {
+            compute_unit_price_micro_lamports: None,
+            jito_tip_lamports: Some(1_000),
+            jito_tip_account: None,
+        };
+
+        let error = build_full_copy_unsigned_flashx_pump_with_fees(
+            parsed.route_context.as_ref(),
+            COPY_WALLET,
+            &parsed.mint,
+            &fee_config,
+        )
+        .expect_err("tip account is required when tip lamports are configured");
+
+        assert_eq!(
+            error,
+            TxBuildError::MissingRouteContext("missing Jito tip account")
+        );
+    }
+
+    #[test]
+    fn builds_full_unsigned_copy_transaction_shell_for_live_migrated_amm() {
+        let transaction = replay_transaction(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/flashx/buy-hYCB3CXxuEw4aofMSiNoenDwGJ9u3XQq1TVXBsSk33TztaUmypa1B2aPZbM7s7dpkW5qeCE7rEEPVMYWczDW33k.tx.base64"
+        )));
+        let account_keys = live_migrated_buy_hydrated_account_keys(&transaction);
+        let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
+            .expect("live migrated FLASHX buy should parse");
+
+        let build = build_full_copy_unsigned_flashx_pump(
+            parsed.route_context.as_ref(),
+            COPY_WALLET,
+            &parsed.mint,
+        )
+        .expect("full migrated AMM copy transaction shell should build");
+
+        assert_eq!(build.route_layout, "migrated-amm");
+        assert_eq!(
+            build.copy_wallet_token_account,
+            "C68p1PQWjCCbgoeApEAPnnB21bF3ccnv5yBrnFH7L3xz"
+        );
+        assert_eq!(build.estimated_required_signer, COPY_WALLET);
+        assert_eq!(build.setup_instruction_count, 2);
+        assert_eq!(build.main_instruction_count, 2);
+        assert_eq!(build.instructions.len(), 4);
+        assert_eq!(
+            build.instructions[0].program_id.to_string(),
+            COMPUTE_BUDGET_PROGRAM_ID
+        );
+        assert_eq!(
+            build.instructions[1].program_id.to_string(),
+            ASSOCIATED_TOKEN_PROGRAM_ID
+        );
+        assert_eq!(
+            build.instructions[2].program_id.to_string(),
+            FLASHX_ROUTER_PROGRAM_ID
+        );
+        assert_eq!(
+            build.instructions[3].program_id.to_string(),
+            FLASHX_ROUTER_PROGRAM_ID
         );
     }
 
@@ -721,6 +1131,35 @@ mod tests {
                 "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1",
                 "8Wf5TiAheLUqBrKXeYg2JtAFFMWtKdG2BSFgqUcPVwTt",
                 "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ",
+            ]
+            .into_iter()
+            .map(ToString::to_string),
+        );
+        account_keys
+    }
+
+    fn live_migrated_buy_hydrated_account_keys(transaction: &VersionedTransaction) -> Vec<String> {
+        let mut account_keys = static_account_keys(transaction);
+        account_keys.extend(
+            [
+                "DKyUs1xXMDy8Z11zNsLnUg3dy9HZf6hYZidB6WodcaGy",
+                "BWXT6RUhit9FfJQM3pBmqeFLPYmuxgmyhMGC5sGr8RbA",
+                "AktftA98kSWAxn6kVSoqBXBELUArjKu2H9WmKB48ULFY",
+                "5vPNE6VFyXmCmzmWotdxmRk57LEWiXxuAfZL3hKbi2LH",
+                "86Vh4XGLW2b6nvWbRyDs4ScgMXbuvRCHT7WbUT3RFxKG",
+                "jitodontfront81111111TradeWithAxiomDotTrade",
+                "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+                "So11111111111111111111111111111111111111112",
+                "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+                "ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw",
+                "G5UZAVbAf46s7cKWoyKu8kYTip9DGTpbLZ2qa9Aq69dP",
+                "GS4CU59F31iL7aR2Q8zVS8DRrcRnXX1yjQ66TqNVQnaR",
+                "C2aFPdENg4A2HQsmrd5rTw5TaYBX5Ku887cWjbFKtZpw",
+                "5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx",
+                "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ",
+                "DKU4HtLZmD825BXdsGkE2bSEC6kunPeUyrgvB9DcawGV",
+                "GXPFM2caqTtQYC2cJ5yJRi9VDkpsYZXzYdwYpGnLmtDL",
             ]
             .into_iter()
             .map(ToString::to_string),

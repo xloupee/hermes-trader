@@ -908,7 +908,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_tx_plan_skips_migrated_amm_until_copy_layout_is_supported() {
+    fn copy_tx_plan_builds_migrated_amm_copy_layout() {
         let execution_plan = migrated_buy_execution_plan();
         let copy_plan = copy_tx_plan_line(
             &execution_plan,
@@ -920,9 +920,15 @@ mod tests {
         );
         let value = serde_json::to_value(copy_plan).expect("copy tx plan serializes");
 
-        assert_eq!(value["copyBuildable"], false);
-        assert_eq!(value["decision"], "skip");
-        assert_eq!(value["reason"], "unsupported flashx-pump copy layout");
+        assert_eq!(value["routeLayout"], "migrated-amm");
+        assert_eq!(value["copyBuildable"], true);
+        assert_eq!(value["decision"], "buildable");
+        assert_eq!(value["copiedInstructionCount"], 2);
+        assert_eq!(
+            value["copyWalletTokenAccount"],
+            "2a7dXCUvaiwSsFDDxKAbcNarw1E6WC7j6ZCDWPRXCtnB"
+        );
+        assert!(value.get("reason").is_none());
     }
 
     #[test]
@@ -987,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_tx_plan_skips_migrated_amm_until_copy_layout_is_supported() {
+    fn unsigned_tx_plan_builds_migrated_amm_copy_layout() {
         let execution_plan = migrated_buy_execution_plan();
         let unsigned_plan = unsigned_tx_plan_line(
             &execution_plan,
@@ -1001,10 +1007,18 @@ mod tests {
         let value = serde_json::to_value(unsigned_plan).expect("unsigned tx plan serializes");
 
         assert_eq!(value["schema"], "copytrade.unsignedTxPlan.v1");
-        assert_eq!(value["buildable"], false);
-        assert_eq!(value["decision"], "skip");
-        assert_eq!(value["reason"], "unsupported flashx-pump copy layout");
+        assert_eq!(value["routeLayout"], "migrated-amm");
+        assert_eq!(value["buildable"], true);
+        assert_eq!(value["decision"], "buildable");
+        assert_eq!(value["instructionCount"], 4);
+        assert_eq!(value["setupInstructionCount"], 2);
+        assert_eq!(value["mainInstructionCount"], 2);
+        assert_eq!(
+            value["copyWalletTokenAccount"],
+            "2a7dXCUvaiwSsFDDxKAbcNarw1E6WC7j6ZCDWPRXCtnB"
+        );
         assert_eq!(value["simulationRequested"], true);
+        assert!(value.get("reason").is_none());
     }
 
     #[test]

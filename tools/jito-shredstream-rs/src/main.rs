@@ -151,6 +151,15 @@ pub(crate) struct LiveOptions {
     #[arg(long, env = "JITO_AUTO_SELL_DELAY_MS", default_value_t = 1_000)]
     pub(crate) auto_sell_delay_ms: u64,
 
+    #[arg(long, env = "JITO_PRIORITY_FEE_MICRO_LAMPORTS")]
+    pub(crate) priority_fee_micro_lamports: Option<u64>,
+
+    #[arg(long, env = "JITO_TIP_LAMPORTS")]
+    pub(crate) jito_tip_lamports: Option<u64>,
+
+    #[arg(long, env = "JITO_TIP_ACCOUNT")]
+    pub(crate) jito_tip_account: Option<String>,
+
     #[arg(long, env = "SUPABASE_URL")]
     pub(crate) supabase_url: Option<String>,
 

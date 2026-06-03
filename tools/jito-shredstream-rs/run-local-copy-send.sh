@@ -49,6 +49,9 @@ export JITO_ENABLE_COPY_SEND=true
 export JITO_ONE_SHOT_COPY_SEND="${JITO_ONE_SHOT_COPY_SEND:-false}"
 export JITO_DRY_RUN=false
 export JITO_AUTO_SELL_DELAY_MS="${JITO_AUTO_SELL_DELAY_MS:-1000}"
+export JITO_PRIORITY_FEE_MICRO_LAMPORTS="${JITO_PRIORITY_FEE_MICRO_LAMPORTS:-${DIRECT_EXECUTION_PRIORITY_FEE_MICRO_LAMPORTS:-}}"
+export JITO_TIP_LAMPORTS="${JITO_TIP_LAMPORTS:-${DIRECT_EXECUTION_JITO_TIP_LAMPORTS:-}}"
+export JITO_TIP_ACCOUNT="${JITO_TIP_ACCOUNT:-${DIRECT_EXECUTION_JITO_TIP_ACCOUNT:-}}"
 export JITO_COPY_EXECUTIONS_PATH="${JITO_COPY_EXECUTIONS_PATH:-/tmp/jito-copy-executions-local-send.jsonl}"
 export JITO_UNSIGNED_TX_PLANS_PATH="${JITO_UNSIGNED_TX_PLANS_PATH:-/tmp/jito-unsigned-tx-plans-local-send.jsonl}"
 export JITO_COPY_TX_PLANS_PATH="${JITO_COPY_TX_PLANS_PATH:-/tmp/jito-copy-tx-plans-local-send.jsonl}"
@@ -86,6 +89,13 @@ echo "  one shot: $JITO_ONE_SHOT_COPY_SEND"
 echo "  dry run: $JITO_DRY_RUN"
 echo "  auto sell after buy: $JITO_AUTO_SELL_AFTER_BUY"
 echo "  auto sell delay ms: $JITO_AUTO_SELL_DELAY_MS"
+echo "  priority fee micro lamports: ${JITO_PRIORITY_FEE_MICRO_LAMPORTS:-0}"
+echo "  jito tip lamports: ${JITO_TIP_LAMPORTS:-0}"
+if [[ -n "$JITO_TIP_ACCOUNT" ]]; then
+  echo "  jito tip account: configured"
+else
+  echo "  jito tip account: unset"
+fi
 echo "  dashboard sync: $JITO_SYNC_COPY_EXECUTIONS"
 
 SYNC_PID=""

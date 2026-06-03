@@ -341,6 +341,7 @@ mod tests {
     const FLASHX_MINT: &str = "E3wDF3hJtojFit9RQ1aX3SDiJh5ygYuj2bBPyJfUpump";
     const FLASHX_V2_MINT: &str = "6QPqSGYksJgxJmMfPzsTc7jK32YEFqTiCRYGZLvHpump";
     const MIGRATED_MINT: &str = "wXfe7vz2t8an9Ca5dy72ChU54fRvtefDRmb4rzUpump";
+    const LIVE_MIGRATED_MINT: &str = "J6UVkdPVe4cbd6qGJHdoacMa7zvN3tiaordcyZRspump";
     const LIVE_DIRECT_PUMP_MINT: &str = "8VigmMkK7f9FvTBDd8S2UmweezCgeBX4y5Xp4jMfpump";
 
     #[test]
@@ -473,6 +474,18 @@ mod tests {
                 )),
                 action: Action::Buy,
                 mint: MIGRATED_MINT,
+                sol_amount: Some(0.00099),
+                token_amount: None,
+                copyable: true,
+            },
+            ReplayCase {
+                signature: "hYCB3CXxuEw4aofMSiNoenDwGJ9u3XQq1TVXBsSk33TztaUmypa1B2aPZbM7s7dpkW5qeCE7rEEPVMYWczDW33k",
+                fixture: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/fixtures/flashx/buy-hYCB3CXxuEw4aofMSiNoenDwGJ9u3XQq1TVXBsSk33TztaUmypa1B2aPZbM7s7dpkW5qeCE7rEEPVMYWczDW33k.tx.base64"
+                )),
+                action: Action::Buy,
+                mint: LIVE_MIGRATED_MINT,
                 sol_amount: Some(0.00099),
                 token_amount: None,
                 copyable: true,

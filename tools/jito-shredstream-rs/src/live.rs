@@ -46,7 +46,11 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
         options.blockhash_refresh_ms,
         options.stats,
     );
-    let copy_executor = CopyExecutor::from_options(&options, blockhash_cache.clone())?;
+    let copy_executor = CopyExecutor::from_options(
+        &options,
+        blockhash_cache.clone(),
+        address_lookup_tables.clone(),
+    )?;
     let mut client = ShredstreamProxyClient::connect(options.endpoint.clone())
         .await
         .with_context(|| format!("connect to {}", options.endpoint))?;

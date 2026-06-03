@@ -1,8 +1,10 @@
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use solana_address_lookup_table_interface::state::AddressLookupTable;
+use solana_message::AddressLookupTableAccount;
+use solana_pubkey::Pubkey;
 use solana_transaction::versioned::VersionedTransaction;
-use std::collections::HashMap;
+use std::{collections::HashMap, str::FromStr};
 
 const FLASHX_LOOKUP_TABLE: &str = "4vX5U9XsiY11infmC13d6VFPjvUqtuRw744r4o94dyow";
 
@@ -99,6 +101,32 @@ impl AddressLookupTableCache {
             keys,
             missing_lookup_table: None,
         }
+    }
+
+    pub(crate) fn table_accounts(&self) -> Result<Vec<AddressLookupTableAccount>, String> {
+        let mut table_keys = self.tables.keys().cloned().collect::<Vec<_>>();
+        table_keys.sort();
+
+        table_keys
+            .into_iter()
+            .map(|key| {
+                let addresses = self
+                    .tables
+                    .get(&key)
+                    .ok_or_else(|| format!("missing lookup table {key}"))?
+                    .iter()
+                    .map(|address| {
+                        Pubkey::from_str(address)
+                            .map_err(|error| format!("invalid lookup table address: {error}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(AddressLookupTableAccount {
+                    key: Pubkey::from_str(&key)
+                        .map_err(|error| format!("invalid lookup table key: {error}"))?,
+                    addresses,
+                })
+            })
+            .collect()
     }
 }
 

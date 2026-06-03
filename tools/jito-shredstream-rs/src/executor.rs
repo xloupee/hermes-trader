@@ -1,10 +1,12 @@
 use crate::{
+    address_lookup::AddressLookupTableCache,
     blockhash::{cached_blockhash, BlockhashCache},
     event::now_ms,
     parser::{Action, Route},
     planner::ExecutionPlanLine,
     tx_builder::{
-        build_auto_sell_unsigned_flashx_pump, build_full_copy_unsigned_flashx_pump, TxBuildError,
+        build_auto_sell_unsigned_flashx_pump, build_full_copy_unsigned_flashx_pump,
+        build_full_copy_unsigned_flashx_pump_with_fees, TxBuildError, TxFeeConfig,
     },
     LiveOptions,
 };
@@ -13,7 +15,9 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use solana_hash::Hash;
 use solana_keypair::{read_keypair_file, Keypair};
+use solana_message::{v0, VersionedMessage};
 use solana_signer::Signer;
+use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction::Transaction;
 use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 use tokio::task::JoinSet;
@@ -28,6 +32,7 @@ pub(crate) struct CopyExecutor {
     keypair: Option<Keypair>,
     client: reqwest::Client,
     blockhash_cache: Option<BlockhashCache>,
+    address_lookup_tables: AddressLookupTableCache,
 }
 
 #[derive(Clone, Debug)]
@@ -46,6 +51,9 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) solana_rpc_url: Option<String>,
     pub(crate) auto_sell_after_buy: bool,
     pub(crate) auto_sell_delay_ms: u64,
+    pub(crate) priority_fee_micro_lamports: Option<u64>,
+    pub(crate) jito_tip_lamports: Option<u64>,
+    pub(crate) jito_tip_account: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,6 +104,8 @@ pub(crate) struct CopyExecutionLine {
     observed_to_signature_returned_ms: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
     route_layout: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tx_version: Option<&'static str>,
     instruction_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     copy_signature: Option<String>,
@@ -118,6 +128,12 @@ pub(crate) struct CopyExecutionLine {
     reason: Option<String>,
     auto_sell_enabled: bool,
     auto_sell_delay_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    priority_fee_micro_lamports: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jito_tip_lamports: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jito_tip_account: Option<String>,
     auto_sell_attempted: bool,
     auto_sell_signed: bool,
     auto_sell_simulated: bool,
@@ -157,12 +173,61 @@ struct SendTransactionResult {
     rpc_errors: Vec<String>,
 }
 
+struct SignedCopyTransaction {
+    transaction: VersionedTransaction,
+    signature: String,
+    tx_version: &'static str,
+}
+
 #[derive(Clone, Debug)]
 struct SendEndpoint {
     label: String,
     url: String,
     kind: SendEndpointKind,
     auth_uuid: Option<String>,
+}
+
+fn sign_copy_transaction(
+    instructions: &[solana_instruction::Instruction],
+    keypair: &Keypair,
+    blockhash: Hash,
+    address_lookup_tables: &AddressLookupTableCache,
+) -> std::result::Result<SignedCopyTransaction, String> {
+    let table_accounts = address_lookup_tables.table_accounts()?;
+    if !table_accounts.is_empty() {
+        let message =
+            v0::Message::try_compile(&keypair.pubkey(), instructions, &table_accounts, blockhash)
+                .map_err(|error| format!("compile v0 message: {error}"))?;
+        let transaction = VersionedTransaction::try_new(VersionedMessage::V0(message), &[keypair])
+            .map_err(|error| format!("sign v0 transaction: {error}"))?;
+        let signature = transaction
+            .signatures
+            .first()
+            .map(ToString::to_string)
+            .ok_or_else(|| "missing v0 signature".to_string())?;
+        return Ok(SignedCopyTransaction {
+            transaction,
+            signature,
+            tx_version: "v0",
+        });
+    }
+
+    let legacy = Transaction::new_signed_with_payer(
+        instructions,
+        Some(&keypair.pubkey()),
+        &[keypair],
+        blockhash,
+    );
+    let signature = legacy
+        .signatures
+        .first()
+        .map(ToString::to_string)
+        .ok_or_else(|| "missing legacy signature".to_string())?;
+    Ok(SignedCopyTransaction {
+        transaction: VersionedTransaction::from(legacy),
+        signature,
+        tx_version: "legacy",
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -175,6 +240,7 @@ impl CopyExecutor {
     pub(crate) fn from_options(
         options: &LiveOptions,
         blockhash_cache: Option<BlockhashCache>,
+        address_lookup_tables: AddressLookupTableCache,
     ) -> Result<Self> {
         let execution_options = CopyExecutionOptions {
             enable_copy_send: options.enable_copy_send,
@@ -199,6 +265,14 @@ impl CopyExecutor {
             solana_rpc_url: options.solana_rpc_url.clone(),
             auto_sell_after_buy: options.auto_sell_after_buy,
             auto_sell_delay_ms: options.auto_sell_delay_ms,
+            priority_fee_micro_lamports: positive_u64(options.priority_fee_micro_lamports),
+            jito_tip_lamports: positive_u64(options.jito_tip_lamports),
+            jito_tip_account: options
+                .jito_tip_account
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
         };
 
         let keypair = match execution_options.copy_keypair_path.as_ref() {
@@ -215,6 +289,7 @@ impl CopyExecutor {
             keypair,
             client: reqwest::Client::new(),
             blockhash_cache,
+            address_lookup_tables,
         })
     }
 
@@ -283,30 +358,31 @@ impl CopyExecutor {
             return line.skip("missing warm blockhash");
         };
 
-        let build = match build_full_copy_unsigned_flashx_pump(
+        let build = match build_full_copy_unsigned_flashx_pump_with_fees(
             execution_plan.route_context.as_ref(),
             copy_wallet,
             &execution_plan.mint,
+            &self.options.tx_fee_config(),
         ) {
             Ok(build) => build,
             Err(error) => return line.skip(tx_build_error_reason(error)),
         };
-        if build.route_layout != "direct-pump" {
-            return line.skip("unsupported copy execution layout");
-        }
 
         let blockhash = match Hash::from_str(&cached_blockhash.blockhash) {
             Ok(blockhash) => blockhash,
             Err(error) => return line.skip(format!("invalid cached blockhash: {error}")),
         };
 
-        let tx = Transaction::new_signed_with_payer(
+        let signed_tx = match sign_copy_transaction(
             &build.instructions,
-            Some(&keypair.pubkey()),
-            &[keypair],
+            keypair,
             blockhash,
-        );
-        let tx_bytes = match bincode::serialize(&tx) {
+            &self.address_lookup_tables,
+        ) {
+            Ok(signed_tx) => signed_tx,
+            Err(error) => return line.error(format!("sign transaction: {error}")),
+        };
+        let tx_bytes = match bincode::serialize(&signed_tx.transaction) {
             Ok(bytes) => bytes,
             Err(error) => return line.error(format!("serialize signed transaction: {error}")),
         };
@@ -314,7 +390,8 @@ impl CopyExecutor {
 
         line.signed = true;
         line.mark_signed();
-        line.copy_signature = tx.signatures.first().map(ToString::to_string);
+        line.copy_signature = Some(signed_tx.signature);
+        line.tx_version = Some(signed_tx.tx_version);
         line.blockhash = Some(cached_blockhash.blockhash);
         line.route_layout = Some(build.route_layout);
         line.instruction_count = build.instructions.len();
@@ -732,6 +809,7 @@ impl CopyExecutionLine {
             observed_to_send_submitted_ms: None,
             observed_to_signature_returned_ms: None,
             route_layout: None,
+            tx_version: None,
             instruction_count: 0,
             copy_signature: None,
             blockhash: None,
@@ -745,6 +823,9 @@ impl CopyExecutionLine {
             reason: None,
             auto_sell_enabled: options.auto_sell_after_buy,
             auto_sell_delay_ms: options.auto_sell_delay_ms,
+            priority_fee_micro_lamports: options.priority_fee_micro_lamports,
+            jito_tip_lamports: options.jito_tip_lamports,
+            jito_tip_account: options.jito_tip_account.clone(),
             auto_sell_attempted: false,
             auto_sell_signed: false,
             auto_sell_simulated: false,
@@ -833,6 +914,14 @@ impl CopyExecutionLine {
 }
 
 impl CopyExecutionOptions {
+    fn tx_fee_config(&self) -> TxFeeConfig {
+        TxFeeConfig {
+            compute_unit_price_micro_lamports: self.priority_fee_micro_lamports,
+            jito_tip_lamports: self.jito_tip_lamports,
+            jito_tip_account: self.jito_tip_account.clone(),
+        }
+    }
+
     fn selected_send_rpc_urls(&self) -> Vec<String> {
         let mut urls =
             normalized_send_rpc_urls(&self.send_rpc_urls, self.solana_rpc_url.as_deref());
@@ -877,6 +966,10 @@ impl CopyExecutionOptions {
 
         endpoints
     }
+}
+
+fn positive_u64(value: Option<u64>) -> Option<u64> {
+    value.filter(|value| *value > 0)
 }
 
 fn normalized_send_rpc_urls(configured: &[String], fallback: Option<&str>) -> Vec<String> {
@@ -1054,6 +1147,9 @@ mod tests {
             solana_rpc_url: None,
             auto_sell_after_buy: false,
             auto_sell_delay_ms: 1_000,
+            priority_fee_micro_lamports: None,
+            jito_tip_lamports: None,
+            jito_tip_account: None,
         }
     }
 
@@ -1092,6 +1188,7 @@ mod tests {
             keypair: None,
             client: reqwest::Client::new(),
             blockhash_cache: None,
+            address_lookup_tables: AddressLookupTableCache::default(),
         }
     }
 

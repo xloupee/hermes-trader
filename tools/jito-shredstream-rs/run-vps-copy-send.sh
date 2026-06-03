@@ -55,6 +55,9 @@ export JITO_ONE_SHOT_COPY_SEND="${JITO_ONE_SHOT_COPY_SEND:-false}"
 export JITO_DRY_RUN="${JITO_DRY_RUN:-false}"
 export JITO_AUTO_SELL_AFTER_BUY="${JITO_AUTO_SELL_AFTER_BUY:-false}"
 export JITO_AUTO_SELL_DELAY_MS="${JITO_AUTO_SELL_DELAY_MS:-1000}"
+export JITO_PRIORITY_FEE_MICRO_LAMPORTS="${JITO_PRIORITY_FEE_MICRO_LAMPORTS:-${DIRECT_EXECUTION_PRIORITY_FEE_MICRO_LAMPORTS:-}}"
+export JITO_TIP_LAMPORTS="${JITO_TIP_LAMPORTS:-${DIRECT_EXECUTION_JITO_TIP_LAMPORTS:-}}"
+export JITO_TIP_ACCOUNT="${JITO_TIP_ACCOUNT:-${DIRECT_EXECUTION_JITO_TIP_ACCOUNT:-}}"
 export JITO_COPY_EXECUTIONS_PATH="${JITO_COPY_EXECUTIONS_PATH:-/var/log/jito-copy-executions-vps.jsonl}"
 export JITO_ADDRESS_LOOKUP_TABLES="${JITO_ADDRESS_LOOKUP_TABLES:-4vX5U9XsiY11infmC13d6VFPjvUqtuRw744r4o94dyow}"
 export JITO_DISABLE_SIGNAL_OBSERVATIONS="${JITO_DISABLE_SIGNAL_OBSERVATIONS:-true}"
@@ -97,6 +100,13 @@ echo "  send enabled: $JITO_ENABLE_COPY_SEND"
 echo "  one shot: $JITO_ONE_SHOT_COPY_SEND"
 echo "  dry run: $JITO_DRY_RUN"
 echo "  auto sell after buy: $JITO_AUTO_SELL_AFTER_BUY"
+echo "  priority fee micro lamports: ${JITO_PRIORITY_FEE_MICRO_LAMPORTS:-0}"
+echo "  jito tip lamports: ${JITO_TIP_LAMPORTS:-0}"
+if [[ -n "$JITO_TIP_ACCOUNT" ]]; then
+  echo "  jito tip account: configured"
+else
+  echo "  jito tip account: unset"
+fi
 echo "  signal observations disabled: $JITO_DISABLE_SIGNAL_OBSERVATIONS"
 
 cd "$WORKER_DIR"

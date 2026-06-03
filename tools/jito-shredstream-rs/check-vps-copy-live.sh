@@ -34,8 +34,12 @@ for key in [
     "JITO_ONE_SHOT_COPY_SEND",
     "JITO_SEND_FANOUT",
     "JITO_AUTO_SELL_AFTER_BUY",
+    "JITO_PRIORITY_FEE_MICRO_LAMPORTS",
+    "JITO_TIP_LAMPORTS",
 ]:
     print(f"{key}: {env.get(key, '')}")
+
+print(f"JITO_TIP_ACCOUNT: {'configured' if env.get('JITO_TIP_ACCOUNT', '') else ''}")
 
 for key in ["JITO_SEND_RPC_URLS", "JITO_BLOCK_ENGINE_SEND_URLS"]:
     value = env.get(key, "")

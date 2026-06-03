@@ -219,7 +219,6 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             account_keys.len(),
                             &parsed,
                         );
-                        shadow_signals.write(&shadow_signal)?;
                         let execution_plan = execution_plan_line(
                             &shadow_signal,
                             now_ms(),
@@ -227,36 +226,23 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 copy_sol_amount: options.copy_plan_sol_amount,
                             },
                         );
-                        execution_plans.write(&execution_plan)?;
-                        tx_build_plans.write(&tx_build_plan_line(
-                            &execution_plan,
-                            now_ms(),
-                            TxBuildPlannerOptions {
-                                max_plan_age_ms: options.tx_build_plan_max_age_ms,
-                            },
-                        ))?;
-                        copy_tx_plans.write(&copy_tx_plan_line(
-                            &execution_plan,
-                            now_ms(),
-                            CopyTxPlannerOptions {
-                                max_plan_age_ms: options.tx_build_plan_max_age_ms,
-                                copy_wallet: options.copy_wallet.clone(),
-                            },
-                        ))?;
-                        unsigned_tx_plans.write(&unsigned_tx_plan_line(
-                            &execution_plan,
-                            now_ms(),
-                            UnsignedTxPlannerOptions {
-                                max_plan_age_ms: options.tx_build_plan_max_age_ms,
-                                copy_wallet: options.copy_wallet.clone(),
-                                simulate_copy_tx: options.simulate_copy_tx,
-                            },
-                        ))?;
-                        copy_executions.write(
-                            &copy_executor
-                                .handle(&execution_plan, parsed.action, parsed.sol_amount)
-                                .await,
-                        )?;
+                        if !options.fast_copy_send {
+                            write_plan_outputs(
+                                &mut shadow_signals,
+                                &mut execution_plans,
+                                &mut tx_build_plans,
+                                &mut copy_tx_plans,
+                                &mut unsigned_tx_plans,
+                                &shadow_signal,
+                                &execution_plan,
+                                &options,
+                            )?;
+                        }
+                        let copy_execution = copy_executor
+                            .handle(&execution_plan, parsed.action, parsed.sol_amount)
+                            .await;
+                        let one_shot_sent = options.one_shot_copy_send && copy_execution.was_sent();
+                        copy_executions.write(&copy_execution)?;
 
                         let event = normalized_event(
                             trade_parsed_at_ms,
@@ -275,6 +261,10 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                         print_json(&event)?;
                         emitted += 1;
                         if options.limit > 0 && emitted >= options.limit {
+                            return Ok(());
+                        }
+                        if one_shot_sent {
+                            eprintln!("one-shot copy send completed; exiting");
                             return Ok(());
                         }
                     }
@@ -455,6 +445,45 @@ impl UnsignedTxPlanWriter {
     fn write(&mut self, plan: &UnsignedTxPlanLine) -> Result<()> {
         write_json_line(self.file.as_mut(), plan)
     }
+}
+
+fn write_plan_outputs(
+    shadow_signals: &mut ShadowSignalWriter,
+    execution_plans: &mut ExecutionPlanWriter,
+    tx_build_plans: &mut TxBuildPlanWriter,
+    copy_tx_plans: &mut CopyTxPlanWriter,
+    unsigned_tx_plans: &mut UnsignedTxPlanWriter,
+    shadow_signal: &ShadowSignalLine,
+    execution_plan: &ExecutionPlanLine,
+    options: &LiveOptions,
+) -> Result<()> {
+    shadow_signals.write(shadow_signal)?;
+    execution_plans.write(execution_plan)?;
+    tx_build_plans.write(&tx_build_plan_line(
+        execution_plan,
+        now_ms(),
+        TxBuildPlannerOptions {
+            max_plan_age_ms: options.tx_build_plan_max_age_ms,
+        },
+    ))?;
+    copy_tx_plans.write(&copy_tx_plan_line(
+        execution_plan,
+        now_ms(),
+        CopyTxPlannerOptions {
+            max_plan_age_ms: options.tx_build_plan_max_age_ms,
+            copy_wallet: options.copy_wallet.clone(),
+        },
+    ))?;
+    unsigned_tx_plans.write(&unsigned_tx_plan_line(
+        execution_plan,
+        now_ms(),
+        UnsignedTxPlannerOptions {
+            max_plan_age_ms: options.tx_build_plan_max_age_ms,
+            copy_wallet: options.copy_wallet.clone(),
+            simulate_copy_tx: options.simulate_copy_tx && !options.fast_copy_send,
+        },
+    ))?;
+    Ok(())
 }
 
 impl CopyExecutionWriter {

@@ -210,6 +210,55 @@ pub(crate) fn build_full_copy_unsigned_flashx_pump(
     })
 }
 
+pub(crate) fn build_auto_sell_unsigned_flashx_pump(
+    route_context: Option<&RouteContext>,
+    copy_wallet: &str,
+    mint: &str,
+    token_amount_raw: u64,
+) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
+    if token_amount_raw == 0 {
+        return Err(TxBuildError::InvalidInstruction(
+            "missing positive auto-sell token amount",
+        ));
+    }
+
+    let mut copy_build = build_copy_unsigned_flashx_pump(route_context, copy_wallet, mint)?;
+    if copy_build.instructions.len() != 1 {
+        return Err(TxBuildError::UnsupportedLayout(
+            "unsupported auto-sell instruction layout",
+        ));
+    }
+
+    let Some(instruction) = copy_build.instructions.first_mut() else {
+        return Err(TxBuildError::UnsupportedLayout(
+            "unsupported auto-sell instruction layout",
+        ));
+    };
+    if instruction.data.len() < 18 {
+        return Err(TxBuildError::InvalidInstruction(
+            "unsupported auto-sell router data",
+        ));
+    }
+
+    instruction.data[1..9].copy_from_slice(&token_amount_raw.to_le_bytes());
+    instruction.data[9..17].copy_from_slice(&0u64.to_le_bytes());
+    instruction.data[17] = 1;
+
+    let copy_wallet_pubkey = parse_pubkey(copy_wallet)?;
+    let mut instructions = Vec::with_capacity(copy_build.instructions.len() + 1);
+    instructions.push(compute_unit_limit_instruction(400_000)?);
+    instructions.extend(copy_build.instructions);
+
+    Ok(FullCopyUnsignedTxBuild {
+        route_layout: copy_build.route_layout,
+        copy_wallet_token_account: copy_build.copy_wallet_token_account,
+        estimated_required_signer: copy_wallet_pubkey.to_string(),
+        setup_instruction_count: 1,
+        main_instruction_count: instructions.len().saturating_sub(1),
+        instructions,
+    })
+}
+
 fn resolved_pubkey(
     resolved_accounts: &[ResolvedRouteAccount],
     role: &'static str,
@@ -447,6 +496,39 @@ mod tests {
             build.instructions[2].program_id.to_string(),
             FLASHX_ROUTER_PROGRAM_ID
         );
+    }
+
+    #[test]
+    fn builds_auto_sell_instruction_for_direct_pump_copy_balance() {
+        let transaction = replay_transaction(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/flashx/live-buy-2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo.tx.base64"
+        )));
+        let account_keys = live_direct_pump_buy_hydrated_account_keys(&transaction);
+        let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
+            .expect("live direct Pump FLASHX buy should parse");
+
+        let build = build_auto_sell_unsigned_flashx_pump(
+            parsed.route_context.as_ref(),
+            COPY_WALLET,
+            &parsed.mint,
+            123_456,
+        )
+        .expect("auto-sell route should build");
+
+        assert_eq!(build.route_layout, "direct-pump");
+        assert_eq!(build.instructions.len(), 2);
+        assert_eq!(
+            build.instructions[1].program_id.to_string(),
+            FLASHX_ROUTER_PROGRAM_ID
+        );
+        assert_eq!(&build.instructions[1].data[1..9], &123_456u64.to_le_bytes());
+        assert_eq!(&build.instructions[1].data[9..17], &0u64.to_le_bytes());
+        assert_eq!(build.instructions[1].data[17], 1);
+        assert!(build.instructions[1]
+            .accounts
+            .iter()
+            .any(|account| account.pubkey.to_string() == COPY_WALLET && account.is_signer));
     }
 
     fn replay_transaction(base64_fixture: &str) -> VersionedTransaction {

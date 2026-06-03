@@ -97,6 +97,17 @@ pub(crate) struct LiveOptions {
     #[arg(long, env = "JITO_ENABLE_COPY_SEND", default_value_t = false)]
     pub(crate) enable_copy_send: bool,
 
+    #[arg(
+        long,
+        env = "JITO_FAST_COPY_SEND",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) fast_copy_send: bool,
+
+    #[arg(long, env = "JITO_ONE_SHOT_COPY_SEND", default_value_t = false)]
+    pub(crate) one_shot_copy_send: bool,
+
     #[arg(long, env = "JITO_DRY_RUN", default_value_t = true)]
     pub(crate) dry_run: bool,
 
@@ -108,6 +119,12 @@ pub(crate) struct LiveOptions {
 
     #[arg(long, env = "JITO_COPY_EXECUTIONS_PATH")]
     pub(crate) copy_executions_path: Option<PathBuf>,
+
+    #[arg(long, env = "JITO_AUTO_SELL_AFTER_BUY", default_value_t = false)]
+    pub(crate) auto_sell_after_buy: bool,
+
+    #[arg(long, env = "JITO_AUTO_SELL_DELAY_MS", default_value_t = 1_000)]
+    pub(crate) auto_sell_delay_ms: u64,
 
     #[arg(long, env = "SUPABASE_URL")]
     pub(crate) supabase_url: Option<String>,
@@ -131,6 +148,14 @@ pub(crate) struct LiveOptions {
         value_delimiter = ','
     )]
     pub(crate) address_lookup_tables: Vec<String>,
+}
+
+fn parse_boolish(value: &str) -> std::result::Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" => Ok(true),
+        "0" | "false" | "no" | "n" | "off" => Ok(false),
+        _ => Err("expected one of true/false/yes/no/1/0/on/off".to_string()),
+    }
 }
 
 #[tokio::main]

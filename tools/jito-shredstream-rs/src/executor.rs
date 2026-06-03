@@ -3,7 +3,9 @@ use crate::{
     event::now_ms,
     parser::{Action, Route},
     planner::ExecutionPlanLine,
-    tx_builder::{build_full_copy_unsigned_flashx_pump, TxBuildError},
+    tx_builder::{
+        build_auto_sell_unsigned_flashx_pump, build_full_copy_unsigned_flashx_pump, TxBuildError,
+    },
     LiveOptions,
 };
 use anyhow::{Context, Result};
@@ -13,7 +15,7 @@ use solana_hash::Hash;
 use solana_keypair::{read_keypair_file, Keypair};
 use solana_signer::Signer;
 use solana_transaction::Transaction;
-use std::{path::PathBuf, str::FromStr};
+use std::{path::PathBuf, str::FromStr, time::Duration};
 
 const FIRST_LIVE_MAX_COPY_SOL_CAP: f64 = 0.001;
 
@@ -29,10 +31,13 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) enable_copy_send: bool,
     pub(crate) dry_run: bool,
     pub(crate) simulate_copy_tx: bool,
+    pub(crate) fast_copy_send: bool,
     pub(crate) max_copy_sol: Option<f64>,
     pub(crate) copy_wallet: Option<String>,
     pub(crate) copy_keypair_path: Option<PathBuf>,
     pub(crate) solana_rpc_url: Option<String>,
+    pub(crate) auto_sell_after_buy: bool,
+    pub(crate) auto_sell_delay_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,6 +64,8 @@ pub(crate) struct CopyExecutionLine {
     send_enabled: bool,
     dry_run: bool,
     simulation_requested: bool,
+    fast_copy_send: bool,
+    skip_preflight: bool,
     signed: bool,
     simulated: bool,
     sent: bool,
@@ -96,6 +103,32 @@ pub(crate) struct CopyExecutionLine {
     send_signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    auto_sell_enabled: bool,
+    auto_sell_delay_ms: u64,
+    auto_sell_attempted: bool,
+    auto_sell_signed: bool,
+    auto_sell_simulated: bool,
+    auto_sell_sent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_sell_decision: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_sell_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_sell_token_amount_raw: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_sell_submitted_at_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_sell_signature_returned_at_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buy_signature_to_auto_sell_submitted_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buy_signature_to_auto_sell_signature_returned_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_sell_copy_signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_sell_send_signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_sell_simulation_error: Option<serde_json::Value>,
 }
 
 impl CopyExecutor {
@@ -106,11 +139,14 @@ impl CopyExecutor {
         let execution_options = CopyExecutionOptions {
             enable_copy_send: options.enable_copy_send,
             dry_run: options.dry_run,
-            simulate_copy_tx: options.simulate_copy_tx,
+            simulate_copy_tx: options.simulate_copy_tx && !options.fast_copy_send,
+            fast_copy_send: options.fast_copy_send,
             max_copy_sol: options.max_copy_sol,
             copy_wallet: options.copy_wallet.clone(),
             copy_keypair_path: options.copy_keypair_path.clone(),
             solana_rpc_url: options.solana_rpc_url.clone(),
+            auto_sell_after_buy: options.auto_sell_after_buy,
+            auto_sell_delay_ms: options.auto_sell_delay_ms,
         };
 
         let keypair = match execution_options.copy_keypair_path.as_ref() {
@@ -265,6 +301,10 @@ impl CopyExecutor {
                     line.mark_signature_returned();
                     line.send_signature = Some(signature);
                     line.decision = "sent";
+                    if self.options.auto_sell_after_buy {
+                        self.handle_auto_sell(&mut line, execution_plan, keypair)
+                            .await;
+                    }
                     line
                 }
                 Err(error) => line.error(error),
@@ -340,7 +380,7 @@ impl CopyExecutor {
                     encoded_tx,
                     {
                         "encoding": "base64",
-                        "skipPreflight": false,
+                        "skipPreflight": self.options.fast_copy_send,
                         "preflightCommitment": "processed",
                         "maxRetries": 0
                     }
@@ -363,9 +403,189 @@ impl CopyExecutor {
             .result
             .ok_or_else(|| "sendTransaction result missing".to_string())
     }
+
+    async fn handle_auto_sell(
+        &self,
+        line: &mut CopyExecutionLine,
+        execution_plan: &ExecutionPlanLine,
+        keypair: &Keypair,
+    ) {
+        line.auto_sell_attempted = true;
+
+        if self.options.dry_run {
+            line.skip_auto_sell("dry run blocks auto-sell");
+            return;
+        }
+        if execution_plan.route != Route::FlashxPump {
+            line.skip_auto_sell("unsupported auto-sell route");
+            return;
+        }
+        if self.options.auto_sell_delay_ms > 5_000 {
+            line.skip_auto_sell("auto-sell delay guard exceeds 5000ms");
+            return;
+        }
+
+        tokio::time::sleep(Duration::from_millis(self.options.auto_sell_delay_ms)).await;
+
+        let Some(copy_wallet) = self.options.copy_wallet.as_deref() else {
+            line.skip_auto_sell("missing copy wallet");
+            return;
+        };
+
+        let token_account = match build_full_copy_unsigned_flashx_pump(
+            execution_plan.route_context.as_ref(),
+            copy_wallet,
+            &execution_plan.mint,
+        ) {
+            Ok(build) if build.route_layout == "direct-pump" => build.copy_wallet_token_account,
+            Ok(_) => {
+                line.skip_auto_sell("unsupported auto-sell layout");
+                return;
+            }
+            Err(error) => {
+                line.skip_auto_sell(tx_build_error_reason(error));
+                return;
+            }
+        };
+
+        let token_amount_raw = match self.token_account_balance_raw(&token_account).await {
+            Ok(amount) if amount > 0 => amount,
+            Ok(_) => {
+                line.skip_auto_sell("copy wallet token balance is zero");
+                return;
+            }
+            Err(error) => {
+                line.error_auto_sell(error);
+                return;
+            }
+        };
+        line.auto_sell_token_amount_raw = Some(token_amount_raw);
+
+        let Some(cached_blockhash) = cached_blockhash(self.blockhash_cache.as_ref()) else {
+            line.skip_auto_sell("missing warm blockhash for auto-sell");
+            return;
+        };
+        let blockhash = match Hash::from_str(&cached_blockhash.blockhash) {
+            Ok(blockhash) => blockhash,
+            Err(error) => {
+                line.skip_auto_sell(format!("invalid cached auto-sell blockhash: {error}"));
+                return;
+            }
+        };
+
+        let build = match build_auto_sell_unsigned_flashx_pump(
+            execution_plan.route_context.as_ref(),
+            copy_wallet,
+            &execution_plan.mint,
+            token_amount_raw,
+        ) {
+            Ok(build) if build.route_layout == "direct-pump" => build,
+            Ok(_) => {
+                line.skip_auto_sell("unsupported auto-sell layout");
+                return;
+            }
+            Err(error) => {
+                line.skip_auto_sell(tx_build_error_reason(error));
+                return;
+            }
+        };
+
+        let tx = Transaction::new_signed_with_payer(
+            &build.instructions,
+            Some(&keypair.pubkey()),
+            &[keypair],
+            blockhash,
+        );
+        let tx_bytes = match bincode::serialize(&tx) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                line.error_auto_sell(format!("serialize signed auto-sell transaction: {error}"));
+                return;
+            }
+        };
+        let encoded_tx = STANDARD.encode(tx_bytes);
+        line.auto_sell_signed = true;
+        line.auto_sell_copy_signature = tx.signatures.first().map(ToString::to_string);
+
+        match self.simulate_transaction(&encoded_tx).await {
+            Ok(simulation) => {
+                line.auto_sell_simulated = true;
+                line.auto_sell_simulation_error = simulation.err;
+                if line.auto_sell_simulation_error.is_some() {
+                    line.skip_auto_sell("auto-sell simulation failed; send blocked");
+                    return;
+                }
+            }
+            Err(error) => {
+                line.auto_sell_simulated = true;
+                line.auto_sell_simulation_error = Some(serde_json::Value::String(error));
+                line.skip_auto_sell("auto-sell simulation failed; send blocked");
+                return;
+            }
+        }
+
+        line.mark_auto_sell_submitted();
+        match self.send_transaction(&encoded_tx).await {
+            Ok(signature) => {
+                line.auto_sell_sent = true;
+                line.mark_auto_sell_signature_returned();
+                line.auto_sell_send_signature = Some(signature);
+                line.auto_sell_decision = Some("sent");
+            }
+            Err(error) => line.error_auto_sell(error),
+        }
+    }
+
+    async fn token_account_balance_raw(&self, token_account: &str) -> Result<u64, String> {
+        let rpc_url = self
+            .options
+            .solana_rpc_url
+            .as_deref()
+            .ok_or_else(|| "missing SOLANA_RPC_URL".to_string())?;
+        let response = self
+            .client
+            .post(rpc_url)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenAccountBalance",
+                "params": [
+                    token_account,
+                    { "commitment": "processed" }
+                ]
+            }))
+            .send()
+            .await
+            .map_err(|error| format!("send getTokenAccountBalance request: {error}"))?
+            .error_for_status()
+            .map_err(|error| format!("getTokenAccountBalance HTTP status: {error}"))?
+            .json::<RpcResponse<TokenAccountBalanceResult>>()
+            .await
+            .map_err(|error| format!("decode getTokenAccountBalance response: {error}"))?;
+
+        if let Some(error) = response.error {
+            return Err(format!(
+                "getTokenAccountBalance RPC error: {}",
+                error.message
+            ));
+        }
+
+        let amount = response
+            .result
+            .ok_or_else(|| "getTokenAccountBalance result missing".to_string())?
+            .value
+            .amount;
+        amount
+            .parse::<u64>()
+            .map_err(|error| format!("parse token account balance: {error}"))
+    }
 }
 
 impl CopyExecutionLine {
+    pub(crate) fn was_sent(&self) -> bool {
+        self.sent && self.decision == "sent"
+    }
+
     fn new(
         execution_plan: &ExecutionPlanLine,
         observed_action: Action,
@@ -391,6 +611,8 @@ impl CopyExecutionLine {
             send_enabled: options.enable_copy_send,
             dry_run: options.dry_run,
             simulation_requested: options.simulate_copy_tx,
+            fast_copy_send: options.fast_copy_send,
+            skip_preflight: options.fast_copy_send,
             signed: false,
             simulated: false,
             sent: false,
@@ -412,6 +634,22 @@ impl CopyExecutionLine {
             simulation_logs: Vec::new(),
             send_signature: None,
             reason: None,
+            auto_sell_enabled: options.auto_sell_after_buy,
+            auto_sell_delay_ms: options.auto_sell_delay_ms,
+            auto_sell_attempted: false,
+            auto_sell_signed: false,
+            auto_sell_simulated: false,
+            auto_sell_sent: false,
+            auto_sell_decision: None,
+            auto_sell_reason: None,
+            auto_sell_token_amount_raw: None,
+            auto_sell_submitted_at_ms: None,
+            auto_sell_signature_returned_at_ms: None,
+            buy_signature_to_auto_sell_submitted_ms: None,
+            buy_signature_to_auto_sell_signature_returned_ms: None,
+            auto_sell_copy_signature: None,
+            auto_sell_send_signature: None,
+            auto_sell_simulation_error: None,
         }
     }
 
@@ -452,6 +690,34 @@ impl CopyExecutionLine {
         self.observed_to_signature_returned_ms =
             Some(timestamp.saturating_sub(self.observed_at_ms));
     }
+
+    fn skip_auto_sell(&mut self, reason: impl Into<String>) {
+        self.auto_sell_decision = Some("skip");
+        self.auto_sell_reason = Some(reason.into());
+    }
+
+    fn error_auto_sell(&mut self, reason: impl Into<String>) {
+        self.auto_sell_decision = Some("error");
+        self.auto_sell_reason = Some(reason.into());
+    }
+
+    fn mark_auto_sell_submitted(&mut self) {
+        let timestamp = now_ms();
+        self.auto_sell_submitted_at_ms = Some(timestamp);
+        if let Some(buy_signature_at_ms) = self.signature_returned_at_ms {
+            self.buy_signature_to_auto_sell_submitted_ms =
+                Some(timestamp.saturating_sub(buy_signature_at_ms));
+        }
+    }
+
+    fn mark_auto_sell_signature_returned(&mut self) {
+        let timestamp = now_ms();
+        self.auto_sell_signature_returned_at_ms = Some(timestamp);
+        if let Some(buy_signature_at_ms) = self.signature_returned_at_ms {
+            self.buy_signature_to_auto_sell_signature_returned_ms =
+                Some(timestamp.saturating_sub(buy_signature_at_ms));
+        }
+    }
 }
 
 fn tx_build_error_reason(error: TxBuildError) -> &'static str {
@@ -486,6 +752,16 @@ struct SimulationValue {
     units_consumed: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TokenAccountBalanceResult {
+    value: TokenAccountBalanceValue,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenAccountBalanceValue {
+    amount: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,10 +774,13 @@ mod tests {
             enable_copy_send: false,
             dry_run: true,
             simulate_copy_tx: false,
+            fast_copy_send: false,
             max_copy_sol: None,
             copy_wallet: None,
             copy_keypair_path: None,
             solana_rpc_url: None,
+            auto_sell_after_buy: false,
+            auto_sell_delay_ms: 1_000,
         }
     }
 
@@ -557,6 +836,7 @@ mod tests {
         assert_eq!(line.signed_at_ms, None);
         assert_eq!(line.observed_to_signed_ms, None);
         assert_eq!(line.observed_to_signature_returned_ms, None);
+        assert!(!line.was_sent());
     }
 
     #[test]
@@ -631,5 +911,18 @@ mod tests {
         assert_eq!(line.decision, "skip");
         assert_eq!(line.reason.as_deref(), Some("missing copy keypair path"));
         assert!(!line.sent);
+    }
+
+    #[test]
+    fn was_sent_requires_sent_decision_and_flag() {
+        let plan = allowed_plan();
+        let mut line =
+            CopyExecutionLine::new(&plan, Action::Buy, Some(0.0005), &disabled_options());
+
+        line.sent = true;
+        assert!(!line.was_sent());
+
+        line.decision = "sent";
+        assert!(line.was_sent());
     }
 }

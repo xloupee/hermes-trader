@@ -125,11 +125,36 @@ The send harness forces:
 
 - `JITO_SIMULATE_COPY_TX=true`
 - `JITO_ENABLE_COPY_SEND=true`
+- `JITO_ONE_SHOT_COPY_SEND=false` by default, so it keeps listening until you stop the terminal
 - `JITO_DRY_RUN=false`
+- `JITO_AUTO_SELL_AFTER_BUY=true` by default in the armed local send harness
+- `JITO_AUTO_SELL_DELAY_MS=1000` by default
 - `JITO_MAX_COPY_SOL=0.001` by default
 
 It refuses to run if `JITO_ARM_LIVE_COPY_SEND` is not exactly `YES`, or if
-`JITO_MAX_COPY_SOL` is above `0.001`.
+`JITO_MAX_COPY_SOL` is above `0.001`. To run a single-copy test instead, set
+`JITO_ONE_SHOT_COPY_SEND=true`. To buy without the automatic post-buy sell, set
+`JITO_AUTO_SELL_AFTER_BUY=false`.
+
+The auto-sell path is deliberately narrow: it only runs after a copied buy was
+sent, waits the configured delay, reads the copy wallet token account balance,
+builds a FLASHX direct-Pump sell for that token balance, simulates it, and sends
+only if simulation succeeds.
+
+For a one-shot fast-send test, arm the separate fast profile:
+
+```bash
+JITO_ARM_LIVE_COPY_SEND=YES \
+JITO_FAST_COPY_SEND=YES \
+JITO_ONE_SHOT_COPY_SEND=true \
+tools/jito-shredstream-rs/run-local-copy-send-vps.sh
+```
+
+Fast mode keeps the same max-copy-SOL and keypair guards, but skips pre-submit
+JSONL plan writes, disables pre-send simulation unless explicitly overridden,
+and submits with `skipPreflight: true`. It defaults
+`JITO_AUTO_SELL_AFTER_BUY=false` so the copied buy path is measured without the
+post-buy sell experiment.
 
 After a send, verify the on-chain result:
 
@@ -139,4 +164,5 @@ node tools/jito-shredstream-rs/verify-copy-execution.mjs
 
 The execution verifier reads the local send JSONL, fetches the sent transaction
 from RPC, and reports the copy signature, mint, copy wallet token delta, SOL
-delta, status, and observed-to-submit/signature timing fields.
+delta, gross SOL spend, network fee, extra spend beyond the observed buy amount,
+status, slot delta, and observed-to-submit/signature timing fields.

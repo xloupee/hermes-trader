@@ -121,6 +121,14 @@ function solDelta(transaction, account) {
   return (post - pre) / 1_000_000_000;
 }
 
+function lamportsToSol(lamports) {
+  return Number.isFinite(lamports) ? lamports / 1_000_000_000 : null;
+}
+
+function positiveOrNull(value) {
+  return Number.isFinite(value) ? Math.max(0, value) : null;
+}
+
 async function main() {
   const path = argValue("executions", process.env.JITO_COPY_EXECUTIONS_PATH || DEFAULT_EXECUTIONS_PATH);
   const signature = argValue("signature");
@@ -149,18 +157,41 @@ async function main() {
   const mint = row.mint;
   const fillTokenDelta = tokenDelta(transaction, copyWallet, mint);
   const copyWalletSolDelta = solDelta(transaction, copyWallet);
+  const grossCopySpendSol = Number.isFinite(copyWalletSolDelta)
+    ? Math.abs(Math.min(copyWalletSolDelta, 0))
+    : null;
+  const intendedCopySpendSol = Number.isFinite(row.observedSolAmount) ? row.observedSolAmount : null;
+  const networkFeeSol = lamportsToSol(transaction.meta?.fee);
+  const extraSpendBeyondObservedSol =
+    grossCopySpendSol !== null && intendedCopySpendSol !== null
+      ? positiveOrNull(grossCopySpendSol - intendedCopySpendSol)
+      : null;
+  const extraSpendBeyondObservedAndNetworkFeeSol =
+    extraSpendBeyondObservedSol !== null && networkFeeSol !== null
+      ? positiveOrNull(extraSpendBeyondObservedSol - networkFeeSol)
+      : null;
+  const slotDeltaFromObserved =
+    Number.isFinite(transaction.slot) && Number.isFinite(row.slot) ? transaction.slot - row.slot : null;
 
   const summary = {
     sendSignature,
     observedSignature: row.observedSignature,
     confirmed: true,
     slot: transaction.slot,
+    observedSlot: row.slot,
+    slotDeltaFromObserved,
     blockTime: transaction.blockTime,
     err: transaction.meta?.err ?? null,
     copyWallet,
     mint,
+    intendedCopySpendSol,
+    maxCopySol: row.maxCopySol ?? null,
     fillTokenDelta,
     copyWalletSolDelta,
+    grossCopySpendSol,
+    networkFeeSol,
+    extraSpendBeyondObservedSol,
+    extraSpendBeyondObservedAndNetworkFeeSol,
     decision: row.decision,
     observedToSignedMs: row.observedToSignedMs ?? null,
     observedToSimulationCompletedMs: row.observedToSimulationCompletedMs ?? null,

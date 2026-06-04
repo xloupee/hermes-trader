@@ -542,6 +542,10 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
                 resolved_pubkey(&context.resolved_accounts, "bondingCurveV2")?,
                 false,
             ),
+            AccountMeta::new(
+                resolved_pubkey(&context.resolved_accounts, "buybackFeeRecipient")?,
+                false,
+            ),
         ],
         data: sell_data,
     };
@@ -1283,7 +1287,7 @@ mod tests {
             resolved_account_for_test(&context.resolved_accounts, "bondingCurveV2");
         let buyback_fee_recipient =
             resolved_account_for_test(&context.resolved_accounts, "buybackFeeRecipient");
-        assert_eq!(build.instructions[1].accounts.len(), 16);
+        assert_eq!(build.instructions[1].accounts.len(), 17);
         assert_eq!(
             build.instructions[1].accounts[14].pubkey.to_string(),
             user_volume_accumulator
@@ -1293,10 +1297,11 @@ mod tests {
             build.instructions[1].accounts[15].pubkey.to_string(),
             bonding_curve_v2
         );
-        assert!(!build.instructions[1]
-            .accounts
-            .iter()
-            .any(|account| account.pubkey.to_string() == buyback_fee_recipient));
+        assert_eq!(
+            build.instructions[1].accounts[16].pubkey.to_string(),
+            buyback_fee_recipient
+        );
+        assert!(build.instructions[1].accounts[16].is_writable);
     }
 
     #[test]

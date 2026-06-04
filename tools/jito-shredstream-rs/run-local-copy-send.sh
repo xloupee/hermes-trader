@@ -40,10 +40,12 @@ case "$FAST_COPY_SEND_NORMALIZED" in
   yes|true|1|on)
     export JITO_SIMULATE_COPY_TX="${JITO_SIMULATE_COPY_TX:-false}"
     export JITO_AUTO_SELL_AFTER_BUY="${JITO_AUTO_SELL_AFTER_BUY:-false}"
+    export JITO_SIMULATE_AUTO_SELL="${JITO_SIMULATE_AUTO_SELL:-false}"
     ;;
   *)
     export JITO_SIMULATE_COPY_TX="${JITO_SIMULATE_COPY_TX:-true}"
     export JITO_AUTO_SELL_AFTER_BUY="${JITO_AUTO_SELL_AFTER_BUY:-true}"
+    export JITO_SIMULATE_AUTO_SELL="${JITO_SIMULATE_AUTO_SELL:-true}"
     ;;
 esac
 export JITO_ENABLE_COPY_SEND=true
@@ -148,6 +150,7 @@ echo "  one shot: $JITO_ONE_SHOT_COPY_SEND"
 echo "  dry run: $JITO_DRY_RUN"
 echo "  auto sell after buy: $JITO_AUTO_SELL_AFTER_BUY"
 echo "  auto sell delay ms: $JITO_AUTO_SELL_DELAY_MS"
+echo "  simulate auto sell: $JITO_SIMULATE_AUTO_SELL"
 echo "  priority fee micro lamports: ${JITO_PRIORITY_FEE_MICRO_LAMPORTS:-0}"
 echo "  max priority fee micro lamports: $JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS"
 echo "  jito tip lamports: ${JITO_TIP_LAMPORTS:-0}"

@@ -167,6 +167,14 @@ pub(crate) struct LiveOptions {
     #[arg(long, env = "JITO_AUTO_SELL_DELAY_MS", default_value_t = 1_000)]
     pub(crate) auto_sell_delay_ms: u64,
 
+    #[arg(
+        long,
+        env = "JITO_SIMULATE_AUTO_SELL",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) simulate_auto_sell: bool,
+
     #[arg(long, env = "JITO_PRIORITY_FEE_MICRO_LAMPORTS")]
     pub(crate) priority_fee_micro_lamports: Option<u64>,
 

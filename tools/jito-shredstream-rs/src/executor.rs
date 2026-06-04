@@ -65,6 +65,7 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) solana_rpc_url: Option<String>,
     pub(crate) auto_sell_after_buy: bool,
     pub(crate) auto_sell_delay_ms: u64,
+    pub(crate) simulate_auto_sell: bool,
     pub(crate) priority_fee_micro_lamports: Option<u64>,
     pub(crate) jito_tip_lamports: Option<u64>,
     pub(crate) jito_tip_account: Option<String>,
@@ -152,6 +153,7 @@ pub(crate) struct CopyExecutionLine {
     reason: Option<String>,
     auto_sell_enabled: bool,
     auto_sell_delay_ms: u64,
+    auto_sell_simulation_requested: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     priority_fee_micro_lamports: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -317,6 +319,7 @@ impl CopyExecutor {
             solana_rpc_url: options.solana_rpc_url.clone(),
             auto_sell_after_buy: options.auto_sell_after_buy,
             auto_sell_delay_ms: options.auto_sell_delay_ms,
+            simulate_auto_sell: options.simulate_auto_sell,
             priority_fee_micro_lamports: positive_u64(options.priority_fee_micro_lamports),
             jito_tip_lamports: positive_u64(options.jito_tip_lamports),
             jito_tip_account: options
@@ -790,22 +793,24 @@ impl CopyExecutor {
         line.auto_sell_signed = true;
         line.auto_sell_copy_signature = tx.signatures.first().map(ToString::to_string);
 
-        match self.simulate_transaction(&encoded_tx).await {
-            Ok(simulation) => {
-                line.auto_sell_simulated = true;
-                line.auto_sell_simulation_error = simulation.err;
-                line.auto_sell_simulation_units_consumed = simulation.units_consumed;
-                line.auto_sell_simulation_logs = simulation.logs.unwrap_or_default();
-                if line.auto_sell_simulation_error.is_some() {
+        if self.options.simulate_auto_sell {
+            match self.simulate_transaction(&encoded_tx).await {
+                Ok(simulation) => {
+                    line.auto_sell_simulated = true;
+                    line.auto_sell_simulation_error = simulation.err;
+                    line.auto_sell_simulation_units_consumed = simulation.units_consumed;
+                    line.auto_sell_simulation_logs = simulation.logs.unwrap_or_default();
+                    if line.auto_sell_simulation_error.is_some() {
+                        line.skip_auto_sell("auto-sell simulation failed; send blocked");
+                        return;
+                    }
+                }
+                Err(error) => {
+                    line.auto_sell_simulated = true;
+                    line.auto_sell_simulation_error = Some(serde_json::Value::String(error));
                     line.skip_auto_sell("auto-sell simulation failed; send blocked");
                     return;
                 }
-            }
-            Err(error) => {
-                line.auto_sell_simulated = true;
-                line.auto_sell_simulation_error = Some(serde_json::Value::String(error));
-                line.skip_auto_sell("auto-sell simulation failed; send blocked");
-                return;
             }
         }
 
@@ -1097,6 +1102,7 @@ impl CopyExecutionLine {
             reason: None,
             auto_sell_enabled: options.auto_sell_after_buy,
             auto_sell_delay_ms: options.auto_sell_delay_ms,
+            auto_sell_simulation_requested: options.simulate_auto_sell,
             priority_fee_micro_lamports: options.priority_fee_micro_lamports,
             jito_tip_lamports: options.jito_tip_lamports,
             jito_tip_account: options.jito_tip_account.clone(),
@@ -1541,6 +1547,7 @@ mod tests {
             solana_rpc_url: None,
             auto_sell_after_buy: false,
             auto_sell_delay_ms: 1_000,
+            simulate_auto_sell: false,
             priority_fee_micro_lamports: None,
             jito_tip_lamports: None,
             jito_tip_account: None,
@@ -1616,12 +1623,24 @@ mod tests {
         assert_eq!(line.schema, "copytrade.localExecution.v1");
         assert!(!line.send_enabled);
         assert!(line.dry_run);
+        assert!(!line.auto_sell_simulation_requested);
         assert!(!line.signed);
         assert!(!line.sent);
         assert_eq!(line.signed_at_ms, None);
         assert_eq!(line.observed_to_signed_ms, None);
         assert_eq!(line.observed_to_signature_returned_ms, None);
         assert!(!line.was_sent());
+    }
+
+    #[test]
+    fn execution_line_records_auto_sell_simulation_request() {
+        let plan = allowed_plan();
+        let mut options = disabled_options();
+        options.simulate_auto_sell = true;
+
+        let line = CopyExecutionLine::new(&plan, Action::Buy, Some(0.0005), &options);
+
+        assert!(line.auto_sell_simulation_requested);
     }
 
     #[test]

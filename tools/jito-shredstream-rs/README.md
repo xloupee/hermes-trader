@@ -129,6 +129,7 @@ The send harness forces:
 - `JITO_DRY_RUN=false`
 - `JITO_AUTO_SELL_AFTER_BUY=true` by default in the armed local send harness
 - `JITO_AUTO_SELL_DELAY_MS=1000` by default
+- `JITO_SIMULATE_AUTO_SELL=true` by default in the non-fast local send harness
 - `JITO_MAX_COPY_SOL=0.001` by default
 
 It refuses to run if `JITO_ARM_LIVE_COPY_SEND` is not exactly `YES`, or if
@@ -138,8 +139,10 @@ It refuses to run if `JITO_ARM_LIVE_COPY_SEND` is not exactly `YES`, or if
 
 The auto-sell path is deliberately narrow: it only runs after a copied buy was
 sent, waits the configured delay, reads the copy wallet token account balance,
-builds a FLASHX direct-Pump sell for that token balance, simulates it, and sends
-only if simulation succeeds.
+builds a FLASHX sell for that token balance, and sends it. Local non-fast live
+tests default `JITO_SIMULATE_AUTO_SELL=true`, which keeps the old simulate-and-
+block guard. Fast live profiles default `JITO_SIMULATE_AUTO_SELL=false`; set it
+to `true` only for debug runs where the extra RPC round trip is worth it.
 
 For a one-shot fast-send test, arm the separate fast profile:
 
@@ -154,7 +157,8 @@ Fast mode keeps the same max-copy-SOL and keypair guards, but skips pre-submit
 JSONL plan writes, disables pre-send simulation unless explicitly overridden,
 and submits with `skipPreflight: true`. It defaults
 `JITO_AUTO_SELL_AFTER_BUY=false` so the copied buy path is measured without the
-post-buy sell experiment.
+post-buy sell experiment, and `JITO_SIMULATE_AUTO_SELL=false` when autosell is
+explicitly enabled.
 
 ## VPS Tiny Send
 
@@ -168,8 +172,9 @@ JITO_ARM_LIVE_COPY_SEND=YES /opt/jito-feed-probe-watch/run-vps-copy-send.sh
 The VPS launcher sources `/opt/pumpfun-migration-bot/.env`, then
 `/etc/jito-copy-live.env`, and runs the release `jito-feed-probe` binary. It
 keeps `JITO_MAX_COPY_SOL <= 0.001`, `JITO_FAST_COPY_SEND=YES`,
-`JITO_ONE_SHOT_COPY_SEND=false`, and `JITO_DISABLE_SIGNAL_OBSERVATIONS=true` by
-default. Dashboard/report syncing should run as a separate post-submit service.
+`JITO_ONE_SHOT_COPY_SEND=false`, `JITO_SIMULATE_AUTO_SELL=false`, and
+`JITO_DISABLE_SIGNAL_OBSERVATIONS=true` by default. Dashboard/report syncing
+should run as a separate post-submit service.
 
 Send fanout is default-off:
 

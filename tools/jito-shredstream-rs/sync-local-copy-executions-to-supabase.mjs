@@ -206,11 +206,38 @@ async function blockPositionDiagnostics(row, copyTransaction, rpcFn = rpc) {
   if (diagnostics.slotDelta === 0) {
     diagnostics.sameSlotTxDelta = diagnostics.copyTxIndex - diagnostics.targetTxIndex;
   } else if (diagnostics.slotDelta > 0) {
+    let intermediateSlotTransactionCount = 0;
+    const intermediateSlots = [];
+    for (let slot = diagnostics.targetSlot + 1; slot < diagnostics.copySlot; slot += 1) {
+      const intermediateBlock = await fetchBlockSignatures(slot, rpcFn);
+      if (!intermediateBlock.signatures) {
+        diagnostics.unavailableReason = `intermediate block ${slot} unavailable: ${intermediateBlock.unavailableReason}`;
+        return diagnostics;
+      }
+      intermediateSlots.push({
+        slot,
+        transactionCount: intermediateBlock.signatures.length
+      });
+      intermediateSlotTransactionCount += intermediateBlock.signatures.length;
+    }
+    const targetSlotTransactionsAfterTarget =
+      targetBlock.signatures.length - diagnostics.targetTxIndex - 1;
+    const copySlotTransactionsThroughCopy = diagnostics.copyTxIndex + 1;
+    const crossSlotTxDelta =
+      targetSlotTransactionsAfterTarget +
+      intermediateSlotTransactionCount +
+      copySlotTransactionsThroughCopy;
     diagnostics.crossSlotPositionSummary = {
       targetSlotTransactionCount: targetBlock.signatures.length,
       copySlotTransactionCount: copyBlock.signatures.length,
       targetTxIndex: diagnostics.targetTxIndex,
-      copyTxIndex: diagnostics.copyTxIndex
+      copyTxIndex: diagnostics.copyTxIndex,
+      targetSlotTransactionsAfterTarget,
+      intermediateSlotCount: intermediateSlots.length,
+      intermediateSlotTransactionCount,
+      intermediateSlots,
+      copySlotTransactionsThroughCopy,
+      crossSlotTxDelta
     };
   }
 

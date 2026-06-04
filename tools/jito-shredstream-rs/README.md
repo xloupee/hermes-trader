@@ -179,15 +179,29 @@ JITO_SEND_RPC_URLS=https://rpc-a.example,https://rpc-b.example
 JITO_BLOCK_ENGINE_SEND_URLS=https://frankfurt.mainnet.block-engine.jito.wtf,https://london.mainnet.block-engine.jito.wtf
 ```
 
-When fanout is enabled, the worker submits the same signed transaction to every
-configured RPC concurrently, records the first successful ACK as
-`sendRpcWinner`, and stores only a sanitized host label, not query strings or
-API keys. If `JITO_SEND_RPC_URLS` is unset, the VPS launcher falls back to
+When fanout is enabled, the worker starts one send for every configured RPC
+concurrently, records the first successful ACK as `sendRpcWinner`, and lets the
+remaining send tasks keep running instead of cancelling them. It stores only a
+sanitized host label, not query strings or API keys. If
+`JITO_SEND_RPC_URLS` is unset, the VPS launcher falls back to
 `DIRECT_EXECUTION_SEND_RPC_URLS`, then `SOLANA_RPC_URL`. If
 `JITO_BLOCK_ENGINE_SEND_URLS` is unset, it falls back to
 `DIRECT_EXECUTION_JITO_SEND_URLS` and posts to Jito
 `/api/v1/transactions`, with `JITO_BLOCK_ENGINE_AUTH_UUID` inherited from
 `DIRECT_EXECUTION_JITO_AUTH_UUID` when present.
+
+Priority fee and Jito tip are explicit, capped runtime knobs:
+
+```bash
+JITO_PRIORITY_FEE_MICRO_LAMPORTS=250000
+JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS=500000
+JITO_TIP_LAMPORTS=10000
+JITO_MAX_TIP_LAMPORTS=50000
+JITO_TIP_ACCOUNT=96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5
+```
+
+The launcher rejects non-integer values, priority fees above the configured
+cap, tips above the configured cap, and positive tips without a tip account.
 
 After a send, verify the on-chain result:
 

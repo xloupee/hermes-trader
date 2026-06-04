@@ -10,15 +10,11 @@ use std::collections::HashSet;
 pub(crate) fn parse(
     instruction: &CompiledInstruction,
     account_keys: &[String],
-    target_wallets: &HashSet<&String>,
+    target_wallets: &HashSet<String>,
 ) -> Option<ParsedTrade> {
-    let accounts = instruction
-        .accounts
-        .iter()
-        .map(|index| *index as usize)
-        .collect::<Vec<_>>();
-    let first_account = account_keys.get(*accounts.first()?)?;
-    let second_account = account_keys.get(*accounts.get(1)?)?;
+    let accounts = instruction.accounts.as_slice();
+    let first_account = account_key_at(accounts, account_keys, 0)?;
+    let second_account = account_key_at(accounts, account_keys, 1)?;
     let amount_in = read_u64_le(&instruction.data, 1)?;
     let _minimum_out = read_u64_le(&instruction.data, 9)?;
 
@@ -36,7 +32,7 @@ pub(crate) fn parse(
         return Some(parsed);
     }
 
-    let mint = account_keys.get(*accounts.get(10)?)?;
+    let mint = account_key_at(accounts, account_keys, 10)?;
 
     if target_wallets.contains(first_account) {
         return Some(ParsedTrade {
@@ -66,9 +62,9 @@ pub(crate) fn parse(
 }
 
 fn parse_migrated_amm_layout(
-    accounts: &[usize],
+    accounts: &[u8],
     account_keys: &[String],
-    target_wallets: &HashSet<&String>,
+    target_wallets: &HashSet<String>,
     amount_in: u64,
     data: &[u8],
 ) -> Option<ParsedTrade> {
@@ -106,9 +102,9 @@ fn parse_migrated_amm_layout(
 }
 
 fn parse_long_v2_layout(
-    accounts: &[usize],
+    accounts: &[u8],
     account_keys: &[String],
-    target_wallets: &HashSet<&String>,
+    target_wallets: &HashSet<String>,
     amount_in: u64,
 ) -> Option<ParsedTrade> {
     if accounts.len() < 50 {
@@ -159,11 +155,7 @@ pub(crate) fn route_context(
         return None;
     }
 
-    let accounts = instruction
-        .accounts
-        .iter()
-        .map(|index| *index as usize)
-        .collect::<Vec<_>>();
+    let accounts = instruction.accounts.as_slice();
 
     if is_migrated_amm_buy_layout(&accounts, account_keys, parsed, &instruction.data) {
         return Some(RouteContext::FlashxPump(FlashxPumpRouteContext {
@@ -189,7 +181,7 @@ pub(crate) fn route_context(
 }
 
 fn is_migrated_amm_buy_layout(
-    accounts: &[usize],
+    accounts: &[u8],
     account_keys: &[String],
     parsed: &ParsedTrade,
     data: &[u8],
@@ -201,7 +193,7 @@ fn is_migrated_amm_buy_layout(
 }
 
 fn is_direct_pump_buy_layout(
-    accounts: &[usize],
+    accounts: &[u8],
     account_keys: &[String],
     parsed: &ParsedTrade,
     data: &[u8],
@@ -232,7 +224,7 @@ fn route_instruction_accounts(
 }
 
 fn migrated_amm_resolved_accounts(
-    accounts: &[usize],
+    accounts: &[u8],
     account_keys: &[String],
 ) -> Option<Vec<ResolvedRouteAccount>> {
     let roles = [
@@ -249,18 +241,21 @@ fn migrated_amm_resolved_accounts(
         ("poolBaseTokenAccount", 16),
         ("poolQuoteTokenAccount", 17),
         ("protocolFeeRecipient", 18),
+        ("protocolFeeRecipientTokenAccount", 19),
         ("baseTokenProgram", 20),
         ("quoteTokenProgram", 21),
         ("systemProgram", 22),
         ("associatedTokenProgram", 23),
         ("eventAuthority", 24),
+        ("coinCreatorVaultAta", 26),
+        ("coinCreatorVaultAuthority", 27),
         ("globalVolumeAccumulator", 28),
         ("userVolumeAccumulator", 29),
         ("feeConfig", 30),
         ("feeProgram", 31),
     ];
 
-    roles
+    let mut resolved = roles
         .into_iter()
         .map(|(role, account_position)| {
             Some(ResolvedRouteAccount {
@@ -268,11 +263,26 @@ fn migrated_amm_resolved_accounts(
                 pubkey: account_key_at(accounts, account_keys, account_position)?.to_string(),
             })
         })
-        .collect()
+        .collect::<Option<Vec<_>>>()?;
+
+    for (role, account_position) in [
+        ("poolV2", 32),
+        ("buybackFeeRecipient", 33),
+        ("buybackFeeRecipientTokenAccount", 34),
+    ] {
+        if let Some(pubkey) = account_key_at(accounts, account_keys, account_position) {
+            resolved.push(ResolvedRouteAccount {
+                role,
+                pubkey: pubkey.to_string(),
+            });
+        }
+    }
+
+    Some(resolved)
 }
 
 fn direct_pump_resolved_accounts(
-    accounts: &[usize],
+    accounts: &[u8],
     account_keys: &[String],
 ) -> Option<Vec<ResolvedRouteAccount>> {
     let roles = [
@@ -310,11 +320,11 @@ fn direct_pump_resolved_accounts(
 }
 
 fn account_key_at<'a>(
-    accounts: &[usize],
+    accounts: &[u8],
     account_keys: &'a [String],
     account_position: usize,
 ) -> Option<&'a String> {
-    account_keys.get(*accounts.get(account_position)?)
+    account_keys.get(*accounts.get(account_position)? as usize)
 }
 
 fn is_pump_mint(account_key: &str) -> bool {

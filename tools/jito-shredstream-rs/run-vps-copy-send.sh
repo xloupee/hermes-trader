@@ -58,9 +58,37 @@ export JITO_AUTO_SELL_DELAY_MS="${JITO_AUTO_SELL_DELAY_MS:-1000}"
 export JITO_PRIORITY_FEE_MICRO_LAMPORTS="${JITO_PRIORITY_FEE_MICRO_LAMPORTS:-${DIRECT_EXECUTION_PRIORITY_FEE_MICRO_LAMPORTS:-}}"
 export JITO_TIP_LAMPORTS="${JITO_TIP_LAMPORTS:-${DIRECT_EXECUTION_JITO_TIP_LAMPORTS:-}}"
 export JITO_TIP_ACCOUNT="${JITO_TIP_ACCOUNT:-${DIRECT_EXECUTION_JITO_TIP_ACCOUNT:-}}"
+export JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS="${JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS:-500000}"
+export JITO_MAX_TIP_LAMPORTS="${JITO_MAX_TIP_LAMPORTS:-50000}"
 export JITO_COPY_EXECUTIONS_PATH="${JITO_COPY_EXECUTIONS_PATH:-/var/log/jito-copy-executions-vps.jsonl}"
 export JITO_ADDRESS_LOOKUP_TABLES="${JITO_ADDRESS_LOOKUP_TABLES:-4vX5U9XsiY11infmC13d6VFPjvUqtuRw744r4o94dyow}"
 export JITO_DISABLE_SIGNAL_OBSERVATIONS="${JITO_DISABLE_SIGNAL_OBSERVATIONS:-true}"
+
+validate_nonnegative_int() {
+  local name="$1"
+  local value="${2:-}"
+
+  [[ -z "$value" ]] && return 0
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    echo "$name must be a nonnegative integer; got $value" >&2
+    exit 1
+  fi
+}
+
+validate_capped_int() {
+  local name="$1"
+  local value="${2:-}"
+  local cap_name="$3"
+  local cap_value="${4:-}"
+
+  validate_nonnegative_int "$name" "$value"
+  validate_nonnegative_int "$cap_name" "$cap_value"
+  [[ -z "$value" || -z "$cap_value" ]] && return 0
+  if (( value > cap_value )); then
+    echo "$name must be <= $cap_name ($cap_value); got $value" >&2
+    exit 1
+  fi
+}
 
 case "$JITO_MAX_COPY_SOL" in
   0.001|0.000[0-9]*)
@@ -78,6 +106,18 @@ fi
 
 if [[ ! -f "$JITO_COPY_KEYPAIR_PATH" ]]; then
   echo "copy keypair not found: $JITO_COPY_KEYPAIR_PATH" >&2
+  exit 1
+fi
+
+validate_capped_int \
+  JITO_PRIORITY_FEE_MICRO_LAMPORTS \
+  "$JITO_PRIORITY_FEE_MICRO_LAMPORTS" \
+  JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS \
+  "$JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS"
+validate_capped_int JITO_TIP_LAMPORTS "$JITO_TIP_LAMPORTS" JITO_MAX_TIP_LAMPORTS "$JITO_MAX_TIP_LAMPORTS"
+
+if [[ -n "$JITO_TIP_LAMPORTS" && "$JITO_TIP_LAMPORTS" != "0" && -z "$JITO_TIP_ACCOUNT" ]]; then
+  echo "JITO_TIP_ACCOUNT must be set when JITO_TIP_LAMPORTS is positive" >&2
   exit 1
 fi
 
@@ -101,7 +141,9 @@ echo "  one shot: $JITO_ONE_SHOT_COPY_SEND"
 echo "  dry run: $JITO_DRY_RUN"
 echo "  auto sell after buy: $JITO_AUTO_SELL_AFTER_BUY"
 echo "  priority fee micro lamports: ${JITO_PRIORITY_FEE_MICRO_LAMPORTS:-0}"
+echo "  max priority fee micro lamports: $JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS"
 echo "  jito tip lamports: ${JITO_TIP_LAMPORTS:-0}"
+echo "  max jito tip lamports: $JITO_MAX_TIP_LAMPORTS"
 if [[ -n "$JITO_TIP_ACCOUNT" ]]; then
   echo "  jito tip account: configured"
 else

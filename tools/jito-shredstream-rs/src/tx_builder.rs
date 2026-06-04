@@ -1,6 +1,7 @@
 use crate::parser::{
     read_u64_le, FlashxPumpLayout, ResolvedRouteAccount, RouteContext, ASSOCIATED_TOKEN_PROGRAM_ID,
-    COMPUTE_BUDGET_PROGRAM_ID, PUMP_FUN_PROGRAM_ID, PUMP_FUN_SELL_DISCRIMINATOR, SYSTEM_PROGRAM_ID,
+    COMPUTE_BUDGET_PROGRAM_ID, PUMP_AMM_PROGRAM_ID, PUMP_FUN_PROGRAM_ID,
+    PUMP_FUN_SELL_DISCRIMINATOR, SYSTEM_PROGRAM_ID,
 };
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
@@ -434,12 +435,32 @@ pub(crate) fn build_auto_sell_unsigned_flashx_pump(
             "unsupported auto-sell layout",
         ));
     };
-    if context.layout != FlashxPumpLayout::DirectPump {
-        return Err(TxBuildError::UnsupportedLayout(
-            "unsupported auto-sell layout",
-        ));
-    }
 
+    match context.layout {
+        FlashxPumpLayout::DirectPump => build_auto_sell_unsigned_flashx_direct_pump(
+            context,
+            copy_build,
+            copy_wallet,
+            mint,
+            token_amount_raw,
+        ),
+        FlashxPumpLayout::MigratedAmm => build_auto_sell_unsigned_flashx_migrated_amm(
+            context,
+            copy_build,
+            copy_wallet,
+            mint,
+            token_amount_raw,
+        ),
+    }
+}
+
+fn build_auto_sell_unsigned_flashx_direct_pump(
+    context: &crate::parser::FlashxPumpRouteContext,
+    copy_build: CopyUnsignedTxBuild,
+    copy_wallet: &str,
+    mint: &str,
+    token_amount_raw: u64,
+) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
     let pump_program = parse_pubkey(PUMP_FUN_PROGRAM_ID)?;
     let copy_wallet_token_account = parse_pubkey(&copy_build.copy_wallet_token_account)?;
     let copy_wallet_pubkey = parse_pubkey(copy_wallet)?;
@@ -525,6 +546,145 @@ pub(crate) fn build_auto_sell_unsigned_flashx_pump(
     })
 }
 
+fn build_auto_sell_unsigned_flashx_migrated_amm(
+    context: &crate::parser::FlashxPumpRouteContext,
+    copy_build: CopyUnsignedTxBuild,
+    copy_wallet: &str,
+    mint: &str,
+    token_amount_raw: u64,
+) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
+    let copy_wallet_pubkey = parse_pubkey(copy_wallet)?;
+    let copy_base_token_account = parse_pubkey(&copy_build.copy_wallet_token_account)?;
+    let mint = parse_pubkey(mint)?;
+    let pump_amm_program = resolved_pubkey(&context.resolved_accounts, "pumpAmmProgram")
+        .or_else(|_| parse_pubkey(PUMP_AMM_PROGRAM_ID))?;
+    let quote_mint = resolved_pubkey(&context.resolved_accounts, "quoteMint")?;
+    let quote_token_program = resolved_pubkey(&context.resolved_accounts, "quoteTokenProgram")?;
+    let associated_token_program =
+        resolved_pubkey(&context.resolved_accounts, "associatedTokenProgram")?;
+    let system_program = resolved_pubkey(&context.resolved_accounts, "systemProgram")?;
+    let copy_quote_token_account = associated_token_address(
+        &copy_wallet_pubkey,
+        &quote_mint,
+        &quote_token_program,
+        &associated_token_program,
+    );
+    let mut sell_data = Vec::with_capacity(24);
+    sell_data.extend_from_slice(&PUMP_FUN_SELL_DISCRIMINATOR);
+    sell_data.extend_from_slice(&token_amount_raw.to_le_bytes());
+    sell_data.extend_from_slice(&0u64.to_le_bytes());
+
+    let sell_instruction = Instruction {
+        program_id: pump_amm_program,
+        accounts: vec![
+            AccountMeta::new(
+                resolved_pubkey(&context.resolved_accounts, "poolState")?,
+                false,
+            ),
+            AccountMeta::new(copy_wallet_pubkey, true),
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "globalConfig")?,
+                false,
+            ),
+            AccountMeta::new_readonly(mint, false),
+            AccountMeta::new_readonly(quote_mint, false),
+            AccountMeta::new(copy_base_token_account, false),
+            AccountMeta::new(copy_quote_token_account, false),
+            AccountMeta::new(
+                resolved_pubkey(&context.resolved_accounts, "poolBaseTokenAccount")?,
+                false,
+            ),
+            AccountMeta::new(
+                resolved_pubkey(&context.resolved_accounts, "poolQuoteTokenAccount")?,
+                false,
+            ),
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "protocolFeeRecipient")?,
+                false,
+            ),
+            AccountMeta::new(
+                resolved_pubkey(
+                    &context.resolved_accounts,
+                    "protocolFeeRecipientTokenAccount",
+                )?,
+                false,
+            ),
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "baseTokenProgram")?,
+                false,
+            ),
+            AccountMeta::new_readonly(quote_token_program, false),
+            AccountMeta::new_readonly(system_program, false),
+            AccountMeta::new_readonly(associated_token_program, false),
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "eventAuthority")?,
+                false,
+            ),
+            AccountMeta::new_readonly(pump_amm_program, false),
+            AccountMeta::new(
+                resolved_pubkey(&context.resolved_accounts, "coinCreatorVaultAta")?,
+                false,
+            ),
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "coinCreatorVaultAuthority")?,
+                false,
+            ),
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "feeConfig")?,
+                false,
+            ),
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "feeProgram")?,
+                false,
+            ),
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "poolV2")?,
+                false,
+            ),
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "buybackFeeRecipient")?,
+                false,
+            ),
+            AccountMeta::new(
+                resolved_pubkey(
+                    &context.resolved_accounts,
+                    "buybackFeeRecipientTokenAccount",
+                )?,
+                false,
+            ),
+        ],
+        data: sell_data,
+    };
+
+    let instructions = vec![
+        compute_unit_limit_instruction(400_000)?,
+        create_associated_token_account_idempotent_instruction(
+            &copy_wallet_pubkey,
+            &copy_quote_token_account,
+            &quote_mint,
+            &quote_token_program,
+            &associated_token_program,
+            &system_program,
+        ),
+        sell_instruction,
+        close_token_account_instruction(
+            &copy_quote_token_account,
+            &copy_wallet_pubkey,
+            &copy_wallet_pubkey,
+            &quote_token_program,
+        ),
+    ];
+
+    Ok(FullCopyUnsignedTxBuild {
+        route_layout: copy_build.route_layout,
+        copy_wallet_token_account: copy_build.copy_wallet_token_account,
+        estimated_required_signer: copy_wallet_pubkey.to_string(),
+        setup_instruction_count: 2,
+        main_instruction_count: 2,
+        instructions,
+    })
+}
+
 fn resolved_pubkey(
     resolved_accounts: &[ResolvedRouteAccount],
     role: &'static str,
@@ -602,6 +762,23 @@ fn system_transfer_instruction(
     })
 }
 
+fn close_token_account_instruction(
+    token_account: &Pubkey,
+    destination: &Pubkey,
+    owner: &Pubkey,
+    token_program: &Pubkey,
+) -> Instruction {
+    Instruction {
+        program_id: *token_program,
+        accounts: vec![
+            AccountMeta::new(*token_account, false),
+            AccountMeta::new(*destination, false),
+            AccountMeta::new_readonly(*owner, true),
+        ],
+        data: vec![9],
+    }
+}
+
 fn create_associated_token_account_idempotent_instruction(
     payer: &Pubkey,
     associated_token_account: &Pubkey,
@@ -629,6 +806,7 @@ mod tests {
     use super::*;
     use crate::parser::{
         parse_trade, static_account_keys, versioned_tx_signature_string, FLASHX_ROUTER_PROGRAM_ID,
+        TOKEN_PROGRAM_ID,
     };
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use solana_transaction::versioned::VersionedTransaction;
@@ -638,10 +816,13 @@ mod tests {
         "Jo9sxcrorVCGkmafhNDQKByQBDBTSqM99tS9R1mYs6DjvFZHxZFuFhAvdSemCxFqauPcqS1t17ir3iDScu7cQF5";
     const LIVE_MIGRATED_BUY_SIGNATURE: &str =
         "hYCB3CXxuEw4aofMSiNoenDwGJ9u3XQq1TVXBsSk33TztaUmypa1B2aPZbM7s7dpkW5qeCE7rEEPVMYWczDW33k";
+    const FAILED_AUTO_SELL_MIGRATED_BUY_SIGNATURE: &str =
+        "5Zi3KWTX4b6RUK5xNvghWDADwqJ4df5V3wpT4W7vMMdTvnQ4Mz6ikErAReiZsWYVgedNfNxjesf2dbTxCmRSgUTn";
     const LIVE_DIRECT_PUMP_BUY_SIGNATURE: &str =
         "2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo";
     const COPY_WALLET: &str = "FqhpPL63symHForRGfxPbGi4wDpe5jQqAVjntbbBqA5W";
     const LIVE_MIGRATED_MINT: &str = "J6UVkdPVe4cbd6qGJHdoacMa7zvN3tiaordcyZRspump";
+    const FAILED_AUTO_SELL_MIGRATED_MINT: &str = "6tLxxZJRHT3YPkpCqzMXnRpSfPzDSiyWipNL47yCpump";
     const LIVE_DIRECT_PUMP_MINT: &str = "8VigmMkK7f9FvTBDd8S2UmweezCgeBX4y5Xp4jMfpump";
 
     #[test]
@@ -1078,6 +1259,169 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn builds_auto_sell_instruction_for_migrated_amm_copy_balance() {
+        let transaction = replay_transaction(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/flashx/buy-hYCB3CXxuEw4aofMSiNoenDwGJ9u3XQq1TVXBsSk33TztaUmypa1B2aPZbM7s7dpkW5qeCE7rEEPVMYWczDW33k.tx.base64"
+        )));
+        let account_keys = live_migrated_buy_hydrated_account_keys(&transaction);
+        let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
+            .expect("live migrated FLASHX buy should parse");
+
+        let build = build_auto_sell_unsigned_flashx_pump(
+            parsed.route_context.as_ref(),
+            COPY_WALLET,
+            &parsed.mint,
+            123_456,
+        )
+        .expect("migrated AMM auto-sell route should build");
+
+        assert_eq!(build.route_layout, "migrated-amm");
+        assert_eq!(
+            build.copy_wallet_token_account,
+            "C68p1PQWjCCbgoeApEAPnnB21bF3ccnv5yBrnFH7L3xz"
+        );
+        assert_eq!(build.setup_instruction_count, 2);
+        assert_eq!(build.main_instruction_count, 2);
+        assert_eq!(build.instructions.len(), 4);
+        assert_eq!(
+            build.instructions[0].program_id.to_string(),
+            COMPUTE_BUDGET_PROGRAM_ID
+        );
+        assert_eq!(
+            build.instructions[1].program_id.to_string(),
+            ASSOCIATED_TOKEN_PROGRAM_ID
+        );
+        assert_eq!(
+            build.instructions[1].accounts[1].pubkey.to_string(),
+            "8znPDiS1XkMMwHM7pJwCofbieMSLGqbZ1xPmeWB2wn9z"
+        );
+        assert_eq!(
+            build.instructions[2].program_id.to_string(),
+            PUMP_AMM_PROGRAM_ID
+        );
+        assert_eq!(build.instructions[2].accounts.len(), 24);
+        assert_eq!(
+            &build.instructions[2].data[0..8],
+            &PUMP_FUN_SELL_DISCRIMINATOR
+        );
+        assert_eq!(
+            &build.instructions[2].data[8..16],
+            &123_456u64.to_le_bytes()
+        );
+        assert_eq!(&build.instructions[2].data[16..24], &0u64.to_le_bytes());
+        assert_eq!(
+            build.instructions[2].accounts[1].pubkey.to_string(),
+            COPY_WALLET
+        );
+        assert!(build.instructions[2].accounts[1].is_signer);
+        assert_eq!(
+            build.instructions[2].accounts[5].pubkey.to_string(),
+            build.copy_wallet_token_account
+        );
+        assert_eq!(
+            build.instructions[2].accounts[6].pubkey.to_string(),
+            "8znPDiS1XkMMwHM7pJwCofbieMSLGqbZ1xPmeWB2wn9z"
+        );
+        assert_eq!(
+            build.instructions[2].accounts[10].pubkey.to_string(),
+            "BWXT6RUhit9FfJQM3pBmqeFLPYmuxgmyhMGC5sGr8RbA"
+        );
+        assert_eq!(
+            build.instructions[2].accounts[17].pubkey.to_string(),
+            "CQAM6AwSFEcJMiRgkmwcB5FbzBRvzqUzryLFrQZxrGf7"
+        );
+        assert_eq!(
+            build.instructions[2].accounts[18].pubkey.to_string(),
+            "6yeW4pQsvXTNzd6F3L8kbMFDf3WDV8i2jRETNspH2A72"
+        );
+        assert_eq!(
+            build.instructions[2].accounts[19].pubkey.to_string(),
+            "5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"
+        );
+        assert!(!build.instructions[2].accounts[21].is_writable);
+        assert!(!build.instructions[2].accounts[22].is_writable);
+        assert!(build.instructions[2].accounts[23].is_writable);
+        assert_eq!(
+            build.instructions[3].program_id.to_string(),
+            TOKEN_PROGRAM_ID
+        );
+        assert_eq!(build.instructions[3].data, vec![9]);
+        assert_eq!(
+            build.instructions[3].accounts[0].pubkey.to_string(),
+            "8znPDiS1XkMMwHM7pJwCofbieMSLGqbZ1xPmeWB2wn9z"
+        );
+        assert_eq!(
+            build.instructions[3].accounts[1].pubkey.to_string(),
+            COPY_WALLET
+        );
+        assert_eq!(
+            build.instructions[3].accounts[2].pubkey.to_string(),
+            COPY_WALLET
+        );
+        assert!(build.instructions[3].accounts[2].is_signer);
+        assert!(!build
+            .instructions
+            .iter()
+            .flat_map(|instruction| instruction.accounts.iter())
+            .any(|account| account.pubkey.to_string() == TARGET_WALLET));
+    }
+
+    #[test]
+    fn builds_auto_sell_instruction_for_failed_live_migrated_buyback_layout() {
+        let transaction = replay_transaction(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/flashx/migrated-buy-5Zi3KWTX4b6RUK5xNvghWDADwqJ4df5V3wpT4W7vMMdTvnQ4Mz6ikErAReiZsWYVgedNfNxjesf2dbTxCmRSgUTn.tx.base64"
+        )));
+        assert_eq!(
+            versioned_tx_signature_string(&transaction),
+            FAILED_AUTO_SELL_MIGRATED_BUY_SIGNATURE
+        );
+        let account_keys = failed_auto_sell_migrated_buy_hydrated_account_keys(&transaction);
+        let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
+            .expect("failed live migrated FLASHX buy should parse");
+        assert_eq!(parsed.mint, FAILED_AUTO_SELL_MIGRATED_MINT);
+
+        let build = build_auto_sell_unsigned_flashx_pump(
+            parsed.route_context.as_ref(),
+            COPY_WALLET,
+            &parsed.mint,
+            32_212_701_563,
+        )
+        .expect("failed migrated AMM auto-sell route should build");
+
+        assert_eq!(build.route_layout, "migrated-amm");
+        assert_eq!(
+            build.copy_wallet_token_account,
+            "D2yXA2HXMpxY98fHENhDkBzY9JDwJ4EcjcdCtypy8LiN"
+        );
+        assert_eq!(
+            build.instructions[2].program_id.to_string(),
+            PUMP_AMM_PROGRAM_ID
+        );
+        assert_eq!(build.instructions[2].accounts.len(), 24);
+        assert_eq!(
+            &build.instructions[2].data[8..16],
+            &32_212_701_563u64.to_le_bytes()
+        );
+        assert_eq!(
+            build.instructions[2].accounts[21].pubkey.to_string(),
+            "8L81oN2mPTHQ9LJXxYcysggHXy5dfuSZP3yVe1tfzHeK"
+        );
+        assert!(!build.instructions[2].accounts[21].is_writable);
+        assert_eq!(
+            build.instructions[2].accounts[22].pubkey.to_string(),
+            "GXPFM2caqTtQYC2cJ5yJRi9VDkpsYZXzYdwYpGnLmtDL"
+        );
+        assert!(!build.instructions[2].accounts[22].is_writable);
+        assert_eq!(
+            build.instructions[2].accounts[23].pubkey.to_string(),
+            "AktftA98kSWAxn6kVSoqBXBELUArjKu2H9WmKB48ULFY"
+        );
+        assert!(build.instructions[2].accounts[23].is_writable);
+    }
+
     fn replay_transaction(base64_fixture: &str) -> VersionedTransaction {
         let compact = base64_fixture.split_whitespace().collect::<String>();
         let bytes = STANDARD.decode(compact).expect("fixture is valid base64");
@@ -1159,6 +1503,36 @@ mod tests {
                 "5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx",
                 "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ",
                 "DKU4HtLZmD825BXdsGkE2bSEC6kunPeUyrgvB9DcawGV",
+                "GXPFM2caqTtQYC2cJ5yJRi9VDkpsYZXzYdwYpGnLmtDL",
+            ]
+            .into_iter()
+            .map(ToString::to_string),
+        );
+        account_keys
+    }
+
+    fn failed_auto_sell_migrated_buy_hydrated_account_keys(
+        transaction: &VersionedTransaction,
+    ) -> Vec<String> {
+        let mut account_keys = static_account_keys(transaction);
+        account_keys.extend(
+            [
+                "7oi1L8U9MRu5zDz5syFahsiLUric47LzvJBQX6r827ws",
+                "Bvtgim23rfocUzxVX9j9QFxTbBnH8JZxnaGLCEkXvjKS",
+                "AktftA98kSWAxn6kVSoqBXBELUArjKu2H9WmKB48ULFY",
+                "3PvqoztjnRxaAiFmLuEfqZkU4GSbjUareks8S2xCZaTa",
+                "8vFGAKdwpn4hk7kc1cBgfWZzpyW3MEMDATDzVZhddeQb",
+                "jitodontfront81111111TradeWithAxiomDotTrade",
+                "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+                "So11111111111111111111111111111111111111112",
+                "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+                "ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw",
+                "9rPYyANsfQZw3DnDmKE3YCQF5E8oD89UXoHn9JFEhJUz",
+                "GS4CU59F31iL7aR2Q8zVS8DRrcRnXX1yjQ66TqNVQnaR",
+                "C2aFPdENg4A2HQsmrd5rTw5TaYBX5Ku887cWjbFKtZpw",
+                "5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx",
+                "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ",
                 "GXPFM2caqTtQYC2cJ5yJRi9VDkpsYZXzYdwYpGnLmtDL",
             ]
             .into_iter()

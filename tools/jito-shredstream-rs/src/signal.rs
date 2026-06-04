@@ -22,6 +22,13 @@ pub(crate) struct SignalTimings {
     pub(crate) deserialize_us: u128,
     pub(crate) parse_us: u128,
     pub(crate) local_detect_us: u128,
+    pub(crate) batch_transaction_count: u64,
+    pub(crate) matched_transaction_index: u64,
+    pub(crate) batch_scan_us: u128,
+    pub(crate) tx_parse_us: u128,
+    pub(crate) account_expand_us: u128,
+    pub(crate) wallet_match_us: u128,
+    pub(crate) route_parse_us: u128,
 }
 
 impl SignalObservationWriter {
@@ -151,6 +158,13 @@ struct SignalObservationRow {
     deserialize_us: i64,
     parse_us: i64,
     local_detect_us: i64,
+    batch_transaction_count: i64,
+    matched_transaction_index: i64,
+    batch_scan_us: i64,
+    tx_parse_us: i64,
+    account_expand_us: i64,
+    wallet_match_us: i64,
+    route_parse_us: i64,
     sol_amount: Option<f64>,
     token_amount: Option<f64>,
     copyable: bool,
@@ -177,6 +191,20 @@ impl SignalObservationRow {
             i64::try_from(timings.parse_us).context("parse_us does not fit into bigint")?;
         let local_detect_us = i64::try_from(timings.local_detect_us)
             .context("local_detect_us does not fit into bigint")?;
+        let batch_transaction_count = i64::try_from(timings.batch_transaction_count)
+            .context("batch_transaction_count does not fit into bigint")?;
+        let matched_transaction_index = i64::try_from(timings.matched_transaction_index)
+            .context("matched_transaction_index does not fit into bigint")?;
+        let batch_scan_us = i64::try_from(timings.batch_scan_us)
+            .context("batch_scan_us does not fit into bigint")?;
+        let tx_parse_us =
+            i64::try_from(timings.tx_parse_us).context("tx_parse_us does not fit into bigint")?;
+        let account_expand_us = i64::try_from(timings.account_expand_us)
+            .context("account_expand_us does not fit into bigint")?;
+        let wallet_match_us = i64::try_from(timings.wallet_match_us)
+            .context("wallet_match_us does not fit into bigint")?;
+        let route_parse_us = i64::try_from(timings.route_parse_us)
+            .context("route_parse_us does not fit into bigint")?;
         let slot = i64::try_from(event.slot).context("slot does not fit into bigint")?;
 
         Ok(Self {
@@ -204,6 +232,13 @@ impl SignalObservationRow {
             deserialize_us,
             parse_us,
             local_detect_us,
+            batch_transaction_count,
+            matched_transaction_index,
+            batch_scan_us,
+            tx_parse_us,
+            account_expand_us,
+            wallet_match_us,
+            route_parse_us,
             sol_amount: event.sol_amount,
             token_amount: event.token_amount,
             copyable: event.copyable,
@@ -372,6 +407,13 @@ mod tests {
             deserialize_us: 4_200,
             parse_us: 5_300,
             local_detect_us: 9_500,
+            batch_transaction_count: 42,
+            matched_transaction_index: 17,
+            batch_scan_us: 4_000,
+            tx_parse_us: 1_300,
+            account_expand_us: 100,
+            wallet_match_us: 40,
+            route_parse_us: 1_160,
         };
         let row = SignalObservationRow::from_event(&event, timings, Some(1_780_450_788_000))
             .expect("row builds");
@@ -387,6 +429,13 @@ mod tests {
         assert_eq!(row.deserialize_us, 4_200);
         assert_eq!(row.parse_us, 5_300);
         assert_eq!(row.local_detect_us, 9_500);
+        assert_eq!(row.batch_transaction_count, 42);
+        assert_eq!(row.matched_transaction_index, 17);
+        assert_eq!(row.batch_scan_us, 4_000);
+        assert_eq!(row.tx_parse_us, 1_300);
+        assert_eq!(row.account_expand_us, 100);
+        assert_eq!(row.wallet_match_us, 40);
+        assert_eq!(row.route_parse_us, 1_160);
         assert_eq!(row.copyable, true);
         assert_eq!(row.raw_event["schema"], "copytrade.feed.event.v1");
     }

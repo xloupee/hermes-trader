@@ -7,7 +7,7 @@ use crate::{
     },
     executor::{CopyExecutionLine, CopyExecutor},
     parser::{
-        classify_wallet_mention, mentioned_target_wallet, parse_trade,
+        classify_wallet_mention, mentioned_target_wallet_in_set, parse_trade_for_mentioned_targets,
         versioned_tx_signature_string,
     },
     planner::{
@@ -35,6 +35,7 @@ use std::{
 
 pub(crate) async fn run(options: LiveOptions) -> Result<()> {
     let target_wallets = parse_target_wallets(&options.target_wallets)?;
+    let target_wallet_set = target_wallets.iter().cloned().collect::<HashSet<_>>();
     let address_lookup_tables = AddressLookupTableCache::load(
         options.solana_rpc_url.as_deref(),
         &options.address_lookup_tables,
@@ -169,35 +170,70 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
             };
         let entries_deserialized_at = Instant::now();
         let entries_deserialized_at_ms = now_ms();
+        let batch_transaction_count = entries
+            .iter()
+            .map(|entry| entry.transactions.len())
+            .sum::<usize>();
 
         if options.stats {
             eprintln!(
                 "slot {} entries={} transactions={}",
                 slot_entry.slot,
                 entries.len(),
-                entries
-                    .iter()
-                    .map(|entry| entry.transactions.len())
-                    .sum::<usize>()
+                batch_transaction_count
             );
         }
 
+        let mut batch_transaction_index = 0usize;
         for entry in entries {
             for versioned_tx in entry.transactions {
+                let current_transaction_index = batch_transaction_index;
+                batch_transaction_index += 1;
+
                 let signature = versioned_tx_signature_string(&versioned_tx);
                 if signature.is_empty() || !seen.insert(signature.clone()) {
                     continue;
                 }
 
+                let tx_parse_started_at = Instant::now();
                 let expanded_account_keys =
                     address_lookup_tables.expanded_account_keys(&versioned_tx);
+                let account_expand_finished_at = Instant::now();
                 if let Some(missing_lookup_table) = &expanded_account_keys.missing_lookup_table {
                     if options.stats {
                         eprintln!("missing address lookup table {missing_lookup_table}");
                     }
                 }
                 let account_keys = expanded_account_keys.keys;
-                match parse_trade(&versioned_tx, &account_keys, &target_wallets) {
+                let wallet_match_started_at = account_expand_finished_at;
+                let target_wallet_mention =
+                    mentioned_target_wallet_in_set(&account_keys, &target_wallet_set);
+                let wallet_match_finished_at = Instant::now();
+                if target_wallet_mention.is_none() {
+                    if options.include_rejections {
+                        print_json(&RejectionLine {
+                            schema: "copytrade.feed.rejection.v1",
+                            observed_at_ms: now_ms(),
+                            provider: "shredstream",
+                            source: "jito-proxy",
+                            endpoint: options.endpoint.clone(),
+                            signature,
+                            slot: slot_entry.slot,
+                            reason: "no supported target Pump instruction in static account keys"
+                                .to_string(),
+                            filters: vec!["jito-entry".to_string()],
+                            account_key_count: account_keys.len(),
+                        })?;
+                    }
+                    continue;
+                }
+
+                let route_parse_started_at = wallet_match_finished_at;
+                match parse_trade_for_mentioned_targets(
+                    &versioned_tx,
+                    &account_keys,
+                    &target_wallet_set,
+                ) {
                     Some(parsed) => {
                         let trade_parsed_at = Instant::now();
                         let trade_parsed_at_ms = now_ms();
@@ -213,6 +249,23 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 .as_micros(),
                             local_detect_us: trade_parsed_at
                                 .duration_since(grpc_message_received_at)
+                                .as_micros(),
+                            batch_transaction_count: batch_transaction_count as u64,
+                            matched_transaction_index: current_transaction_index as u64,
+                            batch_scan_us: tx_parse_started_at
+                                .duration_since(entries_deserialized_at)
+                                .as_micros(),
+                            tx_parse_us: trade_parsed_at
+                                .duration_since(tx_parse_started_at)
+                                .as_micros(),
+                            account_expand_us: account_expand_finished_at
+                                .duration_since(tx_parse_started_at)
+                                .as_micros(),
+                            wallet_match_us: wallet_match_finished_at
+                                .duration_since(wallet_match_started_at)
+                                .as_micros(),
+                            route_parse_us: trade_parsed_at
+                                .duration_since(route_parse_started_at)
                                 .as_micros(),
                         };
                         let shadow_signal = shadow_signal_line(
@@ -288,9 +341,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                         })?;
                     }
                     None if options.print_mentions => {
-                        if let Some(target_wallet) =
-                            mentioned_target_wallet(&account_keys, &target_wallets)
-                        {
+                        if let Some(target_wallet) = target_wallet_mention {
                             let classification =
                                 classify_wallet_mention(&versioned_tx, &account_keys);
                             print_json(&WalletMentionLine {

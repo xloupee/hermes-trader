@@ -2,7 +2,7 @@ use crate::{
     address_lookup::AddressLookupTableCache,
     blockhash::{cached_blockhash, BlockhashCache},
     event::now_ms,
-    parser::{Action, Route},
+    parser::{read_u64_le, Action, FlashxPumpLayout, Route, RouteContext},
     planner::ExecutionPlanLine,
     tx_builder::{
         build_auto_sell_unsigned_flashx_pump, build_full_copy_unsigned_flashx_pump,
@@ -544,7 +544,9 @@ impl CopyExecutor {
         while let Some(result) = send_set.join_next().await {
             match result {
                 Ok(Ok((label, signature))) => {
-                    send_set.abort_all();
+                    // Keep the remaining sends alive. Fast ACK is useful for metrics, but
+                    // aborting slower lanes can prevent a better landing path from submitting.
+                    send_set.detach_all();
                     return Ok(SendTransactionResult {
                         signature,
                         rpc_url_count: endpoints.len(),
@@ -596,18 +598,14 @@ impl CopyExecutor {
             copy_wallet,
             &execution_plan.mint,
         ) {
-            Ok(build) if build.route_layout == "direct-pump" => build.copy_wallet_token_account,
-            Ok(_) => {
-                line.skip_auto_sell("unsupported auto-sell layout");
-                return;
-            }
+            Ok(build) => build.copy_wallet_token_account,
             Err(error) => {
                 line.skip_auto_sell(tx_build_error_reason(error));
                 return;
             }
         };
 
-        let token_amount_raw = match self.auto_sell_token_balance_raw(&token_account).await {
+        let token_balance_raw = match self.auto_sell_token_balance_raw(&token_account).await {
             Ok(amount) if amount > 0 => amount,
             Ok(_) => {
                 line.skip_auto_sell("copy wallet token balance is zero after retries");
@@ -618,6 +616,8 @@ impl CopyExecutor {
                 return;
             }
         };
+        let token_amount_raw =
+            auto_sell_token_amount_raw(execution_plan.route_context.as_ref(), token_balance_raw);
         line.auto_sell_token_amount_raw = Some(token_amount_raw);
 
         let Some(cached_blockhash) = cached_blockhash(self.blockhash_cache.as_ref()) else {
@@ -638,11 +638,7 @@ impl CopyExecutor {
             &execution_plan.mint,
             token_amount_raw,
         ) {
-            Ok(build) if build.route_layout == "direct-pump" => build,
-            Ok(_) => {
-                line.skip_auto_sell("unsupported auto-sell layout");
-                return;
-            }
+            Ok(build) => build,
             Err(error) => {
                 line.skip_auto_sell(tx_build_error_reason(error));
                 return;
@@ -761,6 +757,20 @@ impl CopyExecutor {
         amount
             .parse::<u64>()
             .map_err(|error| format!("parse token account balance: {error}"))
+    }
+}
+
+fn auto_sell_token_amount_raw(route_context: Option<&RouteContext>, token_balance_raw: u64) -> u64 {
+    let Some(RouteContext::FlashxPump(context)) = route_context else {
+        return token_balance_raw;
+    };
+    if context.layout != FlashxPumpLayout::MigratedAmm {
+        return token_balance_raw;
+    }
+
+    match read_u64_le(&context.data, 9) {
+        Some(min_tokens_out) if min_tokens_out > 0 => token_balance_raw.min(min_tokens_out),
+        _ => token_balance_raw,
     }
 }
 
@@ -1182,6 +1192,23 @@ mod tests {
         )
     }
 
+    fn flashx_context(layout: FlashxPumpLayout, min_tokens_out: u64) -> RouteContext {
+        let mut data = vec![0];
+        data.extend_from_slice(&990_000u64.to_le_bytes());
+        data.extend_from_slice(&min_tokens_out.to_le_bytes());
+        data.push(match layout {
+            FlashxPumpLayout::DirectPump | FlashxPumpLayout::MigratedAmm => 0,
+        });
+
+        RouteContext::FlashxPump(crate::parser::FlashxPumpRouteContext {
+            layout,
+            program_id: crate::parser::FLASHX_ROUTER_PROGRAM_ID.to_string(),
+            accounts: Vec::new(),
+            data,
+            resolved_accounts: Vec::new(),
+        })
+    }
+
     fn executor(options: CopyExecutionOptions) -> CopyExecutor {
         CopyExecutor {
             options,
@@ -1212,6 +1239,36 @@ mod tests {
     #[test]
     fn max_copy_sol_first_live_cap_is_one_milli_sol() {
         assert_eq!(FIRST_LIVE_MAX_COPY_SOL_CAP, 0.001);
+    }
+
+    #[test]
+    fn migrated_auto_sell_caps_stale_balance_to_copied_min_out() {
+        let route_context = flashx_context(FlashxPumpLayout::MigratedAmm, 23_000_000_000);
+
+        assert_eq!(
+            auto_sell_token_amount_raw(Some(&route_context), 47_000_000_000),
+            23_000_000_000
+        );
+    }
+
+    #[test]
+    fn migrated_auto_sell_keeps_smaller_balance_when_no_stale_tokens_exist() {
+        let route_context = flashx_context(FlashxPumpLayout::MigratedAmm, 23_000_000_000);
+
+        assert_eq!(
+            auto_sell_token_amount_raw(Some(&route_context), 22_500_000_000),
+            22_500_000_000
+        );
+    }
+
+    #[test]
+    fn direct_auto_sell_keeps_full_balance() {
+        let route_context = flashx_context(FlashxPumpLayout::DirectPump, 1);
+
+        assert_eq!(
+            auto_sell_token_amount_raw(Some(&route_context), 47_000_000_000),
+            47_000_000_000
+        );
     }
 
     #[test]

@@ -101,13 +101,34 @@ pub(crate) struct WalletMentionClassification {
     pub(crate) reason: String,
 }
 
+#[cfg(test)]
 pub(crate) fn parse_trade(
     versioned_tx: &VersionedTransaction,
     account_keys: &[String],
     target_wallets: &[String],
 ) -> Option<ParsedTrade> {
-    let target_wallets = target_wallets.iter().collect::<HashSet<_>>();
+    let target_wallets = target_wallets.iter().cloned().collect::<HashSet<_>>();
+    parse_trade_with_target_set(versioned_tx, account_keys, &target_wallets)
+}
 
+#[cfg(test)]
+pub(crate) fn parse_trade_with_target_set(
+    versioned_tx: &VersionedTransaction,
+    account_keys: &[String],
+    target_wallets: &HashSet<String>,
+) -> Option<ParsedTrade> {
+    if mentioned_target_wallet_in_set(account_keys, target_wallets).is_none() {
+        return None;
+    }
+
+    parse_trade_for_mentioned_targets(versioned_tx, account_keys, target_wallets)
+}
+
+pub(crate) fn parse_trade_for_mentioned_targets(
+    versioned_tx: &VersionedTransaction,
+    account_keys: &[String],
+    target_wallets: &HashSet<String>,
+) -> Option<ParsedTrade> {
     for instruction in versioned_tx.message.instructions() {
         let program_id = account_keys.get(instruction.program_id_index as usize)?;
         let parsed = match program_id.as_str() {
@@ -144,14 +165,22 @@ fn route_context(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn mentioned_target_wallet(
     account_keys: &[String],
     target_wallets: &[String],
 ) -> Option<String> {
-    let account_keys = account_keys.iter().collect::<HashSet<_>>();
-    target_wallets
+    let target_wallets = target_wallets.iter().cloned().collect::<HashSet<_>>();
+    mentioned_target_wallet_in_set(account_keys, &target_wallets)
+}
+
+pub(crate) fn mentioned_target_wallet_in_set(
+    account_keys: &[String],
+    target_wallets: &HashSet<String>,
+) -> Option<String> {
+    account_keys
         .iter()
-        .find(|wallet| account_keys.contains(wallet))
+        .find(|account_key| target_wallets.contains(*account_key))
         .cloned()
 }
 

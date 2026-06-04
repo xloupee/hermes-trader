@@ -7,19 +7,14 @@ use std::collections::HashSet;
 pub(crate) fn parse(
     instruction: &CompiledInstruction,
     account_keys: &[String],
-    target_wallets: &HashSet<&String>,
+    target_wallets: &HashSet<String>,
 ) -> Option<ParsedTrade> {
     let action = parse_action(&instruction.data)?;
-    let accounts = instruction
-        .accounts
-        .iter()
-        .map(|index| *index as usize)
-        .collect::<Vec<_>>();
-    let user = account_keys.get(*accounts.get(6)?)?;
+    let user = account_key_at(&instruction.accounts, account_keys, 6)?;
     if !target_wallets.contains(user) {
         return None;
     }
-    let mint = account_keys.get(*accounts.get(2)?)?;
+    let mint = account_key_at(&instruction.accounts, account_keys, 2)?;
     let token_amount = read_u64_le(&instruction.data, 8)? as f64 / PUMP_FUN_TOKEN_DECIMALS;
     let sol_amount = read_u64_le(&instruction.data, 16)? as f64 / LAMPORTS_PER_SOL;
 
@@ -32,6 +27,14 @@ pub(crate) fn parse(
         token_amount: Some(token_amount),
         route_context: None,
     })
+}
+
+fn account_key_at<'a>(
+    accounts: &[u8],
+    account_keys: &'a [String],
+    account_position: usize,
+) -> Option<&'a String> {
+    account_keys.get(*accounts.get(account_position)? as usize)
 }
 
 #[cfg(test)]

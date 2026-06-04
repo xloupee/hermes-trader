@@ -46,6 +46,7 @@ test("block position diagnostics report later-slot position summary", async () =
     { slot: 102 },
     rpcWithBlocks(new Map([
       [100, { signatures: ["before", "target-sig", "after"] }],
+      [101, { signatures: ["intermediate-1", "intermediate-2"] }],
       [102, { signatures: ["copy-before", "copy-sig", "copy-after", "copy-tail"] }]
     ]))
   );
@@ -59,7 +60,18 @@ test("block position diagnostics report later-slot position summary", async () =
     targetSlotTransactionCount: 3,
     copySlotTransactionCount: 4,
     targetTxIndex: 1,
-    copyTxIndex: 1
+    copyTxIndex: 1,
+    targetSlotTransactionsAfterTarget: 1,
+    intermediateSlotCount: 1,
+    intermediateSlotTransactionCount: 2,
+    intermediateSlots: [
+      {
+        slot: 101,
+        transactionCount: 2
+      }
+    ],
+    copySlotTransactionsThroughCopy: 2,
+    crossSlotTxDelta: 5
   });
 });
 

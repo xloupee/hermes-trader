@@ -11,6 +11,7 @@ const FLASHX_LOOKUP_TABLE: &str = "4vX5U9XsiY11infmC13d6VFPjvUqtuRw744r4o94dyow"
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AddressLookupTableCache {
     tables: HashMap<String, Vec<String>>,
+    table_accounts: Vec<AddressLookupTableAccount>,
 }
 
 impl AddressLookupTableCache {
@@ -41,7 +42,13 @@ impl AddressLookupTableCache {
             tables.insert(table_key.to_string(), addresses);
         }
 
-        Ok(Self { tables })
+        let table_accounts = build_table_accounts(&tables)
+            .map_err(|error| anyhow!("precompute lookup tables: {error}"))?;
+
+        Ok(Self {
+            tables,
+            table_accounts,
+        })
     }
 
     pub(crate) fn expanded_account_keys(
@@ -103,30 +110,8 @@ impl AddressLookupTableCache {
         }
     }
 
-    pub(crate) fn table_accounts(&self) -> Result<Vec<AddressLookupTableAccount>, String> {
-        let mut table_keys = self.tables.keys().cloned().collect::<Vec<_>>();
-        table_keys.sort();
-
-        table_keys
-            .into_iter()
-            .map(|key| {
-                let addresses = self
-                    .tables
-                    .get(&key)
-                    .ok_or_else(|| format!("missing lookup table {key}"))?
-                    .iter()
-                    .map(|address| {
-                        Pubkey::from_str(address)
-                            .map_err(|error| format!("invalid lookup table address: {error}"))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(AddressLookupTableAccount {
-                    key: Pubkey::from_str(&key)
-                        .map_err(|error| format!("invalid lookup table key: {error}"))?,
-                    addresses,
-                })
-            })
-            .collect()
+    pub(crate) fn table_accounts(&self) -> &[AddressLookupTableAccount] {
+        &self.table_accounts
     }
 }
 
@@ -223,6 +208,33 @@ fn base64_decode(value: &str) -> Result<Vec<u8>> {
         .context("base64 decode")
 }
 
+fn build_table_accounts(
+    tables: &HashMap<String, Vec<String>>,
+) -> Result<Vec<AddressLookupTableAccount>, String> {
+    let mut table_keys = tables.keys().cloned().collect::<Vec<_>>();
+    table_keys.sort();
+
+    table_keys
+        .into_iter()
+        .map(|key| {
+            let addresses = tables
+                .get(&key)
+                .ok_or_else(|| format!("missing lookup table {key}"))?
+                .iter()
+                .map(|address| {
+                    Pubkey::from_str(address)
+                        .map_err(|error| format!("invalid lookup table address: {error}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(AddressLookupTableAccount {
+                key: Pubkey::from_str(&key)
+                    .map_err(|error| format!("invalid lookup table key: {error}"))?,
+                addresses,
+            })
+        })
+        .collect()
+}
+
 fn flashx_lookup_table_addresses() -> Vec<String> {
     let mut addresses = vec!["11111111111111111111111111111111".to_string(); 187];
     for (index, address) in [
@@ -267,11 +279,13 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/fixtures/flashx/migrated-buy-Jo9sxcrorVCGkmafhNDQKByQBDBTSqM99tS9R1mYs6DjvFZHxZFuFhAvdSemCxFqauPcqS1t17ir3iDScu7cQF5.tx.base64"
         )));
+        let tables = HashMap::from([(
+            MIGRATED_BUY_LOOKUP_TABLE.to_string(),
+            migrated_buy_lookup_table_addresses(),
+        )]);
         let cache = AddressLookupTableCache {
-            tables: HashMap::from([(
-                MIGRATED_BUY_LOOKUP_TABLE.to_string(),
-                migrated_buy_lookup_table_addresses(),
-            )]),
+            table_accounts: build_table_accounts(&tables).unwrap(),
+            tables,
         };
 
         let expanded = cache.expanded_account_keys(&transaction);
@@ -304,11 +318,13 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/fixtures/flashx/live-buy-2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo.tx.base64"
         )));
+        let tables = HashMap::from([(
+            MIGRATED_BUY_LOOKUP_TABLE.to_string(),
+            migrated_buy_lookup_table_addresses(),
+        )]);
         let cache = AddressLookupTableCache {
-            tables: HashMap::from([(
-                MIGRATED_BUY_LOOKUP_TABLE.to_string(),
-                migrated_buy_lookup_table_addresses(),
-            )]),
+            table_accounts: build_table_accounts(&tables).unwrap(),
+            tables,
         };
 
         let expanded = cache.expanded_account_keys(&transaction);

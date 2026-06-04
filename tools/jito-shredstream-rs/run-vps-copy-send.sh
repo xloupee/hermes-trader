@@ -64,6 +64,10 @@ export JITO_MAX_TIP_LAMPORTS="${JITO_MAX_TIP_LAMPORTS:-50000}"
 export JITO_COPY_EXECUTIONS_PATH="${JITO_COPY_EXECUTIONS_PATH:-/var/log/jito-copy-executions-vps.jsonl}"
 export JITO_ADDRESS_LOOKUP_TABLES="${JITO_ADDRESS_LOOKUP_TABLES:-4vX5U9XsiY11infmC13d6VFPjvUqtuRw744r4o94dyow}"
 export JITO_DISABLE_SIGNAL_OBSERVATIONS="${JITO_DISABLE_SIGNAL_OBSERVATIONS:-true}"
+export JITO_PRINT_FEED_EVENTS="${JITO_PRINT_FEED_EVENTS:-false}"
+export JITO_PRINT_MENTIONS="${JITO_PRINT_MENTIONS:-false}"
+export JITO_WARM_SEND_ENDPOINTS="${JITO_WARM_SEND_ENDPOINTS:-true}"
+export JITO_SEND_ENDPOINT_WARM_INTERVAL_MS="${JITO_SEND_ENDPOINT_WARM_INTERVAL_MS:-15000}"
 
 validate_nonnegative_int() {
   local name="$1"
@@ -165,6 +169,10 @@ else
   echo "  jito tip account: unset"
 fi
 echo "  signal observations disabled: $JITO_DISABLE_SIGNAL_OBSERVATIONS"
+echo "  print feed events: $JITO_PRINT_FEED_EVENTS"
+echo "  print mentions: $JITO_PRINT_MENTIONS"
+echo "  warm send endpoints: $JITO_WARM_SEND_ENDPOINTS"
+echo "  send endpoint warm interval ms: $JITO_SEND_ENDPOINT_WARM_INTERVAL_MS"
 
 cd "$WORKER_DIR"
-exec "$WORKER_BIN" live --print-mentions
+exec "$WORKER_BIN" live

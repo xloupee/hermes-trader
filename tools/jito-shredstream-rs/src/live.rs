@@ -54,6 +54,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
         blockhash_cache.clone(),
         address_lookup_tables.clone(),
     )?);
+    copy_executor.warm_send_endpoints_once().await;
+    Arc::clone(&copy_executor).spawn_send_endpoint_warmer();
     let mut client = ShredstreamProxyClient::connect(options.endpoint.clone())
         .await
         .with_context(|| format!("connect to {}", options.endpoint))?;
@@ -338,7 +340,9 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             }
                         }
 
-                        print_json(&event)?;
+                        if options.print_feed_events {
+                            print_json(&event)?;
+                        }
                         emitted += 1;
                         if options.limit > 0 && emitted >= options.limit {
                             return Ok(());

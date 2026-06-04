@@ -54,8 +54,21 @@ pub(crate) struct LiveOptions {
     #[arg(long, default_value_t = false)]
     pub(crate) stats: bool,
 
-    #[arg(long, default_value_t = false)]
+    #[arg(
+        long,
+        env = "JITO_PRINT_MENTIONS",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
     pub(crate) print_mentions: bool,
+
+    #[arg(
+        long,
+        env = "JITO_PRINT_FEED_EVENTS",
+        default_value_t = true,
+        value_parser = parse_boolish
+    )]
+    pub(crate) print_feed_events: bool,
 
     #[arg(
         long,
@@ -162,6 +175,21 @@ pub(crate) struct LiveOptions {
 
     #[arg(long, env = "JITO_TIP_ACCOUNT")]
     pub(crate) jito_tip_account: Option<String>,
+
+    #[arg(
+        long,
+        env = "JITO_WARM_SEND_ENDPOINTS",
+        default_value_t = true,
+        value_parser = parse_boolish
+    )]
+    pub(crate) warm_send_endpoints: bool,
+
+    #[arg(
+        long,
+        env = "JITO_SEND_ENDPOINT_WARM_INTERVAL_MS",
+        default_value_t = 15_000
+    )]
+    pub(crate) send_endpoint_warm_interval_ms: u64,
 
     #[arg(long, env = "SUPABASE_URL")]
     pub(crate) supabase_url: Option<String>,

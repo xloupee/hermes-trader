@@ -62,6 +62,10 @@ export JITO_EXECUTION_PLANS_PATH="${JITO_EXECUTION_PLANS_PATH:-/tmp/jito-executi
 export JITO_SHADOW_SIGNALS_PATH="${JITO_SHADOW_SIGNALS_PATH:-/tmp/jito-shadow-signals-local-send.jsonl}"
 export JITO_ADDRESS_LOOKUP_TABLES="${JITO_ADDRESS_LOOKUP_TABLES:-4vX5U9XsiY11infmC13d6VFPjvUqtuRw744r4o94dyow}"
 export JITO_SYNC_COPY_EXECUTIONS="${JITO_SYNC_COPY_EXECUTIONS:-true}"
+export JITO_PRINT_FEED_EVENTS="${JITO_PRINT_FEED_EVENTS:-true}"
+export JITO_PRINT_MENTIONS="${JITO_PRINT_MENTIONS:-true}"
+export JITO_WARM_SEND_ENDPOINTS="${JITO_WARM_SEND_ENDPOINTS:-true}"
+export JITO_SEND_ENDPOINT_WARM_INTERVAL_MS="${JITO_SEND_ENDPOINT_WARM_INTERVAL_MS:-15000}"
 
 case "$JITO_MAX_COPY_SOL" in
   0.001|0.000[0-9]*)
@@ -154,6 +158,10 @@ else
   echo "  jito tip account: unset"
 fi
 echo "  dashboard sync: $JITO_SYNC_COPY_EXECUTIONS"
+echo "  print feed events: $JITO_PRINT_FEED_EVENTS"
+echo "  print mentions: $JITO_PRINT_MENTIONS"
+echo "  warm send endpoints: $JITO_WARM_SEND_ENDPOINTS"
+echo "  send endpoint warm interval ms: $JITO_SEND_ENDPOINT_WARM_INTERVAL_MS"
 
 SYNC_PID=""
 cleanup_sync() {
@@ -171,4 +179,4 @@ if [[ "$JITO_SYNC_COPY_EXECUTIONS" == "true" ]]; then
   SYNC_PID=$!
 fi
 
-cargo run --manifest-path tools/jito-shredstream-rs/Cargo.toml -- live --print-mentions
+cargo run --manifest-path tools/jito-shredstream-rs/Cargo.toml -- live

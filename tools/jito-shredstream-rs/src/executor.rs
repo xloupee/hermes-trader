@@ -22,7 +22,12 @@ use solana_message::{v0, VersionedMessage};
 use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction::Transaction;
-use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    str::FromStr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::task::JoinSet;
 
 const FIRST_LIVE_MAX_COPY_SOL_CAP: f64 = 0.001;
@@ -30,6 +35,7 @@ const LAMPORTS_PER_SOL: f64 = 1_000_000_000.0;
 const SIGNATURE_FEE_LAMPORTS_ESTIMATE: u64 = 5_000;
 const ASSOCIATED_TOKEN_ACCOUNT_RENT_LAMPORTS_ESTIMATE: u64 = 2_100_000;
 const SEND_MAX_RETRIES: u64 = 3;
+const SEND_WARM_TIMEOUT_MS: u64 = 750;
 const AUTO_SELL_BALANCE_ATTEMPTS: usize = 8;
 const AUTO_SELL_BALANCE_RETRY_MS: u64 = 250;
 
@@ -37,6 +43,7 @@ pub(crate) struct CopyExecutor {
     options: CopyExecutionOptions,
     keypair: Option<Keypair>,
     client: reqwest::Client,
+    send_endpoints: Arc<Vec<SendEndpoint>>,
     blockhash_cache: Option<BlockhashCache>,
     address_lookup_tables: AddressLookupTableCache,
 }
@@ -61,6 +68,8 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) priority_fee_micro_lamports: Option<u64>,
     pub(crate) jito_tip_lamports: Option<u64>,
     pub(crate) jito_tip_account: Option<String>,
+    pub(crate) warm_send_endpoints: bool,
+    pub(crate) send_endpoint_warm_interval_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -136,6 +145,8 @@ pub(crate) struct CopyExecutionLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     send_rpc_winner: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    send_rpc_attempts: Vec<SendRpcAttemptLine>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     send_rpc_errors: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
@@ -173,9 +184,15 @@ pub(crate) struct CopyExecutionLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_sell_send_rpc_winner: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    auto_sell_send_rpc_attempts: Vec<SendRpcAttemptLine>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     auto_sell_send_rpc_errors: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_sell_simulation_error: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_sell_simulation_units_consumed: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    auto_sell_simulation_logs: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -183,7 +200,28 @@ struct SendTransactionResult {
     signature: String,
     rpc_url_count: usize,
     rpc_winner: String,
+    rpc_attempts: Vec<SendRpcAttemptLine>,
     rpc_errors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SendRpcAttemptLine {
+    label: String,
+    kind: &'static str,
+    status: &'static str,
+    duration_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug)]
+struct SendAttemptOutcome {
+    attempt: SendRpcAttemptLine,
+    signature: Option<String>,
+    error: Option<String>,
 }
 
 struct SignedCopyTransaction {
@@ -206,7 +244,7 @@ fn sign_copy_transaction(
     blockhash: Hash,
     address_lookup_tables: &AddressLookupTableCache,
 ) -> std::result::Result<SignedCopyTransaction, String> {
-    let table_accounts = address_lookup_tables.table_accounts()?;
+    let table_accounts = address_lookup_tables.table_accounts();
     if !table_accounts.is_empty() {
         let message =
             v0::Message::try_compile(&keypair.pubkey(), instructions, &table_accounts, blockhash)
@@ -287,6 +325,8 @@ impl CopyExecutor {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToString::to_string),
+            warm_send_endpoints: options.warm_send_endpoints,
+            send_endpoint_warm_interval_ms: options.send_endpoint_warm_interval_ms,
         };
 
         let keypair = match execution_options.copy_keypair_path.as_ref() {
@@ -298,13 +338,62 @@ impl CopyExecutor {
             None => None,
         };
 
+        let send_endpoints = Arc::new(execution_options.selected_send_endpoints());
+
         Ok(Self {
             options: execution_options,
             keypair,
-            client: reqwest::Client::new(),
+            client: send_http_client(),
+            send_endpoints,
             blockhash_cache,
             address_lookup_tables,
         })
+    }
+
+    pub(crate) async fn warm_send_endpoints_once(&self) {
+        if !self.options.enable_copy_send || !self.options.warm_send_endpoints {
+            return;
+        }
+
+        let endpoints = Arc::clone(&self.send_endpoints);
+        if endpoints.is_empty() {
+            return;
+        }
+
+        let mut warm_set = JoinSet::new();
+        for endpoint in endpoints.iter().cloned() {
+            let client = self.client.clone();
+            warm_set.spawn(async move { warm_send_endpoint(&client, &endpoint).await });
+        }
+
+        while let Some(result) = warm_set.join_next().await {
+            match result {
+                Ok(Ok(_attempt)) => {}
+                Ok(Err(error)) => eprintln!("send endpoint warmup failed: {error}"),
+                Err(error) => eprintln!("send endpoint warmup join failed: {error}"),
+            }
+        }
+    }
+
+    pub(crate) fn spawn_send_endpoint_warmer(self: Arc<Self>) {
+        if !self.options.enable_copy_send
+            || !self.options.warm_send_endpoints
+            || self.options.send_endpoint_warm_interval_ms == 0
+            || self.send_endpoints.is_empty()
+        {
+            return;
+        }
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(
+                self.options.send_endpoint_warm_interval_ms,
+            ));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                self.warm_send_endpoints_once().await;
+            }
+        });
     }
 
     pub(crate) async fn handle(
@@ -460,6 +549,7 @@ impl CopyExecutor {
                     line.send_signature = Some(result.signature);
                     line.send_rpc_url_count = result.rpc_url_count;
                     line.send_rpc_winner = Some(result.rpc_winner);
+                    line.send_rpc_attempts = result.rpc_attempts;
                     line.send_rpc_errors = result.rpc_errors;
                     line.decision = "sent";
                     if self.options.auto_sell_after_buy {
@@ -525,7 +615,7 @@ impl CopyExecutor {
     }
 
     async fn send_transaction(&self, encoded_tx: &str) -> Result<SendTransactionResult, String> {
-        let endpoints = self.options.selected_send_endpoints();
+        let endpoints = self.send_endpoints.as_ref();
         if endpoints.is_empty() {
             return Err(
                 "missing SOLANA_RPC_URL, JITO_SEND_RPC_URLS, or JITO_BLOCK_ENGINE_SEND_URLS"
@@ -535,55 +625,64 @@ impl CopyExecutor {
 
         if endpoints.len() == 1 {
             let endpoint = &endpoints[0];
-            let label = endpoint.label.clone();
-            let signature = send_transaction_to(
+            let outcome = send_transaction_attempt(
                 &self.client,
                 endpoint,
                 encoded_tx,
                 self.options.fast_copy_send,
             )
-            .await
-            .map_err(|error| send_error_message(endpoint, &error))?;
+            .await;
+            let attempts = vec![outcome.attempt];
+            let Some(signature) = outcome.signature else {
+                return Err(outcome
+                    .error
+                    .unwrap_or_else(|| "sendTransaction failed".to_string()));
+            };
             return Ok(SendTransactionResult {
                 signature,
                 rpc_url_count: 1,
-                rpc_winner: label,
+                rpc_winner: endpoint.label.clone(),
+                rpc_attempts: attempts,
                 rpc_errors: Vec::new(),
             });
         }
 
         let encoded_tx = Arc::<str>::from(encoded_tx.to_string());
         let mut send_set = JoinSet::new();
-        for endpoint in &endpoints {
+        for endpoint in endpoints {
             let client = self.client.clone();
             let encoded_tx = encoded_tx.clone();
             let endpoint = endpoint.clone();
             let fast_copy_send = self.options.fast_copy_send;
             send_set.spawn(async move {
-                let label = endpoint.label.clone();
-                let signature =
-                    send_transaction_to(&client, &endpoint, encoded_tx.as_ref(), fast_copy_send)
-                        .await
-                        .map_err(|error| send_error_message(&endpoint, &error))?;
-                Ok::<_, String>((label, signature))
+                send_transaction_attempt(&client, &endpoint, encoded_tx.as_ref(), fast_copy_send)
+                    .await
             });
         }
 
         let mut errors = Vec::new();
+        let mut attempts = Vec::new();
         while let Some(result) = send_set.join_next().await {
             match result {
-                Ok(Ok((label, signature))) => {
-                    // Keep the remaining sends alive. Fast ACK is useful for metrics, but
-                    // aborting slower lanes can prevent a better landing path from submitting.
-                    send_set.detach_all();
-                    return Ok(SendTransactionResult {
-                        signature,
-                        rpc_url_count: endpoints.len(),
-                        rpc_winner: label,
-                        rpc_errors: errors,
-                    });
+                Ok(outcome) => {
+                    let label = outcome.attempt.label.clone();
+                    attempts.push(outcome.attempt);
+                    if let Some(signature) = outcome.signature {
+                        // Keep the remaining sends alive. Fast ACK is useful for metrics, but
+                        // aborting slower lanes can prevent a better landing path from submitting.
+                        send_set.detach_all();
+                        return Ok(SendTransactionResult {
+                            signature,
+                            rpc_url_count: endpoints.len(),
+                            rpc_winner: label,
+                            rpc_attempts: attempts,
+                            rpc_errors: errors,
+                        });
+                    }
+                    if let Some(error) = outcome.error {
+                        errors.push(error);
+                    }
                 }
-                Ok(Err(error)) => errors.push(error),
                 Err(error) => errors.push(format!("join error: {error}")),
             }
         }
@@ -695,6 +794,8 @@ impl CopyExecutor {
             Ok(simulation) => {
                 line.auto_sell_simulated = true;
                 line.auto_sell_simulation_error = simulation.err;
+                line.auto_sell_simulation_units_consumed = simulation.units_consumed;
+                line.auto_sell_simulation_logs = simulation.logs.unwrap_or_default();
                 if line.auto_sell_simulation_error.is_some() {
                     line.skip_auto_sell("auto-sell simulation failed; send blocked");
                     return;
@@ -716,6 +817,7 @@ impl CopyExecutor {
                 line.auto_sell_send_signature = Some(result.signature);
                 line.auto_sell_send_rpc_url_count = result.rpc_url_count;
                 line.auto_sell_send_rpc_winner = Some(result.rpc_winner);
+                line.auto_sell_send_rpc_attempts = result.rpc_attempts;
                 line.auto_sell_send_rpc_errors = result.rpc_errors;
                 line.auto_sell_decision = Some("sent");
             }
@@ -990,6 +1092,7 @@ impl CopyExecutionLine {
             send_signature: None,
             send_rpc_url_count: options.selected_send_rpc_url_count(),
             send_rpc_winner: None,
+            send_rpc_attempts: Vec::new(),
             send_rpc_errors: Vec::new(),
             reason: None,
             auto_sell_enabled: options.auto_sell_after_buy,
@@ -1012,8 +1115,11 @@ impl CopyExecutionLine {
             auto_sell_send_signature: None,
             auto_sell_send_rpc_url_count: options.selected_send_rpc_url_count(),
             auto_sell_send_rpc_winner: None,
+            auto_sell_send_rpc_attempts: Vec::new(),
             auto_sell_send_rpc_errors: Vec::new(),
             auto_sell_simulation_error: None,
+            auto_sell_simulation_units_consumed: None,
+            auto_sell_simulation_logs: Vec::new(),
         }
     }
 
@@ -1203,20 +1309,127 @@ fn jito_transaction_url(url: &str) -> String {
     }
 }
 
-async fn send_transaction_to(
+fn send_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(16)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_nodelay(true)
+        .build()
+        .unwrap_or_else(|error| {
+            eprintln!("falling back to default reqwest client: {error}");
+            reqwest::Client::new()
+        })
+}
+
+fn send_endpoint_kind(endpoint: &SendEndpoint) -> &'static str {
+    match endpoint.kind {
+        SendEndpointKind::Rpc => "rpc",
+        SendEndpointKind::Jito => "jito",
+    }
+}
+
+fn send_endpoint_post(
     client: &reqwest::Client,
     endpoint: &SendEndpoint,
-    encoded_tx: &str,
-    fast_copy_send: bool,
-) -> Result<String, String> {
+) -> reqwest::RequestBuilder {
     let mut request = client.post(&endpoint.url);
     if matches!(endpoint.kind, SendEndpointKind::Jito) {
         if let Some(auth_uuid) = endpoint.auth_uuid.as_deref() {
             request = request.header("x-jito-auth", auth_uuid);
         }
     }
+    request
+}
 
-    let response = request
+async fn warm_send_endpoint(
+    client: &reqwest::Client,
+    endpoint: &SendEndpoint,
+) -> Result<SendRpcAttemptLine, String> {
+    let started_at = Instant::now();
+    let request = send_endpoint_post(client, endpoint).json(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getHealth"
+    }));
+    let response =
+        tokio::time::timeout(Duration::from_millis(SEND_WARM_TIMEOUT_MS), request.send())
+            .await
+            .map_err(|_| {
+                format!(
+                    "{} warmup timed out after {}ms",
+                    endpoint.label, SEND_WARM_TIMEOUT_MS
+                )
+            })?
+            .map_err(|error| format!("{} warmup request failed: {error}", endpoint.label))?;
+
+    let _ = response.bytes().await;
+    Ok(SendRpcAttemptLine {
+        label: endpoint.label.clone(),
+        kind: send_endpoint_kind(endpoint),
+        status: "warmed",
+        duration_ms: started_at.elapsed().as_millis(),
+        signature: None,
+        error: None,
+    })
+}
+
+async fn send_transaction_attempt(
+    client: &reqwest::Client,
+    endpoint: &SendEndpoint,
+    encoded_tx: &str,
+    fast_copy_send: bool,
+) -> SendAttemptOutcome {
+    let started_at = Instant::now();
+    match send_transaction_to(client, endpoint, encoded_tx, fast_copy_send).await {
+        Ok(signature) => {
+            let attempt = SendRpcAttemptLine {
+                label: endpoint.label.clone(),
+                kind: send_endpoint_kind(endpoint),
+                status: "submitted",
+                duration_ms: started_at.elapsed().as_millis(),
+                signature: Some(signature.clone()),
+                error: None,
+            };
+            eprintln!(
+                "sendTransaction lane submitted: label={} kind={} durationMs={}",
+                attempt.label, attempt.kind, attempt.duration_ms
+            );
+            SendAttemptOutcome {
+                attempt,
+                signature: Some(signature),
+                error: None,
+            }
+        }
+        Err(error) => {
+            let sanitized = send_error_message(endpoint, &error);
+            let attempt = SendRpcAttemptLine {
+                label: endpoint.label.clone(),
+                kind: send_endpoint_kind(endpoint),
+                status: "failed",
+                duration_ms: started_at.elapsed().as_millis(),
+                signature: None,
+                error: Some(sanitized.clone()),
+            };
+            eprintln!(
+                "sendTransaction lane failed: label={} kind={} durationMs={} error={}",
+                attempt.label, attempt.kind, attempt.duration_ms, sanitized
+            );
+            SendAttemptOutcome {
+                attempt,
+                signature: None,
+                error: Some(sanitized),
+            }
+        }
+    }
+}
+
+async fn send_transaction_to(
+    client: &reqwest::Client,
+    endpoint: &SendEndpoint,
+    encoded_tx: &str,
+    fast_copy_send: bool,
+) -> Result<String, String> {
+    let response = send_endpoint_post(client, endpoint)
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -1331,6 +1544,8 @@ mod tests {
             priority_fee_micro_lamports: None,
             jito_tip_lamports: None,
             jito_tip_account: None,
+            warm_send_endpoints: false,
+            send_endpoint_warm_interval_ms: 0,
         }
     }
 
@@ -1381,10 +1596,12 @@ mod tests {
     }
 
     fn executor(options: CopyExecutionOptions) -> CopyExecutor {
+        let send_endpoints = Arc::new(options.selected_send_endpoints());
         CopyExecutor {
             options,
             keypair: None,
-            client: reqwest::Client::new(),
+            client: send_http_client(),
+            send_endpoints,
             blockhash_cache: None,
             address_lookup_tables: AddressLookupTableCache::default(),
         }

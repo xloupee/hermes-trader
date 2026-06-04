@@ -47,6 +47,7 @@ pub(crate) struct FullCopyUnsignedTxBuild {
 
 const PUMP_FUN_BUY_EXACT_SOL_IN_DISCRIMINATOR: [u8; 8] = [56, 252, 116, 8, 158, 223, 205, 95];
 const PUMP_FUN_COPY_MIN_TOKENS_OUT: u64 = 1;
+const FLASHX_MIGRATED_COPY_MIN_BASE_AMOUNT_OUT: u64 = 1;
 
 pub(crate) fn build_unsigned_flashx_pump(
     route_context: Option<&RouteContext>,
@@ -289,6 +290,9 @@ fn build_copy_unsigned_flashx_migrated_amm(
         data: setup_data,
     };
 
+    let mut route_data = context.data.clone();
+    rewrite_flashx_migrated_min_base_amount_out(&mut route_data)?;
+
     let route_accounts = context
         .accounts
         .iter()
@@ -324,10 +328,20 @@ fn build_copy_unsigned_flashx_migrated_amm(
             Instruction {
                 program_id: flashx_program,
                 accounts: route_accounts,
-                data: context.data.clone(),
+                data: route_data,
             },
         ],
     })
+}
+
+fn rewrite_flashx_migrated_min_base_amount_out(data: &mut [u8]) -> Result<(), TxBuildError> {
+    if data.len() < 17 {
+        return Err(TxBuildError::InvalidInstruction(
+            "missing flashx min base amount",
+        ));
+    }
+    data[9..17].copy_from_slice(&FLASHX_MIGRATED_COPY_MIN_BASE_AMOUNT_OUT.to_le_bytes());
+    Ok(())
 }
 
 pub(crate) fn build_full_copy_unsigned_flashx_pump(
@@ -520,12 +534,12 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
                 resolved_pubkey(&context.resolved_accounts, "feeProgram")?,
                 false,
             ),
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "bondingCurveV2")?,
+            AccountMeta::new(
+                resolved_pubkey(&context.resolved_accounts, "userVolumeAccumulator")?,
                 false,
             ),
-            AccountMeta::new(
-                resolved_pubkey(&context.resolved_accounts, "buybackFeeRecipient")?,
+            AccountMeta::new_readonly(
+                resolved_pubkey(&context.resolved_accounts, "bondingCurveV2")?,
                 false,
             ),
         ],
@@ -1001,6 +1015,11 @@ mod tests {
             &[1, 0x30, 0x1b, 0x0f, 0, 0, 0, 0, 0]
         );
         assert_eq!(build.instructions[0].data[9], 0xff);
+        assert_eq!(read_u64_le(&build.instructions[1].data, 1), Some(990_000));
+        assert_eq!(
+            read_u64_le(&build.instructions[1].data, 9),
+            Some(FLASHX_MIGRATED_COPY_MIN_BASE_AMOUNT_OUT)
+        );
         assert_eq!(build.instructions[1].accounts.len(), 44);
         assert!(build.instructions[1]
             .accounts
@@ -1257,6 +1276,27 @@ mod tests {
             account.pubkey.to_string() == "DhWQaUj4YBCyRvGuUfwcAjGNTvgB5murcVLT2VdTr1UZ"
                 && account.is_writable
         }));
+        let RouteContext::FlashxPump(context) = parsed.route_context.as_ref().unwrap();
+        let user_volume_accumulator =
+            resolved_account_for_test(&context.resolved_accounts, "userVolumeAccumulator");
+        let bonding_curve_v2 =
+            resolved_account_for_test(&context.resolved_accounts, "bondingCurveV2");
+        let buyback_fee_recipient =
+            resolved_account_for_test(&context.resolved_accounts, "buybackFeeRecipient");
+        assert_eq!(build.instructions[1].accounts.len(), 16);
+        assert_eq!(
+            build.instructions[1].accounts[14].pubkey.to_string(),
+            user_volume_accumulator
+        );
+        assert!(build.instructions[1].accounts[14].is_writable);
+        assert_eq!(
+            build.instructions[1].accounts[15].pubkey.to_string(),
+            bonding_curve_v2
+        );
+        assert!(!build.instructions[1]
+            .accounts
+            .iter()
+            .any(|account| account.pubkey.to_string() == buyback_fee_recipient));
     }
 
     #[test]
@@ -1426,6 +1466,14 @@ mod tests {
         let compact = base64_fixture.split_whitespace().collect::<String>();
         let bytes = STANDARD.decode(compact).expect("fixture is valid base64");
         bincode::deserialize(&bytes).expect("fixture decodes as a VersionedTransaction")
+    }
+
+    fn resolved_account_for_test(accounts: &[ResolvedRouteAccount], role: &'static str) -> String {
+        accounts
+            .iter()
+            .find(|account| account.role == role)
+            .map(|account| account.pubkey.clone())
+            .unwrap_or_else(|| panic!("missing resolved account role {role}"))
     }
 
     fn migrated_buy_hydrated_account_keys(transaction: &VersionedTransaction) -> Vec<String> {

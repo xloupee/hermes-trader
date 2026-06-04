@@ -44,6 +44,7 @@ export SHREDSTREAM_TARGET_WALLETS="${SHREDSTREAM_TARGET_WALLETS:-A8myhNPHpPsq7e4
 export JITO_COPY_WALLET="${JITO_COPY_WALLET:-FqhpPL63symHForRGfxPbGi4wDpe5jQqAVjntbbBqA5W}"
 export JITO_COPY_KEYPAIR_PATH="${JITO_COPY_KEYPAIR_PATH:-/etc/jito-copy-keypair.json}"
 export JITO_MAX_COPY_SOL="${JITO_MAX_COPY_SOL:-0.001}"
+export JITO_MAX_TOTAL_COPY_SPEND_SOL="${JITO_MAX_TOTAL_COPY_SPEND_SOL:-0.0035}"
 export JITO_FAST_COPY_SEND="${JITO_FAST_COPY_SEND:-YES}"
 export JITO_SEND_FANOUT="${JITO_SEND_FANOUT:-false}"
 export JITO_SEND_RPC_URLS="${JITO_SEND_RPC_URLS:-${DIRECT_EXECUTION_SEND_RPC_URLS:-$SOLANA_RPC_URL}}"
@@ -116,6 +117,19 @@ validate_capped_int \
   "$JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS"
 validate_capped_int JITO_TIP_LAMPORTS "$JITO_TIP_LAMPORTS" JITO_MAX_TIP_LAMPORTS "$JITO_MAX_TIP_LAMPORTS"
 
+validate_positive_sol() {
+  local name="$1"
+  local value="${2:-}"
+
+  [[ -z "$value" ]] && return 0
+  if ! awk -v value="$value" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value + 0 > 0) }'; then
+    echo "$name must be a positive SOL amount; got $value" >&2
+    exit 1
+  fi
+}
+
+validate_positive_sol JITO_MAX_TOTAL_COPY_SPEND_SOL "$JITO_MAX_TOTAL_COPY_SPEND_SOL"
+
 if [[ -n "$JITO_TIP_LAMPORTS" && "$JITO_TIP_LAMPORTS" != "0" && -z "$JITO_TIP_ACCOUNT" ]]; then
   echo "JITO_TIP_ACCOUNT must be set when JITO_TIP_LAMPORTS is positive" >&2
   exit 1
@@ -126,6 +140,7 @@ echo "  proxy: $JITO_SHREDSTREAM_PROXY_URL"
 echo "  target: $SHREDSTREAM_TARGET_WALLETS"
 echo "  copy wallet: $JITO_COPY_WALLET"
 echo "  max copy SOL: $JITO_MAX_COPY_SOL"
+echo "  max total copy spend SOL: $JITO_MAX_TOTAL_COPY_SPEND_SOL"
 echo "  executions: $JITO_COPY_EXECUTIONS_PATH"
 echo "  fast copy send: $JITO_FAST_COPY_SEND"
 echo "  send fanout: $JITO_SEND_FANOUT"

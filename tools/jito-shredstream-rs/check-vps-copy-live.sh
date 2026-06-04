@@ -29,6 +29,7 @@ if main_pid and main_pid != "0":
 
 for key in [
     "JITO_MAX_COPY_SOL",
+    "JITO_MAX_TOTAL_COPY_SPEND_SOL",
     "JITO_FAST_COPY_SEND",
     "JITO_ENABLE_COPY_SEND",
     "JITO_ONE_SHOT_COPY_SEND",

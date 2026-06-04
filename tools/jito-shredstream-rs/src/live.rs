@@ -30,8 +30,10 @@ use std::{
     io::{BufWriter, Write},
     path::Path,
     str::FromStr,
+    sync::Arc,
     time::Instant,
 };
+use tokio::sync::mpsc;
 
 pub(crate) async fn run(options: LiveOptions) -> Result<()> {
     let target_wallets = parse_target_wallets(&options.target_wallets)?;
@@ -47,11 +49,11 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
         options.blockhash_refresh_ms,
         options.stats,
     );
-    let copy_executor = CopyExecutor::from_options(
+    let copy_executor = Arc::new(CopyExecutor::from_options(
         &options,
         blockhash_cache.clone(),
         address_lookup_tables.clone(),
-    )?;
+    )?);
     let mut client = ShredstreamProxyClient::connect(options.endpoint.clone())
         .await
         .with_context(|| format!("connect to {}", options.endpoint))?;
@@ -137,14 +139,33 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                     .unwrap_or_else(|| "(disabled)".to_string())
             )
         })?;
+    let (copy_execution_tx, mut copy_execution_rx) = mpsc::unbounded_channel();
     let mut signal_observations = SignalObservationWriter::from_options(&options)?;
     let mut emitted = 0usize;
 
-    while let Some(slot_entry) = stream
-        .message()
-        .await
-        .context("receive Jito ShredStream entry")?
-    {
+    loop {
+        let slot_entry = tokio::select! {
+            copy_execution = copy_execution_rx.recv() => {
+                if let Some(copy_execution) = copy_execution {
+                    if handle_copy_execution_result(
+                        &mut copy_executions,
+                        copy_execution,
+                        options.one_shot_copy_send,
+                    )? {
+                        eprintln!("one-shot copy send completed; exiting");
+                        return Ok(());
+                    }
+                }
+                continue;
+            }
+            slot_entry = stream.message() => {
+                match slot_entry.context("receive Jito ShredStream entry")? {
+                    Some(slot_entry) => slot_entry,
+                    None => break,
+                }
+            }
+        };
+
         let grpc_message_received_at = Instant::now();
         let grpc_message_received_at_ms = now_ms();
         let entries =
@@ -283,6 +304,13 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 copy_sol_amount: options.copy_plan_sol_amount,
                             },
                         );
+                        spawn_copy_execution(
+                            Arc::clone(&copy_executor),
+                            copy_execution_tx.clone(),
+                            execution_plan.clone(),
+                            parsed.action,
+                            parsed.sol_amount,
+                        );
                         if !options.fast_copy_send {
                             write_plan_outputs(
                                 &mut shadow_signals,
@@ -295,11 +323,6 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 &options,
                             )?;
                         }
-                        let copy_execution = copy_executor
-                            .handle(&execution_plan, parsed.action, parsed.sol_amount)
-                            .await;
-                        let one_shot_sent = options.one_shot_copy_send && copy_execution.was_sent();
-                        copy_executions.write(&copy_execution)?;
 
                         let event = normalized_event(
                             trade_parsed_at_ms,
@@ -320,7 +343,11 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                         if options.limit > 0 && emitted >= options.limit {
                             return Ok(());
                         }
-                        if one_shot_sent {
+                        if drain_copy_execution_results(
+                            &mut copy_execution_rx,
+                            &mut copy_executions,
+                            options.one_shot_copy_send,
+                        )? {
                             eprintln!("one-shot copy send completed; exiting");
                             return Ok(());
                         }
@@ -362,6 +389,14 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                 }
             }
         }
+        if drain_copy_execution_results(
+            &mut copy_execution_rx,
+            &mut copy_executions,
+            options.one_shot_copy_send,
+        )? {
+            eprintln!("one-shot copy send completed; exiting");
+            return Ok(());
+        }
     }
 
     Ok(())
@@ -395,6 +430,46 @@ struct UnsignedTxPlanWriter {
 
 struct CopyExecutionWriter {
     file: Option<BufWriter<File>>,
+}
+
+fn spawn_copy_execution(
+    copy_executor: Arc<CopyExecutor>,
+    copy_execution_tx: mpsc::UnboundedSender<CopyExecutionLine>,
+    execution_plan: ExecutionPlanLine,
+    observed_action: crate::parser::Action,
+    observed_sol_amount: Option<f64>,
+) {
+    tokio::spawn(async move {
+        let copy_execution = copy_executor
+            .handle(&execution_plan, observed_action, observed_sol_amount)
+            .await;
+        if copy_execution_tx.send(copy_execution).is_err() {
+            eprintln!("copy execution result dropped; receiver closed");
+        }
+    });
+}
+
+fn drain_copy_execution_results(
+    copy_execution_rx: &mut mpsc::UnboundedReceiver<CopyExecutionLine>,
+    copy_executions: &mut CopyExecutionWriter,
+    one_shot_copy_send: bool,
+) -> Result<bool> {
+    while let Ok(copy_execution) = copy_execution_rx.try_recv() {
+        if handle_copy_execution_result(copy_executions, copy_execution, one_shot_copy_send)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn handle_copy_execution_result(
+    copy_executions: &mut CopyExecutionWriter,
+    copy_execution: CopyExecutionLine,
+    one_shot_copy_send: bool,
+) -> Result<bool> {
+    let one_shot_sent = one_shot_copy_send && copy_execution.was_sent();
+    copy_executions.write(&copy_execution)?;
+    Ok(one_shot_sent)
 }
 
 impl ShadowSignalWriter {

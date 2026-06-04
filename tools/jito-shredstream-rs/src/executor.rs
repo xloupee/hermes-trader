@@ -2,7 +2,10 @@ use crate::{
     address_lookup::AddressLookupTableCache,
     blockhash::{cached_blockhash, BlockhashCache},
     event::now_ms,
-    parser::{read_u64_le, Action, FlashxPumpLayout, Route, RouteContext},
+    parser::{
+        read_u64_le, Action, FlashxPumpLayout, Route, RouteContext, ASSOCIATED_TOKEN_PROGRAM_ID,
+        COMPUTE_BUDGET_PROGRAM_ID, SYSTEM_PROGRAM_ID,
+    },
     planner::ExecutionPlanLine,
     tx_builder::{
         build_auto_sell_unsigned_flashx_pump, build_full_copy_unsigned_flashx_pump,
@@ -23,6 +26,9 @@ use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 use tokio::task::JoinSet;
 
 const FIRST_LIVE_MAX_COPY_SOL_CAP: f64 = 0.001;
+const LAMPORTS_PER_SOL: f64 = 1_000_000_000.0;
+const SIGNATURE_FEE_LAMPORTS_ESTIMATE: u64 = 5_000;
+const ASSOCIATED_TOKEN_ACCOUNT_RENT_LAMPORTS_ESTIMATE: u64 = 2_100_000;
 const SEND_MAX_RETRIES: u64 = 3;
 const AUTO_SELL_BALANCE_ATTEMPTS: usize = 8;
 const AUTO_SELL_BALANCE_RETRY_MS: u64 = 250;
@@ -46,6 +52,7 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) jito_send_urls: Vec<String>,
     pub(crate) jito_auth_uuid: Option<String>,
     pub(crate) max_copy_sol: Option<f64>,
+    pub(crate) max_total_copy_spend_sol: Option<f64>,
     pub(crate) copy_wallet: Option<String>,
     pub(crate) copy_keypair_path: Option<PathBuf>,
     pub(crate) solana_rpc_url: Option<String>,
@@ -77,6 +84,12 @@ pub(crate) struct CopyExecutionLine {
     observed_sol_amount: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_copy_sol: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_total_copy_spend_sol: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    estimated_total_copy_spend_sol: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    estimated_total_copy_spend_lamports: Option<u64>,
     send_enabled: bool,
     dry_run: bool,
     simulation_requested: bool,
@@ -260,6 +273,7 @@ impl CopyExecutor {
                 .filter(|value| !value.is_empty())
                 .map(ToString::to_string),
             max_copy_sol: options.max_copy_sol,
+            max_total_copy_spend_sol: options.max_total_copy_spend_sol,
             copy_wallet: options.copy_wallet.clone(),
             copy_keypair_path: options.copy_keypair_path.clone(),
             solana_rpc_url: options.solana_rpc_url.clone(),
@@ -367,6 +381,23 @@ impl CopyExecutor {
             Ok(build) => build,
             Err(error) => return line.skip(tx_build_error_reason(error)),
         };
+        line.route_layout = Some(build.route_layout);
+        line.instruction_count = build.instructions.len();
+
+        let estimated_total_spend_lamports =
+            match estimate_total_copy_spend_lamports(&build, execution_plan.route_context.as_ref())
+            {
+                Ok(lamports) => lamports,
+                Err(reason) => return line.skip(reason),
+            };
+        line.estimated_total_copy_spend_lamports = Some(estimated_total_spend_lamports);
+        line.estimated_total_copy_spend_sol = Some(lamports_to_sol(estimated_total_spend_lamports));
+
+        match total_copy_spend_guard_reason(&self.options, estimated_total_spend_lamports) {
+            Ok(Some(reason)) => return line.skip(reason),
+            Ok(None) => {}
+            Err(reason) => return line.skip(reason),
+        }
 
         let blockhash = match Hash::from_str(&cached_blockhash.blockhash) {
             Ok(blockhash) => blockhash,
@@ -393,8 +424,6 @@ impl CopyExecutor {
         line.copy_signature = Some(signed_tx.signature);
         line.tx_version = Some(signed_tx.tx_version);
         line.blockhash = Some(cached_blockhash.blockhash);
-        line.route_layout = Some(build.route_layout);
-        line.instruction_count = build.instructions.len();
 
         let mut simulation_ok = true;
         if self.options.simulate_copy_tx {
@@ -774,6 +803,135 @@ fn auto_sell_token_amount_raw(route_context: Option<&RouteContext>, token_balanc
     }
 }
 
+fn estimate_total_copy_spend_lamports(
+    build: &crate::tx_builder::FullCopyUnsignedTxBuild,
+    route_context: Option<&RouteContext>,
+) -> Result<u64, String> {
+    let Some(RouteContext::FlashxPump(context)) = route_context else {
+        return Err("missing route context for total spend guard".to_string());
+    };
+    let spendable_sol_in = read_u64_le(&context.data, 1)
+        .ok_or_else(|| "missing flashx SOL amount for total spend guard".to_string())?;
+
+    let mut total = spendable_sol_in
+        .checked_add(SIGNATURE_FEE_LAMPORTS_ESTIMATE)
+        .ok_or_else(|| "estimated total spend overflow".to_string())?;
+    total = total
+        .checked_add(estimate_priority_fee_lamports(&build.instructions)?)
+        .ok_or_else(|| "estimated total spend overflow".to_string())?;
+    total = total
+        .checked_add(estimate_system_transfer_lamports(&build.instructions)?)
+        .ok_or_else(|| "estimated total spend overflow".to_string())?;
+    if has_idempotent_associated_token_account_setup(&build.instructions) {
+        total = total
+            .checked_add(ASSOCIATED_TOKEN_ACCOUNT_RENT_LAMPORTS_ESTIMATE)
+            .ok_or_else(|| "estimated total spend overflow".to_string())?;
+    }
+
+    Ok(total)
+}
+
+fn estimate_priority_fee_lamports(
+    instructions: &[solana_instruction::Instruction],
+) -> Result<u64, String> {
+    let compute_budget_program = COMPUTE_BUDGET_PROGRAM_ID.to_string();
+    let mut compute_unit_limit = 200_000u64;
+    let mut compute_unit_price_micro_lamports = 0u64;
+
+    for instruction in instructions
+        .iter()
+        .filter(|instruction| instruction.program_id.to_string() == compute_budget_program)
+    {
+        match instruction.data.first().copied() {
+            Some(2) => {
+                if let Some(units) = read_u32_le(&instruction.data, 1) {
+                    compute_unit_limit = u64::from(units);
+                }
+            }
+            Some(3) => {
+                if let Some(price) = read_u64_le(&instruction.data, 1) {
+                    compute_unit_price_micro_lamports = price;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    compute_unit_limit
+        .checked_mul(compute_unit_price_micro_lamports)
+        .and_then(|micro_lamports| micro_lamports.checked_add(999_999))
+        .map(|micro_lamports| micro_lamports / 1_000_000)
+        .ok_or_else(|| "estimated priority fee overflow".to_string())
+}
+
+fn estimate_system_transfer_lamports(
+    instructions: &[solana_instruction::Instruction],
+) -> Result<u64, String> {
+    let system_program = SYSTEM_PROGRAM_ID.to_string();
+    let mut total = 0u64;
+    for instruction in instructions
+        .iter()
+        .filter(|instruction| instruction.program_id.to_string() == system_program)
+    {
+        if instruction.data.len() >= 12 && read_u32_le(&instruction.data, 0) == Some(2) {
+            let lamports = read_u64_le(&instruction.data, 4)
+                .ok_or_else(|| "invalid system transfer amount".to_string())?;
+            total = total
+                .checked_add(lamports)
+                .ok_or_else(|| "estimated system transfer overflow".to_string())?;
+        }
+    }
+    Ok(total)
+}
+
+fn has_idempotent_associated_token_account_setup(
+    instructions: &[solana_instruction::Instruction],
+) -> bool {
+    let associated_token_program = ASSOCIATED_TOKEN_PROGRAM_ID.to_string();
+    instructions.iter().any(|instruction| {
+        instruction.program_id.to_string() == associated_token_program
+            && instruction.data.as_slice() == [1]
+    })
+}
+
+fn read_u32_le(data: &[u8], offset: usize) -> Option<u32> {
+    data.get(offset..offset + 4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_le_bytes)
+}
+
+fn sol_to_lamports(value: f64) -> Option<u64> {
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    let lamports = (value * LAMPORTS_PER_SOL).floor();
+    if !lamports.is_finite() || lamports <= 0.0 || lamports > u64::MAX as f64 {
+        return None;
+    }
+    Some(lamports as u64)
+}
+
+fn lamports_to_sol(lamports: u64) -> f64 {
+    lamports as f64 / LAMPORTS_PER_SOL
+}
+
+fn total_copy_spend_guard_reason(
+    options: &CopyExecutionOptions,
+    estimated_total_spend_lamports: u64,
+) -> Result<Option<String>, String> {
+    match options.max_total_copy_spend_lamports()? {
+        Some(max_total_copy_spend_lamports)
+            if estimated_total_spend_lamports > max_total_copy_spend_lamports =>
+        {
+            Ok(Some(format!(
+                "estimated total copy spend {} lamports exceeds max total copy spend {} lamports",
+                estimated_total_spend_lamports, max_total_copy_spend_lamports
+            )))
+        }
+        _ => Ok(None),
+    }
+}
+
 impl CopyExecutionLine {
     pub(crate) fn was_sent(&self) -> bool {
         self.sent && self.decision == "sent"
@@ -801,6 +959,9 @@ impl CopyExecutionLine {
             observed_action,
             observed_sol_amount,
             max_copy_sol: options.max_copy_sol,
+            max_total_copy_spend_sol: options.max_total_copy_spend_sol,
+            estimated_total_copy_spend_sol: None,
+            estimated_total_copy_spend_lamports: None,
             send_enabled: options.enable_copy_send,
             dry_run: options.dry_run,
             simulation_requested: options.simulate_copy_tx,
@@ -924,6 +1085,15 @@ impl CopyExecutionLine {
 }
 
 impl CopyExecutionOptions {
+    fn max_total_copy_spend_lamports(&self) -> Result<Option<u64>, String> {
+        self.max_total_copy_spend_sol
+            .map(|value| {
+                sol_to_lamports(value)
+                    .ok_or_else(|| "invalid max total copy spend SOL guard".to_string())
+            })
+            .transpose()
+    }
+
     fn tx_fee_config(&self) -> TxFeeConfig {
         TxFeeConfig {
             compute_unit_price_micro_lamports: self.priority_fee_micro_lamports,
@@ -1152,6 +1322,7 @@ mod tests {
             jito_send_urls: Vec::new(),
             jito_auth_uuid: None,
             max_copy_sol: None,
+            max_total_copy_spend_sol: None,
             copy_wallet: None,
             copy_keypair_path: None,
             solana_rpc_url: None,
@@ -1239,6 +1410,102 @@ mod tests {
     #[test]
     fn max_copy_sol_first_live_cap_is_one_milli_sol() {
         assert_eq!(FIRST_LIVE_MAX_COPY_SOL_CAP, 0.001);
+    }
+
+    #[test]
+    fn total_copy_spend_estimate_includes_input_setup_fees_and_tip() {
+        let route_context = flashx_context(FlashxPumpLayout::MigratedAmm, 1);
+        let compute_budget_program = crate::parser::COMPUTE_BUDGET_PROGRAM_ID.parse().unwrap();
+        let associated_token_program = crate::parser::ASSOCIATED_TOKEN_PROGRAM_ID.parse().unwrap();
+        let system_program = crate::parser::SYSTEM_PROGRAM_ID.parse().unwrap();
+        let copy_wallet = COPY_WALLET.parse().unwrap();
+        let tip_account = "96gYZGLnUQYgE8MWWpYJw8yRjnvB51rAhbG1SogE3uSG"
+            .parse()
+            .unwrap();
+        let mut compute_limit_data = vec![2];
+        compute_limit_data.extend_from_slice(&400_000u32.to_le_bytes());
+        let mut compute_price_data = vec![3];
+        compute_price_data.extend_from_slice(&250_000u64.to_le_bytes());
+        let mut tip_data = Vec::new();
+        tip_data.extend_from_slice(&2u32.to_le_bytes());
+        tip_data.extend_from_slice(&10_000u64.to_le_bytes());
+        let build = crate::tx_builder::FullCopyUnsignedTxBuild {
+            route_layout: "migrated-amm",
+            copy_wallet_token_account: "token".to_string(),
+            estimated_required_signer: COPY_WALLET.to_string(),
+            setup_instruction_count: 4,
+            main_instruction_count: 1,
+            instructions: vec![
+                solana_instruction::Instruction {
+                    program_id: compute_budget_program,
+                    accounts: Vec::new(),
+                    data: compute_limit_data,
+                },
+                solana_instruction::Instruction {
+                    program_id: compute_budget_program,
+                    accounts: Vec::new(),
+                    data: compute_price_data,
+                },
+                solana_instruction::Instruction {
+                    program_id: associated_token_program,
+                    accounts: vec![solana_instruction::AccountMeta::new(copy_wallet, true)],
+                    data: vec![1],
+                },
+                solana_instruction::Instruction {
+                    program_id: system_program,
+                    accounts: vec![
+                        solana_instruction::AccountMeta::new(copy_wallet, true),
+                        solana_instruction::AccountMeta::new(tip_account, false),
+                    ],
+                    data: tip_data,
+                },
+            ],
+        };
+
+        assert_eq!(
+            estimate_total_copy_spend_lamports(&build, Some(&route_context)).unwrap(),
+            990_000
+                + SIGNATURE_FEE_LAMPORTS_ESTIMATE
+                + 100_000
+                + 10_000
+                + ASSOCIATED_TOKEN_ACCOUNT_RENT_LAMPORTS_ESTIMATE
+        );
+    }
+
+    #[test]
+    fn max_total_copy_spend_sol_must_be_positive_and_finite() {
+        let mut options = disabled_options();
+        options.max_total_copy_spend_sol = Some(0.0035);
+        assert_eq!(
+            options.max_total_copy_spend_lamports().unwrap(),
+            Some(3_500_000)
+        );
+
+        options.max_total_copy_spend_sol = Some(0.0);
+        assert_eq!(
+            options.max_total_copy_spend_lamports().unwrap_err(),
+            "invalid max total copy spend SOL guard"
+        );
+    }
+
+    #[test]
+    fn total_copy_spend_guard_blocks_estimate_above_cap() {
+        let mut options = disabled_options();
+        options.max_total_copy_spend_sol = Some(0.003);
+
+        assert_eq!(
+            total_copy_spend_guard_reason(&options, 3_205_000).unwrap(),
+            Some(
+                "estimated total copy spend 3205000 lamports exceeds max total copy spend 3000000 lamports"
+                    .to_string()
+            )
+        );
+
+        options.max_total_copy_spend_sol = Some(0.0035);
+        assert_eq!(
+            total_copy_spend_guard_reason(&options, 3_205_000).unwrap(),
+            None
+        );
     }
 
     #[test]

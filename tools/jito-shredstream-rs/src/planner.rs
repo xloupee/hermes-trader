@@ -13,7 +13,7 @@ pub(crate) struct PlannerOptions {
     pub(crate) copy_sol_amount: Option<f64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ExecutionPlanLine {
     pub(crate) schema: &'static str,

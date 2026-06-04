@@ -139,6 +139,9 @@ pub(crate) struct LiveOptions {
     #[arg(long, env = "JITO_MAX_COPY_SOL")]
     pub(crate) max_copy_sol: Option<f64>,
 
+    #[arg(long, env = "JITO_MAX_TOTAL_COPY_SPEND_SOL")]
+    pub(crate) max_total_copy_spend_sol: Option<f64>,
+
     #[arg(long, env = "JITO_COPY_KEYPAIR_PATH")]
     pub(crate) copy_keypair_path: Option<PathBuf>,
 

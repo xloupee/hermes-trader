@@ -7,6 +7,10 @@ const DEFAULT_EXECUTIONS_PATH = "/tmp/jito-copy-executions-local-send.jsonl";
 const DEFAULT_SUPABASE_CWD = `${process.env.HOME || ""}/Documents/pumpfunnoti`;
 const DEFAULT_WATCH_INTERVAL_MS = 1000;
 const DEFAULT_REFRESH_INTERVAL_MS = 5000;
+const DEFAULT_REFRESH_RECENT_LIMIT = 1;
+const DEFAULT_NEW_ROW_BACKFILL = 0;
+const confirmedTransactionCache = new Map();
+const blockSignatureCache = new Map();
 
 function argValue(name, fallback = null) {
   const prefix = `--${name}=`;
@@ -35,6 +39,11 @@ function supabaseCwd() {
 function positiveInteger(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
+}
+
+function nonNegativeInteger(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? Math.floor(number) : fallback;
 }
 
 function boolish(value, fallback = false) {
@@ -98,6 +107,27 @@ async function rpc(method, params) {
   return body.result;
 }
 
+async function confirmedTransaction(signature) {
+  if (!signature) {
+    return null;
+  }
+  if (confirmedTransactionCache.has(signature)) {
+    return confirmedTransactionCache.get(signature);
+  }
+  const transaction = await rpc("getTransaction", [
+    signature,
+    {
+      encoding: "jsonParsed",
+      commitment: "confirmed",
+      maxSupportedTransactionVersion: 0
+    }
+  ]);
+  if (transaction) {
+    confirmedTransactionCache.set(signature, transaction);
+  }
+  return transaction;
+}
+
 function signatureFromBlockTransaction(transaction) {
   if (typeof transaction === "string") {
     return transaction;
@@ -120,6 +150,9 @@ async function fetchBlockSignatures(slot, rpcFn = rpc) {
   if (!Number.isFinite(slot)) {
     return { signatures: null, unavailableReason: "missing slot" };
   }
+  if (rpcFn === rpc && blockSignatureCache.has(slot)) {
+    return { signatures: blockSignatureCache.get(slot), unavailableReason: null };
+  }
 
   try {
     const block = await rpcFn("getBlock", [
@@ -134,6 +167,9 @@ async function fetchBlockSignatures(slot, rpcFn = rpc) {
     const signatures = blockSignatures(block);
     if (!signatures) {
       return { signatures: null, unavailableReason: "block signatures unavailable" };
+    }
+    if (rpcFn === rpc) {
+      blockSignatureCache.set(slot, signatures);
     }
     return { signatures, unavailableReason: null };
   } catch (error) {
@@ -250,6 +286,7 @@ function unknownChainReport(row, unavailableReason) {
   const diagnostics = baseBlockPositionDiagnostics(row, null);
   diagnostics.unavailableReason = unavailableReason;
   return {
+    status: "unknown",
     slot: null,
     slotDeltaFromObserved: null,
     blockPositionDiagnostics: diagnostics,
@@ -270,6 +307,68 @@ function unknownChainReport(row, unavailableReason) {
     err: null,
     blockTime: null
   };
+}
+
+function submittedChainReport(signature, unavailableReason) {
+  return {
+    status: "submitted",
+    signature: signature ?? null,
+    slot: null,
+    err: null,
+    blockTime: null,
+    unavailableReason
+  };
+}
+
+async function transactionChainReport(signature) {
+  if (!signature) {
+    return submittedChainReport(null, "missing transaction signature");
+  }
+  let transaction;
+  try {
+    transaction = await confirmedTransaction(signature);
+  } catch (error) {
+    return submittedChainReport(signature, `getTransaction failed: ${error.message}`);
+  }
+  if (!transaction) {
+    return submittedChainReport(signature, "transaction not found at confirmed commitment");
+  }
+
+  return {
+    status: transaction.meta?.err ? "failedOnChain" : "landed",
+    signature,
+    slot: transaction.slot,
+    err: transaction.meta?.err ?? null,
+    blockTime: transaction.blockTime,
+    unavailableReason: null,
+    transaction
+  };
+}
+
+function buyStatus(row, report) {
+  if (report?.err) {
+    return "buyFailedOnChain";
+  }
+  if (Number.isFinite(report?.slot)) {
+    return "buyLanded";
+  }
+  if (row.sendSignature || row.sent || row.decision === "sent") {
+    return "buySubmitted";
+  }
+  return null;
+}
+
+function autoSellStatus(row, report) {
+  if (report?.err) {
+    return "autoSellFailedOnChain";
+  }
+  if (Number.isFinite(report?.slot)) {
+    return "autoSellLanded";
+  }
+  if (row.autoSellSendSignature || row.autoSellSent || row.autoSellDecision === "sent") {
+    return "autoSellSubmitted";
+  }
+  return null;
 }
 
 function uiAmount(balance) {
@@ -337,18 +436,17 @@ function dedupeRows(rows) {
 
 async function chainReport(row) {
   if (!row.sendSignature) {
-    return unknownChainReport(row, "missing copy send signature");
+    const report = unknownChainReport(row, "missing copy send signature");
+    report.buyStatus = buyStatus(row, report);
+    report.autoSellStatus = autoSellStatus(row, null);
+    report.autoSell = row.autoSellSendSignature
+      ? submittedChainReport(row.autoSellSendSignature, "copy transaction missing; auto-sell not checked")
+      : null;
+    return report;
   }
   let transaction;
   try {
-    transaction = await rpc("getTransaction", [
-      row.sendSignature,
-      {
-        encoding: "jsonParsed",
-        commitment: "confirmed",
-        maxSupportedTransactionVersion: 0
-      }
-    ]);
+    transaction = await confirmedTransaction(row.sendSignature);
   } catch (error) {
     return unknownChainReport(row, `getTransaction failed: ${error.message}`);
   }
@@ -371,8 +469,12 @@ async function chainReport(row) {
       ? positiveOrNull(extraSpendBeyondObservedSol - networkFeeSol)
       : null;
   const positionDiagnostics = await blockPositionDiagnostics(row, transaction);
+  const autoSellReport = row.autoSellSendSignature
+    ? await transactionChainReport(row.autoSellSendSignature)
+    : null;
 
-  return {
+  const report = {
+    status: transaction.meta?.err ? "failedOnChain" : "landed",
     slot: transaction.slot,
     slotDeltaFromObserved: Number.isFinite(transaction.slot) && Number.isFinite(row.slot) ? transaction.slot - row.slot : null,
     blockPositionDiagnostics: positionDiagnostics,
@@ -391,8 +493,21 @@ async function chainReport(row) {
     extraSpendBeyondObservedSol,
     extraSpendBeyondObservedAndNetworkFeeSol,
     err: transaction.meta?.err ?? null,
-    blockTime: transaction.blockTime
+    blockTime: transaction.blockTime,
+    autoSell: autoSellReport
+      ? {
+          status: autoSellReport.status,
+          signature: autoSellReport.signature,
+          slot: autoSellReport.slot,
+          err: autoSellReport.err,
+          blockTime: autoSellReport.blockTime,
+          unavailableReason: autoSellReport.unavailableReason
+        }
+      : null
   };
+  report.buyStatus = buyStatus(row, report);
+  report.autoSellStatus = autoSellStatus(row, autoSellReport);
+  return report;
 }
 
 async function buildRestRows(rows) {
@@ -712,6 +827,24 @@ async function syncOnce(path, { recentLimit = 0 } = {}) {
   return rows.length;
 }
 
+function syncLimitForCycle({
+  hasNewRows,
+  rowCount,
+  lastSyncedCount,
+  recentLimit,
+  refreshRecentLimit,
+  newRowBackfill
+}) {
+  if (!hasNewRows) {
+    return refreshRecentLimit;
+  }
+  if (lastSyncedCount < 0 || rowCount <= lastSyncedCount) {
+    return recentLimit;
+  }
+  const newRows = rowCount - lastSyncedCount;
+  return Math.min(recentLimit, Math.max(1, newRows + newRowBackfill));
+}
+
 async function main() {
   const path = argValue("executions", process.env.JITO_COPY_EXECUTIONS_PATH || DEFAULT_EXECUTIONS_PATH);
   const watch = hasFlag("watch");
@@ -730,6 +863,17 @@ async function main() {
     argValue("recent-limit", process.env.JITO_SYNC_RECENT_LIMIT || (watch ? "100" : "0")),
     watch ? 100 : 0
   );
+  const refreshRecentLimit = positiveInteger(
+    argValue(
+      "refresh-recent-limit",
+      process.env.JITO_SYNC_REFRESH_RECENT_LIMIT || String(Math.min(recentLimit, DEFAULT_REFRESH_RECENT_LIMIT))
+    ),
+    Math.min(recentLimit, DEFAULT_REFRESH_RECENT_LIMIT)
+  );
+  const newRowBackfill = nonNegativeInteger(
+    argValue("new-row-backfill", process.env.JITO_SYNC_NEW_ROW_BACKFILL || String(DEFAULT_NEW_ROW_BACKFILL)),
+    DEFAULT_NEW_ROW_BACKFILL
+  );
   const refreshSentRows = boolish(
     argValue("refresh-sent-rows", process.env.JITO_SYNC_REFRESH_SENT_ROWS),
     true
@@ -744,10 +888,18 @@ async function main() {
     const shouldRefreshRows =
       watch && refreshSentRows && rowCount > 0 && nowMs - lastRefreshAtMs >= refreshIntervalMs;
     if (hasNewRows || shouldRefreshRows) {
-      const synced = await syncOnce(path, { recentLimit });
+      const syncRecentLimit = syncLimitForCycle({
+        hasNewRows,
+        rowCount,
+        lastSyncedCount,
+        recentLimit,
+        refreshRecentLimit,
+        newRowBackfill
+      });
+      const synced = await syncOnce(path, { recentLimit: syncRecentLimit });
       lastSyncedCount = rowCount;
       lastRefreshAtMs = Date.now();
-      const scope = recentLimit > 0 ? `last ${recentLimit} rows` : "all rows";
+      const scope = syncRecentLimit > 0 ? `last ${syncRecentLimit} rows` : "all rows";
       const reason = hasNewRows ? "new rows" : "refresh";
       console.error(`synced ${synced} unique local copy executions to Supabase (${scope}, ${reason})`);
     }
@@ -760,9 +912,12 @@ async function main() {
 export {
   blockPositionDiagnostics,
   blockSignatures,
+  buyStatus,
   dedupeRows,
   executionKey,
-  fetchBlockSignatures
+  fetchBlockSignatures,
+  syncLimitForCycle,
+  autoSellStatus
 };
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

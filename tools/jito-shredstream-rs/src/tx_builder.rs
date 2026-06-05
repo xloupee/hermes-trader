@@ -478,8 +478,6 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
     let pump_program = parse_pubkey(PUMP_FUN_PROGRAM_ID)?;
     let copy_wallet_token_account = parse_pubkey(&copy_build.copy_wallet_token_account)?;
     let copy_wallet_pubkey = parse_pubkey(copy_wallet)?;
-    let copy_user_volume_accumulator =
-        user_volume_accumulator_address(&copy_wallet_pubkey, &pump_program);
 
     let mut sell_data = Vec::with_capacity(24);
     sell_data.extend_from_slice(&PUMP_FUN_SELL_DISCRIMINATOR);
@@ -536,7 +534,6 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
                 resolved_pubkey(&context.resolved_accounts, "feeProgram")?,
                 false,
             ),
-            AccountMeta::new(copy_user_volume_accumulator, false),
             AccountMeta::new_readonly(
                 resolved_pubkey(&context.resolved_accounts, "bondingCurveV2")?,
                 false,
@@ -1284,33 +1281,30 @@ mod tests {
             account.pubkey.to_string() == "DhWQaUj4YBCyRvGuUfwcAjGNTvgB5murcVLT2VdTr1UZ"
                 && account.is_writable
         }));
-        let target_user_volume_accumulator =
-            resolved_account_for_test(&context.resolved_accounts, "userVolumeAccumulator");
-        let copy_user_volume_accumulator = user_volume_accumulator_address(
-            &parse_pubkey(COPY_WALLET).unwrap(),
-            &parse_pubkey(PUMP_FUN_PROGRAM_ID).unwrap(),
-        )
-        .to_string();
         let bonding_curve_v2 =
             resolved_account_for_test(&context.resolved_accounts, "bondingCurveV2");
         let buyback_fee_recipient =
             resolved_account_for_test(&context.resolved_accounts, "buybackFeeRecipient");
-        assert_eq!(build.instructions[1].accounts.len(), 17);
-        assert_ne!(copy_user_volume_accumulator, target_user_volume_accumulator);
+        assert_eq!(build.instructions[1].accounts.len(), 16);
+        assert_eq!(
+            build.instructions[1].accounts[8].pubkey.to_string(),
+            resolved_account_for_test(&context.resolved_accounts, "creatorVault")
+        );
+        assert!(build.instructions[1].accounts[8].is_writable);
+        assert_eq!(
+            build.instructions[1].accounts[9].pubkey.to_string(),
+            resolved_account_for_test(&context.resolved_accounts, "tokenProgram")
+        );
+        assert!(!build.instructions[1].accounts[9].is_writable);
         assert_eq!(
             build.instructions[1].accounts[14].pubkey.to_string(),
-            copy_user_volume_accumulator
-        );
-        assert!(build.instructions[1].accounts[14].is_writable);
-        assert_eq!(
-            build.instructions[1].accounts[15].pubkey.to_string(),
             bonding_curve_v2
         );
         assert_eq!(
-            build.instructions[1].accounts[16].pubkey.to_string(),
+            build.instructions[1].accounts[15].pubkey.to_string(),
             buyback_fee_recipient
         );
-        assert!(build.instructions[1].accounts[16].is_writable);
+        assert!(build.instructions[1].accounts[15].is_writable);
     }
 
     #[test]

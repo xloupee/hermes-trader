@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { blockPositionDiagnostics } from "../tools/jito-shredstream-rs/sync-local-copy-executions-to-supabase.mjs";
+import {
+  autoSellStatus,
+  blockPositionDiagnostics,
+  buyStatus,
+  syncLimitForCycle
+} from "../tools/jito-shredstream-rs/sync-local-copy-executions-to-supabase.mjs";
 
 const baseRow = {
   observedSignature: "target-sig",
@@ -119,4 +124,63 @@ test("block position diagnostics fail quietly when copy signature is missing", a
   assert.equal(diagnostics.copyTxIndex, null);
   assert.equal(diagnostics.sameSlotTxDelta, null);
   assert.equal(diagnostics.unavailableReason, "copy signature not found in confirmed block");
+});
+
+test("copy buy status distinguishes submitted, landed, and failed-on-chain", () => {
+  assert.equal(
+    buyStatus({ sendSignature: "copy-sig", sent: true, decision: "sent" }, { slot: null, err: null }),
+    "buySubmitted"
+  );
+  assert.equal(
+    buyStatus({ sendSignature: "copy-sig", sent: true, decision: "sent" }, { slot: 123, err: null }),
+    "buyLanded"
+  );
+  assert.equal(
+    buyStatus({ sendSignature: "copy-sig", sent: true, decision: "sent" }, { slot: 123, err: { InstructionError: [1, { Custom: 6024 }] } }),
+    "buyFailedOnChain"
+  );
+});
+
+test("auto-sell status distinguishes submitted, landed, and failed-on-chain", () => {
+  assert.equal(
+    autoSellStatus({ autoSellSendSignature: "sell-sig", autoSellSent: true, autoSellDecision: "sent" }, { slot: null, err: null }),
+    "autoSellSubmitted"
+  );
+  assert.equal(
+    autoSellStatus({ autoSellSendSignature: "sell-sig", autoSellSent: true, autoSellDecision: "sent" }, { slot: 123, err: null }),
+    "autoSellLanded"
+  );
+  assert.equal(
+    autoSellStatus({ autoSellSendSignature: "sell-sig", autoSellSent: true, autoSellDecision: "sent" }, { slot: 123, err: { InstructionError: [1, { Custom: 6024 }] } }),
+    "autoSellFailedOnChain"
+  );
+});
+
+test("sync watch loop limits new-row and refresh batches", () => {
+  assert.equal(syncLimitForCycle({
+    hasNewRows: true,
+    rowCount: 92,
+    lastSyncedCount: -1,
+    recentLimit: 100,
+    refreshRecentLimit: 3,
+    newRowBackfill: 2
+  }), 100);
+
+  assert.equal(syncLimitForCycle({
+    hasNewRows: true,
+    rowCount: 93,
+    lastSyncedCount: 92,
+    recentLimit: 100,
+    refreshRecentLimit: 3,
+    newRowBackfill: 0
+  }), 1);
+
+  assert.equal(syncLimitForCycle({
+    hasNewRows: false,
+    rowCount: 93,
+    lastSyncedCount: 93,
+    recentLimit: 100,
+    refreshRecentLimit: 1,
+    newRowBackfill: 0
+  }), 1);
 });

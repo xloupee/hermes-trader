@@ -7,8 +7,7 @@ use crate::{
     },
     executor::{CopyExecutionLine, CopyExecutor},
     parser::{
-        classify_wallet_mention, mentioned_target_wallet_in_set, parse_trade_for_mentioned_targets,
-        versioned_tx_signature_string,
+        classify_wallet_mention, parse_trade_for_mentioned_targets, versioned_tx_signature_string,
     },
     planner::{
         copy_tx_plan_line, execution_plan_line, tx_build_plan_line, unsigned_tx_plan_line,
@@ -38,6 +37,11 @@ use tokio::sync::mpsc;
 pub(crate) async fn run(options: LiveOptions) -> Result<()> {
     let target_wallets = parse_target_wallets(&options.target_wallets)?;
     let target_wallet_set = target_wallets.iter().cloned().collect::<HashSet<_>>();
+    let target_wallet_pubkey_set = target_wallets
+        .iter()
+        .map(|wallet| Pubkey::from_str(wallet))
+        .collect::<std::result::Result<HashSet<_>, _>>()
+        .context("parse target wallet pubkeys")?;
     let address_lookup_tables = AddressLookupTableCache::load(
         options.solana_rpc_url.as_deref(),
         &options.address_lookup_tables,
@@ -219,18 +223,13 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                 }
 
                 let tx_parse_started_at = Instant::now();
-                let expanded_account_keys =
-                    address_lookup_tables.expanded_account_keys(&versioned_tx);
-                let account_expand_finished_at = Instant::now();
-                if let Some(missing_lookup_table) = &expanded_account_keys.missing_lookup_table {
-                    if options.stats {
-                        eprintln!("missing address lookup table {missing_lookup_table}");
-                    }
-                }
-                let account_keys = expanded_account_keys.keys;
-                let wallet_match_started_at = account_expand_finished_at;
-                let target_wallet_mention =
-                    mentioned_target_wallet_in_set(&account_keys, &target_wallet_set);
+                let wallet_match_started_at = tx_parse_started_at;
+                let static_account_keys = versioned_tx.message.static_account_keys();
+                let static_account_key_count = static_account_keys.len();
+                let target_wallet_mention = mentioned_static_target_wallet_in_set(
+                    static_account_keys,
+                    &target_wallet_pubkey_set,
+                );
                 let wallet_match_finished_at = Instant::now();
                 let wallet_match_finished_at_ms = now_ms();
                 if target_wallet_mention.is_none() {
@@ -243,16 +242,26 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             endpoint: options.endpoint.clone(),
                             signature,
                             slot: slot_entry.slot,
-                            reason: "no supported target Pump instruction in static account keys"
-                                .to_string(),
+                            reason: "no target wallet in static account keys".to_string(),
                             filters: vec!["jito-entry".to_string()],
-                            account_key_count: account_keys.len(),
+                            account_key_count: static_account_key_count,
                         })?;
                     }
                     continue;
                 }
 
-                let route_parse_started_at = wallet_match_finished_at;
+                let account_expand_started_at = wallet_match_finished_at;
+                let expanded_account_keys =
+                    address_lookup_tables.expanded_account_keys(&versioned_tx);
+                let account_expand_finished_at = Instant::now();
+                if let Some(missing_lookup_table) = &expanded_account_keys.missing_lookup_table {
+                    if options.stats {
+                        eprintln!("missing address lookup table {missing_lookup_table}");
+                    }
+                }
+                let account_keys = expanded_account_keys.keys;
+
+                let route_parse_started_at = account_expand_finished_at;
                 match parse_trade_for_mentioned_targets(
                     &versioned_tx,
                     &account_keys,
@@ -287,7 +296,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 .duration_since(tx_parse_started_at)
                                 .as_micros(),
                             account_expand_us: account_expand_finished_at
-                                .duration_since(tx_parse_started_at)
+                                .duration_since(account_expand_started_at)
                                 .as_micros(),
                             wallet_match_us: wallet_match_finished_at
                                 .duration_since(wallet_match_started_at)
@@ -721,14 +730,27 @@ fn parse_target_wallets(values: &[String]) -> Result<Vec<String>> {
     Ok(wallets)
 }
 
+fn mentioned_static_target_wallet_in_set(
+    account_keys: &[Pubkey],
+    target_wallets: &HashSet<Pubkey>,
+) -> Option<String> {
+    account_keys
+        .iter()
+        .find(|account_key| target_wallets.contains(account_key))
+        .map(ToString::to_string)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{write_json_line, SeenSignatures};
+    use super::{mentioned_static_target_wallet_in_set, write_json_line, SeenSignatures};
     use serde::Serialize;
+    use solana_pubkey::Pubkey;
     use std::{
+        collections::HashSet,
         fs::{remove_file, File},
         io::BufWriter,
         path::PathBuf,
+        str::FromStr,
     };
 
     #[test]
@@ -782,6 +804,24 @@ mod tests {
         assert_eq!(
             contents,
             "{\"schema\":\"copytrade.shadowSignal.v1\",\"decision\":\"wouldCopy\"}\n"
+        );
+    }
+
+    #[test]
+    fn static_target_wallet_match_uses_pubkeys_without_stringifying_all_accounts() {
+        let target = Pubkey::from_str("CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o")
+            .expect("valid target wallet");
+        let other = Pubkey::from_str("11111111111111111111111111111111").expect("valid pubkey");
+        let mut target_wallets = HashSet::new();
+        target_wallets.insert(target);
+
+        assert_eq!(
+            mentioned_static_target_wallet_in_set(&[other, target], &target_wallets),
+            Some(target.to_string())
+        );
+        assert_eq!(
+            mentioned_static_target_wallet_in_set(&[other], &target_wallets),
+            None
         );
     }
 

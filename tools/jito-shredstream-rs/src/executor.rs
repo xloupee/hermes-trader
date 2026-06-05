@@ -35,7 +35,6 @@ const FIRST_LIVE_MAX_COPY_SOL_CAP: f64 = 0.001;
 const LAMPORTS_PER_SOL: f64 = 1_000_000_000.0;
 const SIGNATURE_FEE_LAMPORTS_ESTIMATE: u64 = 5_000;
 const ASSOCIATED_TOKEN_ACCOUNT_RENT_LAMPORTS_ESTIMATE: u64 = 2_100_000;
-const SEND_MAX_RETRIES: u64 = 3;
 const SEND_WARM_TIMEOUT_MS: u64 = 750;
 const AUTO_SELL_BALANCE_ATTEMPTS: usize = 8;
 const AUTO_SELL_BALANCE_RETRY_MS: u64 = 250;
@@ -67,6 +66,9 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) auto_sell_after_buy: bool,
     pub(crate) auto_sell_delay_ms: u64,
     pub(crate) simulate_auto_sell: bool,
+    pub(crate) isolate_buy_latency_test: bool,
+    pub(crate) send_max_retries: u64,
+    pub(crate) send_http_timeout_ms: u64,
     pub(crate) priority_fee_micro_lamports: Option<u64>,
     pub(crate) jito_tip_lamports: Option<u64>,
     pub(crate) jito_tip_account: Option<String>,
@@ -124,6 +126,8 @@ pub(crate) struct CopyExecutionLine {
     account_expand_us: u128,
     wallet_match_us: u128,
     route_parse_us: u128,
+    send_max_retries: u64,
+    send_http_timeout_ms: u64,
     signed: bool,
     simulated: bool,
     sent: bool,
@@ -177,6 +181,8 @@ pub(crate) struct CopyExecutionLine {
     auto_sell_enabled: bool,
     auto_sell_delay_ms: u64,
     auto_sell_simulation_requested: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    buy_latency_test_isolated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     priority_fee_micro_lamports: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -263,6 +269,13 @@ struct SendEndpoint {
     auth_uuid: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SendConfig {
+    fast_copy_send: bool,
+    max_retries: u64,
+    http_timeout_ms: u64,
+}
+
 fn sign_copy_transaction(
     instructions: &[solana_instruction::Instruction],
     keypair: &Keypair,
@@ -343,6 +356,9 @@ impl CopyExecutor {
             auto_sell_after_buy: options.auto_sell_after_buy,
             auto_sell_delay_ms: options.auto_sell_delay_ms,
             simulate_auto_sell: options.simulate_auto_sell,
+            isolate_buy_latency_test: options.isolate_buy_latency_test,
+            send_max_retries: options.send_max_retries,
+            send_http_timeout_ms: options.send_http_timeout_ms,
             priority_fee_micro_lamports: positive_u64(options.priority_fee_micro_lamports),
             jito_tip_lamports: positive_u64(options.jito_tip_lamports),
             jito_tip_account: options
@@ -581,7 +597,7 @@ impl CopyExecutor {
                     line.send_rpc_attempts = result.rpc_attempts;
                     line.send_rpc_errors = result.rpc_errors;
                     line.decision = "sent";
-                    if self.options.auto_sell_after_buy {
+                    if self.options.auto_sell_after_buy_enabled() {
                         self.handle_auto_sell(&mut line, execution_plan, keypair)
                             .await;
                     }
@@ -658,7 +674,7 @@ impl CopyExecutor {
                 &self.client,
                 endpoint,
                 encoded_tx,
-                self.options.fast_copy_send,
+                self.options.send_config(),
             )
             .await;
             let attempts = vec![outcome.attempt];
@@ -682,10 +698,9 @@ impl CopyExecutor {
             let client = self.client.clone();
             let encoded_tx = encoded_tx.clone();
             let endpoint = endpoint.clone();
-            let fast_copy_send = self.options.fast_copy_send;
+            let send_config = self.options.send_config();
             send_set.spawn(async move {
-                send_transaction_attempt(&client, &endpoint, encoded_tx.as_ref(), fast_copy_send)
-                    .await
+                send_transaction_attempt(&client, &endpoint, encoded_tx.as_ref(), send_config).await
             });
         }
 
@@ -1119,6 +1134,8 @@ impl CopyExecutionLine {
             account_expand_us: timings.account_expand_us,
             wallet_match_us: timings.wallet_match_us,
             route_parse_us: timings.route_parse_us,
+            send_max_retries: options.send_max_retries,
+            send_http_timeout_ms: options.send_http_timeout_ms,
             signed: false,
             simulated: false,
             sent: false,
@@ -1148,9 +1165,10 @@ impl CopyExecutionLine {
             send_rpc_attempts: Vec::new(),
             send_rpc_errors: Vec::new(),
             reason: None,
-            auto_sell_enabled: options.auto_sell_after_buy,
+            auto_sell_enabled: options.auto_sell_after_buy_enabled(),
             auto_sell_delay_ms: options.auto_sell_delay_ms,
-            auto_sell_simulation_requested: options.simulate_auto_sell,
+            auto_sell_simulation_requested: options.simulate_auto_sell_enabled(),
+            buy_latency_test_isolated: options.isolate_buy_latency_test,
             priority_fee_micro_lamports: options.priority_fee_micro_lamports,
             jito_tip_lamports: options.jito_tip_lamports,
             jito_tip_account: options.jito_tip_account.clone(),
@@ -1269,6 +1287,22 @@ impl CopyExecutionOptions {
             jito_tip_lamports: self.jito_tip_lamports,
             jito_tip_account: self.jito_tip_account.clone(),
         }
+    }
+
+    fn send_config(&self) -> SendConfig {
+        SendConfig {
+            fast_copy_send: self.fast_copy_send,
+            max_retries: self.send_max_retries,
+            http_timeout_ms: self.send_http_timeout_ms,
+        }
+    }
+
+    fn auto_sell_after_buy_enabled(&self) -> bool {
+        self.auto_sell_after_buy && !self.isolate_buy_latency_test
+    }
+
+    fn simulate_auto_sell_enabled(&self) -> bool {
+        self.simulate_auto_sell && !self.isolate_buy_latency_test
     }
 
     fn selected_send_rpc_urls(&self) -> Vec<String> {
@@ -1440,10 +1474,23 @@ async fn send_transaction_attempt(
     client: &reqwest::Client,
     endpoint: &SendEndpoint,
     encoded_tx: &str,
-    fast_copy_send: bool,
+    config: SendConfig,
 ) -> SendAttemptOutcome {
     let started_at = Instant::now();
-    match send_transaction_to(client, endpoint, encoded_tx, fast_copy_send).await {
+    let send = send_transaction_to(client, endpoint, encoded_tx, config);
+    let result = if config.http_timeout_ms > 0 {
+        match tokio::time::timeout(Duration::from_millis(config.http_timeout_ms), send).await {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "sendTransaction timed out after {}ms",
+                config.http_timeout_ms
+            )),
+        }
+    } else {
+        send.await
+    };
+
+    match result {
         Ok(signature) => {
             let attempt = SendRpcAttemptLine {
                 label: endpoint.label.clone(),
@@ -1490,7 +1537,7 @@ async fn send_transaction_to(
     client: &reqwest::Client,
     endpoint: &SendEndpoint,
     encoded_tx: &str,
-    fast_copy_send: bool,
+    config: SendConfig,
 ) -> Result<String, String> {
     let response = send_endpoint_post(client, endpoint)
         .json(&serde_json::json!({
@@ -1501,9 +1548,9 @@ async fn send_transaction_to(
                 encoded_tx,
                 {
                     "encoding": "base64",
-                    "skipPreflight": fast_copy_send,
+                    "skipPreflight": config.fast_copy_send,
                     "preflightCommitment": "processed",
-                    "maxRetries": SEND_MAX_RETRIES
+                    "maxRetries": config.max_retries
                 }
             ]
         }))
@@ -1536,6 +1583,10 @@ fn send_error_message(endpoint: &SendEndpoint, error: &str) -> String {
         sanitized = sanitized.replace(endpoint.url.trim_end_matches('/'), "<redacted-rpc-url>");
     }
     format!("{}: {sanitized}", endpoint.label)
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn tx_build_error_reason(error: TxBuildError) -> &'static str {
@@ -1605,6 +1656,9 @@ mod tests {
             auto_sell_after_buy: false,
             auto_sell_delay_ms: 1_000,
             simulate_auto_sell: false,
+            isolate_buy_latency_test: false,
+            send_max_retries: 3,
+            send_http_timeout_ms: 0,
             priority_fee_micro_lamports: None,
             jito_tip_lamports: None,
             jito_tip_account: None,
@@ -1707,6 +1761,8 @@ mod tests {
         assert!(!line.send_enabled);
         assert!(line.dry_run);
         assert!(!line.auto_sell_simulation_requested);
+        assert_eq!(line.send_max_retries, 3);
+        assert_eq!(line.send_http_timeout_ms, 0);
         assert!(!line.signed);
         assert!(!line.sent);
         assert_eq!(line.signed_at_ms, None);
@@ -1725,6 +1781,21 @@ mod tests {
             CopyExecutionLine::new(&plan, Action::Buy, Some(0.0005), &options, sample_timings());
 
         assert!(line.auto_sell_simulation_requested);
+    }
+
+    #[test]
+    fn buy_latency_isolation_forces_auto_sell_off_for_execution_lines() {
+        let plan = allowed_plan();
+        let mut options = disabled_options();
+        options.auto_sell_after_buy = true;
+        options.simulate_auto_sell = true;
+        options.isolate_buy_latency_test = true;
+
+        let line = CopyExecutionLine::new(&plan, Action::Buy, Some(0.0005), &options);
+
+        assert!(line.buy_latency_test_isolated);
+        assert!(!line.auto_sell_enabled);
+        assert!(!line.auto_sell_simulation_requested);
     }
 
     #[test]

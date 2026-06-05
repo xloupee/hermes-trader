@@ -130,12 +130,17 @@ The send harness forces:
 - `JITO_AUTO_SELL_AFTER_BUY=true` by default in the armed local send harness
 - `JITO_AUTO_SELL_DELAY_MS=1000` by default
 - `JITO_SIMULATE_AUTO_SELL=true` by default in the non-fast local send harness
+- `JITO_ISOLATE_BUY_LATENCY_TEST=false` by default
+- `JITO_SEND_MAX_RETRIES=3` by default
+- `JITO_SEND_HTTP_TIMEOUT_MS=5000` by default for non-fast local sends
 - `JITO_MAX_COPY_SOL=0.001` by default
 
 It refuses to run if `JITO_ARM_LIVE_COPY_SEND` is not exactly `YES`, or if
 `JITO_MAX_COPY_SOL` is above `0.001`. To run a single-copy test instead, set
 `JITO_ONE_SHOT_COPY_SEND=true`. To buy without the automatic post-buy sell, set
-`JITO_AUTO_SELL_AFTER_BUY=false`.
+`JITO_AUTO_SELL_AFTER_BUY=false`. For clean buy slot/latency tests, set
+`JITO_ISOLATE_BUY_LATENCY_TEST=true`; it forces auto-sell and auto-sell
+simulation off even if the sourced live environment enabled them.
 
 The auto-sell path is deliberately narrow: it only runs after a copied buy was
 sent, waits the configured delay, reads the copy wallet token account balance,
@@ -158,7 +163,7 @@ JSONL plan writes, disables pre-send simulation unless explicitly overridden,
 and submits with `skipPreflight: true`. It defaults
 `JITO_AUTO_SELL_AFTER_BUY=false` so the copied buy path is measured without the
 post-buy sell experiment, and `JITO_SIMULATE_AUTO_SELL=false` when autosell is
-explicitly enabled.
+explicitly enabled. Fast local sends default `JITO_SEND_HTTP_TIMEOUT_MS=750`.
 
 ## VPS Tiny Send
 
@@ -173,8 +178,11 @@ The VPS launcher sources `/opt/pumpfun-migration-bot/.env`, then
 `/etc/jito-copy-live.env`, and runs the release `jito-feed-probe` binary. It
 keeps `JITO_MAX_COPY_SOL <= 0.001`, `JITO_FAST_COPY_SEND=YES`,
 `JITO_ONE_SHOT_COPY_SEND=false`, `JITO_SIMULATE_AUTO_SELL=false`, and
-`JITO_DISABLE_SIGNAL_OBSERVATIONS=true` by default. Dashboard/report syncing
-should run as a separate post-submit service.
+`JITO_DISABLE_SIGNAL_OBSERVATIONS=true` by default. It also defaults
+`JITO_SEND_MAX_RETRIES=3` and `JITO_SEND_HTTP_TIMEOUT_MS=750`. For clean buy
+latency tests against a live env that has auto-sell enabled, set
+`JITO_ISOLATE_BUY_LATENCY_TEST=true`. Dashboard/report syncing should run as a
+separate post-submit service.
 
 Send fanout is default-off:
 

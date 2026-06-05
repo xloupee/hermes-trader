@@ -653,13 +653,66 @@ function hasSupabaseRestEnv() {
   return Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
 }
 
-async function syncViaSupabaseRest(records) {
-  if (records.length === 0) {
-    return;
+const OPTIONAL_REST_COLUMNS = new Set([
+  "feed_received_at_ms",
+  "decoded_at_ms",
+  "matched_at_ms",
+  "planned_at_ms",
+  "built_at_ms",
+  "feed_received_to_decoded_us",
+  "decoded_to_matched_us",
+  "matched_to_planned_ms",
+  "planned_to_built_ms",
+  "executor_queue_us",
+  "guards_us",
+  "unsigned_build_us",
+  "sign_us",
+  "serialize_us",
+  "batch_transaction_count",
+  "matched_transaction_index",
+  "batch_scan_us",
+  "tx_parse_us",
+  "account_expand_us",
+  "wallet_match_us",
+  "route_parse_us",
+  "send_lane_ms",
+  "slot_delta",
+  "tx_delta"
+]);
+
+function missingOptionalColumn(text) {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = null;
   }
 
-  const base = process.env.SUPABASE_URL.trim().replace(/\/+$/, "");
-  const response = await fetch(
+  const message = `${parsed?.message ?? ""} ${parsed?.details ?? ""} ${text}`.toLowerCase();
+  const candidates = [
+    /'([a-z0-9_]+)'\s+column/,
+    /column\s+"?([a-z0-9_]+)"?\s+does not exist/,
+    /could not find the\s+'([a-z0-9_]+)'/
+  ];
+
+  for (const candidate of candidates) {
+    const match = candidate.exec(message);
+    if (match && OPTIONAL_REST_COLUMNS.has(match[1])) {
+      return match[1];
+    }
+  }
+
+  return null;
+}
+
+function stripOptionalRestColumns(records) {
+  return records.map((record) => Object.fromEntries(
+    Object.entries(record).filter(([column]) => !OPTIONAL_REST_COLUMNS.has(column))
+  ));
+}
+
+async function postExecutionRecords(base, records) {
+  return fetch(
     `${base}/rest/v1/copytrade_local_executions?on_conflict=provider,observed_signature,observed_wallet,observed_action,mint`,
     {
       method: "POST",
@@ -672,9 +725,30 @@ async function syncViaSupabaseRest(records) {
       body: JSON.stringify(records)
     }
   );
+}
+
+async function syncViaSupabaseRest(records) {
+  if (records.length === 0) {
+    return;
+  }
+
+  const base = process.env.SUPABASE_URL.trim().replace(/\/+$/, "");
+  const response = await postExecutionRecords(base, records);
 
   if (!response.ok) {
-    throw new Error(`Supabase REST upsert failed: ${response.status} ${await response.text()}`);
+    const text = await response.text();
+    const missingColumn = missingOptionalColumn(text);
+    if (missingColumn) {
+      console.warn(
+        `Supabase REST schema is missing optional timing column ${missingColumn}; retrying with timing columns in raw_execution only`
+      );
+      const retry = await postExecutionRecords(base, stripOptionalRestColumns(records));
+      if (retry.ok) {
+        return;
+      }
+      throw new Error(`Supabase REST fallback upsert failed: ${retry.status} ${await retry.text()}`);
+    }
+    throw new Error(`Supabase REST upsert failed: ${response.status} ${text}`);
   }
 }
 

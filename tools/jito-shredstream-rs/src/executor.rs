@@ -3,14 +3,15 @@ use crate::{
     blockhash::{cached_blockhash, BlockhashCache},
     event::now_ms,
     parser::{
-        read_u64_le, Action, FlashxPumpLayout, Route, RouteContext, ASSOCIATED_TOKEN_PROGRAM_ID,
-        COMPUTE_BUDGET_PROGRAM_ID, SYSTEM_PROGRAM_ID,
+        associated_token_program_id, compute_budget_program_id, read_u64_le, system_program_id,
+        Action, FlashxPumpLayout, Route, RouteContext,
     },
     planner::ExecutionPlanLine,
     signal::SignalTimings,
     tx_builder::{
         build_auto_sell_unsigned_flashx_pump, build_full_copy_unsigned_flashx_pump,
-        build_full_copy_unsigned_flashx_pump_with_fees, TxBuildError, TxFeeConfig,
+        build_full_copy_unsigned_flashx_pump_with_fees_and_cache, CopyPdaCache, TxBuildError,
+        TxFeeConfig,
     },
     LiveOptions,
 };
@@ -46,6 +47,7 @@ pub(crate) struct CopyExecutor {
     send_endpoints: Arc<Vec<SendEndpoint>>,
     blockhash_cache: Option<BlockhashCache>,
     address_lookup_tables: AddressLookupTableCache,
+    pda_cache: CopyPdaCache,
 }
 
 #[derive(Clone, Debug)]
@@ -119,6 +121,16 @@ pub(crate) struct CopyExecutionLine {
     matched_to_planned_ms: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
     planned_to_built_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    executor_queue_us: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guards_us: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unsigned_build_us: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sign_us: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    serialize_us: Option<u128>,
     batch_transaction_count: u64,
     matched_transaction_index: u64,
     batch_scan_us: u128,
@@ -389,6 +401,7 @@ impl CopyExecutor {
             send_endpoints,
             blockhash_cache,
             address_lookup_tables,
+            pda_cache: CopyPdaCache::default(),
         })
     }
 
@@ -438,6 +451,7 @@ impl CopyExecutor {
         });
     }
 
+    #[cfg(test)]
     pub(crate) async fn handle(
         &self,
         execution_plan: &ExecutionPlanLine,
@@ -445,6 +459,43 @@ impl CopyExecutor {
         observed_sol_amount: Option<f64>,
         timings: SignalTimings,
     ) -> CopyExecutionLine {
+        self.handle_inner(
+            execution_plan,
+            observed_action,
+            observed_sol_amount,
+            timings,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn handle_with_executor_enqueued_at(
+        &self,
+        execution_plan: &ExecutionPlanLine,
+        observed_action: Action,
+        observed_sol_amount: Option<f64>,
+        timings: SignalTimings,
+        executor_enqueued_at: Instant,
+    ) -> CopyExecutionLine {
+        self.handle_inner(
+            execution_plan,
+            observed_action,
+            observed_sol_amount,
+            timings,
+            Some(executor_enqueued_at),
+        )
+        .await
+    }
+
+    async fn handle_inner(
+        &self,
+        execution_plan: &ExecutionPlanLine,
+        observed_action: Action,
+        observed_sol_amount: Option<f64>,
+        timings: SignalTimings,
+        executor_enqueued_at: Option<Instant>,
+    ) -> CopyExecutionLine {
+        let executor_started_at = Instant::now();
         let mut line = CopyExecutionLine::new(
             execution_plan,
             observed_action,
@@ -452,92 +503,139 @@ impl CopyExecutor {
             &self.options,
             timings,
         );
+        if let Some(executor_enqueued_at) = executor_enqueued_at {
+            line.executor_queue_us = Some(
+                executor_started_at
+                    .duration_since(executor_enqueued_at)
+                    .as_micros(),
+            );
+        }
+        let guards_started_at = Instant::now();
+        macro_rules! skip_guard {
+            ($reason:expr) => {{
+                line.record_guards_us(guards_started_at.elapsed().as_micros());
+                return line.skip($reason);
+            }};
+        }
 
         if !self.options.simulate_copy_tx && !self.options.enable_copy_send {
-            return line.skip("copy execution is disabled");
+            skip_guard!("copy execution is disabled");
         }
 
         if !execution_plan.allowed || execution_plan.decision != "wouldBuy" {
-            return line.skip("execution plan is not allowed");
+            skip_guard!("execution plan is not allowed");
         }
 
         if observed_action != Action::Buy {
-            return line.skip("copy execution only allows buy signals");
+            skip_guard!("copy execution only allows buy signals");
         }
 
         if execution_plan.route != Route::FlashxPump {
-            return line.skip("unsupported copy execution route");
+            skip_guard!("unsupported copy execution route");
         }
 
         let Some(observed_sol_amount) = observed_sol_amount else {
-            return line.skip("observed SOL amount is not confidently bounded");
+            skip_guard!("observed SOL amount is not confidently bounded");
         };
         if !observed_sol_amount.is_finite() || observed_sol_amount <= 0.0 {
-            return line.skip("observed SOL amount is not confidently bounded");
+            skip_guard!("observed SOL amount is not confidently bounded");
         }
 
         let Some(max_copy_sol) = self.options.max_copy_sol else {
-            return line.skip("missing max copy SOL guard");
+            skip_guard!("missing max copy SOL guard");
         };
         if !max_copy_sol.is_finite() || max_copy_sol <= 0.0 {
-            return line.skip("invalid max copy SOL guard");
+            skip_guard!("invalid max copy SOL guard");
         }
         if max_copy_sol > FIRST_LIVE_MAX_COPY_SOL_CAP {
-            return line.skip(format!(
+            skip_guard!(format!(
                 "max copy SOL guard exceeds first-live cap {FIRST_LIVE_MAX_COPY_SOL_CAP}"
             ));
         }
         if observed_sol_amount > max_copy_sol {
-            return line.skip("observed spend exceeds max copy SOL guard");
+            skip_guard!("observed spend exceeds max copy SOL guard");
         }
 
         let Some(copy_wallet) = self.options.copy_wallet.as_deref() else {
-            return line.skip("missing copy wallet");
+            skip_guard!("missing copy wallet");
         };
         let Some(keypair) = self.keypair.as_ref() else {
-            return line.skip("missing copy keypair path");
+            skip_guard!("missing copy keypair path");
         };
         if keypair.pubkey().to_string() != copy_wallet {
-            return line.skip("copy keypair does not match copy wallet");
+            skip_guard!("copy keypair does not match copy wallet");
         }
 
         let Some(cached_blockhash) = cached_blockhash(self.blockhash_cache.as_ref()) else {
-            return line.skip("missing warm blockhash");
+            skip_guard!("missing warm blockhash");
         };
 
-        let build = match build_full_copy_unsigned_flashx_pump_with_fees(
+        let prebuild_guards_us = guards_started_at.elapsed().as_micros();
+        let unsigned_build_started_at = Instant::now();
+        let build = match build_full_copy_unsigned_flashx_pump_with_fees_and_cache(
             execution_plan.route_context.as_ref(),
             copy_wallet,
             &execution_plan.mint,
             &self.options.tx_fee_config(),
+            Some(&self.pda_cache),
         ) {
             Ok(build) => build,
-            Err(error) => return line.skip(tx_build_error_reason(error)),
+            Err(error) => {
+                line.record_unsigned_build_us(unsigned_build_started_at);
+                line.record_guards_us(prebuild_guards_us);
+                return line.skip(tx_build_error_reason(error));
+            }
         };
+        line.record_unsigned_build_us(unsigned_build_started_at);
         line.route_layout = Some(build.route_layout);
         line.instruction_count = build.instructions.len();
         line.mark_built();
 
+        let postbuild_guards_started_at = Instant::now();
         let estimated_total_spend_lamports =
             match estimate_total_copy_spend_lamports(&build, execution_plan.route_context.as_ref())
             {
                 Ok(lamports) => lamports,
-                Err(reason) => return line.skip(reason),
+                Err(reason) => {
+                    line.record_guards_us(
+                        prebuild_guards_us + postbuild_guards_started_at.elapsed().as_micros(),
+                    );
+                    return line.skip(reason);
+                }
             };
         line.estimated_total_copy_spend_lamports = Some(estimated_total_spend_lamports);
         line.estimated_total_copy_spend_sol = Some(lamports_to_sol(estimated_total_spend_lamports));
 
         match total_copy_spend_guard_reason(&self.options, estimated_total_spend_lamports) {
-            Ok(Some(reason)) => return line.skip(reason),
+            Ok(Some(reason)) => {
+                line.record_guards_us(
+                    prebuild_guards_us + postbuild_guards_started_at.elapsed().as_micros(),
+                );
+                return line.skip(reason);
+            }
             Ok(None) => {}
-            Err(reason) => return line.skip(reason),
+            Err(reason) => {
+                line.record_guards_us(
+                    prebuild_guards_us + postbuild_guards_started_at.elapsed().as_micros(),
+                );
+                return line.skip(reason);
+            }
         }
 
         let blockhash = match Hash::from_str(&cached_blockhash.blockhash) {
             Ok(blockhash) => blockhash,
-            Err(error) => return line.skip(format!("invalid cached blockhash: {error}")),
+            Err(error) => {
+                line.record_guards_us(
+                    prebuild_guards_us + postbuild_guards_started_at.elapsed().as_micros(),
+                );
+                return line.skip(format!("invalid cached blockhash: {error}"));
+            }
         };
+        line.record_guards_us(
+            prebuild_guards_us + postbuild_guards_started_at.elapsed().as_micros(),
+        );
 
+        let sign_started_at = Instant::now();
         let signed_tx = match sign_copy_transaction(
             &build.instructions,
             keypair,
@@ -545,13 +643,22 @@ impl CopyExecutor {
             &self.address_lookup_tables,
         ) {
             Ok(signed_tx) => signed_tx,
-            Err(error) => return line.error(format!("sign transaction: {error}")),
+            Err(error) => {
+                line.record_sign_us(sign_started_at);
+                return line.error(format!("sign transaction: {error}"));
+            }
         };
+        line.record_sign_us(sign_started_at);
+        let serialize_started_at = Instant::now();
         let tx_bytes = match bincode::serialize(&signed_tx.transaction) {
             Ok(bytes) => bytes,
-            Err(error) => return line.error(format!("serialize signed transaction: {error}")),
+            Err(error) => {
+                line.record_serialize_us(serialize_started_at);
+                return line.error(format!("serialize signed transaction: {error}"));
+            }
         };
         let encoded_tx = STANDARD.encode(tx_bytes);
+        line.record_serialize_us(serialize_started_at);
 
         line.signed = true;
         line.mark_signed();
@@ -777,7 +884,10 @@ impl CopyExecutor {
             }
         };
 
-        let token_balance_raw = match self.auto_sell_token_balance_raw(&token_account).await {
+        let token_balance_raw = match self
+            .auto_sell_token_balance_raw(&token_account.to_string())
+            .await
+        {
             Ok(amount) if amount > 0 => amount,
             Ok(_) => {
                 line.skip_auto_sell("copy wallet token balance is zero after retries");
@@ -982,13 +1092,12 @@ fn estimate_total_copy_spend_lamports(
 fn estimate_priority_fee_lamports(
     instructions: &[solana_instruction::Instruction],
 ) -> Result<u64, String> {
-    let compute_budget_program = COMPUTE_BUDGET_PROGRAM_ID.to_string();
     let mut compute_unit_limit = 200_000u64;
     let mut compute_unit_price_micro_lamports = 0u64;
 
     for instruction in instructions
         .iter()
-        .filter(|instruction| instruction.program_id.to_string() == compute_budget_program)
+        .filter(|instruction| instruction.program_id == *compute_budget_program_id())
     {
         match instruction.data.first().copied() {
             Some(2) => {
@@ -1015,11 +1124,10 @@ fn estimate_priority_fee_lamports(
 fn estimate_system_transfer_lamports(
     instructions: &[solana_instruction::Instruction],
 ) -> Result<u64, String> {
-    let system_program = SYSTEM_PROGRAM_ID.to_string();
     let mut total = 0u64;
     for instruction in instructions
         .iter()
-        .filter(|instruction| instruction.program_id.to_string() == system_program)
+        .filter(|instruction| instruction.program_id == *system_program_id())
     {
         if instruction.data.len() >= 12 && read_u32_le(&instruction.data, 0) == Some(2) {
             let lamports = read_u64_le(&instruction.data, 4)
@@ -1035,9 +1143,8 @@ fn estimate_system_transfer_lamports(
 fn has_idempotent_associated_token_account_setup(
     instructions: &[solana_instruction::Instruction],
 ) -> bool {
-    let associated_token_program = ASSOCIATED_TOKEN_PROGRAM_ID.to_string();
     instructions.iter().any(|instruction| {
-        instruction.program_id.to_string() == associated_token_program
+        instruction.program_id == *associated_token_program_id()
             && instruction.data.as_slice() == [1]
     })
 }
@@ -1127,6 +1234,11 @@ impl CopyExecutionLine {
                 .planned_at_ms
                 .saturating_sub(timings.wallet_match_finished_at_ms),
             planned_to_built_ms: None,
+            executor_queue_us: None,
+            guards_us: None,
+            unsigned_build_us: None,
+            sign_us: None,
+            serialize_us: None,
             batch_transaction_count: timings.batch_transaction_count,
             matched_transaction_index: timings.matched_transaction_index,
             batch_scan_us: timings.batch_scan_us,
@@ -1217,6 +1329,22 @@ impl CopyExecutionLine {
         let timestamp = now_ms();
         self.built_at_ms = Some(timestamp);
         self.planned_to_built_ms = Some(timestamp.saturating_sub(self.planned_at_ms));
+    }
+
+    fn record_guards_us(&mut self, us: u128) {
+        self.guards_us = Some(us);
+    }
+
+    fn record_unsigned_build_us(&mut self, started_at: Instant) {
+        self.unsigned_build_us = Some(started_at.elapsed().as_micros());
+    }
+
+    fn record_sign_us(&mut self, started_at: Instant) {
+        self.sign_us = Some(started_at.elapsed().as_micros());
+    }
+
+    fn record_serialize_us(&mut self, started_at: Instant) {
+        self.serialize_us = Some(started_at.elapsed().as_micros());
     }
 
     fn mark_simulation_completed(&mut self) {
@@ -1634,7 +1762,9 @@ struct TokenAccountBalanceValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::{DirectPumpAccounts, FlashxPumpResolvedAccounts, MigratedAmmAccounts};
     use crate::planner::{execution_plan_line, PlannerOptions};
+    use solana_pubkey::Pubkey;
 
     const COPY_WALLET: &str = "FqhpPL63symHForRGfxPbGi4wDpe5jQqAVjntbbBqA5W";
 
@@ -1724,12 +1854,75 @@ mod tests {
             FlashxPumpLayout::DirectPump | FlashxPumpLayout::MigratedAmm => 0,
         });
 
+        let dummy: Pubkey = COPY_WALLET.parse().unwrap();
+        let flashx_router_program = *crate::parser::flashx_router_program_id();
+        let pump_program = *crate::parser::pump_fun_program_id();
+        let pump_amm_program = *crate::parser::pump_amm_program_id();
+        let resolved_accounts = match layout {
+            FlashxPumpLayout::DirectPump => {
+                FlashxPumpResolvedAccounts::DirectPump(DirectPumpAccounts {
+                    payer: dummy,
+                    target_wallet: dummy,
+                    flashx_router_program,
+                    pump_program,
+                    global_config: dummy,
+                    fee_recipient: dummy,
+                    mint: dummy,
+                    bonding_curve: dummy,
+                    associated_bonding_curve: dummy,
+                    user_token_account: dummy,
+                    system_program: *system_program_id(),
+                    token_program: dummy,
+                    creator_vault: dummy,
+                    event_authority: dummy,
+                    global_volume_accumulator: dummy,
+                    user_volume_accumulator: dummy,
+                    fee_config: dummy,
+                    fee_program: dummy,
+                    bonding_curve_v2: dummy,
+                    buyback_fee_recipient: dummy,
+                })
+            }
+            FlashxPumpLayout::MigratedAmm => {
+                FlashxPumpResolvedAccounts::MigratedAmm(MigratedAmmAccounts {
+                    payer: dummy,
+                    target_wallet: dummy,
+                    flashx_router_program,
+                    pump_amm_program,
+                    pool_state: dummy,
+                    global_config: dummy,
+                    mint: dummy,
+                    quote_mint: dummy,
+                    user_base_token_account: dummy,
+                    user_quote_token_account: dummy,
+                    pool_base_token_account: dummy,
+                    pool_quote_token_account: dummy,
+                    protocol_fee_recipient: dummy,
+                    protocol_fee_recipient_token_account: dummy,
+                    base_token_program: dummy,
+                    quote_token_program: dummy,
+                    system_program: *system_program_id(),
+                    associated_token_program: *associated_token_program_id(),
+                    event_authority: dummy,
+                    coin_creator_vault_ata: dummy,
+                    coin_creator_vault_authority: dummy,
+                    global_volume_accumulator: dummy,
+                    user_volume_accumulator: dummy,
+                    fee_config: dummy,
+                    fee_program: dummy,
+                    pool_v2: Some(dummy),
+                    buyback_fee_recipient: Some(dummy),
+                    buyback_fee_recipient_token_account: Some(dummy),
+                })
+            }
+        };
+
         RouteContext::FlashxPump(crate::parser::FlashxPumpRouteContext {
             layout,
-            program_id: crate::parser::FLASHX_ROUTER_PROGRAM_ID.to_string(),
+            program_id: flashx_router_program,
             accounts: Vec::new(),
             data,
-            resolved_accounts: Vec::new(),
+            resolved_accounts,
         })
     }
 
@@ -1742,6 +1935,7 @@ mod tests {
             send_endpoints,
             blockhash_cache: None,
             address_lookup_tables: AddressLookupTableCache::default(),
+            pda_cache: CopyPdaCache::default(),
         }
     }
 
@@ -1791,7 +1985,8 @@ mod tests {
         options.simulate_auto_sell = true;
         options.isolate_buy_latency_test = true;
 
-        let line = CopyExecutionLine::new(&plan, Action::Buy, Some(0.0005), &options);
+        let line =
+            CopyExecutionLine::new(&plan, Action::Buy, Some(0.0005), &options, sample_timings());
 
         assert!(line.buy_latency_test_isolated);
         assert!(!line.auto_sell_enabled);
@@ -1822,8 +2017,8 @@ mod tests {
         tip_data.extend_from_slice(&10_000u64.to_le_bytes());
         let build = crate::tx_builder::FullCopyUnsignedTxBuild {
             route_layout: "migrated-amm",
-            copy_wallet_token_account: "token".to_string(),
-            estimated_required_signer: COPY_WALLET.to_string(),
+            copy_wallet_token_account: COPY_WALLET.parse().unwrap(),
+            estimated_required_signer: COPY_WALLET.parse().unwrap(),
             setup_instruction_count: 4,
             main_instruction_count: 1,
             instructions: vec![

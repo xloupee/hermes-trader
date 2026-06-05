@@ -36,7 +36,6 @@ use tokio::sync::mpsc;
 
 pub(crate) async fn run(options: LiveOptions) -> Result<()> {
     let target_wallets = parse_target_wallets(&options.target_wallets)?;
-    let target_wallet_set = target_wallets.iter().cloned().collect::<HashSet<_>>();
     let target_wallet_pubkey_set = target_wallets
         .iter()
         .map(|wallet| Pubkey::from_str(wallet))
@@ -146,6 +145,12 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
             )
         })?;
     let (copy_execution_tx, mut copy_execution_rx) = mpsc::unbounded_channel();
+    let (copy_execution_request_tx, copy_execution_request_rx) = mpsc::unbounded_channel();
+    spawn_copy_execution_worker(
+        Arc::clone(&copy_executor),
+        copy_execution_request_rx,
+        copy_execution_tx.clone(),
+    );
     let mut signal_observations = SignalObservationWriter::from_options(&options)?;
     let mut emitted = 0usize;
 
@@ -265,7 +270,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                 match parse_trade_for_mentioned_targets(
                     &versioned_tx,
                     &account_keys,
-                    &target_wallet_set,
+                    &target_wallet_pubkey_set,
                 ) {
                     Some(parsed) => {
                         let trade_parsed_at = Instant::now();
@@ -320,9 +325,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 copy_sol_amount: options.copy_plan_sol_amount,
                             },
                         );
-                        spawn_copy_execution(
-                            Arc::clone(&copy_executor),
-                            copy_execution_tx.clone(),
+                        enqueue_copy_execution(
+                            &copy_execution_request_tx,
                             execution_plan.clone(),
                             parsed.action,
                             parsed.sol_amount,
@@ -451,27 +455,57 @@ struct CopyExecutionWriter {
     file: Option<BufWriter<File>>,
 }
 
-fn spawn_copy_execution(
+struct CopyExecutionRequest {
+    execution_plan: ExecutionPlanLine,
+    observed_action: crate::parser::Action,
+    observed_sol_amount: Option<f64>,
+    timings: SignalTimings,
+    executor_enqueued_at: Instant,
+}
+
+fn spawn_copy_execution_worker(
     copy_executor: Arc<CopyExecutor>,
+    mut copy_execution_request_rx: mpsc::UnboundedReceiver<CopyExecutionRequest>,
     copy_execution_tx: mpsc::UnboundedSender<CopyExecutionLine>,
+) {
+    tokio::spawn(async move {
+        while let Some(request) = copy_execution_request_rx.recv().await {
+            let copy_execution = copy_executor
+                .handle_with_executor_enqueued_at(
+                    &request.execution_plan,
+                    request.observed_action,
+                    request.observed_sol_amount,
+                    request.timings,
+                    request.executor_enqueued_at,
+                )
+                .await;
+            if copy_execution_tx.send(copy_execution).is_err() {
+                eprintln!("copy execution result dropped; receiver closed");
+                break;
+            }
+        }
+    });
+}
+
+fn enqueue_copy_execution(
+    copy_execution_request_tx: &mpsc::UnboundedSender<CopyExecutionRequest>,
     execution_plan: ExecutionPlanLine,
     observed_action: crate::parser::Action,
     observed_sol_amount: Option<f64>,
     timings: SignalTimings,
 ) {
-    tokio::spawn(async move {
-        let copy_execution = copy_executor
-            .handle(
-                &execution_plan,
-                observed_action,
-                observed_sol_amount,
-                timings,
-            )
-            .await;
-        if copy_execution_tx.send(copy_execution).is_err() {
-            eprintln!("copy execution result dropped; receiver closed");
-        }
-    });
+    if copy_execution_request_tx
+        .send(CopyExecutionRequest {
+            execution_plan,
+            observed_action,
+            observed_sol_amount,
+            timings,
+            executor_enqueued_at: Instant::now(),
+        })
+        .is_err()
+    {
+        eprintln!("copy execution request dropped; worker closed");
+    }
 }
 
 fn drain_copy_execution_results(

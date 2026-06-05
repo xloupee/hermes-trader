@@ -1,6 +1,6 @@
 use crate::{
     event::ShadowSignalLine,
-    parser::{Action, ResolvedRouteAccount, Route, RouteContext},
+    parser::{Action, ResolvedRouteAccountJson, Route, RouteContext},
     tx_builder::{
         build_copy_unsigned_flashx_pump, build_full_copy_unsigned_flashx_pump,
         build_unsigned_flashx_pump, TxBuildError,
@@ -81,7 +81,7 @@ pub(crate) struct TxBuildPlanLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     route_layout: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    resolved_accounts: Vec<ResolvedRouteAccount>,
+    resolved_accounts: Vec<ResolvedRouteAccountJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     missing_account_reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -335,7 +335,7 @@ struct TxBuildDecision {
     required_accounts: Vec<&'static str>,
     instruction_count: usize,
     route_layout: Option<&'static str>,
-    resolved_accounts: Vec<ResolvedRouteAccount>,
+    resolved_accounts: Vec<ResolvedRouteAccountJson>,
     missing_account_reason: Option<&'static str>,
     reason: Option<&'static str>,
 }
@@ -470,7 +470,7 @@ fn copy_tx_decision(
             decision: "buildable",
             copied_instruction_count: build.instructions.len(),
             route_layout: Some(build.route_layout),
-            copy_wallet_token_account: Some(build.copy_wallet_token_account),
+            copy_wallet_token_account: Some(build.copy_wallet_token_account.to_string()),
             missing_reason: None,
             reason: None,
         },
@@ -571,8 +571,8 @@ fn unsigned_tx_decision(
             setup_instruction_count: build.setup_instruction_count,
             main_instruction_count: build.main_instruction_count,
             route_layout: Some(build.route_layout),
-            copy_wallet_token_account: Some(build.copy_wallet_token_account),
-            estimated_required_signer: Some(build.estimated_required_signer),
+            copy_wallet_token_account: Some(build.copy_wallet_token_account.to_string()),
+            estimated_required_signer: Some(build.estimated_required_signer.to_string()),
             missing_reason: None,
             reason: None,
         },
@@ -658,7 +658,9 @@ mod tests {
         parser::{parse_trade, static_account_keys, versioned_tx_signature_string},
     };
     use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use solana_pubkey::Pubkey;
     use solana_transaction::versioned::VersionedTransaction;
+    use std::str::FromStr;
 
     const TARGET_WALLET: &str = "A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS";
     const MIGRATED_BUY_SIGNATURE: &str =
@@ -1169,7 +1171,7 @@ mod tests {
         bincode::deserialize(&bytes).expect("fixture decodes as a VersionedTransaction")
     }
 
-    fn migrated_buy_hydrated_account_keys(transaction: &VersionedTransaction) -> Vec<String> {
+    fn migrated_buy_hydrated_account_keys(transaction: &VersionedTransaction) -> Vec<Pubkey> {
         let mut account_keys = static_account_keys(transaction);
         account_keys.extend(
             [
@@ -1192,14 +1194,14 @@ mod tests {
                 "GXPFM2caqTtQYC2cJ5yJRi9VDkpsYZXzYdwYpGnLmtDL",
             ]
             .into_iter()
-            .map(ToString::to_string),
+            .map(pubkey),
         );
         account_keys
     }
 
     fn live_direct_pump_buy_hydrated_account_keys(
         transaction: &VersionedTransaction,
-    ) -> Vec<String> {
+    ) -> Vec<Pubkey> {
         let mut account_keys = static_account_keys(transaction);
         account_keys.extend(
             [
@@ -1218,8 +1220,12 @@ mod tests {
                 "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ",
             ]
             .into_iter()
-            .map(ToString::to_string),
+            .map(pubkey),
         );
         account_keys
+    }
+
+    fn pubkey(value: &str) -> Pubkey {
+        Pubkey::from_str(value).expect("fixture pubkey is valid")
     }
 }

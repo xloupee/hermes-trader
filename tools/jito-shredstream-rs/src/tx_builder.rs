@@ -1,11 +1,11 @@
 use crate::parser::{
-    read_u64_le, FlashxPumpLayout, ResolvedRouteAccount, RouteContext, ASSOCIATED_TOKEN_PROGRAM_ID,
-    COMPUTE_BUDGET_PROGRAM_ID, PUMP_AMM_PROGRAM_ID, PUMP_FUN_PROGRAM_ID,
-    PUMP_FUN_SELL_DISCRIMINATOR, SYSTEM_PROGRAM_ID,
+    associated_token_program_id, compute_budget_program_id, pump_amm_program_id,
+    pump_fun_program_id, read_u64_le, system_program_id, FlashxPumpLayout,
+    ResolvedRouteAccountJson, RouteContext, PUMP_FUN_SELL_DISCRIMINATOR,
 };
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr, sync::Mutex};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TxFeeConfig {
@@ -17,7 +17,7 @@ pub(crate) struct TxFeeConfig {
 #[derive(Debug)]
 pub(crate) struct UnsignedTxBuild {
     pub(crate) route_layout: &'static str,
-    pub(crate) resolved_accounts: Vec<ResolvedRouteAccount>,
+    pub(crate) resolved_accounts: Vec<ResolvedRouteAccountJson>,
     pub(crate) instructions: Vec<Instruction>,
 }
 
@@ -31,18 +31,45 @@ pub(crate) enum TxBuildError {
 #[derive(Debug)]
 pub(crate) struct CopyUnsignedTxBuild {
     pub(crate) route_layout: &'static str,
-    pub(crate) copy_wallet_token_account: String,
+    pub(crate) copy_wallet_token_account: Pubkey,
     pub(crate) instructions: Vec<Instruction>,
 }
 
 #[derive(Debug)]
 pub(crate) struct FullCopyUnsignedTxBuild {
     pub(crate) route_layout: &'static str,
-    pub(crate) copy_wallet_token_account: String,
-    pub(crate) estimated_required_signer: String,
+    pub(crate) copy_wallet_token_account: Pubkey,
+    pub(crate) estimated_required_signer: Pubkey,
     pub(crate) setup_instruction_count: usize,
     pub(crate) main_instruction_count: usize,
     pub(crate) instructions: Vec<Instruction>,
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct CopyPdaCache {
+    associated_token_accounts: Mutex<HashMap<AssociatedTokenAddressKey, Pubkey>>,
+    user_volume_accumulators: Mutex<HashMap<UserVolumeAccumulatorKey, Pubkey>>,
+    flashx_wrapped_sol_accounts: Mutex<HashMap<FlashxWrappedSolAccountKey, (Pubkey, u8)>>,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct AssociatedTokenAddressKey {
+    wallet: Pubkey,
+    mint: Pubkey,
+    token_program: Pubkey,
+    associated_token_program: Pubkey,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct UserVolumeAccumulatorKey {
+    wallet: Pubkey,
+    pump_program: Pubkey,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct FlashxWrappedSolAccountKey {
+    wallet: Pubkey,
+    flashx_program: Pubkey,
 }
 
 const PUMP_FUN_BUY_EXACT_SOL_IN_DISCRIMINATOR: [u8; 8] = [56, 252, 116, 8, 158, 223, 205, 95];
@@ -67,7 +94,7 @@ pub(crate) fn build_unsigned_flashx_pump(
         ));
     }
 
-    if context.accounts.is_empty() || context.resolved_accounts.is_empty() {
+    if context.accounts.is_empty() {
         return Err(TxBuildError::MissingRouteContext(
             "missing flashx-pump migrated route accounts",
         ));
@@ -79,24 +106,21 @@ pub(crate) fn build_unsigned_flashx_pump(
         ));
     }
 
-    let program_id = parse_pubkey(&context.program_id)?;
     let accounts = context
         .accounts
         .iter()
-        .map(|account| {
-            Ok(AccountMeta {
-                pubkey: parse_pubkey(&account.pubkey)?,
-                is_signer: account.is_signer,
-                is_writable: account.is_writable,
-            })
+        .map(|account| AccountMeta {
+            pubkey: account.pubkey,
+            is_signer: account.is_signer,
+            is_writable: account.is_writable,
         })
-        .collect::<Result<Vec<_>, TxBuildError>>()?;
+        .collect::<Vec<_>>();
 
     Ok(UnsignedTxBuild {
         route_layout: context.layout.as_str(),
-        resolved_accounts: context.resolved_accounts.clone(),
+        resolved_accounts: context.resolved_accounts_for_json(),
         instructions: vec![Instruction {
-            program_id,
+            program_id: context.program_id,
             accounts,
             data: context.data.clone(),
         }],
@@ -112,6 +136,15 @@ pub(crate) fn build_copy_unsigned_flashx_pump(
     copy_wallet: &str,
     mint: &str,
 ) -> Result<CopyUnsignedTxBuild, TxBuildError> {
+    build_copy_unsigned_flashx_pump_with_cache(route_context, copy_wallet, mint, None)
+}
+
+fn build_copy_unsigned_flashx_pump_with_cache(
+    route_context: Option<&RouteContext>,
+    copy_wallet: &str,
+    mint: &str,
+    pda_cache: Option<&CopyPdaCache>,
+) -> Result<CopyUnsignedTxBuild, TxBuildError> {
     let Some(RouteContext::FlashxPump(context)) = route_context else {
         return Err(TxBuildError::UnsupportedLayout(
             "unsupported flashx-pump copy layout",
@@ -126,10 +159,10 @@ pub(crate) fn build_copy_unsigned_flashx_pump(
 
     match context.layout {
         FlashxPumpLayout::DirectPump => {
-            build_copy_unsigned_flashx_direct_pump(context, copy_wallet, mint)
+            build_copy_unsigned_flashx_direct_pump(context, copy_wallet, mint, pda_cache)
         }
         FlashxPumpLayout::MigratedAmm => {
-            build_copy_unsigned_flashx_migrated_amm(context, copy_wallet, mint)
+            build_copy_unsigned_flashx_migrated_amm(context, copy_wallet, mint, pda_cache)
         }
     }
 }
@@ -138,19 +171,22 @@ fn build_copy_unsigned_flashx_direct_pump(
     context: &crate::parser::FlashxPumpRouteContext,
     copy_wallet: &str,
     mint: &str,
+    pda_cache: Option<&CopyPdaCache>,
 ) -> Result<CopyUnsignedTxBuild, TxBuildError> {
-    let token_program = resolved_pubkey(&context.resolved_accounts, "tokenProgram")?;
+    let token_program = resolved_pubkey(context, "tokenProgram")?;
     let copy_wallet = parse_pubkey(copy_wallet)?;
     let mint = parse_pubkey(mint)?;
-    let associated_token_program = parse_pubkey(ASSOCIATED_TOKEN_PROGRAM_ID)?;
-    let pump_program = parse_pubkey(PUMP_FUN_PROGRAM_ID)?;
-    let copy_wallet_token_account = associated_token_address(
+    let associated_token_program = *associated_token_program_id();
+    let pump_program = *pump_fun_program_id();
+    let copy_wallet_token_account = associated_token_address_cached(
+        pda_cache,
         &copy_wallet,
         &mint,
         &token_program,
         &associated_token_program,
     );
-    let copy_user_volume_accumulator = user_volume_accumulator_address(&copy_wallet, &pump_program);
+    let copy_user_volume_accumulator =
+        user_volume_accumulator_address_cached(pda_cache, &copy_wallet, &pump_program);
 
     let spendable_sol_in = read_u64_le(&context.data, 1).ok_or(
         TxBuildError::InvalidInstruction("missing flashx SOL amount"),
@@ -163,71 +199,29 @@ fn build_copy_unsigned_flashx_direct_pump(
     buy_data.push(1);
 
     let accounts = vec![
-        AccountMeta::new_readonly(
-            resolved_pubkey(&context.resolved_accounts, "globalConfig")?,
-            false,
-        ),
-        AccountMeta::new(
-            resolved_pubkey(&context.resolved_accounts, "feeRecipient")?,
-            false,
-        ),
+        AccountMeta::new_readonly(resolved_pubkey(context, "globalConfig")?, false),
+        AccountMeta::new(resolved_pubkey(context, "feeRecipient")?, false),
         AccountMeta::new_readonly(mint, false),
-        AccountMeta::new(
-            resolved_pubkey(&context.resolved_accounts, "bondingCurve")?,
-            false,
-        ),
-        AccountMeta::new(
-            resolved_pubkey(&context.resolved_accounts, "associatedBondingCurve")?,
-            false,
-        ),
+        AccountMeta::new(resolved_pubkey(context, "bondingCurve")?, false),
+        AccountMeta::new(resolved_pubkey(context, "associatedBondingCurve")?, false),
         AccountMeta::new(copy_wallet_token_account, false),
         AccountMeta::new(copy_wallet, true),
-        AccountMeta::new_readonly(
-            resolved_pubkey(&context.resolved_accounts, "systemProgram")?,
-            false,
-        ),
-        AccountMeta::new_readonly(
-            resolved_pubkey(&context.resolved_accounts, "tokenProgram")?,
-            false,
-        ),
-        AccountMeta::new(
-            resolved_pubkey(&context.resolved_accounts, "creatorVault")?,
-            false,
-        ),
-        AccountMeta::new_readonly(
-            resolved_pubkey(&context.resolved_accounts, "eventAuthority")?,
-            false,
-        ),
-        AccountMeta::new_readonly(
-            resolved_pubkey(&context.resolved_accounts, "pumpProgram")?,
-            false,
-        ),
-        AccountMeta::new_readonly(
-            resolved_pubkey(&context.resolved_accounts, "globalVolumeAccumulator")?,
-            false,
-        ),
+        AccountMeta::new_readonly(resolved_pubkey(context, "systemProgram")?, false),
+        AccountMeta::new_readonly(resolved_pubkey(context, "tokenProgram")?, false),
+        AccountMeta::new(resolved_pubkey(context, "creatorVault")?, false),
+        AccountMeta::new_readonly(resolved_pubkey(context, "eventAuthority")?, false),
+        AccountMeta::new_readonly(resolved_pubkey(context, "pumpProgram")?, false),
+        AccountMeta::new_readonly(resolved_pubkey(context, "globalVolumeAccumulator")?, false),
         AccountMeta::new(copy_user_volume_accumulator, false),
-        AccountMeta::new_readonly(
-            resolved_pubkey(&context.resolved_accounts, "feeConfig")?,
-            false,
-        ),
-        AccountMeta::new_readonly(
-            resolved_pubkey(&context.resolved_accounts, "feeProgram")?,
-            false,
-        ),
-        AccountMeta::new_readonly(
-            resolved_pubkey(&context.resolved_accounts, "bondingCurveV2")?,
-            false,
-        ),
-        AccountMeta::new(
-            resolved_pubkey(&context.resolved_accounts, "buybackFeeRecipient")?,
-            false,
-        ),
+        AccountMeta::new_readonly(resolved_pubkey(context, "feeConfig")?, false),
+        AccountMeta::new_readonly(resolved_pubkey(context, "feeProgram")?, false),
+        AccountMeta::new_readonly(resolved_pubkey(context, "bondingCurveV2")?, false),
+        AccountMeta::new(resolved_pubkey(context, "buybackFeeRecipient")?, false),
     ];
 
     Ok(CopyUnsignedTxBuild {
         route_layout: context.layout.as_str(),
-        copy_wallet_token_account: copy_wallet_token_account.to_string(),
+        copy_wallet_token_account,
         instructions: vec![Instruction {
             program_id: pump_program,
             accounts,
@@ -240,34 +234,32 @@ fn build_copy_unsigned_flashx_migrated_amm(
     context: &crate::parser::FlashxPumpRouteContext,
     copy_wallet: &str,
     mint: &str,
+    pda_cache: Option<&CopyPdaCache>,
 ) -> Result<CopyUnsignedTxBuild, TxBuildError> {
     let copy_wallet = parse_pubkey(copy_wallet)?;
     let mint = parse_pubkey(mint)?;
-    let flashx_program = parse_pubkey(&context.program_id)?;
-    let pump_amm_program = resolved_pubkey(&context.resolved_accounts, "pumpAmmProgram")?;
-    let base_token_program = resolved_pubkey(&context.resolved_accounts, "baseTokenProgram")?;
-    let associated_token_program =
-        resolved_pubkey(&context.resolved_accounts, "associatedTokenProgram")?;
-    let system_program = resolved_pubkey(&context.resolved_accounts, "systemProgram")?;
-    let quote_mint = resolved_pubkey(&context.resolved_accounts, "quoteMint")?;
-    let quote_token_program = resolved_pubkey(&context.resolved_accounts, "quoteTokenProgram")?;
-    let target_quote_token_account =
-        resolved_pubkey(&context.resolved_accounts, "userQuoteTokenAccount")?;
-    let target_wallet = resolved_pubkey(&context.resolved_accounts, "targetWallet")?;
-    let target_base_token_account =
-        resolved_pubkey(&context.resolved_accounts, "userBaseTokenAccount")?;
-    let target_user_volume_accumulator =
-        resolved_pubkey(&context.resolved_accounts, "userVolumeAccumulator")?;
-    let copy_base_token_account = associated_token_address(
+    let flashx_program = context.program_id;
+    let pump_amm_program = resolved_pubkey(context, "pumpAmmProgram")?;
+    let base_token_program = resolved_pubkey(context, "baseTokenProgram")?;
+    let associated_token_program = resolved_pubkey(context, "associatedTokenProgram")?;
+    let system_program = resolved_pubkey(context, "systemProgram")?;
+    let quote_mint = resolved_pubkey(context, "quoteMint")?;
+    let quote_token_program = resolved_pubkey(context, "quoteTokenProgram")?;
+    let target_quote_token_account = resolved_pubkey(context, "userQuoteTokenAccount")?;
+    let target_wallet = resolved_pubkey(context, "targetWallet")?;
+    let target_base_token_account = resolved_pubkey(context, "userBaseTokenAccount")?;
+    let target_user_volume_accumulator = resolved_pubkey(context, "userVolumeAccumulator")?;
+    let copy_base_token_account = associated_token_address_cached(
+        pda_cache,
         &copy_wallet,
         &mint,
         &base_token_program,
         &associated_token_program,
     );
     let (copy_quote_token_account, copy_quote_bump) =
-        flashx_wrapped_sol_account_address(&copy_wallet, &flashx_program);
+        flashx_wrapped_sol_account_address_cached(pda_cache, &copy_wallet, &flashx_program);
     let copy_user_volume_accumulator =
-        user_volume_accumulator_address(&copy_wallet, &pump_amm_program);
+        user_volume_accumulator_address_cached(pda_cache, &copy_wallet, &pump_amm_program);
 
     let spendable_sol_in = read_u64_le(&context.data, 1).ok_or(
         TxBuildError::InvalidInstruction("missing flashx SOL amount"),
@@ -297,7 +289,7 @@ fn build_copy_unsigned_flashx_migrated_amm(
         .accounts
         .iter()
         .map(|account| {
-            let mut pubkey = parse_pubkey(&account.pubkey)?;
+            let mut pubkey = account.pubkey;
             let mut is_signer = account.is_signer;
             let mut is_writable = account.is_writable;
             if pubkey == target_wallet {
@@ -312,17 +304,17 @@ fn build_copy_unsigned_flashx_migrated_amm(
                 pubkey = copy_user_volume_accumulator;
             }
 
-            Ok(AccountMeta {
+            AccountMeta {
                 pubkey,
                 is_signer,
                 is_writable,
-            })
+            }
         })
-        .collect::<Result<Vec<_>, TxBuildError>>()?;
+        .collect::<Vec<_>>();
 
     Ok(CopyUnsignedTxBuild {
         route_layout: context.layout.as_str(),
-        copy_wallet_token_account: copy_base_token_account.to_string(),
+        copy_wallet_token_account: copy_base_token_account,
         instructions: vec![
             setup_instruction,
             Instruction {
@@ -363,7 +355,24 @@ pub(crate) fn build_full_copy_unsigned_flashx_pump_with_fees(
     mint: &str,
     fee_config: &TxFeeConfig,
 ) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
-    let copy_build = build_copy_unsigned_flashx_pump(route_context, copy_wallet, mint)?;
+    build_full_copy_unsigned_flashx_pump_with_fees_and_cache(
+        route_context,
+        copy_wallet,
+        mint,
+        fee_config,
+        None,
+    )
+}
+
+pub(crate) fn build_full_copy_unsigned_flashx_pump_with_fees_and_cache(
+    route_context: Option<&RouteContext>,
+    copy_wallet: &str,
+    mint: &str,
+    fee_config: &TxFeeConfig,
+    pda_cache: Option<&CopyPdaCache>,
+) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
+    let copy_build =
+        build_copy_unsigned_flashx_pump_with_cache(route_context, copy_wallet, mint, pda_cache)?;
     let Some(RouteContext::FlashxPump(context)) = route_context else {
         return Err(TxBuildError::UnsupportedLayout(
             "unsupported flashx-pump copy layout",
@@ -371,18 +380,14 @@ pub(crate) fn build_full_copy_unsigned_flashx_pump_with_fees(
     };
 
     let copy_wallet_pubkey = parse_pubkey(copy_wallet)?;
-    let copy_wallet_token_account = parse_pubkey(&copy_build.copy_wallet_token_account)?;
+    let copy_wallet_token_account = copy_build.copy_wallet_token_account;
     let mint = parse_pubkey(mint)?;
     let token_program = match context.layout {
-        FlashxPumpLayout::DirectPump => {
-            resolved_pubkey(&context.resolved_accounts, "tokenProgram")?
-        }
-        FlashxPumpLayout::MigratedAmm => {
-            resolved_pubkey(&context.resolved_accounts, "baseTokenProgram")?
-        }
+        FlashxPumpLayout::DirectPump => resolved_pubkey(context, "tokenProgram")?,
+        FlashxPumpLayout::MigratedAmm => resolved_pubkey(context, "baseTokenProgram")?,
     };
-    let associated_token_program = parse_pubkey(ASSOCIATED_TOKEN_PROGRAM_ID)?;
-    let system_program = parse_pubkey(SYSTEM_PROGRAM_ID)?;
+    let associated_token_program = *associated_token_program_id();
+    let system_program = *system_program_id();
 
     let mut instructions = Vec::with_capacity(copy_build.instructions.len() + 4);
     instructions.push(compute_unit_limit_instruction(400_000)?);
@@ -423,8 +428,8 @@ pub(crate) fn build_full_copy_unsigned_flashx_pump_with_fees(
 
     Ok(FullCopyUnsignedTxBuild {
         route_layout: copy_build.route_layout,
-        copy_wallet_token_account: copy_wallet_token_account.to_string(),
-        estimated_required_signer: copy_wallet_pubkey.to_string(),
+        copy_wallet_token_account,
+        estimated_required_signer: copy_wallet_pubkey,
         setup_instruction_count,
         main_instruction_count,
         instructions,
@@ -475,8 +480,8 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
     mint: &str,
     token_amount_raw: u64,
 ) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
-    let pump_program = parse_pubkey(PUMP_FUN_PROGRAM_ID)?;
-    let copy_wallet_token_account = parse_pubkey(&copy_build.copy_wallet_token_account)?;
+    let pump_program = *pump_fun_program_id();
+    let copy_wallet_token_account = copy_build.copy_wallet_token_account;
     let copy_wallet_pubkey = parse_pubkey(copy_wallet)?;
 
     let mut sell_data = Vec::with_capacity(24);
@@ -487,61 +492,22 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
     let sell_instruction = Instruction {
         program_id: pump_program,
         accounts: vec![
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "globalConfig")?,
-                false,
-            ),
-            AccountMeta::new(
-                resolved_pubkey(&context.resolved_accounts, "feeRecipient")?,
-                false,
-            ),
+            AccountMeta::new_readonly(resolved_pubkey(context, "globalConfig")?, false),
+            AccountMeta::new(resolved_pubkey(context, "feeRecipient")?, false),
             AccountMeta::new_readonly(parse_pubkey(mint)?, false),
-            AccountMeta::new(
-                resolved_pubkey(&context.resolved_accounts, "bondingCurve")?,
-                false,
-            ),
-            AccountMeta::new(
-                resolved_pubkey(&context.resolved_accounts, "associatedBondingCurve")?,
-                false,
-            ),
+            AccountMeta::new(resolved_pubkey(context, "bondingCurve")?, false),
+            AccountMeta::new(resolved_pubkey(context, "associatedBondingCurve")?, false),
             AccountMeta::new(copy_wallet_token_account, false),
             AccountMeta::new(copy_wallet_pubkey, true),
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "systemProgram")?,
-                false,
-            ),
-            AccountMeta::new(
-                resolved_pubkey(&context.resolved_accounts, "creatorVault")?,
-                false,
-            ),
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "tokenProgram")?,
-                false,
-            ),
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "eventAuthority")?,
-                false,
-            ),
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "pumpProgram")?,
-                false,
-            ),
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "feeConfig")?,
-                false,
-            ),
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "feeProgram")?,
-                false,
-            ),
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "bondingCurveV2")?,
-                false,
-            ),
-            AccountMeta::new(
-                resolved_pubkey(&context.resolved_accounts, "buybackFeeRecipient")?,
-                false,
-            ),
+            AccountMeta::new_readonly(resolved_pubkey(context, "systemProgram")?, false),
+            AccountMeta::new(resolved_pubkey(context, "creatorVault")?, false),
+            AccountMeta::new_readonly(resolved_pubkey(context, "tokenProgram")?, false),
+            AccountMeta::new_readonly(resolved_pubkey(context, "eventAuthority")?, false),
+            AccountMeta::new_readonly(resolved_pubkey(context, "pumpProgram")?, false),
+            AccountMeta::new_readonly(resolved_pubkey(context, "feeConfig")?, false),
+            AccountMeta::new_readonly(resolved_pubkey(context, "feeProgram")?, false),
+            AccountMeta::new_readonly(resolved_pubkey(context, "bondingCurveV2")?, false),
+            AccountMeta::new(resolved_pubkey(context, "buybackFeeRecipient")?, false),
         ],
         data: sell_data,
     };
@@ -553,7 +519,7 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
     Ok(FullCopyUnsignedTxBuild {
         route_layout: copy_build.route_layout,
         copy_wallet_token_account: copy_build.copy_wallet_token_account,
-        estimated_required_signer: copy_wallet_pubkey.to_string(),
+        estimated_required_signer: copy_wallet_pubkey,
         setup_instruction_count: 1,
         main_instruction_count: instructions.len().saturating_sub(1),
         instructions,
@@ -568,15 +534,14 @@ fn build_auto_sell_unsigned_flashx_migrated_amm(
     token_amount_raw: u64,
 ) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
     let copy_wallet_pubkey = parse_pubkey(copy_wallet)?;
-    let copy_base_token_account = parse_pubkey(&copy_build.copy_wallet_token_account)?;
+    let copy_base_token_account = copy_build.copy_wallet_token_account;
     let mint = parse_pubkey(mint)?;
-    let pump_amm_program = resolved_pubkey(&context.resolved_accounts, "pumpAmmProgram")
-        .or_else(|_| parse_pubkey(PUMP_AMM_PROGRAM_ID))?;
-    let quote_mint = resolved_pubkey(&context.resolved_accounts, "quoteMint")?;
-    let quote_token_program = resolved_pubkey(&context.resolved_accounts, "quoteTokenProgram")?;
-    let associated_token_program =
-        resolved_pubkey(&context.resolved_accounts, "associatedTokenProgram")?;
-    let system_program = resolved_pubkey(&context.resolved_accounts, "systemProgram")?;
+    let pump_amm_program =
+        resolved_pubkey(context, "pumpAmmProgram").unwrap_or_else(|_| *pump_amm_program_id());
+    let quote_mint = resolved_pubkey(context, "quoteMint")?;
+    let quote_token_program = resolved_pubkey(context, "quoteTokenProgram")?;
+    let associated_token_program = resolved_pubkey(context, "associatedTokenProgram")?;
+    let system_program = resolved_pubkey(context, "systemProgram")?;
     let copy_quote_token_account = associated_token_address(
         &copy_wallet_pubkey,
         &quote_mint,
@@ -591,79 +556,37 @@ fn build_auto_sell_unsigned_flashx_migrated_amm(
     let sell_instruction = Instruction {
         program_id: pump_amm_program,
         accounts: vec![
-            AccountMeta::new(
-                resolved_pubkey(&context.resolved_accounts, "poolState")?,
-                false,
-            ),
+            AccountMeta::new(resolved_pubkey(context, "poolState")?, false),
             AccountMeta::new(copy_wallet_pubkey, true),
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "globalConfig")?,
-                false,
-            ),
+            AccountMeta::new_readonly(resolved_pubkey(context, "globalConfig")?, false),
             AccountMeta::new_readonly(mint, false),
             AccountMeta::new_readonly(quote_mint, false),
             AccountMeta::new(copy_base_token_account, false),
             AccountMeta::new(copy_quote_token_account, false),
+            AccountMeta::new(resolved_pubkey(context, "poolBaseTokenAccount")?, false),
+            AccountMeta::new(resolved_pubkey(context, "poolQuoteTokenAccount")?, false),
+            AccountMeta::new_readonly(resolved_pubkey(context, "protocolFeeRecipient")?, false),
             AccountMeta::new(
-                resolved_pubkey(&context.resolved_accounts, "poolBaseTokenAccount")?,
+                resolved_pubkey(context, "protocolFeeRecipientTokenAccount")?,
                 false,
             ),
-            AccountMeta::new(
-                resolved_pubkey(&context.resolved_accounts, "poolQuoteTokenAccount")?,
-                false,
-            ),
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "protocolFeeRecipient")?,
-                false,
-            ),
-            AccountMeta::new(
-                resolved_pubkey(
-                    &context.resolved_accounts,
-                    "protocolFeeRecipientTokenAccount",
-                )?,
-                false,
-            ),
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "baseTokenProgram")?,
-                false,
-            ),
+            AccountMeta::new_readonly(resolved_pubkey(context, "baseTokenProgram")?, false),
             AccountMeta::new_readonly(quote_token_program, false),
             AccountMeta::new_readonly(system_program, false),
             AccountMeta::new_readonly(associated_token_program, false),
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "eventAuthority")?,
-                false,
-            ),
+            AccountMeta::new_readonly(resolved_pubkey(context, "eventAuthority")?, false),
             AccountMeta::new_readonly(pump_amm_program, false),
+            AccountMeta::new(resolved_pubkey(context, "coinCreatorVaultAta")?, false),
+            AccountMeta::new_readonly(
+                resolved_pubkey(context, "coinCreatorVaultAuthority")?,
+                false,
+            ),
+            AccountMeta::new_readonly(resolved_pubkey(context, "feeConfig")?, false),
+            AccountMeta::new_readonly(resolved_pubkey(context, "feeProgram")?, false),
+            AccountMeta::new_readonly(resolved_pubkey(context, "poolV2")?, false),
+            AccountMeta::new_readonly(resolved_pubkey(context, "buybackFeeRecipient")?, false),
             AccountMeta::new(
-                resolved_pubkey(&context.resolved_accounts, "coinCreatorVaultAta")?,
-                false,
-            ),
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "coinCreatorVaultAuthority")?,
-                false,
-            ),
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "feeConfig")?,
-                false,
-            ),
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "feeProgram")?,
-                false,
-            ),
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "poolV2")?,
-                false,
-            ),
-            AccountMeta::new_readonly(
-                resolved_pubkey(&context.resolved_accounts, "buybackFeeRecipient")?,
-                false,
-            ),
-            AccountMeta::new(
-                resolved_pubkey(
-                    &context.resolved_accounts,
-                    "buybackFeeRecipientTokenAccount",
-                )?,
+                resolved_pubkey(context, "buybackFeeRecipientTokenAccount")?,
                 false,
             ),
         ],
@@ -692,7 +615,7 @@ fn build_auto_sell_unsigned_flashx_migrated_amm(
     Ok(FullCopyUnsignedTxBuild {
         route_layout: copy_build.route_layout,
         copy_wallet_token_account: copy_build.copy_wallet_token_account,
-        estimated_required_signer: copy_wallet_pubkey.to_string(),
+        estimated_required_signer: copy_wallet_pubkey,
         setup_instruction_count: 2,
         main_instruction_count: 2,
         instructions,
@@ -700,16 +623,14 @@ fn build_auto_sell_unsigned_flashx_migrated_amm(
 }
 
 fn resolved_pubkey(
-    resolved_accounts: &[ResolvedRouteAccount],
+    context: &crate::parser::FlashxPumpRouteContext,
     role: &'static str,
 ) -> Result<Pubkey, TxBuildError> {
-    let account = resolved_accounts
-        .iter()
-        .find(|account| account.role == role)
+    context
+        .resolved_pubkey(role)
         .ok_or(TxBuildError::MissingRouteContext(
             "missing direct-pump route account",
-        ))?;
-    parse_pubkey(&account.pubkey)
+        ))
 }
 
 fn associated_token_address(
@@ -725,35 +646,131 @@ fn associated_token_address(
     .0
 }
 
+fn associated_token_address_cached(
+    cache: Option<&CopyPdaCache>,
+    wallet: &Pubkey,
+    mint: &Pubkey,
+    token_program: &Pubkey,
+    associated_token_program: &Pubkey,
+) -> Pubkey {
+    let Some(cache) = cache else {
+        return associated_token_address(wallet, mint, token_program, associated_token_program);
+    };
+    cache.associated_token_address(wallet, mint, token_program, associated_token_program)
+}
+
 fn user_volume_accumulator_address(wallet: &Pubkey, pump_program: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"user_volume_accumulator", wallet.as_ref()], pump_program).0
+}
+
+fn user_volume_accumulator_address_cached(
+    cache: Option<&CopyPdaCache>,
+    wallet: &Pubkey,
+    pump_program: &Pubkey,
+) -> Pubkey {
+    let Some(cache) = cache else {
+        return user_volume_accumulator_address(wallet, pump_program);
+    };
+    cache.user_volume_accumulator_address(wallet, pump_program)
 }
 
 fn flashx_wrapped_sol_account_address(wallet: &Pubkey, flashx_program: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[b"wrapped_sol_account", wallet.as_ref()], flashx_program)
 }
 
+fn flashx_wrapped_sol_account_address_cached(
+    cache: Option<&CopyPdaCache>,
+    wallet: &Pubkey,
+    flashx_program: &Pubkey,
+) -> (Pubkey, u8) {
+    let Some(cache) = cache else {
+        return flashx_wrapped_sol_account_address(wallet, flashx_program);
+    };
+    cache.flashx_wrapped_sol_account_address(wallet, flashx_program)
+}
+
+impl CopyPdaCache {
+    fn associated_token_address(
+        &self,
+        wallet: &Pubkey,
+        mint: &Pubkey,
+        token_program: &Pubkey,
+        associated_token_program: &Pubkey,
+    ) -> Pubkey {
+        let key = AssociatedTokenAddressKey {
+            wallet: *wallet,
+            mint: *mint,
+            token_program: *token_program,
+            associated_token_program: *associated_token_program,
+        };
+        let Ok(mut cache) = self.associated_token_accounts.lock() else {
+            return associated_token_address(wallet, mint, token_program, associated_token_program);
+        };
+        if let Some(pubkey) = cache.get(&key) {
+            return *pubkey;
+        }
+        let pubkey =
+            associated_token_address(wallet, mint, token_program, associated_token_program);
+        cache.insert(key, pubkey);
+        pubkey
+    }
+
+    fn user_volume_accumulator_address(&self, wallet: &Pubkey, pump_program: &Pubkey) -> Pubkey {
+        let key = UserVolumeAccumulatorKey {
+            wallet: *wallet,
+            pump_program: *pump_program,
+        };
+        let Ok(mut cache) = self.user_volume_accumulators.lock() else {
+            return user_volume_accumulator_address(wallet, pump_program);
+        };
+        if let Some(pubkey) = cache.get(&key) {
+            return *pubkey;
+        }
+        let pubkey = user_volume_accumulator_address(wallet, pump_program);
+        cache.insert(key, pubkey);
+        pubkey
+    }
+
+    fn flashx_wrapped_sol_account_address(
+        &self,
+        wallet: &Pubkey,
+        flashx_program: &Pubkey,
+    ) -> (Pubkey, u8) {
+        let key = FlashxWrappedSolAccountKey {
+            wallet: *wallet,
+            flashx_program: *flashx_program,
+        };
+        let Ok(mut cache) = self.flashx_wrapped_sol_accounts.lock() else {
+            return flashx_wrapped_sol_account_address(wallet, flashx_program);
+        };
+        if let Some(account) = cache.get(&key) {
+            return *account;
+        }
+        let account = flashx_wrapped_sol_account_address(wallet, flashx_program);
+        cache.insert(key, account);
+        account
+    }
+}
+
 fn compute_unit_limit_instruction(units: u32) -> Result<Instruction, TxBuildError> {
-    let program_id = parse_pubkey(COMPUTE_BUDGET_PROGRAM_ID)?;
     let mut data = Vec::with_capacity(5);
     data.push(2);
     data.extend_from_slice(&units.to_le_bytes());
 
     Ok(Instruction {
-        program_id,
+        program_id: *compute_budget_program_id(),
         accounts: Vec::new(),
         data,
     })
 }
 
 fn compute_unit_price_instruction(micro_lamports: u64) -> Result<Instruction, TxBuildError> {
-    let program_id = parse_pubkey(COMPUTE_BUDGET_PROGRAM_ID)?;
     let mut data = Vec::with_capacity(9);
     data.push(3);
     data.extend_from_slice(&micro_lamports.to_le_bytes());
 
     Ok(Instruction {
-        program_id,
+        program_id: *compute_budget_program_id(),
         accounts: Vec::new(),
         data,
     })
@@ -764,13 +781,12 @@ fn system_transfer_instruction(
     to: &Pubkey,
     lamports: u64,
 ) -> Result<Instruction, TxBuildError> {
-    let program_id = parse_pubkey(SYSTEM_PROGRAM_ID)?;
     let mut data = Vec::with_capacity(12);
     data.extend_from_slice(&2u32.to_le_bytes());
     data.extend_from_slice(&lamports.to_le_bytes());
 
     Ok(Instruction {
-        program_id,
+        program_id: *system_program_id(),
         accounts: vec![AccountMeta::new(*from, true), AccountMeta::new(*to, false)],
         data,
     })
@@ -819,8 +835,9 @@ fn create_associated_token_account_idempotent_instruction(
 mod tests {
     use super::*;
     use crate::parser::{
-        parse_trade, static_account_keys, versioned_tx_signature_string, FLASHX_ROUTER_PROGRAM_ID,
-        TOKEN_PROGRAM_ID,
+        parse_trade, static_account_keys, versioned_tx_signature_string,
+        ASSOCIATED_TOKEN_PROGRAM_ID, COMPUTE_BUDGET_PROGRAM_ID, FLASHX_ROUTER_PROGRAM_ID,
+        PUMP_AMM_PROGRAM_ID, PUMP_FUN_PROGRAM_ID, SYSTEM_PROGRAM_ID, TOKEN_PROGRAM_ID,
     };
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use solana_transaction::versioned::VersionedTransaction;
@@ -940,7 +957,7 @@ mod tests {
         );
         assert_eq!(build.instructions[0].data[24], 1);
         assert_eq!(
-            build.copy_wallet_token_account,
+            build.copy_wallet_token_account.to_string(),
             "G2Bp3rC5GQHw8gWguLdujeZdTRoRgQia3Y1FmD5Ch4Vs"
         );
         assert!(build.instructions[0]
@@ -950,7 +967,7 @@ mod tests {
         assert!(build.instructions[0]
             .accounts
             .iter()
-            .any(|account| account.pubkey.to_string() == build.copy_wallet_token_account));
+            .any(|account| account.pubkey == build.copy_wallet_token_account));
         assert!(build.instructions[0]
             .accounts
             .iter()
@@ -993,7 +1010,7 @@ mod tests {
         assert_eq!(parsed.mint, LIVE_MIGRATED_MINT);
         assert_eq!(build.instructions.len(), 2);
         assert_eq!(
-            build.copy_wallet_token_account,
+            build.copy_wallet_token_account.to_string(),
             "C68p1PQWjCCbgoeApEAPnnB21bF3ccnv5yBrnFH7L3xz"
         );
         assert_eq!(
@@ -1030,7 +1047,7 @@ mod tests {
                 && account.is_writable
         }));
         assert!(build.instructions[1].accounts.iter().any(|account| {
-            account.pubkey.to_string() == build.copy_wallet_token_account && account.is_writable
+            account.pubkey == build.copy_wallet_token_account && account.is_writable
         }));
         assert!(build.instructions[1].accounts.iter().any(|account| {
             account.pubkey.to_string() == "D6EMAgGqecPhW7t9r7LvCnRCiS6uADBwc3Ki1tpc2Bud"
@@ -1070,10 +1087,10 @@ mod tests {
 
         assert_eq!(build.route_layout, "direct-pump");
         assert_eq!(
-            build.copy_wallet_token_account,
+            build.copy_wallet_token_account.to_string(),
             "G2Bp3rC5GQHw8gWguLdujeZdTRoRgQia3Y1FmD5Ch4Vs"
         );
-        assert_eq!(build.estimated_required_signer, COPY_WALLET);
+        assert_eq!(build.estimated_required_signer.to_string(), COPY_WALLET);
         assert_eq!(build.setup_instruction_count, 2);
         assert_eq!(build.main_instruction_count, 1);
         assert_eq!(build.instructions.len(), 3);
@@ -1210,10 +1227,10 @@ mod tests {
 
         assert_eq!(build.route_layout, "migrated-amm");
         assert_eq!(
-            build.copy_wallet_token_account,
+            build.copy_wallet_token_account.to_string(),
             "C68p1PQWjCCbgoeApEAPnnB21bF3ccnv5yBrnFH7L3xz"
         );
-        assert_eq!(build.estimated_required_signer, COPY_WALLET);
+        assert_eq!(build.estimated_required_signer.to_string(), COPY_WALLET);
         assert_eq!(build.setup_instruction_count, 2);
         assert_eq!(build.main_instruction_count, 2);
         assert_eq!(build.instructions.len(), 4);
@@ -1271,7 +1288,7 @@ mod tests {
         assert_eq!(&build.instructions[1].data[16..24], &0u64.to_le_bytes());
         assert_eq!(
             build.instructions[1].accounts[1].pubkey.to_string(),
-            resolved_account_for_test(&context.resolved_accounts, "feeRecipient")
+            resolved_account_for_test(context, "feeRecipient")
         );
         assert!(build.instructions[1]
             .accounts
@@ -1281,19 +1298,17 @@ mod tests {
             account.pubkey.to_string() == "DhWQaUj4YBCyRvGuUfwcAjGNTvgB5murcVLT2VdTr1UZ"
                 && account.is_writable
         }));
-        let bonding_curve_v2 =
-            resolved_account_for_test(&context.resolved_accounts, "bondingCurveV2");
-        let buyback_fee_recipient =
-            resolved_account_for_test(&context.resolved_accounts, "buybackFeeRecipient");
+        let bonding_curve_v2 = resolved_account_for_test(context, "bondingCurveV2");
+        let buyback_fee_recipient = resolved_account_for_test(context, "buybackFeeRecipient");
         assert_eq!(build.instructions[1].accounts.len(), 16);
         assert_eq!(
             build.instructions[1].accounts[8].pubkey.to_string(),
-            resolved_account_for_test(&context.resolved_accounts, "creatorVault")
+            resolved_account_for_test(context, "creatorVault")
         );
         assert!(build.instructions[1].accounts[8].is_writable);
         assert_eq!(
             build.instructions[1].accounts[9].pubkey.to_string(),
-            resolved_account_for_test(&context.resolved_accounts, "tokenProgram")
+            resolved_account_for_test(context, "tokenProgram")
         );
         assert!(!build.instructions[1].accounts[9].is_writable);
         assert_eq!(
@@ -1327,7 +1342,7 @@ mod tests {
 
         assert_eq!(build.route_layout, "migrated-amm");
         assert_eq!(
-            build.copy_wallet_token_account,
+            build.copy_wallet_token_account.to_string(),
             "C68p1PQWjCCbgoeApEAPnnB21bF3ccnv5yBrnFH7L3xz"
         );
         assert_eq!(build.setup_instruction_count, 2);
@@ -1365,7 +1380,7 @@ mod tests {
         );
         assert!(build.instructions[2].accounts[1].is_signer);
         assert_eq!(
-            build.instructions[2].accounts[5].pubkey.to_string(),
+            build.instructions[2].accounts[5].pubkey,
             build.copy_wallet_token_account
         );
         assert_eq!(
@@ -1441,7 +1456,7 @@ mod tests {
 
         assert_eq!(build.route_layout, "migrated-amm");
         assert_eq!(
-            build.copy_wallet_token_account,
+            build.copy_wallet_token_account.to_string(),
             "D2yXA2HXMpxY98fHENhDkBzY9JDwJ4EcjcdCtypy8LiN"
         );
         assert_eq!(
@@ -1476,15 +1491,17 @@ mod tests {
         bincode::deserialize(&bytes).expect("fixture decodes as a VersionedTransaction")
     }
 
-    fn resolved_account_for_test(accounts: &[ResolvedRouteAccount], role: &'static str) -> String {
-        accounts
-            .iter()
-            .find(|account| account.role == role)
-            .map(|account| account.pubkey.clone())
+    fn resolved_account_for_test(
+        context: &crate::parser::FlashxPumpRouteContext,
+        role: &'static str,
+    ) -> String {
+        context
+            .resolved_pubkey(role)
+            .map(|pubkey| pubkey.to_string())
             .unwrap_or_else(|| panic!("missing resolved account role {role}"))
     }
 
-    fn migrated_buy_hydrated_account_keys(transaction: &VersionedTransaction) -> Vec<String> {
+    fn migrated_buy_hydrated_account_keys(transaction: &VersionedTransaction) -> Vec<Pubkey> {
         let mut account_keys = static_account_keys(transaction);
         account_keys.extend(
             [
@@ -1507,14 +1524,14 @@ mod tests {
                 "GXPFM2caqTtQYC2cJ5yJRi9VDkpsYZXzYdwYpGnLmtDL",
             ]
             .into_iter()
-            .map(ToString::to_string),
+            .map(pubkey),
         );
         account_keys
     }
 
     fn live_direct_pump_buy_hydrated_account_keys(
         transaction: &VersionedTransaction,
-    ) -> Vec<String> {
+    ) -> Vec<Pubkey> {
         let mut account_keys = static_account_keys(transaction);
         account_keys.extend(
             [
@@ -1533,12 +1550,12 @@ mod tests {
                 "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ",
             ]
             .into_iter()
-            .map(ToString::to_string),
+            .map(pubkey),
         );
         account_keys
     }
 
-    fn live_migrated_buy_hydrated_account_keys(transaction: &VersionedTransaction) -> Vec<String> {
+    fn live_migrated_buy_hydrated_account_keys(transaction: &VersionedTransaction) -> Vec<Pubkey> {
         let mut account_keys = static_account_keys(transaction);
         account_keys.extend(
             [
@@ -1562,14 +1579,14 @@ mod tests {
                 "GXPFM2caqTtQYC2cJ5yJRi9VDkpsYZXzYdwYpGnLmtDL",
             ]
             .into_iter()
-            .map(ToString::to_string),
+            .map(pubkey),
         );
         account_keys
     }
 
     fn failed_auto_sell_migrated_buy_hydrated_account_keys(
         transaction: &VersionedTransaction,
-    ) -> Vec<String> {
+    ) -> Vec<Pubkey> {
         let mut account_keys = static_account_keys(transaction);
         account_keys.extend(
             [
@@ -1592,8 +1609,12 @@ mod tests {
                 "GXPFM2caqTtQYC2cJ5yJRi9VDkpsYZXzYdwYpGnLmtDL",
             ]
             .into_iter()
-            .map(ToString::to_string),
+            .map(pubkey),
         );
         account_keys
+    }
+
+    fn pubkey(value: &str) -> Pubkey {
+        Pubkey::from_str(value).expect("fixture pubkey is valid")
     }
 }

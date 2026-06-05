@@ -2,12 +2,13 @@ use crate::parser::{
     parse_action, read_u64_le, ParsedTrade, Route, LAMPORTS_PER_SOL, PUMP_FUN_TOKEN_DECIMALS,
 };
 use solana_message::compiled_instruction::CompiledInstruction;
+use solana_pubkey::Pubkey;
 use std::collections::HashSet;
 
 pub(crate) fn parse(
     instruction: &CompiledInstruction,
-    account_keys: &[String],
-    target_wallets: &HashSet<String>,
+    account_keys: &[Pubkey],
+    target_wallets: &HashSet<Pubkey>,
 ) -> Option<ParsedTrade> {
     let action = parse_action(&instruction.data)?;
     let user = account_key_at(&instruction.accounts, account_keys, 6)?;
@@ -31,9 +32,9 @@ pub(crate) fn parse(
 
 fn account_key_at<'a>(
     accounts: &[u8],
-    account_keys: &'a [String],
+    account_keys: &'a [Pubkey],
     account_position: usize,
-) -> Option<&'a String> {
+) -> Option<&'a Pubkey> {
     account_keys.get(*accounts.get(account_position)? as usize)
 }
 

@@ -10,7 +10,7 @@ const FLASHX_LOOKUP_TABLE: &str = "4vX5U9XsiY11infmC13d6VFPjvUqtuRw744r4o94dyow"
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AddressLookupTableCache {
-    tables: HashMap<String, Vec<String>>,
+    tables: HashMap<String, Vec<Pubkey>>,
     table_accounts: Vec<AddressLookupTableAccount>,
 }
 
@@ -59,7 +59,7 @@ impl AddressLookupTableCache {
             .message
             .static_account_keys()
             .iter()
-            .map(ToString::to_string)
+            .copied()
             .collect::<Vec<_>>();
 
         let Some(address_table_lookups) = versioned_tx.message.address_table_lookups() else {
@@ -88,7 +88,7 @@ impl AddressLookupTableCache {
                         missing_lookup_table: Some(table_key),
                     };
                 };
-                writable.push(address.clone());
+                writable.push(*address);
             }
 
             for index in &lookup.readonly_indexes {
@@ -98,7 +98,7 @@ impl AddressLookupTableCache {
                         missing_lookup_table: Some(table_key),
                     };
                 };
-                readonly.push(address.clone());
+                readonly.push(*address);
             }
         }
 
@@ -117,7 +117,7 @@ impl AddressLookupTableCache {
 
 #[derive(Debug)]
 pub(crate) struct ExpandedAccountKeys {
-    pub(crate) keys: Vec<String>,
+    pub(crate) keys: Vec<Pubkey>,
     pub(crate) missing_lookup_table: Option<String>,
 }
 
@@ -153,7 +153,7 @@ async fn fetch_lookup_table_addresses(
     client: &reqwest::Client,
     rpc_url: &str,
     table_key: &str,
-) -> Result<Vec<String>> {
+) -> Result<Vec<Pubkey>> {
     let response = client
         .post(rpc_url)
         .json(&serde_json::json!({
@@ -198,7 +198,7 @@ async fn fetch_lookup_table_addresses(
     let table = AddressLookupTable::deserialize(&bytes)
         .map_err(|error| anyhow!("deserialize lookup table: {error:?}"))?;
 
-    Ok(table.addresses.iter().map(ToString::to_string).collect())
+    Ok(table.addresses.to_vec())
 }
 
 fn base64_decode(value: &str) -> Result<Vec<u8>> {
@@ -209,7 +209,7 @@ fn base64_decode(value: &str) -> Result<Vec<u8>> {
 }
 
 fn build_table_accounts(
-    tables: &HashMap<String, Vec<String>>,
+    tables: &HashMap<String, Vec<Pubkey>>,
 ) -> Result<Vec<AddressLookupTableAccount>, String> {
     let mut table_keys = tables.keys().cloned().collect::<Vec<_>>();
     table_keys.sort();
@@ -221,11 +221,8 @@ fn build_table_accounts(
                 .get(&key)
                 .ok_or_else(|| format!("missing lookup table {key}"))?
                 .iter()
-                .map(|address| {
-                    Pubkey::from_str(address)
-                        .map_err(|error| format!("invalid lookup table address: {error}"))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+                .copied()
+                .collect::<Vec<_>>();
             Ok(AddressLookupTableAccount {
                 key: Pubkey::from_str(&key)
                     .map_err(|error| format!("invalid lookup table key: {error}"))?,
@@ -235,8 +232,10 @@ fn build_table_accounts(
         .collect()
 }
 
-fn flashx_lookup_table_addresses() -> Vec<String> {
-    let mut addresses = vec!["11111111111111111111111111111111".to_string(); 187];
+fn flashx_lookup_table_addresses() -> Vec<Pubkey> {
+    let default = Pubkey::from_str("11111111111111111111111111111111")
+        .expect("default system address is valid");
+    let mut addresses = vec![default; 187];
     for (index, address) in [
         (124, "86Vh4XGLW2b6nvWbRyDs4ScgMXbuvRCHT7WbUT3RFxKG"),
         (117, "DKyUs1xXMDy8Z11zNsLnUg3dy9HZf6hYZidB6WodcaGy"),
@@ -261,7 +260,8 @@ fn flashx_lookup_table_addresses() -> Vec<String> {
         (41, "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"),
         (44, "GXPFM2caqTtQYC2cJ5yJRi9VDkpsYZXzYdwYpGnLmtDL"),
     ] {
-        addresses[index] = address.to_string();
+        addresses[index] =
+            Pubkey::from_str(address).expect("cached FLASHX lookup address is valid");
     }
     addresses
 }
@@ -293,7 +293,7 @@ mod tests {
         assert_eq!(expanded.missing_lookup_table.as_deref(), None);
         assert_eq!(expanded.keys.len(), 35);
         assert_eq!(
-            expanded.keys.get(28).map(String::as_str),
+            expanded.keys.get(28).map(ToString::to_string).as_deref(),
             Some("ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw")
         );
     }
@@ -332,7 +332,7 @@ mod tests {
         assert_eq!(expanded.missing_lookup_table.as_deref(), None);
         assert_eq!(expanded.keys.len(), 26);
         assert_eq!(
-            expanded.keys.get(21).map(String::as_str),
+            expanded.keys.get(21).map(ToString::to_string).as_deref(),
             Some("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
         );
     }
@@ -343,8 +343,9 @@ mod tests {
         bincode::deserialize(&bytes).expect("fixture decodes as a VersionedTransaction")
     }
 
-    fn migrated_buy_lookup_table_addresses() -> Vec<String> {
-        let mut addresses = vec!["11111111111111111111111111111111".to_string(); 187];
+    fn migrated_buy_lookup_table_addresses() -> Vec<Pubkey> {
+        let mut addresses =
+            vec![Pubkey::from_str("11111111111111111111111111111111").unwrap(); 187];
         for (index, address) in [
             (124, "86Vh4XGLW2b6nvWbRyDs4ScgMXbuvRCHT7WbUT3RFxKG"),
             (117, "DKyUs1xXMDy8Z11zNsLnUg3dy9HZf6hYZidB6WodcaGy"),
@@ -369,7 +370,7 @@ mod tests {
             (41, "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"),
             (44, "GXPFM2caqTtQYC2cJ5yJRi9VDkpsYZXzYdwYpGnLmtDL"),
         ] {
-            addresses[index] = address.to_string();
+            addresses[index] = Pubkey::from_str(address).expect("fixture lookup address is valid");
         }
         addresses
     }

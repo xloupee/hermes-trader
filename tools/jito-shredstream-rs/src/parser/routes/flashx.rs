@@ -1,16 +1,17 @@
 use crate::parser::{
-    read_u64_le, Action, FlashxPumpLayout, FlashxPumpRouteContext, ParsedTrade,
-    ResolvedRouteAccount, Route, RouteContext, RouteInstructionAccount, FLASHX_ROUTER_PROGRAM_ID,
-    LAMPORTS_PER_SOL, PUMP_FUN_TOKEN_DECIMALS,
+    flashx_router_program_id, read_u64_le, Action, DirectPumpAccounts, FlashxPumpLayout,
+    FlashxPumpResolvedAccounts, FlashxPumpRouteContext, MigratedAmmAccounts, ParsedTrade, Route,
+    RouteContext, RouteInstructionAccount, LAMPORTS_PER_SOL, PUMP_FUN_TOKEN_DECIMALS,
 };
 use solana_message::compiled_instruction::CompiledInstruction;
 use solana_message::VersionedMessage;
+use solana_pubkey::Pubkey;
 use std::collections::HashSet;
 
 pub(crate) fn parse(
     instruction: &CompiledInstruction,
-    account_keys: &[String],
-    target_wallets: &HashSet<String>,
+    account_keys: &[Pubkey],
+    target_wallets: &HashSet<Pubkey>,
 ) -> Option<ParsedTrade> {
     let accounts = instruction.accounts.as_slice();
     let first_account = account_key_at(accounts, account_keys, 0)?;
@@ -63,8 +64,8 @@ pub(crate) fn parse(
 
 fn parse_migrated_amm_layout(
     accounts: &[u8],
-    account_keys: &[String],
-    target_wallets: &HashSet<String>,
+    account_keys: &[Pubkey],
+    target_wallets: &HashSet<Pubkey>,
     amount_in: u64,
     data: &[u8],
 ) -> Option<ParsedTrade> {
@@ -103,8 +104,8 @@ fn parse_migrated_amm_layout(
 
 fn parse_long_v2_layout(
     accounts: &[u8],
-    account_keys: &[String],
-    target_wallets: &HashSet<String>,
+    account_keys: &[Pubkey],
+    target_wallets: &HashSet<Pubkey>,
     amount_in: u64,
 ) -> Option<ParsedTrade> {
     if accounts.len() < 50 {
@@ -148,7 +149,7 @@ fn parse_long_v2_layout(
 pub(crate) fn route_context(
     message: &VersionedMessage,
     instruction: &CompiledInstruction,
-    account_keys: &[String],
+    account_keys: &[Pubkey],
     parsed: &ParsedTrade,
 ) -> Option<RouteContext> {
     if parsed.action != Action::Buy {
@@ -160,7 +161,7 @@ pub(crate) fn route_context(
     if is_migrated_amm_buy_layout(&accounts, account_keys, parsed, &instruction.data) {
         return Some(RouteContext::FlashxPump(FlashxPumpRouteContext {
             layout: FlashxPumpLayout::MigratedAmm,
-            program_id: FLASHX_ROUTER_PROGRAM_ID.to_string(),
+            program_id: *flashx_router_program_id(),
             accounts: route_instruction_accounts(message, instruction, account_keys)?,
             data: instruction.data.clone(),
             resolved_accounts: migrated_amm_resolved_accounts(&accounts, account_keys)?,
@@ -170,7 +171,7 @@ pub(crate) fn route_context(
     if is_direct_pump_buy_layout(&accounts, account_keys, parsed, &instruction.data) {
         return Some(RouteContext::FlashxPump(FlashxPumpRouteContext {
             layout: FlashxPumpLayout::DirectPump,
-            program_id: FLASHX_ROUTER_PROGRAM_ID.to_string(),
+            program_id: *flashx_router_program_id(),
             accounts: route_instruction_accounts(message, instruction, account_keys)?,
             data: instruction.data.clone(),
             resolved_accounts: direct_pump_resolved_accounts(&accounts, account_keys)?,
@@ -182,32 +183,36 @@ pub(crate) fn route_context(
 
 fn is_migrated_amm_buy_layout(
     accounts: &[u8],
-    account_keys: &[String],
+    account_keys: &[Pubkey],
     parsed: &ParsedTrade,
     data: &[u8],
 ) -> bool {
     accounts.len() >= 40
         && data.get(17).copied() == Some(0)
-        && account_key_at(accounts, account_keys, 1) == Some(&parsed.target_wallet)
-        && account_key_at(accounts, account_keys, 12) == Some(&parsed.mint)
+        && account_key_at(accounts, account_keys, 1)
+            .is_some_and(|account| account.to_string() == parsed.target_wallet)
+        && account_key_at(accounts, account_keys, 12)
+            .is_some_and(|account| account.to_string() == parsed.mint)
 }
 
 fn is_direct_pump_buy_layout(
     accounts: &[u8],
-    account_keys: &[String],
+    account_keys: &[Pubkey],
     parsed: &ParsedTrade,
     data: &[u8],
 ) -> bool {
     accounts.len() >= 32
         && data.get(17).copied() == Some(0)
-        && account_key_at(accounts, account_keys, 0) == Some(&parsed.target_wallet)
-        && account_key_at(accounts, account_keys, 10) == Some(&parsed.mint)
+        && account_key_at(accounts, account_keys, 0)
+            .is_some_and(|account| account.to_string() == parsed.target_wallet)
+        && account_key_at(accounts, account_keys, 10)
+            .is_some_and(|account| account.to_string() == parsed.mint)
 }
 
 fn route_instruction_accounts(
     message: &VersionedMessage,
     instruction: &CompiledInstruction,
-    account_keys: &[String],
+    account_keys: &[Pubkey],
 ) -> Option<Vec<RouteInstructionAccount>> {
     instruction
         .accounts
@@ -215,7 +220,7 @@ fn route_instruction_accounts(
         .map(|index| {
             let account_index = *index as usize;
             Some(RouteInstructionAccount {
-                pubkey: account_keys.get(account_index)?.to_string(),
+                pubkey: *account_keys.get(account_index)?,
                 is_signer: message.is_signer(account_index),
                 is_writable: message.is_maybe_writable(account_index, None),
             })
@@ -225,110 +230,81 @@ fn route_instruction_accounts(
 
 fn migrated_amm_resolved_accounts(
     accounts: &[u8],
-    account_keys: &[String],
-) -> Option<Vec<ResolvedRouteAccount>> {
-    let roles = [
-        ("payer", 1),
-        ("targetWallet", 1),
-        ("flashxRouterProgram", 4),
-        ("pumpAmmProgram", 5),
-        ("poolState", 9),
-        ("globalConfig", 11),
-        ("mint", 12),
-        ("quoteMint", 13),
-        ("userBaseTokenAccount", 14),
-        ("userQuoteTokenAccount", 15),
-        ("poolBaseTokenAccount", 16),
-        ("poolQuoteTokenAccount", 17),
-        ("protocolFeeRecipient", 18),
-        ("protocolFeeRecipientTokenAccount", 19),
-        ("baseTokenProgram", 20),
-        ("quoteTokenProgram", 21),
-        ("systemProgram", 22),
-        ("associatedTokenProgram", 23),
-        ("eventAuthority", 24),
-        ("coinCreatorVaultAta", 26),
-        ("coinCreatorVaultAuthority", 27),
-        ("globalVolumeAccumulator", 28),
-        ("userVolumeAccumulator", 29),
-        ("feeConfig", 30),
-        ("feeProgram", 31),
-    ];
-
-    let mut resolved = roles
-        .into_iter()
-        .map(|(role, account_position)| {
-            Some(ResolvedRouteAccount {
-                role,
-                pubkey: account_key_at(accounts, account_keys, account_position)?.to_string(),
-            })
-        })
-        .collect::<Option<Vec<_>>>()?;
-
-    for (role, account_position) in [
-        ("poolV2", 32),
-        ("buybackFeeRecipient", 33),
-        ("buybackFeeRecipientTokenAccount", 34),
-    ] {
-        if let Some(pubkey) = account_key_at(accounts, account_keys, account_position) {
-            resolved.push(ResolvedRouteAccount {
-                role,
-                pubkey: pubkey.to_string(),
-            });
-        }
-    }
-
-    Some(resolved)
+    account_keys: &[Pubkey],
+) -> Option<FlashxPumpResolvedAccounts> {
+    Some(FlashxPumpResolvedAccounts::MigratedAmm(
+        MigratedAmmAccounts {
+            payer: *account_key_at(accounts, account_keys, 1)?,
+            target_wallet: *account_key_at(accounts, account_keys, 1)?,
+            flashx_router_program: *account_key_at(accounts, account_keys, 4)?,
+            pump_amm_program: *account_key_at(accounts, account_keys, 5)?,
+            pool_state: *account_key_at(accounts, account_keys, 9)?,
+            global_config: *account_key_at(accounts, account_keys, 11)?,
+            mint: *account_key_at(accounts, account_keys, 12)?,
+            quote_mint: *account_key_at(accounts, account_keys, 13)?,
+            user_base_token_account: *account_key_at(accounts, account_keys, 14)?,
+            user_quote_token_account: *account_key_at(accounts, account_keys, 15)?,
+            pool_base_token_account: *account_key_at(accounts, account_keys, 16)?,
+            pool_quote_token_account: *account_key_at(accounts, account_keys, 17)?,
+            protocol_fee_recipient: *account_key_at(accounts, account_keys, 18)?,
+            protocol_fee_recipient_token_account: *account_key_at(accounts, account_keys, 19)?,
+            base_token_program: *account_key_at(accounts, account_keys, 20)?,
+            quote_token_program: *account_key_at(accounts, account_keys, 21)?,
+            system_program: *account_key_at(accounts, account_keys, 22)?,
+            associated_token_program: *account_key_at(accounts, account_keys, 23)?,
+            event_authority: *account_key_at(accounts, account_keys, 24)?,
+            coin_creator_vault_ata: *account_key_at(accounts, account_keys, 26)?,
+            coin_creator_vault_authority: *account_key_at(accounts, account_keys, 27)?,
+            global_volume_accumulator: *account_key_at(accounts, account_keys, 28)?,
+            user_volume_accumulator: *account_key_at(accounts, account_keys, 29)?,
+            fee_config: *account_key_at(accounts, account_keys, 30)?,
+            fee_program: *account_key_at(accounts, account_keys, 31)?,
+            pool_v2: account_key_at(accounts, account_keys, 32).copied(),
+            buyback_fee_recipient: account_key_at(accounts, account_keys, 33).copied(),
+            buyback_fee_recipient_token_account: account_key_at(accounts, account_keys, 34)
+                .copied(),
+        },
+    ))
 }
 
 fn direct_pump_resolved_accounts(
     accounts: &[u8],
-    account_keys: &[String],
-) -> Option<Vec<ResolvedRouteAccount>> {
-    let roles = [
-        ("payer", 0),
-        ("targetWallet", 0),
-        ("flashxRouterProgram", 4),
-        ("pumpProgram", 5),
-        ("globalConfig", 8),
-        ("feeRecipient", 9),
-        ("mint", 10),
-        ("bondingCurve", 11),
-        ("associatedBondingCurve", 12),
-        ("userTokenAccount", 13),
-        ("systemProgram", 15),
-        ("tokenProgram", 16),
-        ("creatorVault", 17),
-        ("eventAuthority", 18),
-        ("globalVolumeAccumulator", 20),
-        ("userVolumeAccumulator", 21),
-        ("feeConfig", 22),
-        ("feeProgram", 23),
-        ("bondingCurveV2", 24),
-        ("buybackFeeRecipient", 25),
-    ];
-
-    roles
-        .into_iter()
-        .map(|(role, account_position)| {
-            Some(ResolvedRouteAccount {
-                role,
-                pubkey: account_key_at(accounts, account_keys, account_position)?.to_string(),
-            })
-        })
-        .collect()
+    account_keys: &[Pubkey],
+) -> Option<FlashxPumpResolvedAccounts> {
+    Some(FlashxPumpResolvedAccounts::DirectPump(DirectPumpAccounts {
+        payer: *account_key_at(accounts, account_keys, 0)?,
+        target_wallet: *account_key_at(accounts, account_keys, 0)?,
+        flashx_router_program: *account_key_at(accounts, account_keys, 4)?,
+        pump_program: *account_key_at(accounts, account_keys, 5)?,
+        global_config: *account_key_at(accounts, account_keys, 8)?,
+        fee_recipient: *account_key_at(accounts, account_keys, 9)?,
+        mint: *account_key_at(accounts, account_keys, 10)?,
+        bonding_curve: *account_key_at(accounts, account_keys, 11)?,
+        associated_bonding_curve: *account_key_at(accounts, account_keys, 12)?,
+        user_token_account: *account_key_at(accounts, account_keys, 13)?,
+        system_program: *account_key_at(accounts, account_keys, 15)?,
+        token_program: *account_key_at(accounts, account_keys, 16)?,
+        creator_vault: *account_key_at(accounts, account_keys, 17)?,
+        event_authority: *account_key_at(accounts, account_keys, 18)?,
+        global_volume_accumulator: *account_key_at(accounts, account_keys, 20)?,
+        user_volume_accumulator: *account_key_at(accounts, account_keys, 21)?,
+        fee_config: *account_key_at(accounts, account_keys, 22)?,
+        fee_program: *account_key_at(accounts, account_keys, 23)?,
+        bonding_curve_v2: *account_key_at(accounts, account_keys, 24)?,
+        buyback_fee_recipient: *account_key_at(accounts, account_keys, 25)?,
+    }))
 }
 
 fn account_key_at<'a>(
     accounts: &[u8],
-    account_keys: &'a [String],
+    account_keys: &'a [Pubkey],
     account_position: usize,
-) -> Option<&'a String> {
+) -> Option<&'a Pubkey> {
     account_keys.get(*accounts.get(account_position)? as usize)
 }
 
-fn is_pump_mint(account_key: &str) -> bool {
-    account_key.ends_with("pump")
+fn is_pump_mint(account_key: &Pubkey) -> bool {
+    account_key.to_string().ends_with("pump")
 }
 
 #[cfg(test)]

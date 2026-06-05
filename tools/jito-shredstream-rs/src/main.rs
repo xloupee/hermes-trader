@@ -175,6 +175,20 @@ pub(crate) struct LiveOptions {
     )]
     pub(crate) simulate_auto_sell: bool,
 
+    #[arg(
+        long,
+        env = "JITO_ISOLATE_BUY_LATENCY_TEST",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) isolate_buy_latency_test: bool,
+
+    #[arg(long, env = "JITO_SEND_MAX_RETRIES", default_value_t = 3)]
+    pub(crate) send_max_retries: u64,
+
+    #[arg(long, env = "JITO_SEND_HTTP_TIMEOUT_MS", default_value_t = 0)]
+    pub(crate) send_http_timeout_ms: u64,
+
     #[arg(long, env = "JITO_PRIORITY_FEE_MICRO_LAMPORTS")]
     pub(crate) priority_fee_micro_lamports: Option<u64>,
 

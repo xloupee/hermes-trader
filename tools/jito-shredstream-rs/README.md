@@ -223,3 +223,8 @@ The Supabase sync helper also computes block-position diagnostics:
 `targetSlot`, `copySlot`, `slotDelta`, `targetTxIndex`, `copyTxIndex`, and
 `sameSlotTxDelta`. In watch mode it refreshes recent rows so transactions that
 were not visible at the first confirmed lookup can still fill in after landing.
+The VPS sync launcher checks for newly appended execution rows every
+`JITO_SYNC_INTERVAL_MS` (default `1000`) and refreshes recent sent rows every
+`JITO_SYNC_REFRESH_INTERVAL_MS` (default `5000`) so fresh benchmark rows can
+arrive quickly without re-running the heavier confirmation diagnostics every
+tick.

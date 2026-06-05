@@ -5,6 +5,8 @@ import { pathToFileURL } from "node:url";
 
 const DEFAULT_EXECUTIONS_PATH = "/tmp/jito-copy-executions-local-send.jsonl";
 const DEFAULT_SUPABASE_CWD = `${process.env.HOME || ""}/Documents/pumpfunnoti`;
+const DEFAULT_WATCH_INTERVAL_MS = 1000;
+const DEFAULT_REFRESH_INTERVAL_MS = 5000;
 
 function argValue(name, fallback = null) {
   const prefix = `--${name}=`;
@@ -713,7 +715,17 @@ async function syncOnce(path, { recentLimit = 0 } = {}) {
 async function main() {
   const path = argValue("executions", process.env.JITO_COPY_EXECUTIONS_PATH || DEFAULT_EXECUTIONS_PATH);
   const watch = hasFlag("watch");
-  const intervalMs = Number(argValue("interval-ms", "5000"));
+  const intervalMs = positiveInteger(
+    argValue("interval-ms", String(DEFAULT_WATCH_INTERVAL_MS)),
+    DEFAULT_WATCH_INTERVAL_MS
+  );
+  const refreshIntervalMs = positiveInteger(
+    argValue(
+      "refresh-interval-ms",
+      process.env.JITO_SYNC_REFRESH_INTERVAL_MS || String(DEFAULT_REFRESH_INTERVAL_MS)
+    ),
+    DEFAULT_REFRESH_INTERVAL_MS
+  );
   const recentLimit = positiveInteger(
     argValue("recent-limit", process.env.JITO_SYNC_RECENT_LIMIT || (watch ? "100" : "0")),
     watch ? 100 : 0
@@ -724,16 +736,23 @@ async function main() {
   );
 
   let lastSyncedCount = -1;
+  let lastRefreshAtMs = 0;
   do {
     const rowCount = readJsonl(path).length;
-    if (rowCount !== lastSyncedCount || (watch && refreshSentRows && rowCount > 0)) {
+    const nowMs = Date.now();
+    const hasNewRows = rowCount !== lastSyncedCount;
+    const shouldRefreshRows =
+      watch && refreshSentRows && rowCount > 0 && nowMs - lastRefreshAtMs >= refreshIntervalMs;
+    if (hasNewRows || shouldRefreshRows) {
       const synced = await syncOnce(path, { recentLimit });
       lastSyncedCount = rowCount;
+      lastRefreshAtMs = Date.now();
       const scope = recentLimit > 0 ? `last ${recentLimit} rows` : "all rows";
-      console.error(`synced ${synced} unique local copy executions to Supabase (${scope})`);
+      const reason = hasNewRows ? "new rows" : "refresh";
+      console.error(`synced ${synced} unique local copy executions to Supabase (${scope}, ${reason})`);
     }
     if (watch) {
-      await new Promise((resolve) => setTimeout(resolve, Number.isFinite(intervalMs) ? intervalMs : 5000));
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
   } while (watch);
 }

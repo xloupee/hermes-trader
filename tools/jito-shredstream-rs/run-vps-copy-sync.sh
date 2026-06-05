@@ -37,11 +37,13 @@ fi
 export JITO_COPY_EXECUTIONS_PATH="${JITO_COPY_EXECUTIONS_PATH:-/var/log/jito-copy-executions-vps.jsonl}"
 export JITO_SYNC_RECENT_LIMIT="${JITO_SYNC_RECENT_LIMIT:-100}"
 export JITO_SYNC_REFRESH_SENT_ROWS="${JITO_SYNC_REFRESH_SENT_ROWS:-true}"
+export JITO_SYNC_REFRESH_INTERVAL_MS="${JITO_SYNC_REFRESH_INTERVAL_MS:-5000}"
 export JITO_SUPABASE_CWD="${JITO_SUPABASE_CWD:-/opt/pumpfun-migration-bot}"
 
 cd "$WORKER_DIR"
 exec /usr/bin/node "$WORKER_DIR/sync-local-copy-executions-to-supabase.mjs" \
   --watch \
   --executions="$JITO_COPY_EXECUTIONS_PATH" \
-  --interval-ms="${JITO_SYNC_INTERVAL_MS:-5000}" \
+  --interval-ms="${JITO_SYNC_INTERVAL_MS:-1000}" \
+  --refresh-interval-ms="$JITO_SYNC_REFRESH_INTERVAL_MS" \
   --recent-limit="$JITO_SYNC_RECENT_LIMIT"

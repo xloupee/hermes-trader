@@ -48,7 +48,6 @@ pub(crate) struct FullCopyUnsignedTxBuild {
 const PUMP_FUN_BUY_EXACT_SOL_IN_DISCRIMINATOR: [u8; 8] = [56, 252, 116, 8, 158, 223, 205, 95];
 const PUMP_FUN_COPY_MIN_TOKENS_OUT: u64 = 1;
 const FLASHX_MIGRATED_COPY_MIN_BASE_AMOUNT_OUT: u64 = 1;
-const PUMP_FUN_DIRECT_SELL_FEE_RECIPIENT: &str = "9rPYyANsfQZw3DnDmKE3YCQF5E8oD89UXoHn9JFEhJUz";
 
 pub(crate) fn build_unsigned_flashx_pump(
     route_context: Option<&RouteContext>,
@@ -494,7 +493,10 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
                 resolved_pubkey(&context.resolved_accounts, "globalConfig")?,
                 false,
             ),
-            AccountMeta::new(parse_pubkey(PUMP_FUN_DIRECT_SELL_FEE_RECIPIENT)?, false),
+            AccountMeta::new(
+                resolved_pubkey(&context.resolved_accounts, "feeRecipient")?,
+                false,
+            ),
             AccountMeta::new_readonly(parse_pubkey(mint)?, false),
             AccountMeta::new(
                 resolved_pubkey(&context.resolved_accounts, "bondingCurve")?,
@@ -1253,6 +1255,7 @@ mod tests {
             123_456,
         )
         .expect("auto-sell route should build");
+        let RouteContext::FlashxPump(context) = parsed.route_context.as_ref().unwrap();
 
         assert_eq!(build.route_layout, "direct-pump");
         assert_eq!(build.instructions.len(), 2);
@@ -1271,7 +1274,7 @@ mod tests {
         assert_eq!(&build.instructions[1].data[16..24], &0u64.to_le_bytes());
         assert_eq!(
             build.instructions[1].accounts[1].pubkey.to_string(),
-            PUMP_FUN_DIRECT_SELL_FEE_RECIPIENT
+            resolved_account_for_test(&context.resolved_accounts, "feeRecipient")
         );
         assert!(build.instructions[1]
             .accounts
@@ -1281,7 +1284,6 @@ mod tests {
             account.pubkey.to_string() == "DhWQaUj4YBCyRvGuUfwcAjGNTvgB5murcVLT2VdTr1UZ"
                 && account.is_writable
         }));
-        let RouteContext::FlashxPump(context) = parsed.route_context.as_ref().unwrap();
         let target_user_volume_accumulator =
             resolved_account_for_test(&context.resolved_accounts, "userVolumeAccumulator");
         let copy_user_volume_accumulator = user_volume_accumulator_address(

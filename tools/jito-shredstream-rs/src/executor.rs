@@ -7,6 +7,7 @@ use crate::{
         COMPUTE_BUDGET_PROGRAM_ID, SYSTEM_PROGRAM_ID,
     },
     planner::ExecutionPlanLine,
+    signal::SignalTimings,
     tx_builder::{
         build_auto_sell_unsigned_flashx_pump, build_full_copy_unsigned_flashx_pump,
         build_full_copy_unsigned_flashx_pump_with_fees, TxBuildError, TxFeeConfig,
@@ -105,6 +106,24 @@ pub(crate) struct CopyExecutionLine {
     simulation_requested: bool,
     fast_copy_send: bool,
     skip_preflight: bool,
+    feed_received_at_ms: u128,
+    decoded_at_ms: u128,
+    matched_at_ms: u128,
+    planned_at_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    built_at_ms: Option<u128>,
+    feed_received_to_decoded_us: u128,
+    decoded_to_matched_us: u128,
+    matched_to_planned_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    planned_to_built_ms: Option<u128>,
+    batch_transaction_count: u64,
+    matched_transaction_index: u64,
+    batch_scan_us: u128,
+    tx_parse_us: u128,
+    account_expand_us: u128,
+    wallet_match_us: u128,
+    route_parse_us: u128,
     signed: bool,
     simulated: bool,
     sent: bool,
@@ -125,6 +144,10 @@ pub(crate) struct CopyExecutionLine {
     observed_to_send_submitted_ms: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
     observed_to_signature_returned_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    send_lane_ms: Option<u128>,
+    slot_delta: Option<i64>,
+    tx_delta: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     route_layout: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -404,12 +427,14 @@ impl CopyExecutor {
         execution_plan: &ExecutionPlanLine,
         observed_action: Action,
         observed_sol_amount: Option<f64>,
+        timings: SignalTimings,
     ) -> CopyExecutionLine {
         let mut line = CopyExecutionLine::new(
             execution_plan,
             observed_action,
             observed_sol_amount,
             &self.options,
+            timings,
         );
 
         if !self.options.simulate_copy_tx && !self.options.enable_copy_send {
@@ -475,6 +500,7 @@ impl CopyExecutor {
         };
         line.route_layout = Some(build.route_layout);
         line.instruction_count = build.instructions.len();
+        line.mark_built();
 
         let estimated_total_spend_lamports =
             match estimate_total_copy_spend_lamports(&build, execution_plan.route_context.as_ref())
@@ -1049,6 +1075,7 @@ impl CopyExecutionLine {
         observed_action: Action,
         observed_sol_amount: Option<f64>,
         options: &CopyExecutionOptions,
+        timings: SignalTimings,
     ) -> Self {
         Self {
             schema: "copytrade.localExecution.v1",
@@ -1074,6 +1101,24 @@ impl CopyExecutionLine {
             simulation_requested: options.simulate_copy_tx,
             fast_copy_send: options.fast_copy_send,
             skip_preflight: options.fast_copy_send,
+            feed_received_at_ms: timings.grpc_message_received_at_ms,
+            decoded_at_ms: timings.entries_deserialized_at_ms,
+            matched_at_ms: timings.wallet_match_finished_at_ms,
+            planned_at_ms: execution_plan.planned_at_ms,
+            built_at_ms: None,
+            feed_received_to_decoded_us: timings.deserialize_us,
+            decoded_to_matched_us: timings.wallet_match_finished_at_us,
+            matched_to_planned_ms: execution_plan
+                .planned_at_ms
+                .saturating_sub(timings.wallet_match_finished_at_ms),
+            planned_to_built_ms: None,
+            batch_transaction_count: timings.batch_transaction_count,
+            matched_transaction_index: timings.matched_transaction_index,
+            batch_scan_us: timings.batch_scan_us,
+            tx_parse_us: timings.tx_parse_us,
+            account_expand_us: timings.account_expand_us,
+            wallet_match_us: timings.wallet_match_us,
+            route_parse_us: timings.route_parse_us,
             signed: false,
             simulated: false,
             sent: false,
@@ -1086,6 +1131,9 @@ impl CopyExecutionLine {
             observed_to_simulation_completed_ms: None,
             observed_to_send_submitted_ms: None,
             observed_to_signature_returned_ms: None,
+            send_lane_ms: None,
+            slot_delta: None,
+            tx_delta: None,
             route_layout: None,
             tx_version: None,
             instruction_count: 0,
@@ -1147,6 +1195,12 @@ impl CopyExecutionLine {
         self.observed_to_signed_ms = Some(timestamp.saturating_sub(self.observed_at_ms));
     }
 
+    fn mark_built(&mut self) {
+        let timestamp = now_ms();
+        self.built_at_ms = Some(timestamp);
+        self.planned_to_built_ms = Some(timestamp.saturating_sub(self.planned_at_ms));
+    }
+
     fn mark_simulation_completed(&mut self) {
         let timestamp = now_ms();
         self.simulation_completed_at_ms = Some(timestamp);
@@ -1165,6 +1219,9 @@ impl CopyExecutionLine {
         self.signature_returned_at_ms = Some(timestamp);
         self.observed_to_signature_returned_ms =
             Some(timestamp.saturating_sub(self.observed_at_ms));
+        if let Some(send_submitted_at_ms) = self.send_submitted_at_ms {
+            self.send_lane_ms = Some(timestamp.saturating_sub(send_submitted_at_ms));
+        }
     }
 
     fn skip_auto_sell(&mut self, reason: impl Into<String>) {
@@ -1585,6 +1642,26 @@ mod tests {
         )
     }
 
+    fn sample_timings() -> SignalTimings {
+        SignalTimings {
+            grpc_message_received_at_ms: 1,
+            entries_deserialized_at_ms: 2,
+            wallet_match_finished_at_ms: 3,
+            trade_parsed_at_ms: 4,
+            deserialize_us: 1_000,
+            wallet_match_finished_at_us: 2_000,
+            parse_us: 3_000,
+            local_detect_us: 4_000,
+            batch_transaction_count: 5,
+            matched_transaction_index: 1,
+            batch_scan_us: 500,
+            tx_parse_us: 1_500,
+            account_expand_us: 100,
+            wallet_match_us: 50,
+            route_parse_us: 1_350,
+        }
+    }
+
     fn flashx_context(layout: FlashxPumpLayout, min_tokens_out: u64) -> RouteContext {
         let mut data = vec![0];
         data.extend_from_slice(&990_000u64.to_le_bytes());
@@ -1618,7 +1695,13 @@ mod tests {
     fn execution_line_defaults_to_safe_disabled_state() {
         let plan = allowed_plan();
 
-        let line = CopyExecutionLine::new(&plan, Action::Buy, Some(0.0005), &disabled_options());
+        let line = CopyExecutionLine::new(
+            &plan,
+            Action::Buy,
+            Some(0.0005),
+            &disabled_options(),
+            sample_timings(),
+        );
 
         assert_eq!(line.schema, "copytrade.localExecution.v1");
         assert!(!line.send_enabled);
@@ -1638,7 +1721,8 @@ mod tests {
         let mut options = disabled_options();
         options.simulate_auto_sell = true;
 
-        let line = CopyExecutionLine::new(&plan, Action::Buy, Some(0.0005), &options);
+        let line =
+            CopyExecutionLine::new(&plan, Action::Buy, Some(0.0005), &options, sample_timings());
 
         assert!(line.auto_sell_simulation_requested);
     }
@@ -1906,7 +1990,7 @@ mod tests {
     #[tokio::test]
     async fn disabled_executor_skips_before_signing() {
         let line = executor(disabled_options())
-            .handle(&allowed_plan(), Action::Buy, Some(0.0005))
+            .handle(&allowed_plan(), Action::Buy, Some(0.0005), sample_timings())
             .await;
 
         assert_eq!(line.decision, "skip");
@@ -1923,7 +2007,7 @@ mod tests {
         options.copy_wallet = Some(COPY_WALLET.to_string());
 
         let line = executor(options)
-            .handle(&allowed_plan(), Action::Buy, Some(0.0005))
+            .handle(&allowed_plan(), Action::Buy, Some(0.0005), sample_timings())
             .await;
 
         assert_eq!(line.decision, "skip");
@@ -1943,7 +2027,7 @@ mod tests {
         options.copy_wallet = Some(COPY_WALLET.to_string());
 
         let line = executor(options)
-            .handle(&allowed_plan(), Action::Buy, Some(0.0005))
+            .handle(&allowed_plan(), Action::Buy, Some(0.0005), sample_timings())
             .await;
 
         assert_eq!(line.decision, "skip");
@@ -1964,7 +2048,7 @@ mod tests {
         options.copy_wallet = Some(COPY_WALLET.to_string());
 
         let line = executor(options)
-            .handle(&allowed_plan(), Action::Buy, Some(0.0005))
+            .handle(&allowed_plan(), Action::Buy, Some(0.0005), sample_timings())
             .await;
 
         assert_eq!(line.decision, "skip");
@@ -1975,8 +2059,13 @@ mod tests {
     #[test]
     fn was_sent_requires_sent_decision_and_flag() {
         let plan = allowed_plan();
-        let mut line =
-            CopyExecutionLine::new(&plan, Action::Buy, Some(0.0005), &disabled_options());
+        let mut line = CopyExecutionLine::new(
+            &plan,
+            Action::Buy,
+            Some(0.0005),
+            &disabled_options(),
+            sample_timings(),
+        );
 
         line.sent = true;
         assert!(!line.was_sent());

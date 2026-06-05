@@ -18,8 +18,10 @@ pub(crate) struct SignalObservationWriter {
 pub(crate) struct SignalTimings {
     pub(crate) grpc_message_received_at_ms: u128,
     pub(crate) entries_deserialized_at_ms: u128,
+    pub(crate) wallet_match_finished_at_ms: u128,
     pub(crate) trade_parsed_at_ms: u128,
     pub(crate) deserialize_us: u128,
+    pub(crate) wallet_match_finished_at_us: u128,
     pub(crate) parse_us: u128,
     pub(crate) local_detect_us: u128,
     pub(crate) batch_transaction_count: u64,
@@ -403,8 +405,10 @@ mod tests {
         let timings = SignalTimings {
             grpc_message_received_at_ms: 1_780_450_789_600,
             entries_deserialized_at_ms: 1_780_450_789_604,
+            wallet_match_finished_at_ms: 1_780_450_789_605,
             trade_parsed_at_ms: 1_780_450_789_609,
             deserialize_us: 4_200,
+            wallet_match_finished_at_us: 5_000,
             parse_us: 5_300,
             local_detect_us: 9_500,
             batch_transaction_count: 42,

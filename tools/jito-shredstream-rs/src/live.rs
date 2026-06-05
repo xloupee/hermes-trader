@@ -232,6 +232,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                 let target_wallet_mention =
                     mentioned_target_wallet_in_set(&account_keys, &target_wallet_set);
                 let wallet_match_finished_at = Instant::now();
+                let wallet_match_finished_at_ms = now_ms();
                 if target_wallet_mention.is_none() {
                     if options.include_rejections {
                         print_json(&RejectionLine {
@@ -263,9 +264,13 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                         let timings = SignalTimings {
                             grpc_message_received_at_ms,
                             entries_deserialized_at_ms,
+                            wallet_match_finished_at_ms,
                             trade_parsed_at_ms,
                             deserialize_us: entries_deserialized_at
                                 .duration_since(grpc_message_received_at)
+                                .as_micros(),
+                            wallet_match_finished_at_us: wallet_match_finished_at
+                                .duration_since(entries_deserialized_at)
                                 .as_micros(),
                             parse_us: trade_parsed_at
                                 .duration_since(entries_deserialized_at)
@@ -312,6 +317,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             execution_plan.clone(),
                             parsed.action,
                             parsed.sol_amount,
+                            timings,
                         );
                         if !options.fast_copy_send {
                             write_plan_outputs(
@@ -442,10 +448,16 @@ fn spawn_copy_execution(
     execution_plan: ExecutionPlanLine,
     observed_action: crate::parser::Action,
     observed_sol_amount: Option<f64>,
+    timings: SignalTimings,
 ) {
     tokio::spawn(async move {
         let copy_execution = copy_executor
-            .handle(&execution_plan, observed_action, observed_sol_amount)
+            .handle(
+                &execution_plan,
+                observed_action,
+                observed_sol_amount,
+                timings,
+            )
             .await;
         if copy_execution_tx.send(copy_execution).is_err() {
             eprintln!("copy execution result dropped; receiver closed");

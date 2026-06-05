@@ -4,7 +4,7 @@ use crate::{
     event::now_ms,
     parser::{
         associated_token_program_id, compute_budget_program_id, read_u64_le, system_program_id,
-        Action, FlashxPumpLayout, Route, RouteContext,
+        Action, Route, RouteContext,
     },
     planner::ExecutionPlanLine,
     signal::SignalTimings,
@@ -1051,9 +1051,6 @@ fn auto_sell_token_amount_raw(route_context: Option<&RouteContext>, token_balanc
     let Some(RouteContext::FlashxPump(context)) = route_context else {
         return token_balance_raw;
     };
-    if context.layout != FlashxPumpLayout::MigratedAmm {
-        return token_balance_raw;
-    }
 
     match read_u64_le(&context.data, 9) {
         Some(min_tokens_out) if min_tokens_out > 0 => token_balance_raw.min(min_tokens_out),
@@ -1762,7 +1759,9 @@ struct TokenAccountBalanceValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{DirectPumpAccounts, FlashxPumpResolvedAccounts, MigratedAmmAccounts};
+    use crate::parser::{
+        DirectPumpAccounts, FlashxPumpLayout, FlashxPumpResolvedAccounts, MigratedAmmAccounts,
+    };
     use crate::planner::{execution_plan_line, PlannerOptions};
     use solana_pubkey::Pubkey;
 
@@ -2115,12 +2114,22 @@ mod tests {
     }
 
     #[test]
-    fn direct_auto_sell_keeps_full_balance() {
-        let route_context = flashx_context(FlashxPumpLayout::DirectPump, 1);
+    fn direct_auto_sell_caps_stale_balance_to_target_min_out() {
+        let route_context = flashx_context(FlashxPumpLayout::DirectPump, 23_000_000_000);
 
         assert_eq!(
             auto_sell_token_amount_raw(Some(&route_context), 47_000_000_000),
-            47_000_000_000
+            23_000_000_000
+        );
+    }
+
+    #[test]
+    fn direct_auto_sell_keeps_smaller_balance_when_no_stale_tokens_exist() {
+        let route_context = flashx_context(FlashxPumpLayout::DirectPump, 23_000_000_000);
+
+        assert_eq!(
+            auto_sell_token_amount_raw(Some(&route_context), 22_500_000_000),
+            22_500_000_000
         );
     }
 

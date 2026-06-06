@@ -108,6 +108,16 @@ export interface BotConfig extends MigrationFormatConfig {
   copyTradeTrailingSellTrailPercent: number;
   copyTradeTrailingSellIntervalMs: number;
   copyTradeTrailingSellMaxBuilds: number;
+  copyTradeRustTrailingSellsEnabled: boolean;
+  copyTradeRustTrailingSellsLiveEnabled: boolean;
+  copyTradeRustTrailingSellsSource: "supabase" | "local-jsonl";
+  copyTradeRustTrailingSellsLocalExecutionsPath: string;
+  copyTradeRustTrailingSellsExecutionProvider: "pumpportal-lightning" | "direct-pump" | "direct-pumpswap" | "direct-auto";
+  copyTradeRustTrailingSellsPollMs: number;
+  copyTradeRustTrailingSellsConfirmationPollMs: number;
+  copyTradeRustTrailingSellsLookbackMs: number;
+  copyTradeRustTrailingSellsStartupLookbackMs: number;
+  copyTradeRustTrailingSellsMaxRows: number;
   copyTradeBuyPressureSellEnabled: boolean;
   copyTradeBuyPressureSellPercent: number;
   copyTradeBuyPressureSellTimeoutMs: number;

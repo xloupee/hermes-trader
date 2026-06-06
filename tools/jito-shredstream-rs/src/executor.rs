@@ -9,8 +9,9 @@ use crate::{
     planner::ExecutionPlanLine,
     signal::SignalTimings,
     tx_builder::{
-        build_auto_sell_unsigned_flashx_pump_with_cache,
+        build_auto_sell_unsigned_flashx_pump_with_fees_and_cache,
         build_full_copy_unsigned_flashx_pump_with_fees_and_cache_and_spend,
+        build_trailing_sell_unsigned_flashx_pump_with_fees_and_cache,
         copy_wallet_token_account_for_flashx_pump, CopyPdaCache, TxBuildError, TxFeeConfig,
     },
     LiveOptions,
@@ -26,6 +27,7 @@ use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction::Transaction;
 use std::{
     collections::{HashMap, VecDeque},
+    io::Write,
     path::PathBuf,
     str::FromStr,
     sync::{Arc, Mutex},
@@ -41,6 +43,40 @@ const SEND_WARM_TIMEOUT_MS: u64 = 750;
 const AUTO_SELL_BALANCE_ATTEMPTS: usize = 8;
 const AUTO_SELL_BALANCE_RETRY_MS: u64 = 250;
 const DIRECT_PUMP_SELL_CONTEXT_CACHE_CAPACITY: usize = 512;
+const TRAILING_SELL_MAX_STEPS: usize = 20;
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TrailingSellPlan {
+    pub(crate) mode: TrailingSellMode,
+    pub(crate) percent_basis: TrailingSellPercentBasis,
+    pub(crate) steps: Vec<TrailingSellStep>,
+    pub(crate) sell_slippage_percent: Option<f64>,
+    pub(crate) sell_priority_fee_sol: Option<f64>,
+    pub(crate) priority_fee_micro_lamports: Option<u64>,
+    pub(crate) jito_tip_lamports: Option<u64>,
+    pub(crate) jito_tip_account: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TrailingSellMode {
+    CustomSteps,
+    Formula,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TrailingSellPercentBasis {
+    RemainingBalance,
+    OriginalPosition,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TrailingSellStep {
+    pub(crate) delay_ms: u64,
+    pub(crate) percent: f64,
+}
 
 pub(crate) struct CopyExecutor {
     options: CopyExecutionOptions,
@@ -83,6 +119,9 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) solana_rpc_url: Option<String>,
     pub(crate) auto_sell_after_buy: bool,
     pub(crate) auto_sell_delay_ms: u64,
+    pub(crate) rust_trailing_sells_enabled: bool,
+    pub(crate) rust_trailing_sell_confirmation_timeout_ms: u64,
+    pub(crate) rust_trailing_sell_confirmation_poll_ms: u64,
     pub(crate) simulate_auto_sell: bool,
     pub(crate) isolate_buy_latency_test: bool,
     pub(crate) send_max_retries: u64,
@@ -110,6 +149,8 @@ pub(crate) struct CopyExecutionLine {
     slot: u64,
     selected_route: Route,
     mint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_wallet_token_account: Option<String>,
     observed_action: Action,
     #[serde(skip_serializing_if = "Option::is_none")]
     observed_sol_amount: Option<f64>,
@@ -258,6 +299,94 @@ pub(crate) struct CopyExecutionLine {
     auto_sell_simulation_logs: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum CopyExecutionOutput {
+    Copy(CopyExecutionLine),
+    RustTrailingSell(RustTrailingSellLine),
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RustTrailingSellLine {
+    schema: &'static str,
+    observed_at_ms: u128,
+    execution_at_ms: u128,
+    provider: &'static str,
+    source: &'static str,
+    endpoint: String,
+    observed_wallet: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_wallet: Option<String>,
+    observed_signature: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buy_send_signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_wallet_token_account: Option<String>,
+    slot: u64,
+    selected_route: Route,
+    mint: String,
+    step_index: usize,
+    total_steps: usize,
+    delay_ms: u64,
+    percent: f64,
+    percent_basis: TrailingSellPercentBasis,
+    mode: TrailingSellMode,
+    schedule_anchor_at_ms: u128,
+    due_at_ms: u128,
+    step_started_at_ms: u128,
+    drift_ms: i128,
+    sell_slippage_percent: Option<f64>,
+    sell_priority_fee_sol: Option<f64>,
+    priority_fee_micro_lamports: Option<u64>,
+    jito_tip_lamports: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jito_tip_account: Option<String>,
+    confirmation_checked: bool,
+    confirmation_ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confirmation_slot: Option<u64>,
+    signed: bool,
+    simulated: bool,
+    sent: bool,
+    decision: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route_layout: Option<&'static str>,
+    instruction_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token_balance_raw: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token_amount_raw: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blockhash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    submitted_at_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature_returned_at_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buy_signature_to_submitted_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buy_signature_to_signature_returned_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    send_signature: Option<String>,
+    send_rpc_url_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    send_rpc_winner: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    send_rpc_attempts: Vec<SendRpcAttemptLine>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    send_rpc_errors: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    simulation_error: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    simulation_units_consumed: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    simulation_logs: Vec<String>,
+}
+
 #[derive(Debug)]
 struct SendTransactionResult {
     signature: String,
@@ -387,6 +516,11 @@ impl CopyExecutor {
             solana_rpc_url: options.solana_rpc_url.clone(),
             auto_sell_after_buy: options.auto_sell_after_buy,
             auto_sell_delay_ms: options.auto_sell_delay_ms,
+            rust_trailing_sells_enabled: options.rust_trailing_sells_enabled,
+            rust_trailing_sell_confirmation_timeout_ms: options
+                .rust_trailing_sell_confirmation_timeout_ms,
+            rust_trailing_sell_confirmation_poll_ms: options
+                .rust_trailing_sell_confirmation_poll_ms,
             simulate_auto_sell: options.simulate_auto_sell,
             isolate_buy_latency_test: options.isolate_buy_latency_test,
             send_max_retries: options.send_max_retries,
@@ -622,6 +756,7 @@ impl CopyExecutor {
         line.record_unsigned_build_us(unsigned_build_started_at);
         line.route_layout = Some(build.route_layout);
         line.instruction_count = build.instructions.len();
+        line.copy_wallet_token_account = Some(build.copy_wallet_token_account.to_string());
         line.mark_built();
 
         let postbuild_guards_started_at = Instant::now();
@@ -757,6 +892,31 @@ impl CopyExecutor {
         line.was_sent() && self.options.auto_sell_after_buy_enabled()
     }
 
+    pub(crate) fn should_spawn_trailing_sells_after_buy(
+        &self,
+        line: &CopyExecutionLine,
+        trailing_sell_plan: Option<&TrailingSellPlan>,
+    ) -> bool {
+        line.was_sent()
+            && self.options.rust_trailing_sells_enabled()
+            && trailing_sell_plan
+                .map(|plan| !effective_trailing_sell_steps(plan).is_empty())
+                .unwrap_or(false)
+    }
+
+    pub(crate) fn should_spawn_auto_sell_on_target_sell(
+        &self,
+        execution_plan: &ExecutionPlanLine,
+        observed_action: Action,
+    ) -> bool {
+        observed_action == Action::Sell
+            && self.options.auto_sell_after_buy_enabled()
+            && execution_plan
+                .route_context
+                .as_ref()
+                .is_some_and(is_direct_pump_sell_route_context)
+    }
+
     pub(crate) fn observe_direct_pump_sell_route_context(
         &self,
         target_wallet: &str,
@@ -790,9 +950,120 @@ impl CopyExecutor {
             return line;
         };
 
-        self.handle_auto_sell(&mut line, execution_plan, keypair)
+        self.handle_auto_sell(&mut line, execution_plan, keypair, true)
             .await;
         line
+    }
+
+    pub(crate) async fn handle_target_sell_auto_sell_result(
+        &self,
+        mut line: CopyExecutionLine,
+        execution_plan: &ExecutionPlanLine,
+    ) -> CopyExecutionLine {
+        line.execution_at_ms = now_ms();
+        let Some(keypair) = self.keypair.as_ref() else {
+            line.auto_sell_attempted = true;
+            line.skip_auto_sell("missing copy keypair path");
+            return line;
+        };
+
+        self.handle_auto_sell(&mut line, execution_plan, keypair, false)
+            .await;
+        line
+    }
+
+    pub(crate) async fn handle_trailing_sell_results(
+        self: Arc<Self>,
+        buy_line: CopyExecutionLine,
+        execution_plan: ExecutionPlanLine,
+        trailing_sell_plan: TrailingSellPlan,
+        copy_execution_tx: tokio::sync::mpsc::UnboundedSender<CopyExecutionOutput>,
+    ) {
+        let steps = effective_trailing_sell_steps(&trailing_sell_plan);
+        if steps.is_empty() {
+            return;
+        }
+
+        let anchor_at_ms = buy_line
+            .signature_returned_at_ms
+            .or(buy_line.send_submitted_at_ms)
+            .unwrap_or_else(now_ms);
+        let confirmation = self
+            .wait_for_signature_confirmation(
+                buy_line.send_signature.as_deref(),
+                self.options.rust_trailing_sell_confirmation_timeout_ms,
+                self.options.rust_trailing_sell_confirmation_poll_ms,
+            )
+            .await;
+
+        if !confirmation.ok {
+            let mut line = RustTrailingSellLine::new(
+                &buy_line,
+                &trailing_sell_plan,
+                0,
+                steps.len(),
+                steps[0],
+                anchor_at_ms,
+                &self.options,
+            );
+            line.confirmation_checked = confirmation.checked;
+            line.confirmation_ok = false;
+            line.confirmation_slot = confirmation.slot;
+            line.skip(confirmation.reason.unwrap_or_else(|| {
+                "copy buy was not confirmed before trailing sell scheduling timeout".to_string()
+            }));
+            if copy_execution_tx
+                .send(CopyExecutionOutput::RustTrailingSell(line))
+                .is_err()
+            {
+                eprintln!("rust trailing sell result dropped; receiver closed");
+            }
+            return;
+        }
+
+        let mut optimistic_sellable_balance_raw: Option<u64> = None;
+        for (index, step) in steps.iter().copied().enumerate() {
+            let due_at_ms = anchor_at_ms.saturating_add(u128::from(step.delay_ms));
+            let now = now_ms();
+            if due_at_ms > now {
+                tokio::time::sleep(Duration::from_millis((due_at_ms - now) as u64)).await;
+            }
+
+            let mut line = RustTrailingSellLine::new(
+                &buy_line,
+                &trailing_sell_plan,
+                index,
+                steps.len(),
+                step,
+                anchor_at_ms,
+                &self.options,
+            );
+            line.confirmation_checked = confirmation.checked;
+            line.confirmation_ok = true;
+            line.confirmation_slot = confirmation.slot;
+            self.handle_trailing_sell_step(
+                &mut line,
+                &execution_plan,
+                &trailing_sell_plan,
+                optimistic_sellable_balance_raw,
+            )
+            .await;
+            if line.sent {
+                optimistic_sellable_balance_raw = update_optimistic_trailing_sell_balance_raw(
+                    optimistic_sellable_balance_raw,
+                    line.token_balance_raw,
+                    line.token_amount_raw,
+                );
+            }
+
+            if copy_execution_tx
+                .send(CopyExecutionOutput::RustTrailingSell(line))
+                .is_err()
+            {
+                eprintln!("rust trailing sell result dropped; receiver closed");
+                return;
+            }
+        }
     }
 
     async fn simulate_transaction(&self, encoded_tx: &str) -> Result<SimulationValue, String> {
@@ -920,6 +1191,7 @@ impl CopyExecutor {
         line: &mut CopyExecutionLine,
         execution_plan: &ExecutionPlanLine,
         keypair: &Keypair,
+        sleep_before_sell: bool,
     ) {
         line.auto_sell_attempted = true;
 
@@ -931,12 +1203,14 @@ impl CopyExecutor {
             line.skip_auto_sell("unsupported auto-sell route");
             return;
         }
-        if self.options.auto_sell_delay_ms > 5_000 {
-            line.skip_auto_sell("auto-sell delay guard exceeds 5000ms");
-            return;
-        }
+        if sleep_before_sell {
+            if self.options.auto_sell_delay_ms > 5_000 {
+                line.skip_auto_sell("auto-sell delay guard exceeds 5000ms");
+                return;
+            }
 
-        tokio::time::sleep(Duration::from_millis(self.options.auto_sell_delay_ms)).await;
+            tokio::time::sleep(Duration::from_millis(self.options.auto_sell_delay_ms)).await;
+        }
 
         let Some(copy_wallet) = self.options.copy_wallet.as_deref() else {
             line.skip_auto_sell("missing copy wallet");
@@ -994,11 +1268,12 @@ impl CopyExecutor {
             }
         };
 
-        let build = match build_auto_sell_unsigned_flashx_pump_with_cache(
+        let build = match build_auto_sell_unsigned_flashx_pump_with_fees_and_cache(
             Some(&auto_sell_route_context),
             copy_wallet,
             &execution_plan.mint,
             token_amount_raw,
+            &self.options.tx_fee_config(),
             Some(&self.pda_cache),
         ) {
             Ok(build) => build,
@@ -1007,6 +1282,9 @@ impl CopyExecutor {
                 return;
             }
         };
+        line.route_layout = Some(build.route_layout);
+        line.instruction_count = build.instructions.len();
+        line.mark_built();
 
         let tx = Transaction::new_signed_with_payer(
             &build.instructions,
@@ -1059,6 +1337,168 @@ impl CopyExecutor {
                 line.auto_sell_decision = Some("sent");
             }
             Err(error) => line.error_auto_sell(error),
+        }
+    }
+
+    async fn handle_trailing_sell_step(
+        &self,
+        line: &mut RustTrailingSellLine,
+        execution_plan: &ExecutionPlanLine,
+        trailing_sell_plan: &TrailingSellPlan,
+        optimistic_sellable_balance_raw: Option<u64>,
+    ) {
+        if self.options.dry_run {
+            line.skip("dry run blocks rust trailing sell");
+            return;
+        }
+        if execution_plan.route != Route::FlashxPump {
+            line.skip("unsupported rust trailing sell route");
+            return;
+        }
+        let Some(keypair) = self.keypair.as_ref() else {
+            line.skip("missing copy keypair path");
+            return;
+        };
+        let Some(copy_wallet) = self.options.copy_wallet.as_deref() else {
+            line.skip("missing copy wallet");
+            return;
+        };
+
+        let auto_sell_route_context = match trailing_sell_route_context_for_plan(execution_plan) {
+            Ok(route_context) => route_context,
+            Err(reason) => {
+                line.skip(reason);
+                return;
+            }
+        };
+
+        let token_account = match copy_wallet_token_account_for_flashx_pump(
+            Some(&auto_sell_route_context),
+            copy_wallet,
+            &execution_plan.mint,
+            Some(&self.pda_cache),
+        ) {
+            Ok(token_account) => token_account,
+            Err(error) => {
+                line.skip(tx_build_error_reason(error));
+                return;
+            }
+        };
+        line.copy_wallet_token_account = Some(token_account.to_string());
+
+        let token_balance_raw = match self
+            .auto_sell_token_balance_raw(&token_account.to_string())
+            .await
+        {
+            Ok(amount) if amount > 0 => amount,
+            Ok(_) => {
+                line.skip("copy wallet token balance is zero after retries");
+                return;
+            }
+            Err(error) => {
+                line.error(error);
+                return;
+            }
+        };
+        line.token_balance_raw = Some(token_balance_raw);
+        let mut sellable_balance_raw =
+            auto_sell_token_amount_raw(Some(&auto_sell_route_context), token_balance_raw);
+        if let Some(optimistic_sellable_balance_raw) = optimistic_sellable_balance_raw {
+            sellable_balance_raw = sellable_balance_raw.min(optimistic_sellable_balance_raw);
+            line.token_balance_raw = Some(sellable_balance_raw);
+        }
+        let token_amount_raw = trailing_sell_token_amount_raw(sellable_balance_raw, line.percent);
+        if token_amount_raw == 0 {
+            line.skip("rust trailing sell token amount rounds to zero");
+            return;
+        }
+        line.token_amount_raw = Some(token_amount_raw);
+
+        let Some(cached_blockhash) = cached_blockhash(self.blockhash_cache.as_ref()) else {
+            line.skip("missing warm blockhash for rust trailing sell");
+            return;
+        };
+        let blockhash = match Hash::from_str(&cached_blockhash.blockhash) {
+            Ok(blockhash) => blockhash,
+            Err(error) => {
+                line.skip(format!(
+                    "invalid cached rust trailing sell blockhash: {error}"
+                ));
+                return;
+            }
+        };
+        line.blockhash = Some(cached_blockhash.blockhash);
+
+        let build = match build_trailing_sell_unsigned_flashx_pump_with_fees_and_cache(
+            Some(&auto_sell_route_context),
+            copy_wallet,
+            &execution_plan.mint,
+            token_amount_raw,
+            &self.trailing_sell_tx_fee_config(trailing_sell_plan),
+            Some(&self.pda_cache),
+        ) {
+            Ok(build) => build,
+            Err(error) => {
+                line.skip(tx_build_error_reason(error));
+                return;
+            }
+        };
+        line.route_layout = Some(build.route_layout);
+        line.instruction_count = build.instructions.len();
+
+        let tx = Transaction::new_signed_with_payer(
+            &build.instructions,
+            Some(&keypair.pubkey()),
+            &[keypair],
+            blockhash,
+        );
+        let tx_bytes = match bincode::serialize(&tx) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                line.error(format!(
+                    "serialize signed rust trailing sell transaction: {error}"
+                ));
+                return;
+            }
+        };
+        let encoded_tx = STANDARD.encode(tx_bytes);
+        line.signed = true;
+        line.copy_signature = tx.signatures.first().map(ToString::to_string);
+
+        if self.options.simulate_auto_sell {
+            match self.simulate_transaction(&encoded_tx).await {
+                Ok(simulation) => {
+                    line.simulated = true;
+                    line.simulation_error = simulation.err;
+                    line.simulation_units_consumed = simulation.units_consumed;
+                    line.simulation_logs = simulation.logs.unwrap_or_default();
+                    if line.simulation_error.is_some() {
+                        line.skip("rust trailing sell simulation failed; send blocked");
+                        return;
+                    }
+                }
+                Err(error) => {
+                    line.simulated = true;
+                    line.simulation_error = Some(serde_json::Value::String(error));
+                    line.skip("rust trailing sell simulation failed; send blocked");
+                    return;
+                }
+            }
+        }
+
+        line.mark_submitted();
+        match self.send_transaction(&encoded_tx).await {
+            Ok(result) => {
+                line.sent = true;
+                line.mark_signature_returned();
+                line.send_signature = Some(result.signature);
+                line.send_rpc_url_count = result.rpc_url_count;
+                line.send_rpc_winner = Some(result.rpc_winner);
+                line.send_rpc_attempts = result.rpc_attempts;
+                line.send_rpc_errors = result.rpc_errors;
+                line.decision = "sent";
+            }
+            Err(error) => line.error(error),
         }
     }
 
@@ -1142,6 +1582,144 @@ impl CopyExecutor {
             .parse::<u64>()
             .map_err(|error| format!("parse token account balance: {error}"))
     }
+
+    async fn wait_for_signature_confirmation(
+        &self,
+        signature: Option<&str>,
+        timeout_ms: u64,
+        poll_ms: u64,
+    ) -> SignatureConfirmation {
+        let Some(signature) = signature.filter(|value| !value.is_empty()) else {
+            return SignatureConfirmation {
+                checked: false,
+                ok: false,
+                slot: None,
+                reason: Some("missing copy buy send signature".to_string()),
+            };
+        };
+        let Some(rpc_url) = self.options.solana_rpc_url.as_deref() else {
+            return SignatureConfirmation {
+                checked: false,
+                ok: false,
+                slot: None,
+                reason: Some("missing SOLANA_RPC_URL".to_string()),
+            };
+        };
+
+        let started_at = Instant::now();
+        let timeout = Duration::from_millis(timeout_ms);
+        loop {
+            let request = async {
+                self.client
+                    .post(rpc_url)
+                    .json(&serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": signature,
+                        "method": "getSignatureStatuses",
+                        "params": [[signature], { "searchTransactionHistory": true }]
+                    }))
+                    .send()
+                    .await
+                    .map_err(|error| format!("send getSignatureStatuses request: {error}"))?
+                    .error_for_status()
+                    .map_err(|error| format!("getSignatureStatuses HTTP status: {error}"))?
+                    .json::<RpcResponse<SignatureStatusesResult>>()
+                    .await
+                    .map_err(|error| format!("decode getSignatureStatuses response: {error}"))
+            };
+            let response = if self.options.send_http_timeout_ms > 0 {
+                match tokio::time::timeout(
+                    Duration::from_millis(self.options.send_http_timeout_ms),
+                    request,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(format!(
+                        "getSignatureStatuses timed out after {}ms",
+                        self.options.send_http_timeout_ms
+                    )),
+                }
+            } else {
+                request.await
+            };
+
+            match response {
+                Ok(response) => {
+                    if let Some(error) = response.error {
+                        return SignatureConfirmation {
+                            checked: true,
+                            ok: false,
+                            slot: None,
+                            reason: Some(format!(
+                                "getSignatureStatuses RPC error: {}",
+                                error.message
+                            )),
+                        };
+                    }
+                    if let Some(status) = response
+                        .result
+                        .and_then(|result| result.value.into_iter().next().flatten())
+                    {
+                        if let Some(error) = status.err {
+                            return SignatureConfirmation {
+                                checked: true,
+                                ok: false,
+                                slot: status.slot,
+                                reason: Some(format!(
+                                    "copy buy transaction landed with error: {error}"
+                                )),
+                            };
+                        }
+                        if matches!(
+                            status.confirmation_status.as_deref(),
+                            Some("confirmed") | Some("finalized")
+                        ) {
+                            return SignatureConfirmation {
+                                checked: true,
+                                ok: true,
+                                slot: status.slot,
+                                reason: None,
+                            };
+                        }
+                    }
+                }
+                Err(error) => {
+                    if started_at.elapsed() >= timeout {
+                        return SignatureConfirmation {
+                            checked: true,
+                            ok: false,
+                            slot: None,
+                            reason: Some(error),
+                        };
+                    }
+                }
+            }
+
+            if started_at.elapsed() >= timeout {
+                return SignatureConfirmation {
+                    checked: true,
+                    ok: false,
+                    slot: None,
+                    reason: Some("copy buy confirmation timed out".to_string()),
+                };
+            }
+            tokio::time::sleep(Duration::from_millis(poll_ms.max(1))).await;
+        }
+    }
+
+    fn trailing_sell_tx_fee_config(&self, plan: &TrailingSellPlan) -> TxFeeConfig {
+        TxFeeConfig {
+            compute_unit_price_micro_lamports: plan
+                .priority_fee_micro_lamports
+                .or(self.options.priority_fee_micro_lamports),
+            jito_tip_lamports: plan.jito_tip_lamports.or(self.options.jito_tip_lamports),
+            jito_tip_account: plan
+                .jito_tip_account
+                .clone()
+                .or_else(|| self.options.jito_tip_account.clone()),
+        }
+    }
 }
 
 impl DirectPumpSellContextCache {
@@ -1191,6 +1769,10 @@ fn auto_sell_route_context_for_plan(
         return Ok(route_context.clone());
     }
 
+    if is_direct_pump_sell_route_context(route_context) {
+        return Ok(route_context.clone());
+    }
+
     let Ok(cache) = executor.direct_pump_sell_contexts.lock() else {
         return Err("direct-pump sell-side route context cache unavailable");
     };
@@ -1198,6 +1780,15 @@ fn auto_sell_route_context_for_plan(
         .get(&execution_plan.target_wallet, &execution_plan.mint)
         .filter(is_direct_pump_sell_route_context)
         .ok_or("missing direct-pump sell-side route context")
+}
+
+fn trailing_sell_route_context_for_plan(
+    execution_plan: &ExecutionPlanLine,
+) -> Result<RouteContext, &'static str> {
+    execution_plan
+        .route_context
+        .clone()
+        .ok_or("missing rust trailing sell route context")
 }
 
 fn is_direct_pump_route_context(route_context: &RouteContext) -> bool {
@@ -1229,6 +1820,80 @@ fn auto_sell_token_amount_raw(route_context: Option<&RouteContext>, token_balanc
         Some(min_tokens_out) if min_tokens_out > 0 => token_balance_raw.min(min_tokens_out),
         _ => token_balance_raw,
     }
+}
+
+fn effective_trailing_sell_steps(plan: &TrailingSellPlan) -> Vec<TrailingSellStep> {
+    let mut steps = match plan.percent_basis {
+        TrailingSellPercentBasis::RemainingBalance => plan.steps.clone(),
+        TrailingSellPercentBasis::OriginalPosition => {
+            original_position_steps_to_remaining_balance_steps(&plan.steps)
+        }
+    };
+
+    if plan.mode == TrailingSellMode::CustomSteps {
+        let mut elapsed_ms = 0u64;
+        for step in &mut steps {
+            elapsed_ms = elapsed_ms.saturating_add(step.delay_ms);
+            step.delay_ms = elapsed_ms;
+        }
+    }
+
+    steps
+        .into_iter()
+        .filter(|step| step.percent.is_finite() && step.percent > 0.0 && step.percent <= 100.0)
+        .take(TRAILING_SELL_MAX_STEPS)
+        .collect()
+}
+
+fn original_position_steps_to_remaining_balance_steps(
+    steps: &[TrailingSellStep],
+) -> Vec<TrailingSellStep> {
+    let mut remaining_original_percent = 100.0f64;
+    let mut converted = Vec::with_capacity(steps.len());
+
+    for step in steps {
+        if remaining_original_percent <= 0.0 {
+            break;
+        }
+        let original_percent_to_sell = step.percent.min(remaining_original_percent);
+        let remaining_balance_percent =
+            (original_percent_to_sell / remaining_original_percent * 100.0).min(100.0);
+        remaining_original_percent -= original_percent_to_sell;
+        if remaining_balance_percent > 0.0 {
+            converted.push(TrailingSellStep {
+                delay_ms: step.delay_ms,
+                percent: (remaining_balance_percent * 1_000_000.0).round() / 1_000_000.0,
+            });
+        }
+    }
+
+    converted
+}
+
+fn trailing_sell_token_amount_raw(token_balance_raw: u64, percent: f64) -> u64 {
+    if token_balance_raw == 0 || !percent.is_finite() || percent <= 0.0 {
+        return 0;
+    }
+    if percent >= 100.0 {
+        return token_balance_raw;
+    }
+
+    let basis_points = (percent * 100.0).floor();
+    if !basis_points.is_finite() || basis_points <= 0.0 {
+        return 0;
+    }
+
+    ((u128::from(token_balance_raw) * basis_points as u128) / 10_000u128) as u64
+}
+
+fn update_optimistic_trailing_sell_balance_raw(
+    previous_sellable_balance_raw: Option<u64>,
+    current_sellable_balance_raw: Option<u64>,
+    sold_amount_raw: Option<u64>,
+) -> Option<u64> {
+    let sold_amount_raw = sold_amount_raw?;
+    let sellable_balance_raw = previous_sellable_balance_raw.or(current_sellable_balance_raw)?;
+    Some(sellable_balance_raw.saturating_sub(sold_amount_raw))
 }
 
 fn estimate_total_copy_spend_lamports(
@@ -1382,6 +2047,7 @@ impl CopyExecutionLine {
             slot: execution_plan.slot,
             selected_route: execution_plan.route,
             mint: execution_plan.mint.clone(),
+            copy_wallet_token_account: None,
             observed_action,
             observed_sol_amount,
             planned_copy_sol_amount: execution_plan.spend_sol_amount,
@@ -1571,6 +2237,138 @@ impl CopyExecutionLine {
     }
 }
 
+impl CopyExecutionOutput {
+    pub(crate) fn was_sent(&self) -> bool {
+        matches!(self, CopyExecutionOutput::Copy(line) if line.was_sent())
+    }
+
+    pub(crate) fn write_json_line(
+        &self,
+        writer: Option<&mut std::io::BufWriter<std::fs::File>>,
+    ) -> Result<()> {
+        let Some(writer) = writer else {
+            return Ok(());
+        };
+
+        match self {
+            CopyExecutionOutput::Copy(line) => serde_json::to_writer(&mut *writer, line)?,
+            CopyExecutionOutput::RustTrailingSell(line) => {
+                serde_json::to_writer(&mut *writer, line)?
+            }
+        }
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+        Ok(())
+    }
+}
+
+impl From<CopyExecutionLine> for CopyExecutionOutput {
+    fn from(line: CopyExecutionLine) -> Self {
+        CopyExecutionOutput::Copy(line)
+    }
+}
+
+impl RustTrailingSellLine {
+    fn new(
+        buy_line: &CopyExecutionLine,
+        plan: &TrailingSellPlan,
+        step_index: usize,
+        total_steps: usize,
+        step: TrailingSellStep,
+        anchor_at_ms: u128,
+        options: &CopyExecutionOptions,
+    ) -> Self {
+        let step_started_at_ms = now_ms();
+        let due_at_ms = anchor_at_ms.saturating_add(u128::from(step.delay_ms));
+        Self {
+            schema: "copytrade.rustTrailingSell.v1",
+            observed_at_ms: buy_line.observed_at_ms,
+            execution_at_ms: step_started_at_ms,
+            provider: "shredstream",
+            source: "jito-proxy",
+            endpoint: buy_line.endpoint.clone(),
+            observed_wallet: buy_line.observed_wallet.clone(),
+            copy_wallet: buy_line.copy_wallet.clone(),
+            observed_signature: buy_line.observed_signature.clone(),
+            buy_send_signature: buy_line.send_signature.clone(),
+            copy_wallet_token_account: buy_line.copy_wallet_token_account.clone(),
+            slot: buy_line.slot,
+            selected_route: buy_line.selected_route,
+            mint: buy_line.mint.clone(),
+            step_index,
+            total_steps,
+            delay_ms: step.delay_ms,
+            percent: step.percent,
+            percent_basis: plan.percent_basis,
+            mode: plan.mode,
+            schedule_anchor_at_ms: anchor_at_ms,
+            due_at_ms,
+            step_started_at_ms,
+            drift_ms: step_started_at_ms as i128 - due_at_ms as i128,
+            sell_slippage_percent: plan.sell_slippage_percent,
+            sell_priority_fee_sol: plan.sell_priority_fee_sol,
+            priority_fee_micro_lamports: plan
+                .priority_fee_micro_lamports
+                .or(options.priority_fee_micro_lamports),
+            jito_tip_lamports: plan.jito_tip_lamports.or(options.jito_tip_lamports),
+            jito_tip_account: plan
+                .jito_tip_account
+                .clone()
+                .or_else(|| options.jito_tip_account.clone()),
+            confirmation_checked: false,
+            confirmation_ok: false,
+            confirmation_slot: None,
+            signed: false,
+            simulated: false,
+            sent: false,
+            decision: "skip",
+            reason: None,
+            route_layout: None,
+            instruction_count: 0,
+            token_balance_raw: None,
+            token_amount_raw: None,
+            blockhash: None,
+            submitted_at_ms: None,
+            signature_returned_at_ms: None,
+            buy_signature_to_submitted_ms: None,
+            buy_signature_to_signature_returned_ms: None,
+            copy_signature: None,
+            send_signature: None,
+            send_rpc_url_count: options.selected_send_rpc_url_count(),
+            send_rpc_winner: None,
+            send_rpc_attempts: Vec::new(),
+            send_rpc_errors: Vec::new(),
+            simulation_error: None,
+            simulation_units_consumed: None,
+            simulation_logs: Vec::new(),
+        }
+    }
+
+    fn skip(&mut self, reason: impl Into<String>) {
+        self.decision = "skip";
+        self.reason = Some(reason.into());
+    }
+
+    fn error(&mut self, reason: impl Into<String>) {
+        self.decision = "error";
+        self.reason = Some(reason.into());
+    }
+
+    fn mark_submitted(&mut self) {
+        let timestamp = now_ms();
+        self.submitted_at_ms = Some(timestamp);
+        self.buy_signature_to_submitted_ms =
+            Some(timestamp.saturating_sub(self.schedule_anchor_at_ms));
+    }
+
+    fn mark_signature_returned(&mut self) {
+        let timestamp = now_ms();
+        self.signature_returned_at_ms = Some(timestamp);
+        self.buy_signature_to_signature_returned_ms =
+            Some(timestamp.saturating_sub(self.schedule_anchor_at_ms));
+    }
+}
+
 impl CopyExecutionOptions {
     fn max_total_copy_spend_lamports(&self) -> Result<Option<u64>, String> {
         self.max_total_copy_spend_sol
@@ -1603,6 +2401,10 @@ impl CopyExecutionOptions {
 
     fn simulate_auto_sell_enabled(&self) -> bool {
         self.simulate_auto_sell && !self.isolate_buy_latency_test
+    }
+
+    fn rust_trailing_sells_enabled(&self) -> bool {
+        self.rust_trailing_sells_enabled && !self.isolate_buy_latency_test
     }
 
     fn selected_send_rpc_urls(&self) -> Vec<String> {
@@ -1931,6 +2733,27 @@ struct TokenAccountBalanceValue {
     amount: String,
 }
 
+#[derive(Debug)]
+struct SignatureConfirmation {
+    checked: bool,
+    ok: bool,
+    slot: Option<u64>,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SignatureStatusesResult {
+    value: Vec<Option<SignatureStatusValue>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SignatureStatusValue {
+    confirmation_status: Option<String>,
+    err: Option<serde_json::Value>,
+    slot: Option<u64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1959,6 +2782,9 @@ mod tests {
             solana_rpc_url: None,
             auto_sell_after_buy: false,
             auto_sell_delay_ms: 1_000,
+            rust_trailing_sells_enabled: false,
+            rust_trailing_sell_confirmation_timeout_ms: 30_000,
+            rust_trailing_sell_confirmation_poll_ms: 100,
             simulate_auto_sell: false,
             isolate_buy_latency_test: false,
             send_max_retries: 3,
@@ -2203,6 +3029,34 @@ mod tests {
     }
 
     #[test]
+    fn direct_pump_trailing_sell_accepts_buy_side_context() {
+        let mut plan = allowed_plan();
+        plan.route_context = Some(flashx_context(FlashxPumpLayout::DirectPump, 1));
+
+        let route_context = trailing_sell_route_context_for_plan(&plan)
+            .expect("rust trailing sell should use copied buy route context");
+
+        assert!(is_direct_pump_route_context(&route_context));
+        assert!(!is_direct_pump_sell_route_context(&route_context));
+    }
+
+    #[test]
+    fn target_sell_auto_sell_uses_current_sell_side_context_without_cache() {
+        let mut options = disabled_options();
+        options.auto_sell_after_buy = true;
+        let executor = executor(options);
+        let mut plan = allowed_plan();
+        plan.route_context = Some(flashx_direct_sell_context());
+
+        assert!(executor.should_spawn_auto_sell_on_target_sell(&plan, Action::Sell));
+        assert!(!executor.should_spawn_auto_sell_on_target_sell(&plan, Action::Buy));
+
+        let route_context = auto_sell_route_context_for_plan(&executor, &plan)
+            .expect("target sell context should be directly usable");
+        assert!(is_direct_pump_sell_route_context(&route_context));
+    }
+
+    #[test]
     fn max_copy_sol_first_live_cap_is_one_milli_sol() {
         assert_eq!(FIRST_LIVE_MAX_COPY_SOL_CAP, 0.001);
     }
@@ -2340,6 +3194,121 @@ mod tests {
         assert_eq!(
             auto_sell_token_amount_raw(Some(&route_context), 22_500_000_000),
             22_500_000_000
+        );
+    }
+
+    #[test]
+    fn trailing_sell_custom_original_position_steps_match_node_semantics() {
+        let plan = TrailingSellPlan {
+            mode: TrailingSellMode::CustomSteps,
+            percent_basis: TrailingSellPercentBasis::OriginalPosition,
+            steps: vec![
+                TrailingSellStep {
+                    delay_ms: 500,
+                    percent: 50.0,
+                },
+                TrailingSellStep {
+                    delay_ms: 500,
+                    percent: 100.0,
+                },
+            ],
+            sell_slippage_percent: None,
+            sell_priority_fee_sol: None,
+            priority_fee_micro_lamports: None,
+            jito_tip_lamports: None,
+            jito_tip_account: None,
+        };
+
+        assert_eq!(
+            effective_trailing_sell_steps(&plan),
+            vec![
+                TrailingSellStep {
+                    delay_ms: 500,
+                    percent: 50.0,
+                },
+                TrailingSellStep {
+                    delay_ms: 1_000,
+                    percent: 100.0,
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn trailing_sell_amount_uses_raw_balance_basis_points() {
+        assert_eq!(trailing_sell_token_amount_raw(1_000_000, 50.0), 500_000);
+        assert_eq!(trailing_sell_token_amount_raw(3, 33.333), 0);
+        assert_eq!(trailing_sell_token_amount_raw(3, 100.0), 3);
+    }
+
+    #[test]
+    fn trailing_sell_optimistic_balance_tracks_submitted_steps() {
+        let first_remaining =
+            update_optimistic_trailing_sell_balance_raw(None, Some(34_214_804), Some(17_107_402));
+        assert_eq!(first_remaining, Some(17_107_402));
+
+        let second_remaining = update_optimistic_trailing_sell_balance_raw(
+            first_remaining,
+            Some(34_214_804),
+            Some(17_107_402),
+        );
+        assert_eq!(second_remaining, Some(0));
+    }
+
+    #[test]
+    fn rust_trailing_sell_line_records_buy_identity_and_token_account() {
+        let plan = allowed_plan();
+        let mut buy_line = CopyExecutionLine::new(
+            &plan,
+            Action::Buy,
+            Some(0.0005),
+            &disabled_options(),
+            sample_timings(),
+        );
+        buy_line.send_signature = Some("copy-buy-signature".to_string());
+        buy_line.copy_wallet_token_account = Some("copy-token-account".to_string());
+        let trailing_sell_plan = TrailingSellPlan {
+            mode: TrailingSellMode::CustomSteps,
+            percent_basis: TrailingSellPercentBasis::RemainingBalance,
+            steps: vec![TrailingSellStep {
+                delay_ms: 500,
+                percent: 50.0,
+            }],
+            sell_slippage_percent: Some(8.0),
+            sell_priority_fee_sol: Some(0.00002),
+            priority_fee_micro_lamports: Some(250_000),
+            jito_tip_lamports: Some(10_000),
+            jito_tip_account: Some(COPY_WALLET.to_string()),
+        };
+
+        let line = RustTrailingSellLine::new(
+            &buy_line,
+            &trailing_sell_plan,
+            0,
+            1,
+            trailing_sell_plan.steps[0],
+            1_000,
+            &disabled_options(),
+        );
+        let json = serde_json::to_value(&line).expect("trailing sell line serializes");
+
+        assert_eq!(
+            json.get("schema").and_then(serde_json::Value::as_str),
+            Some("copytrade.rustTrailingSell.v1")
+        );
+        assert_eq!(
+            json.get("buySendSignature")
+                .and_then(serde_json::Value::as_str),
+            Some("copy-buy-signature")
+        );
+        assert_eq!(
+            json.get("copyWalletTokenAccount")
+                .and_then(serde_json::Value::as_str),
+            Some("copy-token-account")
+        );
+        assert_eq!(
+            json.get("mint").and_then(serde_json::Value::as_str),
+            Some(plan.mint.as_str())
         );
     }
 

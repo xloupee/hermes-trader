@@ -305,6 +305,7 @@ function unknownChainReport(row, unavailableReason) {
     extraSpendBeyondObservedSol: null,
     extraSpendBeyondObservedAndNetworkFeeSol: null,
     err: null,
+    targetBlockTime: null,
     blockTime: null
   };
 }
@@ -435,8 +436,16 @@ function dedupeRows(rows) {
 }
 
 async function chainReport(row) {
+  let targetTransaction = null;
+  try {
+    targetTransaction = await confirmedTransaction(row.observedSignature);
+  } catch {
+    targetTransaction = null;
+  }
+
   if (!row.sendSignature) {
     const report = unknownChainReport(row, "missing copy send signature");
+    report.targetBlockTime = targetTransaction?.blockTime ?? null;
     report.buyStatus = buyStatus(row, report);
     report.autoSellStatus = autoSellStatus(row, null);
     report.autoSell = row.autoSellSendSignature
@@ -451,7 +460,9 @@ async function chainReport(row) {
     return unknownChainReport(row, `getTransaction failed: ${error.message}`);
   }
   if (!transaction) {
-    return unknownChainReport(row, "copy transaction not found at confirmed commitment");
+    const report = unknownChainReport(row, "copy transaction not found at confirmed commitment");
+    report.targetBlockTime = targetTransaction?.blockTime ?? null;
+    return report;
   }
 
   const copyWalletSolDelta = solDelta(transaction, row.copyWallet);
@@ -493,6 +504,7 @@ async function chainReport(row) {
     extraSpendBeyondObservedSol,
     extraSpendBeyondObservedAndNetworkFeeSol,
     err: transaction.meta?.err ?? null,
+    targetBlockTime: targetTransaction?.blockTime ?? null,
     blockTime: transaction.blockTime,
     autoSell: autoSellReport
       ? {

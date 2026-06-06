@@ -15,6 +15,18 @@ const routing = {
   pool: "auto",
   defaultSlippage: 10,
   defaultPriorityFee: 0.00005,
+  defaultTrailingSell: {
+    enabled: true,
+    mode: "custom_steps",
+    percentBasis: "remaining_balance",
+    steps: [
+      { delayMs: 500, percent: 50 },
+      { delayMs: 500, percent: 100 }
+    ]
+  },
+  priorityFeeMicroLamports: 250000,
+  jitoTipLamports: 10000,
+  jitoTipAccount: "96gYZGLnUQYgE8MWWpYJw8yRjnvB51rAhbG1SogE3uSG",
   maxBuySol: 0.2,
   dailySolCap: 1,
   maxSignalAgeMs: 750,
@@ -64,8 +76,8 @@ function subscriber(overrides = {}) {
     copyAmountSol: overrides.copyAmountSol ?? 0.01,
     copyTradeBuySlippagePercent: overrides.copyTradeBuySlippagePercent ?? null,
     copyTradeBuyPriorityFeeSol: overrides.copyTradeBuyPriorityFeeSol ?? null,
-    copyTradeSellSlippagePercent: null,
-    copyTradeSellPriorityFeeSol: null,
+    copyTradeSellSlippagePercent: overrides.copyTradeSellSlippagePercent ?? null,
+    copyTradeSellPriorityFeeSol: overrides.copyTradeSellPriorityFeeSol ?? null,
     copyTradeRetryFailedBuys: overrides.copyTradeRetryFailedBuys ?? false,
     copyTradeBuyPressureSellEnabled: overrides.copyTradeBuyPressureSellEnabled ?? false,
     copyTradeBuyPressureSellTimeoutMs: overrides.copyTradeBuyPressureSellTimeoutMs ?? null,
@@ -103,6 +115,59 @@ test("copy trade hot-path snapshot is deterministic and checksummed", () => {
   ]);
   assert.doesNotMatch(JSON.stringify(snapshot), /encrypted|encryptedSecretKey|apiKeyLast4|abcd/);
   assert.equal(snapshot.subscribers[0].dailySpentSol, 0.1);
+  assert.deepEqual(snapshot.subscribers[0].wallets[0].trailingSell, routing.defaultTrailingSell);
+  assert.equal(snapshot.subscribers[0].effectiveSellSlippage, routing.defaultSlippage);
+  assert.equal(snapshot.subscribers[0].effectiveSellPriorityFee, routing.defaultPriorityFee);
+});
+
+test("copy trade hot-path snapshot exports wallet trailing sell overrides and sell settings", () => {
+  const walletTrailingSell = {
+    enabled: true,
+    mode: "custom_steps",
+    percentBasis: "original_position",
+    steps: [
+      { delayMs: 250, percent: 25 },
+      { delayMs: 750, percent: 100 }
+    ],
+    updatedAt: "now"
+  };
+  const snapshot = createCopyTradeHotPathSnapshot({
+    subscribers: [
+      subscriber({
+        copyTradeSellSlippagePercent: 7,
+        copyTradeSellPriorityFeeSol: 0.00002,
+        copyTradeWallets: [
+          {
+            address: "WalletC1111111111111111111111111111111111",
+            label: "Custom",
+            trailingSellConfig: walletTrailingSell,
+            addedAt: "now",
+            updatedAt: "now"
+          }
+        ]
+      })
+    ],
+    routing,
+    dailySpentSolByChatId: {
+      "chat-1": 0
+    },
+    sequence: 8,
+    generatedAtMs: 1
+  });
+
+  assert.equal(snapshot.subscribers[0].sellSlippage, 7);
+  assert.equal(snapshot.subscribers[0].sellPriorityFee, 0.00002);
+  assert.equal(snapshot.subscribers[0].effectiveSellSlippage, 7);
+  assert.equal(snapshot.subscribers[0].effectiveSellPriorityFee, 0.00002);
+  assert.deepEqual(snapshot.subscribers[0].wallets[0].trailingSell, {
+    enabled: true,
+    mode: "custom_steps",
+    percentBasis: "original_position",
+    steps: [
+      { delayMs: 250, percent: 25 },
+      { delayMs: 750, percent: 100 }
+    ]
+  });
 });
 
 test("copy trade hot-path snapshot skips incomplete or disabled copy state", () => {

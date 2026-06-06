@@ -1,3 +1,6 @@
+use crate::executor::{
+    TrailingSellMode, TrailingSellPercentBasis, TrailingSellPlan, TrailingSellStep,
+};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use solana_pubkey::Pubkey;
@@ -12,6 +15,7 @@ pub(crate) struct TelegramSnapshotConfig {
 #[derive(Clone, Debug)]
 pub(crate) struct TelegramTargetConfig {
     pub(crate) copy_amount_sol: f64,
+    pub(crate) trailing_sell: Option<TrailingSellPlan>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +33,18 @@ struct SnapshotRouting {
     #[serde(rename = "liveTradingEnabled")]
     _live_trading_enabled: bool,
     emergency_stopped: bool,
+    #[serde(default)]
+    default_slippage: Option<f64>,
+    #[serde(default)]
+    default_priority_fee: Option<f64>,
+    #[serde(default)]
+    default_trailing_sell: Option<SnapshotTrailingSellConfig>,
+    #[serde(default)]
+    priority_fee_micro_lamports: Option<u64>,
+    #[serde(default)]
+    jito_tip_lamports: Option<u64>,
+    #[serde(default)]
+    jito_tip_account: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,12 +52,39 @@ struct SnapshotRouting {
 struct SnapshotSubscriber {
     trading_wallet_public_key: String,
     copy_amount_sol: f64,
+    #[serde(default)]
+    sell_slippage: Option<f64>,
+    #[serde(default)]
+    sell_priority_fee: Option<f64>,
+    #[serde(default)]
+    effective_sell_slippage: Option<f64>,
+    #[serde(default)]
+    effective_sell_priority_fee: Option<f64>,
     wallets: Vec<SnapshotWallet>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SnapshotWallet {
     address: String,
+    #[serde(default)]
+    trailing_sell: Option<SnapshotTrailingSellConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotTrailingSellConfig {
+    enabled: bool,
+    mode: Option<String>,
+    percent_basis: Option<String>,
+    steps: Vec<SnapshotTrailingSellStep>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotTrailingSellStep {
+    delay_ms: f64,
+    percent: f64,
 }
 
 impl TelegramSnapshotConfig {
@@ -77,14 +120,40 @@ impl TelegramSnapshotConfig {
                     continue;
                 }
 
+                let sell_slippage_percent = subscriber
+                    .effective_sell_slippage
+                    .or(subscriber.sell_slippage)
+                    .or(snapshot.routing.default_slippage)
+                    .filter(|value| value.is_finite() && *value >= 0.0);
+                let sell_priority_fee_sol = subscriber
+                    .effective_sell_priority_fee
+                    .or(subscriber.sell_priority_fee)
+                    .or(snapshot.routing.default_priority_fee)
+                    .filter(|value| value.is_finite() && *value >= 0.0);
+
                 for wallet in subscriber.wallets {
                     if Pubkey::from_str(&wallet.address).is_err() {
                         continue;
                     }
+                    let trailing_sell = wallet
+                        .trailing_sell
+                        .as_ref()
+                        .or(snapshot.routing.default_trailing_sell.as_ref())
+                        .and_then(|config| {
+                            trailing_sell_plan_from_snapshot(
+                                config,
+                                sell_slippage_percent,
+                                sell_priority_fee_sol,
+                                snapshot.routing.priority_fee_micro_lamports,
+                                snapshot.routing.jito_tip_lamports,
+                                snapshot.routing.jito_tip_account.clone(),
+                            )
+                        });
                     targets.insert(
                         wallet.address,
                         TelegramTargetConfig {
                             copy_amount_sol: subscriber.copy_amount_sol,
+                            trailing_sell,
                         },
                     );
                 }
@@ -112,6 +181,62 @@ impl TelegramSnapshotConfig {
     }
 }
 
+fn trailing_sell_plan_from_snapshot(
+    config: &SnapshotTrailingSellConfig,
+    sell_slippage_percent: Option<f64>,
+    sell_priority_fee_sol: Option<f64>,
+    priority_fee_micro_lamports: Option<u64>,
+    jito_tip_lamports: Option<u64>,
+    jito_tip_account: Option<String>,
+) -> Option<TrailingSellPlan> {
+    if !config.enabled {
+        return None;
+    }
+
+    let steps = config
+        .steps
+        .iter()
+        .filter_map(|step| {
+            if !step.delay_ms.is_finite()
+                || step.delay_ms < 0.0
+                || !step.percent.is_finite()
+                || step.percent <= 0.0
+                || step.percent > 100.0
+            {
+                return None;
+            }
+
+            Some(TrailingSellStep {
+                delay_ms: step.delay_ms.floor() as u64,
+                percent: step.percent,
+            })
+        })
+        .take(20)
+        .collect::<Vec<_>>();
+    if steps.is_empty() {
+        return None;
+    }
+
+    Some(TrailingSellPlan {
+        mode: match config.mode.as_deref() {
+            Some("formula") => TrailingSellMode::Formula,
+            _ => TrailingSellMode::CustomSteps,
+        },
+        percent_basis: match config.percent_basis.as_deref() {
+            Some("original_position") => TrailingSellPercentBasis::OriginalPosition,
+            _ => TrailingSellPercentBasis::RemainingBalance,
+        },
+        steps,
+        sell_slippage_percent,
+        sell_priority_fee_sol,
+        priority_fee_micro_lamports: priority_fee_micro_lamports.filter(|value| *value > 0),
+        jito_tip_lamports: jito_tip_lamports.filter(|value| *value > 0),
+        jito_tip_account: jito_tip_account
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,15 +259,34 @@ mod tests {
               "checksum": "ignored",
               "routing": {{
                 "liveTradingEnabled": false,
-                "emergencyStopped": false
+                "emergencyStopped": false,
+                "defaultSlippage": 10,
+                "defaultPriorityFee": 0.00005,
+                "priorityFeeMicroLamports": 250000,
+                "jitoTipLamports": 10000,
+                "jitoTipAccount": "96gYZGLnUQYgE8MWWpYJw8yRjnvB51rAhbG1SogE3uSG"
               }},
               "subscribers": [
                 {{
                   "chatId": "chat-1",
                   "tradingWalletPublicKey": "{COPY_WALLET}",
                   "copyAmountSol": 0.0007,
+                  "effectiveSellSlippage": 8,
+                  "effectiveSellPriorityFee": 0.00002,
                   "wallets": [
-                    {{ "address": "{TARGET_B}", "label": "B" }},
+                    {{
+                      "address": "{TARGET_B}",
+                      "label": "B",
+                      "trailingSell": {{
+                        "enabled": true,
+                        "mode": "custom_steps",
+                        "percentBasis": "original_position",
+                        "steps": [
+                          {{ "delayMs": 500, "percent": 50 }},
+                          {{ "delayMs": 500, "percent": 100 }}
+                        ]
+                      }}
+                    }},
                     {{ "address": "{TARGET_A}", "label": "A" }}
                   ]
                 }},
@@ -168,6 +312,43 @@ mod tests {
         assert_eq!(
             snapshot.target_config(TARGET_A).unwrap().copy_amount_sol,
             0.0007
+        );
+        assert!(snapshot
+            .target_config(TARGET_A)
+            .unwrap()
+            .trailing_sell
+            .is_none());
+        let trailing_sell = snapshot
+            .target_config(TARGET_B)
+            .unwrap()
+            .trailing_sell
+            .as_ref()
+            .expect("target B trailing sell config");
+        assert_eq!(trailing_sell.mode, TrailingSellMode::CustomSteps);
+        assert_eq!(
+            trailing_sell.percent_basis,
+            TrailingSellPercentBasis::OriginalPosition
+        );
+        assert_eq!(
+            trailing_sell.steps,
+            vec![
+                TrailingSellStep {
+                    delay_ms: 500,
+                    percent: 50.0,
+                },
+                TrailingSellStep {
+                    delay_ms: 500,
+                    percent: 100.0,
+                }
+            ]
+        );
+        assert_eq!(trailing_sell.sell_slippage_percent, Some(8.0));
+        assert_eq!(trailing_sell.sell_priority_fee_sol, Some(0.00002));
+        assert_eq!(trailing_sell.priority_fee_micro_lamports, Some(250000));
+        assert_eq!(trailing_sell.jito_tip_lamports, Some(10000));
+        assert_eq!(
+            trailing_sell.jito_tip_account.as_deref(),
+            Some("96gYZGLnUQYgE8MWWpYJw8yRjnvB51rAhbG1SogE3uSG")
         );
         assert!(snapshot.target_config(OTHER_WALLET).is_none());
     }

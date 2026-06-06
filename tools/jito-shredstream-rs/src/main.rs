@@ -165,11 +165,43 @@ pub(crate) struct LiveOptions {
     #[arg(long, env = "JITO_COPY_EXECUTIONS_PATH")]
     pub(crate) copy_executions_path: Option<PathBuf>,
 
+    #[arg(long, env = "JITO_COPY_EXECUTION_CONCURRENCY", default_value_t = 4)]
+    pub(crate) copy_execution_concurrency: usize,
+
+    #[arg(
+        long,
+        env = "JITO_COPY_EXECUTION_QUEUE_CAPACITY",
+        default_value_t = 1024
+    )]
+    pub(crate) copy_execution_queue_capacity: usize,
+
     #[arg(long, env = "JITO_AUTO_SELL_AFTER_BUY", default_value_t = false)]
     pub(crate) auto_sell_after_buy: bool,
 
     #[arg(long, env = "JITO_AUTO_SELL_DELAY_MS", default_value_t = 1_000)]
     pub(crate) auto_sell_delay_ms: u64,
+
+    #[arg(
+        long,
+        env = "JITO_RUST_TRAILING_SELLS_ENABLED",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) rust_trailing_sells_enabled: bool,
+
+    #[arg(
+        long,
+        env = "JITO_RUST_TRAILING_SELL_CONFIRMATION_TIMEOUT_MS",
+        default_value_t = 30_000
+    )]
+    pub(crate) rust_trailing_sell_confirmation_timeout_ms: u64,
+
+    #[arg(
+        long,
+        env = "JITO_RUST_TRAILING_SELL_CONFIRMATION_POLL_MS",
+        default_value_t = 100
+    )]
+    pub(crate) rust_trailing_sell_confirmation_poll_ms: u64,
 
     #[arg(
         long,
@@ -237,6 +269,13 @@ pub(crate) struct LiveOptions {
         default_value = "copytrade_signal_observations"
     )]
     pub(crate) signal_table: String,
+
+    #[arg(
+        long,
+        env = "JITO_SIGNAL_OBSERVATION_QUEUE_CAPACITY",
+        default_value_t = 4096
+    )]
+    pub(crate) signal_observation_queue_capacity: usize,
 
     #[arg(long, env = "SOLANA_RPC_URL")]
     pub(crate) solana_rpc_url: Option<String>,

@@ -2,7 +2,17 @@ import { createHash } from "node:crypto";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { TradeExecutionProvider } from "./trade-execution.js";
-import type { PumpPortalTradePool, SubscriberRecord, SubscriberStore, TelegramChatId, TradingWallet, WatchedWallet } from "./types.js";
+import type {
+  PumpPortalTradePool,
+  SubscriberRecord,
+  SubscriberStore,
+  TelegramChatId,
+  TradingWallet,
+  TrailingSellConfig,
+  TrailingSellMode,
+  TrailingSellPercentBasis,
+  WatchedWallet
+} from "./types.js";
 
 export const COPY_TRADE_HOT_PATH_SNAPSHOT_VERSION = 1;
 
@@ -11,6 +21,10 @@ export interface CopyTradeHotPathSnapshotRouting {
   pool: PumpPortalTradePool;
   defaultSlippage: number;
   defaultPriorityFee: number;
+  defaultTrailingSell: CopyTradeHotPathSnapshotTrailingSellConfig | null;
+  priorityFeeMicroLamports: number | null;
+  jitoTipLamports: number | null;
+  jitoTipAccount: string | null;
   maxBuySol: number;
   dailySolCap: number;
   maxSignalAgeMs: number;
@@ -23,6 +37,18 @@ export interface CopyTradeHotPathSnapshotRouting {
   emergencyStopped: boolean;
 }
 
+export interface CopyTradeHotPathSnapshotTrailingSellStep {
+  delayMs: number;
+  percent: number;
+}
+
+export interface CopyTradeHotPathSnapshotTrailingSellConfig {
+  enabled: boolean;
+  mode: TrailingSellMode;
+  percentBasis: TrailingSellPercentBasis;
+  steps: CopyTradeHotPathSnapshotTrailingSellStep[];
+}
+
 export interface CopyTradeHotPathSnapshotSubscriber {
   chatId: string;
   tradingWalletPublicKey: string;
@@ -32,12 +58,15 @@ export interface CopyTradeHotPathSnapshotSubscriber {
   buyPriorityFee: number | null;
   sellSlippage: number | null;
   sellPriorityFee: number | null;
+  effectiveSellSlippage: number;
+  effectiveSellPriorityFee: number;
   buyPressureSellEnabled: boolean;
   buyPressureSellTimeoutMs: number | null;
   dailySpentSol: number;
   wallets: Array<{
     address: string;
     label: string | null;
+    trailingSell: CopyTradeHotPathSnapshotTrailingSellConfig | null;
   }>;
 }
 
@@ -240,11 +269,13 @@ function snapshotSubscriber({
     return null;
   }
 
+  const defaultTrailingSell = snapshotTrailingSellConfig(routing.defaultTrailingSell);
   const wallets = (subscriber.copyTradeWallets || [])
     .filter(isSnapshotCopyTradeWalletEnabled)
     .map((wallet) => ({
       address: wallet.address,
-      label: wallet.label || null
+      label: wallet.label || null,
+      trailingSell: snapshotTrailingSellConfig(wallet.trailingSellConfig) ?? defaultTrailingSell
     }))
     .sort((a, b) => a.address.localeCompare(b.address));
 
@@ -258,12 +289,16 @@ function snapshotSubscriber({
   const sellPriorityFee = nullableFiniteNumber(subscriber.copyTradeSellPriorityFeeSol);
   const effectiveBuySlippage = buySlippage ?? routing.defaultSlippage;
   const effectiveBuyPriorityFee = buyPriorityFee ?? routing.defaultPriorityFee;
+  const effectiveSellSlippage = sellSlippage ?? routing.defaultSlippage;
+  const effectiveSellPriorityFee = sellPriorityFee ?? routing.defaultPriorityFee;
 
   if (
     capExceeded(copyAmountSol, routing.maxBuySol) ||
     capExceeded(dailySpentSol + copyAmountSol, routing.dailySolCap) ||
     capExceeded(effectiveBuySlippage, routing.maxSlippage) ||
-    capExceeded(effectiveBuyPriorityFee, routing.maxPriorityFee)
+    capExceeded(effectiveBuyPriorityFee, routing.maxPriorityFee) ||
+    capExceeded(effectiveSellSlippage, routing.maxSlippage) ||
+    capExceeded(effectiveSellPriorityFee, routing.maxPriorityFee)
   ) {
     return null;
   }
@@ -277,6 +312,8 @@ function snapshotSubscriber({
     buyPriorityFee,
     sellSlippage,
     sellPriorityFee,
+    effectiveSellSlippage,
+    effectiveSellPriorityFee,
     buyPressureSellEnabled: subscriber.copyTradeBuyPressureSellEnabled === true,
     buyPressureSellTimeoutMs: nullableFiniteNumber(subscriber.copyTradeBuyPressureSellTimeoutMs),
     dailySpentSol,
@@ -302,6 +339,43 @@ function finitePositiveNumber(value: number | null | undefined): number | null {
 
 function nullableFiniteNumber(value: number | null | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function snapshotTrailingSellConfig(
+  config: TrailingSellConfig | CopyTradeHotPathSnapshotTrailingSellConfig | null | undefined
+): CopyTradeHotPathSnapshotTrailingSellConfig | null {
+  if (!config) {
+    return null;
+  }
+
+  const mode = config.mode === "formula" ? "formula" : "custom_steps";
+  const percentBasis = config.percentBasis === "original_position" ? "original_position" : "remaining_balance";
+  const steps = Array.isArray(config.steps)
+    ? config.steps
+        .map((step) => {
+          const delayMs = Math.floor(Number(step.delayMs));
+          const percent = Number(step.percent);
+          return Number.isFinite(delayMs) &&
+            delayMs >= 0 &&
+            Number.isFinite(percent) &&
+            percent > 0 &&
+            percent <= 100
+            ? { delayMs, percent }
+            : null;
+        })
+        .filter((step): step is CopyTradeHotPathSnapshotTrailingSellStep => Boolean(step))
+    : [];
+
+  if (steps.length === 0) {
+    return null;
+  }
+
+  return {
+    enabled: config.enabled !== false,
+    mode,
+    percentBasis,
+    steps
+  };
 }
 
 function capExceeded(value: number, cap: number): boolean {

@@ -108,7 +108,11 @@ test("index runtime wires Helius receipt and normalization timestamps into copy 
   );
   assert.match(
     indexSource,
-    /function scheduleCopyTradeTrailingSellsAfterConfirmation[\s\S]*await waitForSignatureConfirmationResult\(buySignature\)[\s\S]*await scheduleCopyTradeTrailingSells/
+    /function scheduleCopyTradeTrailingSellsAfterConfirmation[\s\S]*await waitForSignatureConfirmationResult\([\s\S]*buySignature[\s\S]*await scheduleCopyTradePostConfirmationExits/
+  );
+  assert.match(
+    indexSource,
+    /function scheduleCopyTradePostConfirmationExits[\s\S]*await scheduleCopyTradeTrailingSells/
   );
   assert.match(
     indexSource,

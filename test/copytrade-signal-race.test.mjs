@@ -265,7 +265,8 @@ test("index wires PumpPortal and Geyser through the shared signal race path", ()
 
   assert.match(indexSource, /copyTradeSignalProvider: parseCopyTradeSignalProvider\(process\.env\.COPY_TRADE_SIGNAL_PROVIDER\)/);
   assert.match(indexSource, /if \(!copyTradeSignalProviderAllows\(config\.copyTradeSignalProvider, "geyser"\)\)/);
-  assert.match(indexSource, /if \(!diagnostic && copyTradeSignalProviderAllows\(config\.copyTradeSignalProvider, "shredstream"\)\) \{[\s\S]*handleWalletTradeSignal\(observedTrade/);
+  assert.match(indexSource, /async function handleShredstreamWalletTrade[\s\S]*writeWalletTradeLog\(observedTrade\)/);
+  assert.match(indexSource, /shredstream=\$\{copyTradeSignalProviderAllows\(config\.copyTradeSignalProvider, "shredstream"\) \? "rust-worker" :/);
   assert.match(indexSource, /handleWalletTradeSignal\(trade, \{/);
   assert.match(indexSource, /walletFeedDiagnosticWallets: diagnosticWalletsFromEnv\(process\.env\.WALLET_FEED_DIAGNOSTIC_WALLETS\)/);
   assert.match(indexSource, /\.\.\.config\.walletFeedDiagnosticWallets/);
@@ -278,7 +279,7 @@ test("index wires PumpPortal and Geyser through the shared signal race path", ()
   assert.match(indexSource, /const racesCopyTradeSignal = canRaceCopyTradeSignal && !raceCopyableBlockedReason/);
   assert.match(indexSource, /copyTradeSignalRaceTracker\.claim\(trade, receivedAtMs\)/);
   assert.match(indexSource, /enabled: config\.geyserEnabled \|\| copyTradeSignalProviderAllows\(config\.copyTradeSignalProvider, "geyser"\)/);
-  assert.match(indexSource, /enabled: config\.shredstreamWalletObserverEnabled \|\| copyTradeSignalProviderAllows\(config\.copyTradeSignalProvider, "shredstream"\)/);
+  assert.match(indexSource, /enabled: config\.shredstreamWalletObserverEnabled/);
 });
 
 test("ShredStream copytrade hot path uses the dynamic active copytrade wallet set", () => {
@@ -298,7 +299,7 @@ test("ShredStream copytrade hot path uses the dynamic active copytrade wallet se
   );
   assert.match(
     indexSource,
-    /activeCopyTradeEntriesForTarget\(observedTrade\.targetWallet\)\.length > 0[\s\S]*prefetchDirectPumpFastBuyStateForTrade\(observedTrade\)/
+    /activeCopyTradeEntriesForTarget\(trade\.targetWallet\)[\s\S]*prefetchDirectPumpFastBuyStateForTrade\(trade\)/
   );
   assert.doesNotMatch(indexSource, /A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS/);
 });

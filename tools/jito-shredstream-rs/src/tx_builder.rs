@@ -145,6 +145,22 @@ fn build_copy_unsigned_flashx_pump_with_cache(
     mint: &str,
     pda_cache: Option<&CopyPdaCache>,
 ) -> Result<CopyUnsignedTxBuild, TxBuildError> {
+    build_copy_unsigned_flashx_pump_with_cache_and_spend(
+        route_context,
+        copy_wallet,
+        mint,
+        pda_cache,
+        None,
+    )
+}
+
+fn build_copy_unsigned_flashx_pump_with_cache_and_spend(
+    route_context: Option<&RouteContext>,
+    copy_wallet: &str,
+    mint: &str,
+    pda_cache: Option<&CopyPdaCache>,
+    copy_spend_lamports: Option<u64>,
+) -> Result<CopyUnsignedTxBuild, TxBuildError> {
     let Some(RouteContext::FlashxPump(context)) = route_context else {
         return Err(TxBuildError::UnsupportedLayout(
             "unsupported flashx-pump copy layout",
@@ -158,11 +174,59 @@ fn build_copy_unsigned_flashx_pump_with_cache(
     }
 
     match context.layout {
+        FlashxPumpLayout::DirectPump => build_copy_unsigned_flashx_direct_pump(
+            context,
+            copy_wallet,
+            mint,
+            pda_cache,
+            copy_spend_lamports,
+        ),
+        FlashxPumpLayout::MigratedAmm => build_copy_unsigned_flashx_migrated_amm(
+            context,
+            copy_wallet,
+            mint,
+            pda_cache,
+            copy_spend_lamports,
+        ),
+    }
+}
+
+pub(crate) fn copy_wallet_token_account_for_flashx_pump(
+    route_context: Option<&RouteContext>,
+    copy_wallet: &str,
+    mint: &str,
+    pda_cache: Option<&CopyPdaCache>,
+) -> Result<Pubkey, TxBuildError> {
+    let Some(RouteContext::FlashxPump(context)) = route_context else {
+        return Err(TxBuildError::UnsupportedLayout(
+            "unsupported flashx-pump copy layout",
+        ));
+    };
+
+    let copy_wallet = parse_pubkey(copy_wallet)?;
+    let mint = parse_pubkey(mint)?;
+    match context.layout {
         FlashxPumpLayout::DirectPump => {
-            build_copy_unsigned_flashx_direct_pump(context, copy_wallet, mint, pda_cache)
+            let token_program = resolved_pubkey(context, "tokenProgram")?;
+            let associated_token_program = *associated_token_program_id();
+            Ok(associated_token_address_cached(
+                pda_cache,
+                &copy_wallet,
+                &mint,
+                &token_program,
+                &associated_token_program,
+            ))
         }
         FlashxPumpLayout::MigratedAmm => {
-            build_copy_unsigned_flashx_migrated_amm(context, copy_wallet, mint, pda_cache)
+            let base_token_program = resolved_pubkey(context, "baseTokenProgram")?;
+            let associated_token_program = resolved_pubkey(context, "associatedTokenProgram")?;
+            Ok(associated_token_address_cached(
+                pda_cache,
+                &copy_wallet,
+                &mint,
+                &base_token_program,
+                &associated_token_program,
+            ))
         }
     }
 }
@@ -172,6 +236,7 @@ fn build_copy_unsigned_flashx_direct_pump(
     copy_wallet: &str,
     mint: &str,
     pda_cache: Option<&CopyPdaCache>,
+    copy_spend_lamports: Option<u64>,
 ) -> Result<CopyUnsignedTxBuild, TxBuildError> {
     let token_program = resolved_pubkey(context, "tokenProgram")?;
     let copy_wallet = parse_pubkey(copy_wallet)?;
@@ -188,9 +253,11 @@ fn build_copy_unsigned_flashx_direct_pump(
     let copy_user_volume_accumulator =
         user_volume_accumulator_address_cached(pda_cache, &copy_wallet, &pump_program);
 
-    let spendable_sol_in = read_u64_le(&context.data, 1).ok_or(
-        TxBuildError::InvalidInstruction("missing flashx SOL amount"),
-    )?;
+    let spendable_sol_in = copy_spend_lamports
+        .or_else(|| read_u64_le(&context.data, 1))
+        .ok_or(TxBuildError::InvalidInstruction(
+            "missing flashx SOL amount",
+        ))?;
 
     let mut buy_data = Vec::with_capacity(25);
     buy_data.extend_from_slice(&PUMP_FUN_BUY_EXACT_SOL_IN_DISCRIMINATOR);
@@ -207,7 +274,7 @@ fn build_copy_unsigned_flashx_direct_pump(
         AccountMeta::new(copy_wallet_token_account, false),
         AccountMeta::new(copy_wallet, true),
         AccountMeta::new_readonly(resolved_pubkey(context, "systemProgram")?, false),
-        AccountMeta::new_readonly(resolved_pubkey(context, "tokenProgram")?, false),
+        AccountMeta::new_readonly(token_program, false),
         AccountMeta::new(resolved_pubkey(context, "creatorVault")?, false),
         AccountMeta::new_readonly(resolved_pubkey(context, "eventAuthority")?, false),
         AccountMeta::new_readonly(resolved_pubkey(context, "pumpProgram")?, false),
@@ -235,6 +302,7 @@ fn build_copy_unsigned_flashx_migrated_amm(
     copy_wallet: &str,
     mint: &str,
     pda_cache: Option<&CopyPdaCache>,
+    copy_spend_lamports: Option<u64>,
 ) -> Result<CopyUnsignedTxBuild, TxBuildError> {
     let copy_wallet = parse_pubkey(copy_wallet)?;
     let mint = parse_pubkey(mint)?;
@@ -261,9 +329,11 @@ fn build_copy_unsigned_flashx_migrated_amm(
     let copy_user_volume_accumulator =
         user_volume_accumulator_address_cached(pda_cache, &copy_wallet, &pump_amm_program);
 
-    let spendable_sol_in = read_u64_le(&context.data, 1).ok_or(
-        TxBuildError::InvalidInstruction("missing flashx SOL amount"),
-    )?;
+    let spendable_sol_in = copy_spend_lamports
+        .or_else(|| read_u64_le(&context.data, 1))
+        .ok_or(TxBuildError::InvalidInstruction(
+            "missing flashx SOL amount",
+        ))?;
 
     let mut setup_data = Vec::with_capacity(10);
     setup_data.push(1);
@@ -283,7 +353,7 @@ fn build_copy_unsigned_flashx_migrated_amm(
     };
 
     let mut route_data = context.data.clone();
-    rewrite_flashx_migrated_min_base_amount_out(&mut route_data)?;
+    rewrite_flashx_migrated_amounts(&mut route_data, spendable_sol_in)?;
 
     let route_accounts = context
         .accounts
@@ -326,12 +396,16 @@ fn build_copy_unsigned_flashx_migrated_amm(
     })
 }
 
-fn rewrite_flashx_migrated_min_base_amount_out(data: &mut [u8]) -> Result<(), TxBuildError> {
+fn rewrite_flashx_migrated_amounts(
+    data: &mut [u8],
+    quote_amount_in: u64,
+) -> Result<(), TxBuildError> {
     if data.len() < 17 {
         return Err(TxBuildError::InvalidInstruction(
-            "missing flashx min base amount",
+            "missing flashx migrated amounts",
         ));
     }
+    data[1..9].copy_from_slice(&quote_amount_in.to_le_bytes());
     data[9..17].copy_from_slice(&FLASHX_MIGRATED_COPY_MIN_BASE_AMOUNT_OUT.to_le_bytes());
     Ok(())
 }
@@ -371,8 +445,31 @@ pub(crate) fn build_full_copy_unsigned_flashx_pump_with_fees_and_cache(
     fee_config: &TxFeeConfig,
     pda_cache: Option<&CopyPdaCache>,
 ) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
-    let copy_build =
-        build_copy_unsigned_flashx_pump_with_cache(route_context, copy_wallet, mint, pda_cache)?;
+    build_full_copy_unsigned_flashx_pump_with_fees_and_cache_and_spend(
+        route_context,
+        copy_wallet,
+        mint,
+        fee_config,
+        pda_cache,
+        None,
+    )
+}
+
+pub(crate) fn build_full_copy_unsigned_flashx_pump_with_fees_and_cache_and_spend(
+    route_context: Option<&RouteContext>,
+    copy_wallet: &str,
+    mint: &str,
+    fee_config: &TxFeeConfig,
+    pda_cache: Option<&CopyPdaCache>,
+    copy_spend_lamports: Option<u64>,
+) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
+    let copy_build = build_copy_unsigned_flashx_pump_with_cache_and_spend(
+        route_context,
+        copy_wallet,
+        mint,
+        pda_cache,
+        copy_spend_lamports,
+    )?;
     let Some(RouteContext::FlashxPump(context)) = route_context else {
         return Err(TxBuildError::UnsupportedLayout(
             "unsupported flashx-pump copy layout",
@@ -436,11 +533,30 @@ pub(crate) fn build_full_copy_unsigned_flashx_pump_with_fees_and_cache(
     })
 }
 
-pub(crate) fn build_auto_sell_unsigned_flashx_pump(
+pub(crate) fn build_auto_sell_unsigned_flashx_pump_with_cache(
     route_context: Option<&RouteContext>,
     copy_wallet: &str,
     mint: &str,
     token_amount_raw: u64,
+    pda_cache: Option<&CopyPdaCache>,
+) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
+    build_sell_unsigned_flashx_pump_with_cache(
+        route_context,
+        copy_wallet,
+        mint,
+        token_amount_raw,
+        pda_cache,
+        false,
+    )
+}
+
+fn build_sell_unsigned_flashx_pump_with_cache(
+    route_context: Option<&RouteContext>,
+    copy_wallet: &str,
+    mint: &str,
+    token_amount_raw: u64,
+    pda_cache: Option<&CopyPdaCache>,
+    allow_direct_pump_buy_context: bool,
 ) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
     if token_amount_raw == 0 {
         return Err(TxBuildError::InvalidInstruction(
@@ -448,24 +564,27 @@ pub(crate) fn build_auto_sell_unsigned_flashx_pump(
         ));
     }
 
-    let copy_build = build_copy_unsigned_flashx_pump(route_context, copy_wallet, mint)?;
     let Some(RouteContext::FlashxPump(context)) = route_context else {
         return Err(TxBuildError::UnsupportedLayout(
             "unsupported auto-sell layout",
         ));
     };
+    let copy_wallet_token_account =
+        copy_wallet_token_account_for_flashx_pump(route_context, copy_wallet, mint, pda_cache)?;
 
     match context.layout {
         FlashxPumpLayout::DirectPump => build_auto_sell_unsigned_flashx_direct_pump(
             context,
-            copy_build,
+            copy_wallet_token_account,
             copy_wallet,
             mint,
             token_amount_raw,
+            pda_cache,
+            allow_direct_pump_buy_context,
         ),
         FlashxPumpLayout::MigratedAmm => build_auto_sell_unsigned_flashx_migrated_amm(
             context,
-            copy_build,
+            copy_wallet_token_account,
             copy_wallet,
             mint,
             token_amount_raw,
@@ -473,16 +592,142 @@ pub(crate) fn build_auto_sell_unsigned_flashx_pump(
     }
 }
 
-fn build_auto_sell_unsigned_flashx_direct_pump(
-    context: &crate::parser::FlashxPumpRouteContext,
-    copy_build: CopyUnsignedTxBuild,
+pub(crate) fn build_auto_sell_unsigned_flashx_pump_with_fees_and_cache(
+    route_context: Option<&RouteContext>,
     copy_wallet: &str,
     mint: &str,
     token_amount_raw: u64,
+    fee_config: &TxFeeConfig,
+    pda_cache: Option<&CopyPdaCache>,
 ) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
-    let pump_program = *pump_fun_program_id();
-    let copy_wallet_token_account = copy_build.copy_wallet_token_account;
+    let mut build = build_auto_sell_unsigned_flashx_pump_with_cache(
+        route_context,
+        copy_wallet,
+        mint,
+        token_amount_raw,
+        pda_cache,
+    )?;
     let copy_wallet_pubkey = parse_pubkey(copy_wallet)?;
+    let mut fee_instructions = Vec::new();
+    if let Some(micro_lamports) = fee_config
+        .compute_unit_price_micro_lamports
+        .filter(|value| *value > 0)
+    {
+        fee_instructions.push(compute_unit_price_instruction(micro_lamports)?);
+    }
+    if let Some(tip_lamports) = fee_config.jito_tip_lamports.filter(|value| *value > 0) {
+        let Some(tip_account) = fee_config
+            .jito_tip_account
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(TxBuildError::MissingRouteContext(
+                "missing Jito tip account",
+            ));
+        };
+        fee_instructions.push(system_transfer_instruction(
+            &copy_wallet_pubkey,
+            &parse_pubkey(tip_account)?,
+            tip_lamports,
+        )?);
+    }
+
+    if !fee_instructions.is_empty() {
+        let insertion_index = build
+            .instructions
+            .iter()
+            .position(|instruction| instruction.program_id != *compute_budget_program_id())
+            .unwrap_or(build.instructions.len());
+        let fee_instruction_count = fee_instructions.len();
+        build
+            .instructions
+            .splice(insertion_index..insertion_index, fee_instructions);
+        build.setup_instruction_count += fee_instruction_count;
+    }
+
+    Ok(build)
+}
+
+pub(crate) fn build_trailing_sell_unsigned_flashx_pump_with_fees_and_cache(
+    route_context: Option<&RouteContext>,
+    copy_wallet: &str,
+    mint: &str,
+    token_amount_raw: u64,
+    fee_config: &TxFeeConfig,
+    pda_cache: Option<&CopyPdaCache>,
+) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
+    let mut build = build_sell_unsigned_flashx_pump_with_cache(
+        route_context,
+        copy_wallet,
+        mint,
+        token_amount_raw,
+        pda_cache,
+        true,
+    )?;
+    let copy_wallet_pubkey = parse_pubkey(copy_wallet)?;
+    let mut fee_instructions = Vec::new();
+    if let Some(micro_lamports) = fee_config
+        .compute_unit_price_micro_lamports
+        .filter(|value| *value > 0)
+    {
+        fee_instructions.push(compute_unit_price_instruction(micro_lamports)?);
+    }
+    if let Some(tip_lamports) = fee_config.jito_tip_lamports.filter(|value| *value > 0) {
+        let Some(tip_account) = fee_config
+            .jito_tip_account
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(TxBuildError::MissingRouteContext(
+                "missing Jito tip account",
+            ));
+        };
+        fee_instructions.push(system_transfer_instruction(
+            &copy_wallet_pubkey,
+            &parse_pubkey(tip_account)?,
+            tip_lamports,
+        )?);
+    }
+
+    if !fee_instructions.is_empty() {
+        let insertion_index = build
+            .instructions
+            .iter()
+            .position(|instruction| instruction.program_id != *compute_budget_program_id())
+            .unwrap_or(build.instructions.len());
+        let fee_instruction_count = fee_instructions.len();
+        build
+            .instructions
+            .splice(insertion_index..insertion_index, fee_instructions);
+        build.setup_instruction_count += fee_instruction_count;
+    }
+
+    Ok(build)
+}
+
+fn build_auto_sell_unsigned_flashx_direct_pump(
+    context: &crate::parser::FlashxPumpRouteContext,
+    copy_wallet_token_account: Pubkey,
+    copy_wallet: &str,
+    mint: &str,
+    token_amount_raw: u64,
+    pda_cache: Option<&CopyPdaCache>,
+    allow_direct_pump_buy_context: bool,
+) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
+    if !allow_direct_pump_buy_context && context.data.get(17).copied() != Some(1) {
+        return Err(TxBuildError::MissingRouteContext(
+            "missing direct-pump sell-side route context",
+        ));
+    }
+
+    let pump_program = *pump_fun_program_id();
+    let copy_wallet_pubkey = parse_pubkey(copy_wallet)?;
+    let token_program = resolved_pubkey(context, "tokenProgram")?;
+    let mint = parse_pubkey(mint)?;
+    let copy_user_volume_accumulator =
+        user_volume_accumulator_address_cached(pda_cache, &copy_wallet_pubkey, &pump_program);
 
     let mut sell_data = Vec::with_capacity(24);
     sell_data.extend_from_slice(&PUMP_FUN_SELL_DISCRIMINATOR);
@@ -494,18 +739,19 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
         accounts: vec![
             AccountMeta::new_readonly(resolved_pubkey(context, "globalConfig")?, false),
             AccountMeta::new(resolved_pubkey(context, "feeRecipient")?, false),
-            AccountMeta::new_readonly(parse_pubkey(mint)?, false),
+            AccountMeta::new_readonly(mint, false),
             AccountMeta::new(resolved_pubkey(context, "bondingCurve")?, false),
             AccountMeta::new(resolved_pubkey(context, "associatedBondingCurve")?, false),
             AccountMeta::new(copy_wallet_token_account, false),
             AccountMeta::new(copy_wallet_pubkey, true),
             AccountMeta::new_readonly(resolved_pubkey(context, "systemProgram")?, false),
             AccountMeta::new(resolved_pubkey(context, "creatorVault")?, false),
-            AccountMeta::new_readonly(resolved_pubkey(context, "tokenProgram")?, false),
+            AccountMeta::new_readonly(token_program, false),
             AccountMeta::new_readonly(resolved_pubkey(context, "eventAuthority")?, false),
             AccountMeta::new_readonly(resolved_pubkey(context, "pumpProgram")?, false),
             AccountMeta::new_readonly(resolved_pubkey(context, "feeConfig")?, false),
             AccountMeta::new_readonly(resolved_pubkey(context, "feeProgram")?, false),
+            AccountMeta::new(copy_user_volume_accumulator, false),
             AccountMeta::new_readonly(resolved_pubkey(context, "bondingCurveV2")?, false),
             AccountMeta::new(resolved_pubkey(context, "buybackFeeRecipient")?, false),
         ],
@@ -517,8 +763,8 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
     instructions.push(sell_instruction);
 
     Ok(FullCopyUnsignedTxBuild {
-        route_layout: copy_build.route_layout,
-        copy_wallet_token_account: copy_build.copy_wallet_token_account,
+        route_layout: context.layout.as_str(),
+        copy_wallet_token_account,
         estimated_required_signer: copy_wallet_pubkey,
         setup_instruction_count: 1,
         main_instruction_count: instructions.len().saturating_sub(1),
@@ -528,13 +774,12 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
 
 fn build_auto_sell_unsigned_flashx_migrated_amm(
     context: &crate::parser::FlashxPumpRouteContext,
-    copy_build: CopyUnsignedTxBuild,
+    copy_base_token_account: Pubkey,
     copy_wallet: &str,
     mint: &str,
     token_amount_raw: u64,
 ) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
     let copy_wallet_pubkey = parse_pubkey(copy_wallet)?;
-    let copy_base_token_account = copy_build.copy_wallet_token_account;
     let mint = parse_pubkey(mint)?;
     let pump_amm_program =
         resolved_pubkey(context, "pumpAmmProgram").unwrap_or_else(|_| *pump_amm_program_id());
@@ -613,8 +858,8 @@ fn build_auto_sell_unsigned_flashx_migrated_amm(
     ];
 
     Ok(FullCopyUnsignedTxBuild {
-        route_layout: copy_build.route_layout,
-        copy_wallet_token_account: copy_build.copy_wallet_token_account,
+        route_layout: context.layout.as_str(),
+        copy_wallet_token_account: copy_base_token_account,
         estimated_required_signer: copy_wallet_pubkey,
         setup_instruction_count: 2,
         main_instruction_count: 2,
@@ -855,6 +1100,7 @@ mod tests {
     const LIVE_MIGRATED_MINT: &str = "J6UVkdPVe4cbd6qGJHdoacMa7zvN3tiaordcyZRspump";
     const FAILED_AUTO_SELL_MIGRATED_MINT: &str = "6tLxxZJRHT3YPkpCqzMXnRpSfPzDSiyWipNL47yCpump";
     const LIVE_DIRECT_PUMP_MINT: &str = "8VigmMkK7f9FvTBDd8S2UmweezCgeBX4y5Xp4jMfpump";
+    const BURV_MINT: &str = "BurvgViVffsLv7sfuy7eqUXAk4S6YsBMh51FoaxDpump";
 
     #[test]
     fn builds_unsigned_flashx_migrated_instruction_from_replay_context() {
@@ -1053,6 +1299,28 @@ mod tests {
             account.pubkey.to_string() == "D6EMAgGqecPhW7t9r7LvCnRCiS6uADBwc3Ki1tpc2Bud"
                 && account.is_writable
         }));
+
+        let override_build = build_copy_unsigned_flashx_pump_with_cache_and_spend(
+            parsed.route_context.as_ref(),
+            COPY_WALLET,
+            &parsed.mint,
+            None,
+            Some(777_000),
+        )
+        .expect("migrated AMM copy route should rewrite planned quote amount");
+        assert_eq!(
+            read_u64_le(&override_build.instructions[0].data, 1),
+            Some(777_000)
+        );
+        assert_eq!(
+            read_u64_le(&override_build.instructions[1].data, 1),
+            Some(777_000)
+        );
+        assert_eq!(
+            read_u64_le(&override_build.instructions[1].data, 9),
+            Some(FLASHX_MIGRATED_COPY_MIN_BASE_AMOUNT_OUT)
+        );
+
         assert!(!build.instructions[1]
             .accounts
             .iter()
@@ -1112,6 +1380,29 @@ mod tests {
             &build.instructions[2].data[0..8],
             &PUMP_FUN_BUY_EXACT_SOL_IN_DISCRIMINATOR
         );
+    }
+
+    #[test]
+    fn planned_copy_spend_overrides_observed_flashx_sol_amount() {
+        let transaction = replay_transaction(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/flashx/live-buy-2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo.tx.base64"
+        )));
+        let account_keys = live_direct_pump_buy_hydrated_account_keys(&transaction);
+        let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
+            .expect("live direct Pump FLASHX buy should parse");
+
+        let build = build_full_copy_unsigned_flashx_pump_with_fees_and_cache_and_spend(
+            parsed.route_context.as_ref(),
+            COPY_WALLET,
+            &parsed.mint,
+            &TxFeeConfig::default(),
+            None,
+            Some(777_000),
+        )
+        .expect("full copy transaction shell should build with planned spend override");
+
+        assert_eq!(read_u64_le(&build.instructions[2].data, 8), Some(777_000));
     }
 
     #[test]
@@ -1253,7 +1544,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_auto_sell_instruction_for_direct_pump_copy_balance() {
+    fn rejects_direct_pump_auto_sell_from_buy_side_context() {
         let transaction = replay_transaction(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/fixtures/flashx/live-buy-2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo.tx.base64"
@@ -1262,14 +1553,78 @@ mod tests {
         let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
             .expect("live direct Pump FLASHX buy should parse");
 
-        let build = build_auto_sell_unsigned_flashx_pump(
+        let error = build_auto_sell_unsigned_flashx_pump_with_cache(
             parsed.route_context.as_ref(),
             COPY_WALLET,
             &parsed.mint,
             123_456,
+            None,
         )
-        .expect("auto-sell route should build");
-        let RouteContext::FlashxPump(context) = parsed.route_context.as_ref().unwrap();
+        .expect_err("direct Pump auto-sell must not build from buy-side route context");
+
+        assert_eq!(
+            error,
+            TxBuildError::MissingRouteContext("missing direct-pump sell-side route context")
+        );
+    }
+
+    #[test]
+    fn builds_trailing_sell_instruction_for_direct_pump_buy_side_context() {
+        let transaction = replay_transaction(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/flashx/live-buy-2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo.tx.base64"
+        )));
+        let account_keys = live_direct_pump_buy_hydrated_account_keys(&transaction);
+        let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
+            .expect("live direct Pump FLASHX buy should parse");
+
+        let build = build_trailing_sell_unsigned_flashx_pump_with_fees_and_cache(
+            parsed.route_context.as_ref(),
+            COPY_WALLET,
+            &parsed.mint,
+            123_456,
+            &TxFeeConfig::default(),
+            None,
+        )
+        .expect("rust trailing sell can build from owned-position buy-side context");
+
+        assert_eq!(build.route_layout, "direct-pump");
+        assert_eq!(build.instructions.len(), 2);
+        assert_eq!(
+            build.instructions[1].program_id.to_string(),
+            PUMP_FUN_PROGRAM_ID
+        );
+        assert_eq!(
+            &build.instructions[1].data[0..8],
+            &PUMP_FUN_SELL_DISCRIMINATOR
+        );
+        assert_eq!(
+            &build.instructions[1].data[8..16],
+            &123_456u64.to_le_bytes()
+        );
+        assert_eq!(
+            build.instructions[1].accounts[5].pubkey,
+            build.copy_wallet_token_account
+        );
+        assert!(build.instructions[1]
+            .accounts
+            .iter()
+            .any(|account| account.pubkey.to_string() == COPY_WALLET && account.is_signer));
+    }
+
+    #[test]
+    fn builds_auto_sell_instruction_for_direct_pump_sell_side_context() {
+        let route_context = burv_direct_pump_sell_route_context();
+        let RouteContext::FlashxPump(context) = &route_context;
+
+        let build = build_auto_sell_unsigned_flashx_pump_with_cache(
+            Some(&route_context),
+            COPY_WALLET,
+            BURV_MINT,
+            123_456,
+            None,
+        )
+        .expect("auto-sell route should build from sell-side context");
 
         assert_eq!(build.route_layout, "direct-pump");
         assert_eq!(build.instructions.len(), 2);
@@ -1290,17 +1645,21 @@ mod tests {
             build.instructions[1].accounts[1].pubkey.to_string(),
             resolved_account_for_test(context, "feeRecipient")
         );
+        assert_eq!(
+            build.instructions[1].accounts[1].pubkey.to_string(),
+            "CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM"
+        );
         assert!(build.instructions[1]
             .accounts
             .iter()
             .any(|account| account.pubkey.to_string() == COPY_WALLET && account.is_signer));
         assert!(build.instructions[1].accounts.iter().any(|account| {
-            account.pubkey.to_string() == "DhWQaUj4YBCyRvGuUfwcAjGNTvgB5murcVLT2VdTr1UZ"
+            account.pubkey.to_string() == "5RGtdhAeLrhqdgEFsa4jR9xpt6Y4Bk9rTQzNTFAjMnho"
                 && account.is_writable
         }));
         let bonding_curve_v2 = resolved_account_for_test(context, "bondingCurveV2");
         let buyback_fee_recipient = resolved_account_for_test(context, "buybackFeeRecipient");
-        assert_eq!(build.instructions[1].accounts.len(), 16);
+        assert_eq!(build.instructions[1].accounts.len(), 17);
         assert_eq!(
             build.instructions[1].accounts[8].pubkey.to_string(),
             resolved_account_for_test(context, "creatorVault")
@@ -1313,13 +1672,22 @@ mod tests {
         assert!(!build.instructions[1].accounts[9].is_writable);
         assert_eq!(
             build.instructions[1].accounts[14].pubkey.to_string(),
+            "A6z9cMVt6RovLTYpLbkawnTDEGtFpLuEgE3t7BYHJCm2"
+        );
+        assert!(build.instructions[1].accounts[14].is_writable);
+        assert_eq!(
+            build.instructions[1].accounts[15].pubkey.to_string(),
             bonding_curve_v2
         );
         assert_eq!(
-            build.instructions[1].accounts[15].pubkey.to_string(),
+            build.instructions[1].accounts[16].pubkey.to_string(),
             buyback_fee_recipient
         );
-        assert!(build.instructions[1].accounts[15].is_writable);
+        assert_eq!(
+            build.instructions[1].accounts[16].pubkey.to_string(),
+            "5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD"
+        );
+        assert!(build.instructions[1].accounts[16].is_writable);
     }
 
     #[test]
@@ -1332,11 +1700,12 @@ mod tests {
         let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
             .expect("live migrated FLASHX buy should parse");
 
-        let build = build_auto_sell_unsigned_flashx_pump(
+        let build = build_auto_sell_unsigned_flashx_pump_with_cache(
             parsed.route_context.as_ref(),
             COPY_WALLET,
             &parsed.mint,
             123_456,
+            None,
         )
         .expect("migrated AMM auto-sell route should build");
 
@@ -1446,11 +1815,12 @@ mod tests {
             .expect("failed live migrated FLASHX buy should parse");
         assert_eq!(parsed.mint, FAILED_AUTO_SELL_MIGRATED_MINT);
 
-        let build = build_auto_sell_unsigned_flashx_pump(
+        let build = build_auto_sell_unsigned_flashx_pump_with_cache(
             parsed.route_context.as_ref(),
             COPY_WALLET,
             &parsed.mint,
             32_212_701_563,
+            None,
         )
         .expect("failed migrated AMM auto-sell route should build");
 
@@ -1616,5 +1986,47 @@ mod tests {
 
     fn pubkey(value: &str) -> Pubkey {
         Pubkey::from_str(value).expect("fixture pubkey is valid")
+    }
+
+    fn burv_direct_pump_sell_route_context() -> RouteContext {
+        let flashx_router_program = pubkey(FLASHX_ROUTER_PROGRAM_ID);
+        let pump_program = pubkey(PUMP_FUN_PROGRAM_ID);
+        let mut data = vec![0];
+        data.extend_from_slice(&34_968_346_045u64.to_le_bytes());
+        data.extend_from_slice(&579_882u64.to_le_bytes());
+        data.extend_from_slice(&[1, 1, 0x1a, 0x32, 0]);
+
+        RouteContext::FlashxPump(crate::parser::FlashxPumpRouteContext {
+            layout: FlashxPumpLayout::DirectPump,
+            program_id: flashx_router_program,
+            accounts: Vec::new(),
+            data,
+            resolved_accounts: crate::parser::FlashxPumpResolvedAccounts::DirectPump(
+                crate::parser::DirectPumpAccounts {
+                    payer: pubkey(TARGET_WALLET),
+                    target_wallet: pubkey(TARGET_WALLET),
+                    flashx_router_program,
+                    pump_program,
+                    global_config: pubkey("4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf"),
+                    fee_recipient: pubkey("CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM"),
+                    mint: pubkey(BURV_MINT),
+                    bonding_curve: pubkey("4p4fH6hAMjSwQV5oWLD4TxieQiciZHBoGL7m7vjRovE9"),
+                    associated_bonding_curve: pubkey(
+                        "He1PZZtQ3LRYe4bQKVH7XNtAcxUbs38mDkgZL58MUP8V",
+                    ),
+                    user_token_account: pubkey("Bc8P1uc9nc7fgq5Z6yEvBM8ccXx9W4fEbqhwX9qnSQ84"),
+                    system_program: pubkey(SYSTEM_PROGRAM_ID),
+                    token_program: pubkey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"),
+                    creator_vault: pubkey("82L33tWkcKBcXFPyUiLJtRmnGomhCzyitELKNoXrJ2T"),
+                    event_authority: pubkey("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1"),
+                    global_volume_accumulator: None,
+                    user_volume_accumulator: pubkey("8aHZJSt6frgjRTTfg4foDXjZHMyZ2ZQQjpwcWzzCvAGp"),
+                    fee_config: pubkey("8Wf5TiAheLUqBrKXeYg2JtAFFMWtKdG2BSFgqUcPVwTt"),
+                    fee_program: pubkey("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"),
+                    bonding_curve_v2: pubkey("EYyZtDHLiBnLLw9u4z7uLrUoom3ZkrZugmhmqw48mNh6"),
+                    buyback_fee_recipient: pubkey("5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD"),
+                },
+            ),
+        })
     }
 }

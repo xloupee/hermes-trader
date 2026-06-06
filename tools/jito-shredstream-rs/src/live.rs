@@ -3,11 +3,12 @@ use crate::{
     blockhash::spawn_blockhash_cache,
     event::{
         normalized_event, now_ms, print_json, shadow_signal_line, wallet_mention_schema,
-        RejectionLine, ShadowSignalLine, WalletMentionLine,
+        NormalizedCopyTradeEvent, RejectionLine, ShadowSignalLine, WalletMentionLine,
     },
-    executor::{CopyExecutionLine, CopyExecutor},
+    executor::{CopyExecutionOutput, CopyExecutor, TrailingSellPlan},
     parser::{
         classify_wallet_mention, parse_trade_for_mentioned_targets, versioned_tx_signature_string,
+        Action,
     },
     planner::{
         copy_tx_plan_line, execution_plan_line, tx_build_plan_line, unsigned_tx_plan_line,
@@ -18,6 +19,7 @@ use crate::{
         shredstream_proxy_client::ShredstreamProxyClient, SubscribeEntriesRequest,
     },
     signal::{SignalObservationWriter, SignalTimings},
+    telegram_snapshot::TelegramSnapshotConfig,
     LiveOptions,
 };
 use anyhow::{Context, Result};
@@ -32,10 +34,17 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 
 pub(crate) async fn run(options: LiveOptions) -> Result<()> {
-    let target_wallets = parse_target_wallets(&options.target_wallets)?;
+    let telegram_snapshot = TelegramSnapshotConfig::load(
+        options.telegram_snapshot_path.as_deref(),
+        options.copy_wallet.as_deref(),
+    )?;
+    let target_wallets = match &telegram_snapshot {
+        Some(snapshot) => snapshot.target_wallets(),
+        None => parse_target_wallets(&options.target_wallets)?,
+    };
     let target_wallet_pubkey_set = target_wallets
         .iter()
         .map(|wallet| Pubkey::from_str(wallet))
@@ -74,6 +83,13 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
         target_wallets.len(),
         options.limit
     );
+    if let Some(snapshot) = &telegram_snapshot {
+        eprintln!(
+            "loaded Telegram Jito snapshot sequence={}; activeCopyTargets={}",
+            snapshot.sequence(),
+            target_wallets.len()
+        );
+    }
 
     let mut seen = SeenSignatures::new(options.dedupe_capacity);
     let mut shadow_signals = ShadowSignalWriter::new(options.shadow_signals_path.as_deref())
@@ -145,13 +161,19 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
             )
         })?;
     let (copy_execution_tx, mut copy_execution_rx) = mpsc::unbounded_channel();
-    let (copy_execution_request_tx, copy_execution_request_rx) = mpsc::unbounded_channel();
+    let (copy_execution_request_tx, copy_execution_request_rx) =
+        mpsc::channel(nonzero_capacity(options.copy_execution_queue_capacity));
     spawn_copy_execution_worker(
         Arc::clone(&copy_executor),
         copy_execution_request_rx,
         copy_execution_tx.clone(),
+        options.copy_execution_concurrency,
     );
-    let mut signal_observations = SignalObservationWriter::from_options(&options)?;
+    let signal_side_effect_tx = spawn_signal_side_effect_worker(
+        SignalObservationWriter::from_options(&options)?,
+        options.print_feed_events,
+        options.signal_observation_queue_capacity,
+    );
     let mut emitted = 0usize;
 
     loop {
@@ -275,6 +297,13 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                     Some(parsed) => {
                         let trade_parsed_at = Instant::now();
                         let trade_parsed_at_ms = now_ms();
+                        if parsed.action == Action::Sell {
+                            copy_executor.observe_direct_pump_sell_route_context(
+                                &parsed.target_wallet,
+                                &parsed.mint,
+                                parsed.route_context.as_ref(),
+                            );
+                        }
                         let timings = SignalTimings {
                             grpc_message_received_at_ms,
                             entries_deserialized_at_ms,
@@ -318,11 +347,16 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             account_keys.len(),
                             &parsed,
                         );
+                        let telegram_target_config = telegram_snapshot
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.target_config(&parsed.target_wallet));
                         let execution_plan = execution_plan_line(
                             &shadow_signal,
                             now_ms(),
                             PlannerOptions {
-                                copy_sol_amount: options.copy_plan_sol_amount,
+                                copy_sol_amount: telegram_target_config
+                                    .map(|target| target.copy_amount_sol)
+                                    .or(options.copy_plan_sol_amount),
                             },
                         );
                         enqueue_copy_execution(
@@ -331,6 +365,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             parsed.action,
                             parsed.sol_amount,
                             timings,
+                            telegram_target_config.and_then(|target| target.trailing_sell.clone()),
                         );
                         if !options.fast_copy_send {
                             write_plan_outputs(
@@ -353,15 +388,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             account_keys.len(),
                             parsed,
                         );
-                        if let Some(writer) = &mut signal_observations {
-                            if let Err(error) = writer.write(&event, timings).await {
-                                eprintln!("signal observation write failed: {error:#}");
-                            }
-                        }
-
-                        if options.print_feed_events {
-                            print_json(&event)?;
-                        }
+                        enqueue_signal_side_effect(&signal_side_effect_tx, event, timings);
                         emitted += 1;
                         if options.limit > 0 && emitted >= options.limit {
                             return Ok(());
@@ -461,55 +488,192 @@ struct CopyExecutionRequest {
     observed_sol_amount: Option<f64>,
     timings: SignalTimings,
     executor_enqueued_at: Instant,
+    trailing_sell_plan: Option<TrailingSellPlan>,
 }
 
 fn spawn_copy_execution_worker(
     copy_executor: Arc<CopyExecutor>,
-    mut copy_execution_request_rx: mpsc::UnboundedReceiver<CopyExecutionRequest>,
-    copy_execution_tx: mpsc::UnboundedSender<CopyExecutionLine>,
+    mut copy_execution_request_rx: mpsc::Receiver<CopyExecutionRequest>,
+    copy_execution_tx: mpsc::UnboundedSender<CopyExecutionOutput>,
+    concurrency: usize,
 ) {
     tokio::spawn(async move {
+        let permits = Arc::new(Semaphore::new(nonzero_capacity(concurrency)));
         while let Some(request) = copy_execution_request_rx.recv().await {
-            let copy_execution = copy_executor
-                .handle_with_executor_enqueued_at(
-                    &request.execution_plan,
-                    request.observed_action,
-                    request.observed_sol_amount,
-                    request.timings,
-                    request.executor_enqueued_at,
-                )
-                .await;
-            if copy_execution_tx.send(copy_execution).is_err() {
-                eprintln!("copy execution result dropped; receiver closed");
+            let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
                 break;
-            }
+            };
+            let copy_executor = Arc::clone(&copy_executor);
+            let copy_execution_tx = copy_execution_tx.clone();
+            tokio::spawn(async move {
+                let _permit = permit;
+                handle_copy_execution_request(copy_executor, request, copy_execution_tx).await;
+            });
         }
     });
 }
 
+async fn handle_copy_execution_request(
+    copy_executor: Arc<CopyExecutor>,
+    request: CopyExecutionRequest,
+    copy_execution_tx: mpsc::UnboundedSender<CopyExecutionOutput>,
+) {
+    let copy_execution = copy_executor
+        .handle_with_executor_enqueued_at(
+            &request.execution_plan,
+            request.observed_action,
+            request.observed_sol_amount,
+            request.timings,
+            request.executor_enqueued_at,
+        )
+        .await;
+    let rust_trailing_sell_line = copy_executor
+        .should_spawn_trailing_sells_after_buy(&copy_execution, request.trailing_sell_plan.as_ref())
+        .then(|| copy_execution.clone());
+    let auto_sell_line = (rust_trailing_sell_line.is_none()
+        && copy_executor.should_spawn_auto_sell_after_buy(&copy_execution))
+    .then(|| copy_execution.clone());
+    let target_sell_auto_sell_line = copy_executor
+        .should_spawn_auto_sell_on_target_sell(&request.execution_plan, request.observed_action)
+        .then(|| copy_execution.clone());
+    if copy_execution_tx
+        .send(CopyExecutionOutput::Copy(copy_execution))
+        .is_err()
+    {
+        eprintln!("copy execution result dropped; receiver closed");
+        return;
+    }
+    if let (Some(buy_line), Some(trailing_sell_plan)) =
+        (rust_trailing_sell_line, request.trailing_sell_plan.clone())
+    {
+        let trailing_sell_executor = Arc::clone(&copy_executor);
+        let trailing_sell_tx = copy_execution_tx.clone();
+        let execution_plan = request.execution_plan.clone();
+        tokio::spawn(async move {
+            trailing_sell_executor
+                .handle_trailing_sell_results(
+                    buy_line,
+                    execution_plan,
+                    trailing_sell_plan,
+                    trailing_sell_tx,
+                )
+                .await;
+        });
+    }
+    if let Some(auto_sell_line) = auto_sell_line {
+        let auto_sell_executor = Arc::clone(&copy_executor);
+        let auto_sell_tx = copy_execution_tx.clone();
+        let execution_plan = request.execution_plan.clone();
+        tokio::spawn(async move {
+            let auto_sell_result = auto_sell_executor
+                .handle_auto_sell_result(auto_sell_line, &execution_plan)
+                .await;
+            if auto_sell_tx
+                .send(CopyExecutionOutput::Copy(auto_sell_result))
+                .is_err()
+            {
+                eprintln!("copy auto-sell result dropped; receiver closed");
+            }
+        });
+    }
+    if let Some(auto_sell_line) = target_sell_auto_sell_line {
+        let auto_sell_executor = Arc::clone(&copy_executor);
+        let auto_sell_tx = copy_execution_tx.clone();
+        let execution_plan = request.execution_plan;
+        tokio::spawn(async move {
+            let auto_sell_result = auto_sell_executor
+                .handle_target_sell_auto_sell_result(auto_sell_line, &execution_plan)
+                .await;
+            if auto_sell_tx
+                .send(CopyExecutionOutput::Copy(auto_sell_result))
+                .is_err()
+            {
+                eprintln!("target-sell auto-sell result dropped; receiver closed");
+            }
+        });
+    }
+}
+
 fn enqueue_copy_execution(
-    copy_execution_request_tx: &mpsc::UnboundedSender<CopyExecutionRequest>,
+    copy_execution_request_tx: &mpsc::Sender<CopyExecutionRequest>,
     execution_plan: ExecutionPlanLine,
     observed_action: crate::parser::Action,
     observed_sol_amount: Option<f64>,
     timings: SignalTimings,
+    trailing_sell_plan: Option<TrailingSellPlan>,
 ) {
     if copy_execution_request_tx
-        .send(CopyExecutionRequest {
+        .try_send(CopyExecutionRequest {
             execution_plan,
             observed_action,
             observed_sol_amount,
             timings,
             executor_enqueued_at: Instant::now(),
+            trailing_sell_plan,
         })
         .is_err()
     {
-        eprintln!("copy execution request dropped; worker closed");
+        eprintln!("copy execution request dropped; worker closed or queue full");
     }
 }
 
+struct SignalSideEffectRequest {
+    event: NormalizedCopyTradeEvent,
+    timings: SignalTimings,
+}
+
+fn spawn_signal_side_effect_worker(
+    writer: Option<SignalObservationWriter>,
+    print_feed_events: bool,
+    queue_capacity: usize,
+) -> Option<mpsc::Sender<SignalSideEffectRequest>> {
+    if writer.is_none() && !print_feed_events {
+        return None;
+    }
+
+    let (tx, mut rx) = mpsc::channel::<SignalSideEffectRequest>(nonzero_capacity(queue_capacity));
+    tokio::spawn(async move {
+        let mut writer = writer;
+        while let Some(request) = rx.recv().await {
+            if let Some(writer) = &mut writer {
+                if let Err(error) = writer.write(&request.event, request.timings).await {
+                    eprintln!("signal observation write failed: {error:#}");
+                }
+            }
+            if print_feed_events {
+                if let Err(error) = print_json(&request.event) {
+                    eprintln!("feed event print failed: {error:#}");
+                }
+            }
+        }
+    });
+
+    Some(tx)
+}
+
+fn enqueue_signal_side_effect(
+    signal_side_effect_tx: &Option<mpsc::Sender<SignalSideEffectRequest>>,
+    event: NormalizedCopyTradeEvent,
+    timings: SignalTimings,
+) {
+    let Some(tx) = signal_side_effect_tx else {
+        return;
+    };
+
+    if tx
+        .try_send(SignalSideEffectRequest { event, timings })
+        .is_err()
+    {
+        eprintln!("signal side-effect request dropped; worker closed or queue full");
+    }
+}
+
+fn nonzero_capacity(value: usize) -> usize {
+    value.max(1)
+}
+
 fn drain_copy_execution_results(
-    copy_execution_rx: &mut mpsc::UnboundedReceiver<CopyExecutionLine>,
+    copy_execution_rx: &mut mpsc::UnboundedReceiver<CopyExecutionOutput>,
     copy_executions: &mut CopyExecutionWriter,
     one_shot_copy_send: bool,
 ) -> Result<bool> {
@@ -523,7 +687,7 @@ fn drain_copy_execution_results(
 
 fn handle_copy_execution_result(
     copy_executions: &mut CopyExecutionWriter,
-    copy_execution: CopyExecutionLine,
+    copy_execution: CopyExecutionOutput,
     one_shot_copy_send: bool,
 ) -> Result<bool> {
     let one_shot_sent = one_shot_copy_send && copy_execution.was_sent();
@@ -691,8 +855,8 @@ impl CopyExecutionWriter {
         Ok(Self { file })
     }
 
-    fn write(&mut self, line: &CopyExecutionLine) -> Result<()> {
-        write_json_line(self.file.as_mut(), line)
+    fn write(&mut self, line: &CopyExecutionOutput) -> Result<()> {
+        line.write_json_line(self.file.as_mut())
     }
 }
 

@@ -114,7 +114,7 @@ pub(crate) struct DirectPumpAccounts {
     pub(crate) token_program: Pubkey,
     pub(crate) creator_vault: Pubkey,
     pub(crate) event_authority: Pubkey,
-    pub(crate) global_volume_accumulator: Pubkey,
+    pub(crate) global_volume_accumulator: Option<Pubkey>,
     pub(crate) user_volume_accumulator: Pubkey,
     pub(crate) fee_config: Pubkey,
     pub(crate) fee_program: Pubkey,
@@ -207,7 +207,7 @@ impl DirectPumpAccounts {
             "tokenProgram" => self.token_program,
             "creatorVault" => self.creator_vault,
             "eventAuthority" => self.event_authority,
-            "globalVolumeAccumulator" => self.global_volume_accumulator,
+            "globalVolumeAccumulator" => self.global_volume_accumulator?,
             "userVolumeAccumulator" => self.user_volume_accumulator,
             "feeConfig" => self.fee_config,
             "feeProgram" => self.fee_program,
@@ -218,7 +218,7 @@ impl DirectPumpAccounts {
     }
 
     fn resolved_accounts(&self) -> Vec<ResolvedRouteAccount> {
-        vec![
+        let mut accounts = vec![
             resolved("payer", self.payer),
             resolved("targetWallet", self.target_wallet),
             resolved("flashxRouterProgram", self.flashx_router_program),
@@ -233,13 +233,16 @@ impl DirectPumpAccounts {
             resolved("tokenProgram", self.token_program),
             resolved("creatorVault", self.creator_vault),
             resolved("eventAuthority", self.event_authority),
-            resolved("globalVolumeAccumulator", self.global_volume_accumulator),
             resolved("userVolumeAccumulator", self.user_volume_accumulator),
             resolved("feeConfig", self.fee_config),
             resolved("feeProgram", self.fee_program),
             resolved("bondingCurveV2", self.bonding_curve_v2),
             resolved("buybackFeeRecipient", self.buyback_fee_recipient),
-        ]
+        ];
+        if let Some(pubkey) = self.global_volume_accumulator {
+            accounts.insert(14, resolved("globalVolumeAccumulator", pubkey));
+        }
+        accounts
     }
 }
 

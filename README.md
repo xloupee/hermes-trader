@@ -108,10 +108,10 @@ npm run import-subscribers -- data/telegram-subscribers.json
 - `YELLOWSTONE_ENABLED=true` starts an optional Yellowstone gRPC watched-wallet stream. For a QuickNode trial, set `YELLOWSTONE_ENDPOINT` to the gRPC endpoint on port `10000` and `YELLOWSTONE_TOKEN` to the token from the original QuickNode RPC URL. Keep `YELLOWSTONE_SHADOW_ONLY=true` at first; shadow mode writes/logs Yellowstone candidates but does not trigger copy buys or Telegram alerts.
 - Expose `WEBHOOK_PORT` through your reverse proxy at the exact `HELIUS_WEBHOOK_PUBLIC_URL`, and forward the `Authorization` header unchanged.
 - `GEYSER_ENABLED=true` starts an observe-only Yellowstone Geyser wallet feed using `GEYSER_GRPC_URL`. By default it writes parsed diagnostics to `WALLET_TRADE_LOG_PATH` and does not trigger copy buys, sells, Telegram alerts, or buy-pressure exits. `COPY_TRADE_SIGNAL_PROVIDER=parallel` races PumpPortal and Geyser watched-wallet buys through the same copy-buy handler; the first signature/target-wallet/mint signal wins and later duplicates are logged without submitting another buy attempt. Keep one bot instance so the shared Geyser stream stays well under the provider's stream limit.
-- `SHREDSTREAM_WALLET_OBSERVER_ENABLED=true` starts an observe-only ShredStream watched-wallet feed using the same `SHREDSTREAM_SOURCE`, `SHREDSTREAM_GRPC_URL`, and optional `SHREDSTREAM_DECODER_CMD` settings as the discovery listener. It writes `provider="shredstream"` rows to `WALLET_TRADE_LOG_PATH` for matching watched/copytrade wallets and does not trigger copy buys, sells, Telegram alerts, or buy-pressure exits.
+- `SHREDSTREAM_WALLET_OBSERVER_ENABLED=true` starts an observe-only ShredStream watched-wallet feed using the same `SHREDSTREAM_SOURCE`, `SHREDSTREAM_GRPC_URL`, and optional `SHREDSTREAM_DECODER_CMD` settings as the discovery listener. It writes `provider="shredstream"` rows to `WALLET_TRADE_LOG_PATH` for matching watched/copytrade wallets and does not trigger copy buys, sells, Telegram alerts, or buy-pressure exits. Live ShredStream copy buys belong to the long-running Rust worker in `tools/jito-shredstream-rs`, not this TypeScript observer.
 - `SHREDSTREAM_WALLET_OBSERVER_STATS_INTERVAL_MS=60000` controls the observer stats log cadence. The stats line reports records read, parse errors, decoded Pump/PumpSwap buy/sell candidates, watched-wallet matches, diagnostic-vs-real wallet matches, and emitted ShredStream wallet rows.
 - `WALLET_FEED_DIAGNOSTIC_WALLETS=address[:label],...` adds operator-only wallets to PumpPortal/Geyser/ShredStream feed observation. Diagnostic wallets write rows to `WALLET_TRADE_LOG_PATH` with `raw.diagnosticWallet=true`, but they are not subscriber watchlists, do not send Telegram alerts, and do not submit copy trades. They remain ShredStream shadow-only even if `COPY_TRADE_SIGNAL_PROVIDER=shredstream` or `all`.
-- `COPY_TRADE_SIGNAL_PROVIDER=shredstream` promotes ShredStream into the same copy-trade signal race as PumpPortal while leaving Geyser diagnostic-only. `COPY_TRADE_SIGNAL_PROVIDER=all` allows PumpPortal, Geyser, and ShredStream to race. Keep `COPY_TRADE_SIGNAL_PROVIDER=pumpportal` or `parallel` until ShredStream wallet logs have proven coverage for your watched wallets.
+- `COPY_TRADE_SIGNAL_PROVIDER=shredstream` is no longer a TypeScript ShredStream copy-buy promotion path. Use it only as an operator signal that ShredStream live copies are handled by the Rust worker. The TypeScript bot can still race PumpPortal/Geyser in `parallel` mode; ShredStream live copy buys must run through `tools/jito-shredstream-rs` with a hot Telegram snapshot.
 - Compare PumpPortal, Helius, Geyser, and ShredStream accepted wallet events with `npm run wallet-feed-report -- --path=logs/wallet-trades.jsonl`. Add `--since=2026-05-29T00:00:00Z`, `--copyable-only=true`, `--include-diagnostic=false`, or `--limit=50` for a narrower report. Use `npm run wallet-feed-readiness-report -- --role=copytrade --since=<ISO time>` to see the active real copytrade wallets and their provider evidence. Use `npm run shredstream-promotion-gate -- --since=<ISO time>` as the fail-closed gate before changing `COPY_TRADE_SIGNAL_PROVIDER` to `shredstream` or `all`.
 - [VA RPC and Geyser runbook](docs/va-geyser-runbook.md) documents the VA endpoints, IP allowlisting, smoke tests, canary env, feed comparison, rollback paths, and the 20-stream Geyser limit.
 
@@ -245,13 +245,18 @@ npm run shredstream-promotion-gate -- \
 
 Do not promote if the gate prints `Result=FAIL`. A healthy first promotion window should show at least one active real copytrade wallet, real copyable buys, ShredStream copyable buys for those wallets, and matched copyable groups against another provider. Diagnostic-wallet rows do not count.
 
-After the observed ShredStream wallet rows match the existing feed and the gate passes, promote it deliberately:
+After the observed ShredStream wallet rows match the existing feed and the gate passes, promote the Rust worker deliberately. Keep TypeScript as the Telegram/settings/snapshot control plane and post-submit notification surface; do not route ShredStream copy buys through `handleWalletTradeSignal`.
 
 ```bash
 COPY_TRADE_SIGNAL_PROVIDER=shredstream
+COPY_TRADE_HOT_SNAPSHOT_ENABLED=true
+COPY_TRADE_HOT_SNAPSHOT_RELOAD_COMMAND="systemctl restart jito-copy-live.service"
+JITO_TELEGRAM_SNAPSHOT_PATH=/var/lib/pumpfun/copytrade-hot-snapshot.json
+JITO_FAST_COPY_SEND=YES
+JITO_DISABLE_SIGNAL_OBSERVATIONS=true
 ```
 
-That mode races PumpPortal and ShredStream only. Use `COPY_TRADE_SIGNAL_PROVIDER=all` if you also want Geyser in the race. The race still applies age, allowed-source, copyable-buy, idempotency, emergency-stop, dry-run/live, and execution-provider gates before any copy buy can submit.
+That mode does not make the TypeScript ShredStream observer submit buys. The Rust worker preloads the snapshot, matches/builds/signs/sends in-process, and writes post-submit execution records for Telegram/dashboard follow-up.
 
 Rollback is just the signal provider env:
 

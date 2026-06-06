@@ -1,6 +1,8 @@
 import "dotenv/config";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { appendFile, mkdir, open, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { promisify } from "node:util";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { buildMigrationReplyMarkup, escapeHtml, extractMigrationData, formatMigrationMessage, getEventId } from "./format.js";
 import { createTelegramCommandPoller } from "./commands.js";
@@ -102,6 +104,7 @@ import {
   tradeExecutionSkippedResult
 } from "./trade-execution.js";
 import type {
+  DirectExecutionGateConfig,
   DirectTradeExecutionProvider,
   TradeExecutionPlatformFee,
   TradeExecutionProvider,
@@ -113,6 +116,11 @@ import { createShredstreamWalletObserver } from "./shredstream-wallet-observer.j
 import { createSubscriberStore } from "./subscribers.js";
 import { createSupabaseCopyTradeRecorderFromEnv, createSupabaseSubscriberStoreFromEnv } from "./subscribers-supabase.js";
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
+import {
+  createCopyTradeHotPathSnapshot,
+  createCopyTradeHotSnapshotSubscriberStore,
+  writeCopyTradeHotPathSnapshotFile
+} from "./copytrade-hot-snapshot.js";
 import { asRecord, errorMessage, isRecord, stringValue } from "./types.js";
 import {
   buildWalletTradeReplyMarkup,
@@ -174,6 +182,11 @@ function nonNegativeIntegerFromEnv(value: string | undefined, fallback: number):
 
 function positiveIntegerFromEnv(value: string | undefined, fallback: number): number {
   return Math.max(1, Math.floor(positiveNumberFromEnv(value, fallback)));
+}
+
+function positiveIntegerOrNullFromEnv(value: string | undefined): number | null {
+  const number = finiteNumberValue(value);
+  return number !== null && number > 0 ? Math.floor(number) : null;
 }
 
 function percentFromEnv(value: string | undefined, fallback: number): number {
@@ -243,6 +256,7 @@ const TOKEN_2022_PROGRAM_ADDRESS = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 const DIRECT_PUMP_FAST_STATE_PREFETCH_MAX_IN_FLIGHT = 4;
 const DIRECT_PUMP_FAST_STATE_PREFETCH_MAX_QUEUED = 400;
 const DIRECT_PUMP_FAST_STATE_PREFETCH_RETRY_DELAYS_MS = [0, 100, 400, 1200, 2500];
+const execFileAsync = promisify(execFile);
 const directPumpFastStatePrefetchQueue: Array<{ mint: string; event: LooseRecord }> = [];
 const directPumpFastStatePrefetchPending = new Set<string>();
 const directPumpFastStatePrefetchStats = {
@@ -384,6 +398,10 @@ function directExecutionConfirmationModeFromEnv(value: string | undefined): BotC
   return normalized === "background" || normalized === "async" ? "background" : "inline";
 }
 
+function rustTrailingSellSourceFromEnv(value: string | undefined): BotConfig["copyTradeRustTrailingSellsSource"] {
+  return value?.trim().toLowerCase() === "supabase" ? "supabase" : "local-jsonl";
+}
+
 function yellowstoneCommitmentFromEnv(value: string | undefined): BotConfig["yellowstoneCommitment"] {
   const normalized = value?.trim().toLowerCase();
   return normalized === "confirmed" || normalized === "finalized" ? normalized : "processed";
@@ -447,6 +465,9 @@ function copyTradeLatencyMilestoneForDirectStage(stage: DirectSolanaSendStage): 
 
 const rawCopyTradeExecutionProvider = process.env.COPY_TRADE_EXECUTION_PROVIDER || process.env.TRADE_EXECUTION_PROVIDER;
 const copyTradeExecutionProviderError = tradeExecutionProviderConfigError(rawCopyTradeExecutionProvider);
+const rawRustTrailingSellExecutionProvider = process.env.COPY_TRADE_RUST_TRAILING_SELLS_EXECUTION_PROVIDER || "direct-auto";
+const copyTradeRustTrailingSellExecutionProviderError =
+  tradeExecutionProviderConfigError(rawRustTrailingSellExecutionProvider);
 
 const config: BotConfig = {
   telegramToken: process.env.TELEGRAM_BOT_TOKEN,
@@ -516,12 +537,42 @@ const config: BotConfig = {
   copyTradeTrailingSellTrailPercent: percentFromEnv(process.env.COPY_TRADE_TRAILING_SELL_TRAIL_PERCENT, 20),
   copyTradeTrailingSellIntervalMs: positiveIntegerFromEnv(process.env.COPY_TRADE_TRAILING_SELL_INTERVAL_MS, 2000),
   copyTradeTrailingSellMaxBuilds: positiveIntegerFromEnv(process.env.COPY_TRADE_TRAILING_SELL_MAX_BUILDS, 5),
+  copyTradeRustTrailingSellsEnabled: process.env.COPY_TRADE_RUST_TRAILING_SELLS_ENABLED === "true",
+  copyTradeRustTrailingSellsLiveEnabled: process.env.COPY_TRADE_RUST_TRAILING_SELLS_LIVE_ENABLED === "true",
+  copyTradeRustTrailingSellsSource: rustTrailingSellSourceFromEnv(process.env.COPY_TRADE_RUST_TRAILING_SELLS_SOURCE),
+  copyTradeRustTrailingSellsLocalExecutionsPath:
+    process.env.COPY_TRADE_RUST_TRAILING_SELLS_LOCAL_EXECUTIONS_PATH ||
+    process.env.JITO_COPY_EXECUTIONS_PATH ||
+    "/var/log/jito-copy-executions-vps.jsonl",
+  copyTradeRustTrailingSellsExecutionProvider: parseTradeExecutionProvider(rawRustTrailingSellExecutionProvider),
+  copyTradeRustTrailingSellsPollMs: positiveIntegerFromEnv(process.env.COPY_TRADE_RUST_TRAILING_SELLS_POLL_MS, 100),
+  copyTradeRustTrailingSellsConfirmationPollMs: positiveIntegerFromEnv(
+    process.env.COPY_TRADE_RUST_TRAILING_SELLS_CONFIRMATION_POLL_MS,
+    100
+  ),
+  copyTradeRustTrailingSellsLookbackMs: positiveIntegerFromEnv(
+    process.env.COPY_TRADE_RUST_TRAILING_SELLS_LOOKBACK_MS,
+    60_000
+  ),
+  copyTradeRustTrailingSellsStartupLookbackMs: nonNegativeIntegerFromEnv(
+    process.env.COPY_TRADE_RUST_TRAILING_SELLS_STARTUP_LOOKBACK_MS,
+    0
+  ),
+  copyTradeRustTrailingSellsMaxRows: positiveIntegerFromEnv(process.env.COPY_TRADE_RUST_TRAILING_SELLS_MAX_ROWS, 50),
   copyTradeBuyPressureSellEnabled: process.env.COPY_TRADE_BUY_PRESSURE_SELL_ENABLED === "true",
   copyTradeBuyPressureSellPercent: percentFromEnv(process.env.COPY_TRADE_BUY_PRESSURE_SELL_PERCENT, 100),
   copyTradeBuyPressureSellTimeoutMs: positiveIntegerFromEnv(process.env.COPY_TRADE_BUY_PRESSURE_SELL_TIMEOUT_MS, 120_000),
   copyTradeBuyPressureSellMinBuys: positiveIntegerFromEnv(process.env.COPY_TRADE_BUY_PRESSURE_SELL_MIN_BUYS, 1),
   copyTradeBuyPressureSellMinTotalSol: nonNegativeNumberFromEnv(process.env.COPY_TRADE_BUY_PRESSURE_SELL_MIN_TOTAL_SOL, 0),
   copyTradeBuyPressureSellStatePath: process.env.COPY_TRADE_BUY_PRESSURE_SELL_STATE_PATH || "data/copytrade-buy-pressure-sells.json",
+  copyTradeHotSnapshotEnabled: process.env.COPY_TRADE_HOT_SNAPSHOT_ENABLED === "true",
+  copyTradeHotSnapshotPath:
+    process.env.COPY_TRADE_HOT_SNAPSHOT_PATH ||
+    process.env.JITO_TELEGRAM_SNAPSHOT_PATH ||
+    "data/jito-telegram-copy-snapshot.json",
+  copyTradeHotSnapshotReloadCommand:
+    process.env.COPY_TRADE_HOT_SNAPSHOT_RELOAD_COMMAND ||
+    process.env.JITO_COPY_LIVE_RELOAD_COMMAND,
   directExecutionEnabled: process.env.DIRECT_EXECUTION_ENABLED === "true",
   directExecutionLiveEnabled: process.env.DIRECT_EXECUTION_LIVE_ENABLED === "true",
   directExecutionBuildOnly: process.env.DIRECT_EXECUTION_BUILD_ONLY === "true",
@@ -563,6 +614,8 @@ const activeTrailingSellSchedules = new Set<string>();
 const buyPressureSellTimers = new Map<string, NodeJS.Timeout>();
 const activeBuyPressureSellWatchers = new Map<string, CopyTradeBuyPressureSellWatcher>();
 const activeBuyPressureSellTriggers = new Set<string>();
+const rustTrailingSellExecutionKeys = new Set<string>();
+const rustTrailingSellPollStartedAtMs = Date.now();
 const copyBuySubmissionGuard = createCopyBuySubmissionGuard();
 const copyBuySemanticSubmissionGuard = createCopyBuySubmissionGuard();
 const copyTradeSignalRaceTracker = createCopyTradeSignalRaceTracker();
@@ -584,7 +637,7 @@ const directSolanaReadConnections: DirectSolanaReadConnection[] = directSolanaSe
 let isShuttingDown = false;
 let copyTradeEmergencyStopped = false;
 const pumpFunCoinInfoRetryDelaysMs = [0, 750, 1500, 3000, 6000];
-const subscribers =
+const baseSubscribers =
   config.supabaseUrl && config.supabaseServiceRoleKey
     ? createSupabaseSubscriberStoreFromEnv({
         url: config.supabaseUrl,
@@ -595,6 +648,12 @@ const subscribers =
         path: config.telegramSubscribersPath,
         initialChatIds: [config.telegramChatId]
       });
+const subscribers = createCopyTradeHotSnapshotSubscriberStore(baseSubscribers, {
+  onChange: queueCopyTradeHotPathSnapshotRefresh,
+  onError: (error, reason) => {
+    console.warn(`Copy trade hot snapshot refresh failed after ${reason}: ${errorMessage(error)}`);
+  }
+});
 const subscriberStoreLabel = config.supabaseUrl && config.supabaseServiceRoleKey ? "Supabase" : "JSON";
 const copyTradeRecorder =
   config.supabaseUrl && config.supabaseServiceRoleKey
@@ -626,12 +685,18 @@ const copyTradeBuyIdempotency =
 const copyTradeBuyPressureSellStore = createJsonCopyTradeBuyPressureSellStore({
   path: config.copyTradeBuyPressureSellStatePath
 });
+let copyTradeHotPathSnapshotSequence = 0;
+let copyTradeHotPathSnapshotQueue: Promise<void> = Promise.resolve();
 let platformFeeTreasuryWarmup: Promise<string | null> | null = null;
 let platformFeeTreasuryVerified: string | null = null;
 let platformFeeTreasuryBlockedReason: string | null = null;
 const localSolanaSignerCache = new Map<string, ReturnType<typeof decryptLocalSolanaKeypair>>();
 let directBlockhashWarmTimer: NodeJS.Timeout | null = null;
 let directSdkWarmTimer: NodeJS.Timeout | null = null;
+let rustTrailingSellPollerTimer: NodeJS.Timeout | null = null;
+let rustTrailingSellPollerRunning = false;
+let rustTrailingSellLocalFileOffset: number | null = null;
+let rustTrailingSellLocalFileRemainder = "";
 
 const baseSubscriptionMethods: PumpPortalSubscription[] = ["subscribeNewToken", "subscribeMigration"];
 
@@ -660,7 +725,139 @@ function copyTradeLatencyMode(): "dry" | "live" {
   return copyTradeLiveExecutionEnabled(copyTradeExecutionModeConfig()) ? "live" : "dry";
 }
 
+function queueCopyTradeHotPathSnapshotRefresh(reason: string): Promise<void> {
+  if (!config.copyTradeHotSnapshotEnabled) {
+    return Promise.resolve();
+  }
+
+  const next = copyTradeHotPathSnapshotQueue
+    .catch(() => undefined)
+    .then(() => refreshCopyTradeHotPathSnapshot(reason));
+  copyTradeHotPathSnapshotQueue = next;
+  return next;
+}
+
+async function refreshCopyTradeHotPathSnapshot(reason: string): Promise<void> {
+  const snapshot = createCopyTradeHotPathSnapshot({
+    subscribers: baseSubscribers.list(),
+    sequence: copyTradeHotPathSnapshotSequence + 1,
+    routing: {
+      executionProvider: config.copyTradeExecutionProvider,
+      pool: config.copyTradePool,
+      defaultSlippage: config.copyTradeSlippage,
+      defaultPriorityFee: config.copyTradePriorityFee,
+      defaultTrailingSell: inheritedTrailingSellConfig(),
+      priorityFeeMicroLamports: positiveIntegerOrNullFromEnv(process.env.JITO_PRIORITY_FEE_MICRO_LAMPORTS),
+      jitoTipLamports: positiveIntegerOrNullFromEnv(process.env.JITO_TIP_LAMPORTS),
+      jitoTipAccount: process.env.JITO_TIP_ACCOUNT?.trim() || null,
+      maxBuySol: config.copyTradeMaxBuySol,
+      dailySolCap: config.copyTradeDailySolCap,
+      maxSignalAgeMs: config.copyTradeMaxSignalAgeMs,
+      minWalletReserveSol: config.copyTradeMinWalletReserveSol,
+      allowedSources: config.copyTradeAllowedSources,
+      maxSlippage: config.copyTradeMaxSlippage,
+      maxPriorityFee: config.copyTradeMaxPriorityFee,
+      maxCopyWalletsPerChat: config.copyTradeMaxCopyWalletsPerChat,
+      liveTradingEnabled: copyTradeLiveExecutionEnabled(copyTradeExecutionModeConfig()),
+      emergencyStopped: copyTradeEmergencyStopped
+    }
+  });
+  copyTradeHotPathSnapshotSequence = snapshot.sequence;
+  await writeCopyTradeHotPathSnapshotFile(config.copyTradeHotSnapshotPath, snapshot);
+
+  const targetCount = new Set(snapshot.subscribers.flatMap((subscriber) => subscriber.wallets.map((wallet) => wallet.address))).size;
+  console.log(
+    [
+      "Copy trade hot snapshot refreshed",
+      `reason=${reason}`,
+      `sequence=${snapshot.sequence}`,
+      `subscribers=${snapshot.subscribers.length}`,
+      `targets=${targetCount}`,
+      `path=${config.copyTradeHotSnapshotPath}`
+    ].join(" | ")
+  );
+
+  if (copyTradeHotSnapshotReloadNeeded(reason)) {
+    await runCopyTradeHotSnapshotReloadCommand(reason);
+  }
+}
+
+async function runCopyTradeHotSnapshotReloadCommand(reason: string): Promise<void> {
+  const command = config.copyTradeHotSnapshotReloadCommand?.trim();
+
+  if (!command) {
+    return;
+  }
+
+  await execFileAsync("sh", ["-lc", command], {
+    timeout: 30_000,
+    env: {
+      ...process.env,
+      COPY_TRADE_HOT_SNAPSHOT_REASON: reason,
+      COPY_TRADE_HOT_SNAPSHOT_PATH: config.copyTradeHotSnapshotPath,
+      COPY_TRADE_HOT_SNAPSHOT_SEQUENCE: String(copyTradeHotPathSnapshotSequence)
+    }
+  });
+}
+
+function copyTradeHotSnapshotReloadNeeded(reason: string): boolean {
+  return reason === "startup" ||
+    reason === "copytrade.emergency_stop" ||
+    reason === "copytrade.emergency_resume" ||
+    reason === "subscriber.remove" ||
+    reason === "subscriber.setNotificationsPaused" ||
+    reason === "subscriber.watchCopyTradeWallet" ||
+    reason === "subscriber.setCopyTradeWalletEnabled" ||
+    reason === "subscriber.unwatchCopyTradeWallet" ||
+    reason === "subscriber.unwatchAllCopyTradeWallets" ||
+    reason === "subscriber.setCopyTradeWalletTrailingSellConfig" ||
+    reason === "subscriber.setTradingWallet" ||
+    reason === "subscriber.setActiveTradingWallet" ||
+    reason === "subscriber.removeTradingWallet" ||
+    reason === "subscriber.removeAllTradingWallets" ||
+    reason === "subscriber.setCopyAmountSol" ||
+    reason === "subscriber.setCopyTradeSellSlippage" ||
+    reason === "subscriber.setCopyTradeSellPriorityFee" ||
+    reason === "subscriber.setCopyTargetWallet";
+}
+
 type CopyTradeExecutionResult = PumpPortalLightningTradeResult | TradeExecutionResult;
+type CopyTradeSellSubmissionBlockedReason = (provider: TradeExecutionProvider) => string | null;
+
+interface CopyTradeTrailingSellExecutionContext {
+  submissionBlockedReason?: CopyTradeSellSubmissionBlockedReason;
+  directGate?: DirectExecutionGateConfig;
+  latencyMode?: "dry" | "live";
+  includeBuyPressureSell?: boolean;
+  confirmationPollMs?: number;
+  scheduleAnchorAtMs?: number | null;
+}
+
+interface RustCopyTradeLocalExecutionRow {
+  id: number | null;
+  created_at: string | null;
+  observed_at_ms: number | null;
+  execution_at_ms: number | null;
+  provider: string;
+  source: string | null;
+  observed_wallet: string;
+  copy_wallet: string;
+  observed_signature: string;
+  send_signature: string;
+  slot: number | null;
+  copy_slot: number | null;
+  selected_route: string | null;
+  route_layout: string | null;
+  mint: string;
+  observed_action: "buy";
+  observed_sol_amount: number | null;
+  decision: string | null;
+  sent: boolean;
+  dry_run: boolean;
+  send_enabled: boolean;
+  raw_execution: LooseRecord;
+  chain_report: LooseRecord;
+}
 
 function isProviderNeutralResult(result: CopyTradeExecutionResult): result is TradeExecutionResult {
   return typeof result.status === "string";
@@ -762,6 +959,59 @@ function copyTradeSubmissionBlockedReason(provider: TradeExecutionProvider): str
   }
 
   return copyTradeLiveExecutionBlockedReason(copyTradeExecutionModeConfig());
+}
+
+function rustTrailingSellDirectExecutionGate(provider: TradeExecutionProvider): DirectExecutionGateConfig {
+  return {
+    provider,
+    copyTradeEnabled: config.copyTradeRustTrailingSellsLiveEnabled,
+    copyTradeDryRun: !config.copyTradeRustTrailingSellsLiveEnabled,
+    emergencyStopped: copyTradeEmergencyStopped,
+    directExecutionEnabled: config.directExecutionEnabled,
+    directExecutionLiveEnabled: config.directExecutionLiveEnabled,
+    directExecutionBuildOnly: config.directExecutionBuildOnly,
+    directExecutionSimulateOnly: config.directExecutionSimulateOnly
+  };
+}
+
+function rustTrailingSellSubmissionBlockedReason(provider: TradeExecutionProvider): string | null {
+  if (copyTradeRustTrailingSellExecutionProviderError) {
+    return copyTradeRustTrailingSellExecutionProviderError;
+  }
+
+  if (!config.copyTradeRustTrailingSellsEnabled) {
+    return "COPY_TRADE_RUST_TRAILING_SELLS_ENABLED is not true";
+  }
+
+  if (!config.copyTradeRustTrailingSellsLiveEnabled) {
+    return "COPY_TRADE_RUST_TRAILING_SELLS_LIVE_ENABLED is not true";
+  }
+
+  if (copyTradeEmergencyStopped) {
+    return "copy trade emergency stop is active";
+  }
+
+  if (!isDirectTradeExecutionProvider(provider)) {
+    return `Rust trailing sells require a direct execution provider; got ${provider}`;
+  }
+
+  if (!config.directExecutionEnabled) {
+    return "DIRECT_EXECUTION_ENABLED is not true";
+  }
+
+  if (!config.directExecutionLiveEnabled) {
+    return "DIRECT_EXECUTION_LIVE_ENABLED is not true";
+  }
+
+  if (config.directExecutionBuildOnly) {
+    return "direct execution build-only mode is enabled";
+  }
+
+  if (config.directExecutionSimulateOnly) {
+    return "direct execution simulate-only mode is enabled";
+  }
+
+  return null;
 }
 
 function shouldReserveDailyBudget(provider: TradeExecutionProvider): boolean {
@@ -1125,7 +1375,7 @@ function logCopyTradeExecutionState(): void {
       `mode=${config.copyTradeSignalProvider}`,
       `pumpPortal=${copyTradeSignalProviderAllows(config.copyTradeSignalProvider, "pumpportal") ? "trigger" : "diagnostic"}`,
       `geyser=${copyTradeSignalProviderAllows(config.copyTradeSignalProvider, "geyser") ? "trigger" : "diagnostic"}`,
-      `shredstream=${copyTradeSignalProviderAllows(config.copyTradeSignalProvider, "shredstream") ? "trigger" : config.shredstreamWalletObserverEnabled ? "observe" : "off"}`,
+      `shredstream=${copyTradeSignalProviderAllows(config.copyTradeSignalProvider, "shredstream") ? "rust-worker" : config.shredstreamWalletObserverEnabled ? "observe" : "off"}`,
       `diagnosticWallets=${config.walletFeedDiagnosticWallets.length}`
     ].join(" | ")
   );
@@ -1154,6 +1404,14 @@ function logCopyTradeExecutionState(): void {
       `canaryWallets=${formatCanaryListForLog(config.directExecutionCanaryWallets)}`,
       `platformFee=${config.platformFeeEnabled ? `${config.platformFeeBps}bps` : "disabled"}`,
       `cashback=${cashbackConfig.enabled ? `${cashbackConfig.feeShareBps}bps` : "disabled"}`
+    ].join(" | ")
+  );
+  console.log(
+    [
+      "Copy trade hot snapshot",
+      `enabled=${config.copyTradeHotSnapshotEnabled ? "true" : "false"}`,
+      `path=${config.copyTradeHotSnapshotPath}`,
+      `reload=${config.copyTradeHotSnapshotReloadCommand ? "configured" : "off"}`
     ].join(" | ")
   );
 
@@ -1220,6 +1478,7 @@ async function persistCopyTradeEmergencyStopCleared(chatId: string | number): Pr
 async function activateCopyTradeEmergencyStop(chatId: string | number): Promise<string> {
   copyTradeEmergencyStopped = true;
   await persistCopyTradeEmergencyStop(chatId);
+  await queueCopyTradeHotPathSnapshotRefresh("copytrade.emergency_stop");
   const message = formatCopyTradeExecutionStateLog(copyTradeExecutionModeConfig());
 
   console.warn(`Copy trade emergency stop activated by ${chatId}: ${message}`);
@@ -1229,6 +1488,7 @@ async function activateCopyTradeEmergencyStop(chatId: string | number): Promise<
 async function clearCopyTradeEmergencyStop(chatId: string | number): Promise<string> {
   copyTradeEmergencyStopped = false;
   await persistCopyTradeEmergencyStopCleared(chatId);
+  await queueCopyTradeHotPathSnapshotRefresh("copytrade.emergency_resume");
   const message = formatCopyTradeExecutionStateLog(copyTradeExecutionModeConfig());
 
   console.warn(`Copy trade emergency stop cleared by ${chatId}: ${message}`);
@@ -2084,15 +2344,6 @@ async function handleShredstreamWalletTrade(
     }
   };
 
-  if (!diagnostic && copyTradeSignalProviderAllows(config.copyTradeSignalProvider, "shredstream")) {
-    if (activeCopyTradeEntriesForTarget(observedTrade.targetWallet).length > 0) {
-      prefetchDirectPumpFastBuyStateForTrade(observedTrade);
-      prefetchDirectPumpSwapStateForTrade(observedTrade);
-    }
-    await handleWalletTradeSignal(observedTrade, { receivedAtMs, normalizedAtMs });
-    return;
-  }
-
   await writeWalletTradeLog(observedTrade);
   console.log(`ShredStream shadow wallet trade event: ${JSON.stringify(observedTrade)}`);
 }
@@ -2123,6 +2374,7 @@ async function executeDirectCopyTrade({
   platformFee = null,
   metadata = {},
   forceFreshBuyState = false,
+  directGate,
   onLatencyMilestone
 }: {
   subscriber: SubscriberRecord;
@@ -2133,6 +2385,7 @@ async function executeDirectCopyTrade({
   platformFee?: ReturnType<typeof calculatePlatformFeeSplit> | null;
   metadata?: Record<string, unknown>;
   forceFreshBuyState?: boolean;
+  directGate?: DirectExecutionGateConfig;
   onLatencyMilestone?: (milestone: CopyTradeLatencyMilestone, details?: CopyTradeLatencyMilestoneDetails) => void;
 }): Promise<TradeExecutionResult> {
   const tradingWallet = subscriber.tradingWallet;
@@ -2262,7 +2515,7 @@ async function executeDirectCopyTrade({
       signer,
       payload: built,
       config: {
-        gate: directExecutionGate(provider),
+        gate: directGate || directExecutionGate(provider),
         simulateBeforeSend: config.directExecutionSimulateBeforeSend,
         skipPreflight: config.directExecutionSkipPreflight,
         confirmationMode: "background",
@@ -2288,7 +2541,7 @@ async function executeDirectCopyTrade({
     signer,
     payload: built,
     config: {
-      gate: directExecutionGate(provider),
+      gate: directGate || directExecutionGate(provider),
       simulateBeforeSend: config.directExecutionSimulateBeforeSend,
       skipPreflight: config.directExecutionSkipPreflight,
       confirmationMode: "inline",
@@ -2372,7 +2625,8 @@ async function executeCopyTradeSell({
   request,
   provider,
   seenSellSignatures,
-  platformFee
+  platformFee,
+  directGate
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
@@ -2380,6 +2634,7 @@ async function executeCopyTradeSell({
   provider: TradeExecutionProvider;
   seenSellSignatures: Set<string>;
   platformFee: ReturnType<typeof calculatePlatformFeeSplit>;
+  directGate?: DirectExecutionGateConfig;
 }): Promise<{ result: CopyTradeExecutionResult; duplicateSignature: boolean }> {
   if (!isDirectTradeExecutionProvider(provider)) {
     return {
@@ -2413,6 +2668,7 @@ async function executeCopyTradeSell({
         amountLamports: percentBasisPoints,
         amountBasis: "percent",
         platformFee,
+        directGate,
         metadata: {
           observedSignature: trade.signature,
           sourceWallet: trade.targetWallet,
@@ -2945,7 +3201,8 @@ async function scheduleCopyTradeTrailingSellsAfterConfirmation({
   buySignature,
   executionProvider,
   preBuyTokenBalance,
-  replyToMessageId = null
+  replyToMessageId = null,
+  trailingSellContext = {}
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
@@ -2954,6 +3211,7 @@ async function scheduleCopyTradeTrailingSellsAfterConfirmation({
   executionProvider: TradeExecutionProvider;
   preBuyTokenBalance: number | null;
   replyToMessageId?: number | null;
+  trailingSellContext?: CopyTradeTrailingSellExecutionContext;
 }): Promise<void> {
   if (!buySignature) {
     await notifySkippedTrailingSellSchedule({
@@ -2965,7 +3223,11 @@ async function scheduleCopyTradeTrailingSellsAfterConfirmation({
     return;
   }
 
-  const confirmation = await waitForSignatureConfirmationResult(buySignature);
+  const confirmation = await waitForSignatureConfirmationResult(
+    buySignature,
+    30000,
+    trailingSellContext.confirmationPollMs
+  );
   if (!confirmation.confirmed) {
     await notifySkippedTrailingSellSchedule({
       subscriber,
@@ -2985,7 +3247,8 @@ async function scheduleCopyTradeTrailingSellsAfterConfirmation({
     buySignature,
     preBuyTokenBalance,
     executionProvider,
-    replyToMessageId
+    replyToMessageId,
+    trailingSellContext
   });
 }
 
@@ -2996,7 +3259,8 @@ async function scheduleCopyTradePostConfirmationExits({
   buySignature,
   preBuyTokenBalance,
   executionProvider,
-  replyToMessageId = null
+  replyToMessageId = null,
+  trailingSellContext = {}
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
@@ -3005,22 +3269,26 @@ async function scheduleCopyTradePostConfirmationExits({
   preBuyTokenBalance: number | null;
   executionProvider: TradeExecutionProvider;
   replyToMessageId?: number | null;
+  trailingSellContext?: CopyTradeTrailingSellExecutionContext;
 }): Promise<void> {
-  const postBuyTokenBalance = copyTradeBuyPressureSellEnabledForSubscriber(subscriber) && trade.mint
+  const includeBuyPressureSell = trailingSellContext.includeBuyPressureSell !== false;
+  const postBuyTokenBalance = includeBuyPressureSell && copyTradeBuyPressureSellEnabledForSubscriber(subscriber) && trade.mint
     ? await getTokenBalanceForWalletMint({
         owner: subscriber.tradingWallet?.publicKey || "",
         mint: trade.mint
       })
     : null;
-  const buyPressureWatcherStarted = await startCopyTradeBuyPressureSellWatcher({
-    subscriber,
-    trade,
-    copyTradeWallet,
-    buySignature,
-    preBuyTokenBalance,
-    postBuyTokenBalance,
-    executionProvider
-  });
+  const buyPressureWatcherStarted = includeBuyPressureSell
+    ? await startCopyTradeBuyPressureSellWatcher({
+        subscriber,
+        trade,
+        copyTradeWallet,
+        buySignature,
+        preBuyTokenBalance,
+        postBuyTokenBalance,
+        executionProvider
+      })
+    : false;
 
   if (buyPressureWatcherStarted) {
     return;
@@ -3031,7 +3299,8 @@ async function scheduleCopyTradePostConfirmationExits({
     trade,
     copyTradeWallet,
     executionProvider,
-    replyToMessageId
+    replyToMessageId,
+    trailingSellContext
   });
 }
 
@@ -3898,13 +4167,15 @@ async function scheduleCopyTradeTrailingSells({
   trade,
   copyTradeWallet,
   executionProvider,
-  replyToMessageId = null
+  replyToMessageId = null,
+  trailingSellContext = {}
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
   copyTradeWallet: WatchedWallet;
   executionProvider: TradeExecutionProvider;
   replyToMessageId?: number | null;
+  trailingSellContext?: CopyTradeTrailingSellExecutionContext;
 }): Promise<void> {
   const trailingSellConfig = resolveTrailingSellConfig(copyTradeWallet);
   const steps = buildTrailingSellSchedule({ subscriber, trade, trailingSellConfig });
@@ -3946,7 +4217,8 @@ async function scheduleCopyTradeTrailingSells({
     copyTradeWallet,
     scheduleKey,
     executionProvider,
-    replyToMessageId
+    replyToMessageId,
+    trailingSellContext
   }).catch((error) => {
     console.warn(`Trailing sell schedule failed for ${subscriber.chatId}: ${errorMessage(error)}`);
   });
@@ -3967,7 +4239,8 @@ async function runTrailingSellSchedule({
   copyTradeWallet,
   scheduleKey,
   executionProvider,
-  replyToMessageId = null
+  replyToMessageId = null,
+  trailingSellContext = {}
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
@@ -3976,8 +4249,9 @@ async function runTrailingSellSchedule({
   scheduleKey: string;
   executionProvider: TradeExecutionProvider;
   replyToMessageId?: number | null;
+  trailingSellContext?: CopyTradeTrailingSellExecutionContext;
 }): Promise<void> {
-  const startedAt = Date.now();
+  const startedAt = trailingSellContext.scheduleAnchorAtMs ?? Date.now();
   const seenSellSignatures = new Set<string>();
 
   try {
@@ -3988,6 +4262,19 @@ async function runTrailingSellSchedule({
 
       const waitMs = Math.max(0, step.delayMs - (Date.now() - startedAt));
       await trackedDelay(waitMs);
+      const stepStartAtMs = Date.now();
+      if (trailingSellContext.scheduleAnchorAtMs !== undefined) {
+        console.log(`Rust trailing sell step due: ${JSON.stringify({
+          chatId: subscriber.chatId,
+          mint: trade.mint,
+          stepIndex,
+          totalSteps: steps.length,
+          delayMs: step.delayMs,
+          anchorAtMs: trailingSellContext.scheduleAnchorAtMs,
+          stepStartAtMs,
+          driftMs: stepStartAtMs - startedAt - step.delayMs
+        })}`);
+      }
 
       const result = await buildAndNotifyTrailingSell({
         subscriber,
@@ -3998,7 +4285,8 @@ async function runTrailingSellSchedule({
         copyTradeWallet,
         seenSellSignatures,
         executionProvider,
-        replyToMessageId
+        replyToMessageId,
+        trailingSellContext
       });
 
       if (result.ok && result.signature) {
@@ -4019,7 +4307,8 @@ async function buildAndNotifyTrailingSell({
   copyTradeWallet,
   seenSellSignatures,
   executionProvider,
-  replyToMessageId = null
+  replyToMessageId = null,
+  trailingSellContext = {}
 }: {
   subscriber: SubscriberRecord;
   trade: WalletTradeData;
@@ -4030,6 +4319,7 @@ async function buildAndNotifyTrailingSell({
   seenSellSignatures: Set<string>;
   executionProvider: TradeExecutionProvider;
   replyToMessageId?: number | null;
+  trailingSellContext?: CopyTradeTrailingSellExecutionContext;
 }): Promise<CopyTradeExecutionResult> {
   const latencyTracker = createCopyTradeLatencyTracker({
     chatId: subscriber.chatId,
@@ -4037,7 +4327,7 @@ async function buildAndNotifyTrailingSell({
     tradingWallet: subscriber.tradingWallet?.publicKey || null,
     observedSignature: trade.signature,
     mint: trade.mint,
-    mode: copyTradeLatencyMode()
+    mode: trailingSellContext.latencyMode || copyTradeLatencyMode()
   });
   latencyTracker.mark("request_built", { status: "ok" });
 
@@ -4047,7 +4337,9 @@ async function buildAndNotifyTrailingSell({
     reason: requestRiskBlockedReason
   });
 
-  const liveBlockedReason = copyTradeSubmissionBlockedReason(executionProvider);
+  const liveBlockedReason = (trailingSellContext.submissionBlockedReason || copyTradeSubmissionBlockedReason)(
+    executionProvider
+  );
   latencyTracker.mark("live_gate_checked", {
     status: liveBlockedReason ? "blocked" : "ok",
     reason: liveBlockedReason
@@ -4099,7 +4391,8 @@ async function buildAndNotifyTrailingSell({
     request,
     provider: executionProvider,
     seenSellSignatures,
-    platformFee
+    platformFee,
+    directGate: trailingSellContext.directGate
   });
   const trailingSellSkipped = Boolean(result.errorText?.startsWith("Trailing sell skipped:"));
   latencyTracker.mark("submit_finished", {
@@ -4876,6 +5169,422 @@ function activeCopyTradeEntriesForTarget(targetWallet: string): Array<{
     );
 }
 
+function rustTrailingSellPollerDisabledReason(): string | null {
+  if (!config.copyTradeRustTrailingSellsEnabled) {
+    return "COPY_TRADE_RUST_TRAILING_SELLS_ENABLED is not true";
+  }
+
+  if (
+    config.copyTradeRustTrailingSellsSource === "supabase" &&
+    (!config.supabaseUrl || !config.supabaseServiceRoleKey)
+  ) {
+    return "missing Supabase config";
+  }
+
+  if (
+    config.copyTradeRustTrailingSellsSource === "local-jsonl" &&
+    !config.copyTradeRustTrailingSellsLocalExecutionsPath
+  ) {
+    return "missing COPY_TRADE_RUST_TRAILING_SELLS_LOCAL_EXECUTIONS_PATH";
+  }
+
+  if (copyTradeRustTrailingSellExecutionProviderError) {
+    return copyTradeRustTrailingSellExecutionProviderError;
+  }
+
+  if (!isDirectTradeExecutionProvider(config.copyTradeRustTrailingSellsExecutionProvider)) {
+    return `COPY_TRADE_RUST_TRAILING_SELLS_EXECUTION_PROVIDER must be direct-pump, direct-pumpswap, or direct-auto`;
+  }
+
+  return null;
+}
+
+function startRustTrailingSellPoller(): void {
+  const disabledReason = rustTrailingSellPollerDisabledReason();
+  if (disabledReason) {
+    if (config.copyTradeRustTrailingSellsEnabled) {
+      console.warn(`Rust copy buy trailing sell bridge disabled: ${disabledReason}`);
+    }
+    return;
+  }
+
+  console.log(
+    [
+      "Rust copy buy trailing sell bridge enabled",
+      `source=${config.copyTradeRustTrailingSellsSource}`,
+      `provider=${config.copyTradeRustTrailingSellsExecutionProvider}`,
+      `live=${config.copyTradeRustTrailingSellsLiveEnabled ? "true" : "false"}`,
+      `pollMs=${config.copyTradeRustTrailingSellsPollMs}`,
+      `confirmationPollMs=${config.copyTradeRustTrailingSellsConfirmationPollMs}`,
+      `lookbackMs=${config.copyTradeRustTrailingSellsLookbackMs}`
+    ].join(" | ")
+  );
+
+  rustTrailingSellPollerTimer = setInterval(() => {
+    pollRustTrailingSellExecutions().catch((error) => {
+      console.warn(`Rust copy buy trailing sell poll failed: ${errorMessage(error)}`);
+    });
+  }, config.copyTradeRustTrailingSellsPollMs);
+
+  pollRustTrailingSellExecutions().catch((error) => {
+    console.warn(`Initial Rust copy buy trailing sell poll failed: ${errorMessage(error)}`);
+  });
+}
+
+async function pollRustTrailingSellExecutions(): Promise<void> {
+  if (rustTrailingSellPollerRunning || isShuttingDown) {
+    return;
+  }
+
+  rustTrailingSellPollerRunning = true;
+  try {
+    const rows = await fetchRecentRustCopyBuyExecutionRows();
+    for (const row of rows) {
+      scheduleRustTrailingSellsForExecution(row).catch((error) => {
+        console.warn(`Rust copy buy trailing sell scheduling failed: ${errorMessage(error)}`);
+      });
+    }
+  } finally {
+    rustTrailingSellPollerRunning = false;
+  }
+}
+
+async function fetchRecentRustCopyBuyExecutionRows(): Promise<RustCopyTradeLocalExecutionRow[]> {
+  if (config.copyTradeRustTrailingSellsSource === "local-jsonl") {
+    return fetchNewRustCopyBuyExecutionRowsFromLocalFile();
+  }
+
+  const base = config.supabaseUrl?.trim().replace(/\/+$/, "");
+  const serviceRoleKey = config.supabaseServiceRoleKey;
+  if (!base || !serviceRoleKey) {
+    return [];
+  }
+
+  const sinceMs = Math.max(
+    Date.now() - config.copyTradeRustTrailingSellsLookbackMs,
+    rustTrailingSellPollStartedAtMs - config.copyTradeRustTrailingSellsStartupLookbackMs
+  );
+  const url = new URL(`${base}/rest/v1/copytrade_local_executions`);
+  url.searchParams.set(
+    "select",
+    [
+      "id",
+      "created_at",
+      "observed_at_ms",
+      "provider",
+      "source",
+      "observed_wallet",
+      "copy_wallet",
+      "observed_signature",
+      "send_signature",
+      "slot",
+      "copy_slot",
+      "selected_route",
+      "route_layout",
+      "mint",
+      "observed_action",
+      "observed_sol_amount",
+      "decision",
+      "sent",
+      "dry_run",
+      "send_enabled",
+      "raw_execution",
+      "chain_report"
+    ].join(",")
+  );
+  url.searchParams.set("provider", "eq.shredstream");
+  url.searchParams.set("observed_action", "eq.buy");
+  url.searchParams.set("decision", "eq.sent");
+  url.searchParams.set("sent", "eq.true");
+  url.searchParams.set("send_signature", "not.is.null");
+  url.searchParams.set("copy_wallet", "not.is.null");
+  url.searchParams.set("mint", "not.is.null");
+  url.searchParams.set("created_at", `gte.${new Date(sinceMs).toISOString()}`);
+  url.searchParams.set("order", "created_at.asc");
+  url.searchParams.set("limit", String(config.copyTradeRustTrailingSellsMaxRows));
+
+  const response = await fetch(url, {
+    headers: {
+      apikey: serviceRoleKey,
+      authorization: `Bearer ${serviceRoleKey}`
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Supabase Rust execution query failed: ${response.status} ${await response.text()}`);
+  }
+
+  const body = await response.json() as unknown;
+  if (!Array.isArray(body)) {
+    throw new Error("Supabase Rust execution query returned a non-array response");
+  }
+
+  return body
+    .map(normalizeRustCopyBuyExecutionRow)
+    .filter((row): row is RustCopyTradeLocalExecutionRow => row !== null);
+}
+
+async function fetchNewRustCopyBuyExecutionRowsFromLocalFile(): Promise<RustCopyTradeLocalExecutionRow[]> {
+  const path = config.copyTradeRustTrailingSellsLocalExecutionsPath;
+  let currentStat: Awaited<ReturnType<typeof stat>>;
+  try {
+    currentStat = await stat(path);
+  } catch (error) {
+    console.warn(`Rust copy buy trailing sell local source unavailable at ${path}: ${errorMessage(error)}`);
+    return [];
+  }
+
+  if (rustTrailingSellLocalFileOffset === null || currentStat.size < rustTrailingSellLocalFileOffset) {
+    rustTrailingSellLocalFileOffset = currentStat.size;
+    rustTrailingSellLocalFileRemainder = "";
+    return [];
+  }
+
+  if (currentStat.size === rustTrailingSellLocalFileOffset) {
+    return [];
+  }
+
+  const length = currentStat.size - rustTrailingSellLocalFileOffset;
+  const buffer = Buffer.alloc(length);
+  const handle = await open(path, "r");
+  try {
+    await handle.read(buffer, 0, length, rustTrailingSellLocalFileOffset);
+  } finally {
+    await handle.close();
+  }
+  rustTrailingSellLocalFileOffset = currentStat.size;
+
+  const text = rustTrailingSellLocalFileRemainder + buffer.toString("utf8");
+  const lines = text.split(/\r?\n/);
+  rustTrailingSellLocalFileRemainder = lines.pop() || "";
+
+  return lines
+    .map((line) => {
+      try {
+        return JSON.parse(line) as unknown;
+      } catch {
+        return null;
+      }
+    })
+    .map(normalizeRustCopyBuyExecutionRow)
+    .filter((row): row is RustCopyTradeLocalExecutionRow => row !== null);
+}
+
+function normalizeRustCopyBuyExecutionRow(value: unknown): RustCopyTradeLocalExecutionRow | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const schema = firstString([value], ["schema"]);
+  if (schema && schema !== "copytrade.localExecution.v1") {
+    return null;
+  }
+
+  const provider = firstString([value], ["provider"]);
+  const observedWallet = firstString([value], ["observed_wallet", "observedWallet"]);
+  const copyWallet = firstString([value], ["copy_wallet", "copyWallet"]);
+  const observedSignature = firstString([value], ["observed_signature", "observedSignature"]);
+  const sendSignature = firstString([value], ["send_signature", "sendSignature", "copySignature"]);
+  const mint = firstString([value], ["mint"]);
+  const observedAction = firstString([value], ["observed_action", "observedAction"]);
+  const decision = firstString([value], ["decision"]);
+  const sent = booleanFromRecords([value], ["sent"]) === true;
+  if (
+    provider !== "shredstream" ||
+    observedAction !== "buy" ||
+    decision !== "sent" ||
+    !sent ||
+    !observedWallet ||
+    !copyWallet ||
+    !observedSignature ||
+    !sendSignature ||
+    !mint
+  ) {
+    return null;
+  }
+
+  const id = finiteNumberValue(value.id);
+
+  return {
+    id: id !== null ? Math.floor(id) : null,
+    created_at: firstString([value], ["created_at", "createdAt"]),
+    observed_at_ms: finiteNumberValue(firstValue([value], ["observed_at_ms", "observedAtMs"])),
+    execution_at_ms: finiteNumberValue(firstValue([value], ["execution_at_ms", "executionAtMs"])),
+    provider,
+    source: firstString([value], ["source"]),
+    observed_wallet: observedWallet,
+    copy_wallet: copyWallet,
+    observed_signature: observedSignature,
+    send_signature: sendSignature,
+    slot: finiteNumberValue(firstValue([value], ["slot"])),
+    copy_slot: finiteNumberValue(firstValue([value], ["copy_slot", "copySlot"])),
+    selected_route: firstString([value], ["selected_route", "selectedRoute"]),
+    route_layout: firstString([value], ["route_layout", "routeLayout"]),
+    mint,
+    observed_action: "buy",
+    observed_sol_amount: finiteNumberValue(firstValue([value], ["observed_sol_amount", "observedSolAmount"])),
+    decision,
+    sent,
+    dry_run: booleanFromRecords([value], ["dry_run", "dryRun"]) === true,
+    send_enabled: booleanFromRecords([value], ["send_enabled", "sendEnabled"]) === true,
+    raw_execution: isRecord(value.raw_execution) ? asRecord(value.raw_execution) : value,
+    chain_report: asRecord(value.chain_report)
+  };
+}
+
+async function scheduleRustTrailingSellsForExecution(row: RustCopyTradeLocalExecutionRow): Promise<void> {
+  const key = rustTrailingSellExecutionKey(row);
+  if (!rememberRustTrailingSellExecution(key)) {
+    return;
+  }
+
+  const buyStatus = stringValue(row.chain_report.buyStatus);
+  if (buyStatus === "buyFailedOnChain") {
+    console.warn(`Skipping Rust trailing sell for failed copy buy ${row.send_signature}:${row.mint}`);
+    return;
+  }
+
+  const entries = activeCopyTradeEntriesForTarget(row.observed_wallet)
+    .filter((entry) => entry.subscriber.tradingWallet?.publicKey === row.copy_wallet);
+
+  if (entries.length === 0) {
+    console.warn(
+      `Skipping Rust trailing sell for ${row.observed_wallet}:${row.copy_wallet}:${row.mint}: no active Telegram copy target matched`
+    );
+    return;
+  }
+
+  const executionProvider = config.copyTradeRustTrailingSellsExecutionProvider;
+  const trailingSellContext: CopyTradeTrailingSellExecutionContext = {
+    submissionBlockedReason: rustTrailingSellSubmissionBlockedReason,
+    directGate: rustTrailingSellDirectExecutionGate(executionProvider),
+    latencyMode: config.copyTradeRustTrailingSellsLiveEnabled ? "live" : "dry",
+    includeBuyPressureSell: false,
+    confirmationPollMs: config.copyTradeRustTrailingSellsConfirmationPollMs,
+    scheduleAnchorAtMs: rustCopyBuyScheduleAnchorAtMs(row)
+  };
+
+  await Promise.all(entries.map((entry) => {
+    const trade = walletTradeFromRustCopyBuyExecution(row, entry.label);
+    return scheduleCopyTradeTrailingSellsAfterConfirmation({
+      subscriber: entry.subscriber,
+      trade,
+      copyTradeWallet: entry.wallet,
+      buySignature: row.send_signature,
+      executionProvider,
+      preBuyTokenBalance: null,
+      trailingSellContext
+    });
+  }));
+}
+
+function rustTrailingSellExecutionKey(row: RustCopyTradeLocalExecutionRow): string {
+  return [
+    row.provider,
+    row.observed_signature,
+    row.observed_wallet,
+    row.copy_wallet,
+    row.mint,
+    row.send_signature
+  ].join(":");
+}
+
+function rustCopyBuyScheduleAnchorAtMs(row: RustCopyTradeLocalExecutionRow): number | null {
+  return finiteNumberValue(row.raw_execution.signatureReturnedAtMs)
+    ?? finiteNumberValue(row.raw_execution.sendSubmittedAtMs)
+    ?? row.execution_at_ms
+    ?? row.observed_at_ms;
+}
+
+function rememberRustTrailingSellExecution(key: string): boolean {
+  if (rustTrailingSellExecutionKeys.has(key)) {
+    return false;
+  }
+
+  rustTrailingSellExecutionKeys.add(key);
+  if (rustTrailingSellExecutionKeys.size > 5000) {
+    const oldest = rustTrailingSellExecutionKeys.values().next().value;
+    if (oldest) {
+      rustTrailingSellExecutionKeys.delete(oldest);
+    }
+  }
+  return true;
+}
+
+function walletTradeFromRustCopyBuyExecution(row: RustCopyTradeLocalExecutionRow, label: string | null): WalletTradeData {
+  const parsedCreatedAtMs = row.created_at ? Date.parse(row.created_at) : NaN;
+  const observedAtMs = row.observed_at_ms ?? (Number.isFinite(parsedCreatedAtMs) ? parsedCreatedAtMs : Date.now());
+
+  return {
+    observedAt: new Date(observedAtMs).toISOString(),
+    provider: "shredstream",
+    targetWallet: row.observed_wallet,
+    label,
+    action: "buy",
+    mint: row.mint,
+    signature: row.observed_signature,
+    timestamp: Math.floor(observedAtMs / 1000),
+    feePayer: row.observed_wallet,
+    source: row.source || "jito-proxy",
+    input: {
+      mint: "So11111111111111111111111111111111111111112",
+      symbol: "SOL",
+      amount: row.observed_sol_amount
+    },
+    output: {
+      mint: row.mint,
+      symbol: null,
+      amount: null
+    },
+    solAmount: row.observed_sol_amount,
+    tokenAmount: null,
+    pool: rustCopyBuyObservedPool(row),
+    marketCapSol: null,
+    pumpFunUrl: `${config.pumpFunBaseUrl}/${row.mint}`,
+    solscanTokenUrl: `${config.solscanBaseUrl}/token/${row.mint}`,
+    solscanTxUrl: `${config.solscanBaseUrl}/tx/${row.observed_signature}`,
+    raw: {
+      rustCopyTradeLocalExecution: {
+        id: row.id,
+        createdAt: row.created_at,
+        provider: row.provider,
+        source: row.source,
+        observedWallet: row.observed_wallet,
+        copyWallet: row.copy_wallet,
+        observedSignature: row.observed_signature,
+        sendSignature: row.send_signature,
+        selectedRoute: row.selected_route,
+        routeLayout: row.route_layout,
+        decision: row.decision,
+        sent: row.sent,
+        dryRun: row.dry_run,
+        sendEnabled: row.send_enabled,
+        slot: row.slot,
+        copySlot: row.copy_slot
+      },
+      rawExecution: row.raw_execution,
+      chainReport: row.chain_report
+    }
+  };
+}
+
+function rustCopyBuyObservedPool(row: RustCopyTradeLocalExecutionRow): string | null {
+  const route = [row.route_layout, row.selected_route]
+    .filter((value): value is string => Boolean(value))
+    .join(" ")
+    .toLowerCase();
+
+  if (route.includes("pumpswap") || route.includes("pump-amm")) {
+    return "pump-amm";
+  }
+
+  if (route.includes("pump")) {
+    return "pump";
+  }
+
+  return row.route_layout || row.selected_route;
+}
+
 function isSubscriberLive(subscriber: SubscriberRecord): boolean {
   return subscriber.notificationsPaused !== true;
 }
@@ -5156,7 +5865,7 @@ const yellowstoneWalletMonitor = createYellowstoneWalletMonitor({
 });
 
 const shredstreamWalletObserver = createShredstreamWalletObserver({
-  enabled: config.shredstreamWalletObserverEnabled || copyTradeSignalProviderAllows(config.copyTradeSignalProvider, "shredstream"),
+  enabled: config.shredstreamWalletObserverEnabled,
   wallets: activeGeyserWallets(),
   explorer: {
     pumpFunBaseUrl: config.pumpFunBaseUrl,
@@ -5219,6 +5928,10 @@ async function shutdown(): Promise<void> {
     clearInterval(directSdkWarmTimer);
     directSdkWarmTimer = null;
   }
+  if (rustTrailingSellPollerTimer) {
+    clearInterval(rustTrailingSellPollerTimer);
+    rustTrailingSellPollerTimer = null;
+  }
   geyserWalletTradeListener.stop();
   for (const timer of trailingSellTimers) {
     clearTimeout(timer);
@@ -5254,6 +5967,7 @@ assertConfig();
 await subscribers.init();
 await loadCopyTradeEmergencyStop();
 await loadCopyTradeBuyPressureSellWatchers();
+await queueCopyTradeHotPathSnapshotRefresh("startup");
 console.log(`Using ${subscriberStoreLabel} subscriber storage`);
 console.log(`Loaded ${subscribers.count()} verified Telegram subscriber(s)`);
 logCopyTradeExecutionState();
@@ -5277,6 +5991,7 @@ if (config.heliusWebhookAuthHeader) {
 }
 yellowstoneWalletMonitor.start();
 shredstreamWalletObserver.start();
+startRustTrailingSellPoller();
 migrationListener.start();
 geyserWalletTradeListener.start();
 await commandPoller.start();

@@ -479,9 +479,25 @@ fn spawn_copy_execution_worker(
                     request.executor_enqueued_at,
                 )
                 .await;
+            let auto_sell_line = copy_executor
+                .should_spawn_auto_sell_after_buy(&copy_execution)
+                .then(|| copy_execution.clone());
             if copy_execution_tx.send(copy_execution).is_err() {
                 eprintln!("copy execution result dropped; receiver closed");
                 break;
+            }
+            if let Some(auto_sell_line) = auto_sell_line {
+                let auto_sell_executor = Arc::clone(&copy_executor);
+                let auto_sell_tx = copy_execution_tx.clone();
+                let execution_plan = request.execution_plan;
+                tokio::spawn(async move {
+                    let auto_sell_result = auto_sell_executor
+                        .handle_auto_sell_result(auto_sell_line, &execution_plan)
+                        .await;
+                    if auto_sell_tx.send(auto_sell_result).is_err() {
+                        eprintln!("copy auto-sell result dropped; receiver closed");
+                    }
+                });
             }
         }
     });

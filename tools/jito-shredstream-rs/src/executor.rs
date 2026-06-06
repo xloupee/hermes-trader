@@ -9,9 +9,9 @@ use crate::{
     planner::ExecutionPlanLine,
     signal::SignalTimings,
     tx_builder::{
-        build_auto_sell_unsigned_flashx_pump, build_full_copy_unsigned_flashx_pump,
-        build_full_copy_unsigned_flashx_pump_with_fees_and_cache, CopyPdaCache, TxBuildError,
-        TxFeeConfig,
+        build_auto_sell_unsigned_flashx_pump_with_cache,
+        build_full_copy_unsigned_flashx_pump_with_fees_and_cache,
+        copy_wallet_token_account_for_flashx_pump, CopyPdaCache, TxBuildError, TxFeeConfig,
     },
     LiveOptions,
 };
@@ -78,7 +78,7 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) send_endpoint_warm_interval_ms: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CopyExecutionLine {
     schema: &'static str,
@@ -704,10 +704,6 @@ impl CopyExecutor {
                     line.send_rpc_attempts = result.rpc_attempts;
                     line.send_rpc_errors = result.rpc_errors;
                     line.decision = "sent";
-                    if self.options.auto_sell_after_buy_enabled() {
-                        self.handle_auto_sell(&mut line, execution_plan, keypair)
-                            .await;
-                    }
                     line
                 }
                 Err(error) => line.error(error),
@@ -722,6 +718,27 @@ impl CopyExecutor {
         } else {
             line.skip("copy send is disabled")
         }
+    }
+
+    pub(crate) fn should_spawn_auto_sell_after_buy(&self, line: &CopyExecutionLine) -> bool {
+        line.was_sent() && self.options.auto_sell_after_buy_enabled()
+    }
+
+    pub(crate) async fn handle_auto_sell_result(
+        &self,
+        mut line: CopyExecutionLine,
+        execution_plan: &ExecutionPlanLine,
+    ) -> CopyExecutionLine {
+        line.execution_at_ms = now_ms();
+        let Some(keypair) = self.keypair.as_ref() else {
+            line.auto_sell_attempted = true;
+            line.skip_auto_sell("missing copy keypair path");
+            return line;
+        };
+
+        self.handle_auto_sell(&mut line, execution_plan, keypair)
+            .await;
+        line
     }
 
     async fn simulate_transaction(&self, encoded_tx: &str) -> Result<SimulationValue, String> {
@@ -872,12 +889,13 @@ impl CopyExecutor {
             return;
         };
 
-        let token_account = match build_full_copy_unsigned_flashx_pump(
+        let token_account = match copy_wallet_token_account_for_flashx_pump(
             execution_plan.route_context.as_ref(),
             copy_wallet,
             &execution_plan.mint,
+            Some(&self.pda_cache),
         ) {
-            Ok(build) => build.copy_wallet_token_account,
+            Ok(token_account) => token_account,
             Err(error) => {
                 line.skip_auto_sell(tx_build_error_reason(error));
                 return;
@@ -914,11 +932,12 @@ impl CopyExecutor {
             }
         };
 
-        let build = match build_auto_sell_unsigned_flashx_pump(
+        let build = match build_auto_sell_unsigned_flashx_pump_with_cache(
             execution_plan.route_context.as_ref(),
             copy_wallet,
             &execution_plan.mint,
             token_amount_raw,
+            Some(&self.pda_cache),
         ) {
             Ok(build) => build,
             Err(error) => {
@@ -1008,26 +1027,42 @@ impl CopyExecutor {
             .solana_rpc_url
             .as_deref()
             .ok_or_else(|| "missing SOLANA_RPC_URL".to_string())?;
-        let response = self
-            .client
-            .post(rpc_url)
-            .json(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getTokenAccountBalance",
-                "params": [
-                    token_account,
-                    { "commitment": "processed" }
-                ]
-            }))
-            .send()
+        let fetch_balance = async {
+            self.client
+                .post(rpc_url)
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getTokenAccountBalance",
+                    "params": [
+                        token_account,
+                        { "commitment": "processed" }
+                    ]
+                }))
+                .send()
+                .await
+                .map_err(|error| format!("send getTokenAccountBalance request: {error}"))?
+                .error_for_status()
+                .map_err(|error| format!("getTokenAccountBalance HTTP status: {error}"))?
+                .json::<RpcResponse<TokenAccountBalanceResult>>()
+                .await
+                .map_err(|error| format!("decode getTokenAccountBalance response: {error}"))
+        };
+        let response = if self.options.send_http_timeout_ms > 0 {
+            tokio::time::timeout(
+                Duration::from_millis(self.options.send_http_timeout_ms),
+                fetch_balance,
+            )
             .await
-            .map_err(|error| format!("send getTokenAccountBalance request: {error}"))?
-            .error_for_status()
-            .map_err(|error| format!("getTokenAccountBalance HTTP status: {error}"))?
-            .json::<RpcResponse<TokenAccountBalanceResult>>()
-            .await
-            .map_err(|error| format!("decode getTokenAccountBalance response: {error}"))?;
+            .map_err(|_| {
+                format!(
+                    "getTokenAccountBalance timed out after {}ms",
+                    self.options.send_http_timeout_ms
+                )
+            })??
+        } else {
+            fetch_balance.await?
+        };
 
         if let Some(error) = response.error {
             return Err(format!(

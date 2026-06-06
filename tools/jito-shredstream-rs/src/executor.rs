@@ -114,6 +114,10 @@ pub(crate) struct CopyExecutionLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     observed_sol_amount: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    planned_copy_sol_amount: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    planned_copy_spend_lamports: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_copy_sol: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_total_copy_spend_sol: Option<f64>,
@@ -1380,6 +1384,8 @@ impl CopyExecutionLine {
             mint: execution_plan.mint.clone(),
             observed_action,
             observed_sol_amount,
+            planned_copy_sol_amount: execution_plan.spend_sol_amount,
+            planned_copy_spend_lamports: execution_plan.spend_sol_amount.and_then(sol_to_lamports),
             max_copy_sol: options.max_copy_sol,
             max_total_copy_spend_sol: options.max_total_copy_spend_sol,
             estimated_total_copy_spend_sol: None,

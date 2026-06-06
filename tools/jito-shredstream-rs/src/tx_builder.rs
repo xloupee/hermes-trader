@@ -353,7 +353,7 @@ fn build_copy_unsigned_flashx_migrated_amm(
     };
 
     let mut route_data = context.data.clone();
-    rewrite_flashx_migrated_min_base_amount_out(&mut route_data)?;
+    rewrite_flashx_migrated_amounts(&mut route_data, spendable_sol_in)?;
 
     let route_accounts = context
         .accounts
@@ -396,12 +396,16 @@ fn build_copy_unsigned_flashx_migrated_amm(
     })
 }
 
-fn rewrite_flashx_migrated_min_base_amount_out(data: &mut [u8]) -> Result<(), TxBuildError> {
+fn rewrite_flashx_migrated_amounts(
+    data: &mut [u8],
+    quote_amount_in: u64,
+) -> Result<(), TxBuildError> {
     if data.len() < 17 {
         return Err(TxBuildError::InvalidInstruction(
-            "missing flashx min base amount",
+            "missing flashx migrated amounts",
         ));
     }
+    data[1..9].copy_from_slice(&quote_amount_in.to_le_bytes());
     data[9..17].copy_from_slice(&FLASHX_MIGRATED_COPY_MIN_BASE_AMOUNT_OUT.to_le_bytes());
     Ok(())
 }
@@ -1160,6 +1164,28 @@ mod tests {
             account.pubkey.to_string() == "D6EMAgGqecPhW7t9r7LvCnRCiS6uADBwc3Ki1tpc2Bud"
                 && account.is_writable
         }));
+
+        let override_build = build_copy_unsigned_flashx_pump_with_cache_and_spend(
+            parsed.route_context.as_ref(),
+            COPY_WALLET,
+            &parsed.mint,
+            None,
+            Some(777_000),
+        )
+        .expect("migrated AMM copy route should rewrite planned quote amount");
+        assert_eq!(
+            read_u64_le(&override_build.instructions[0].data, 1),
+            Some(777_000)
+        );
+        assert_eq!(
+            read_u64_le(&override_build.instructions[1].data, 1),
+            Some(777_000)
+        );
+        assert_eq!(
+            read_u64_le(&override_build.instructions[1].data, 9),
+            Some(FLASHX_MIGRATED_COPY_MIN_BASE_AMOUNT_OUT)
+        );
+
         assert!(!build.instructions[1]
             .accounts
             .iter()

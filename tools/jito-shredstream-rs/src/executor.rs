@@ -303,6 +303,53 @@ pub(crate) struct CopyExecutionLine {
 pub(crate) enum CopyExecutionOutput {
     Copy(CopyExecutionLine),
     RustTrailingSell(RustTrailingSellLine),
+    TransactionConfirmation(TransactionConfirmationLine),
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TransactionConfirmationLine {
+    schema: &'static str,
+    observed_at_ms: u128,
+    confirmation_at_ms: u128,
+    provider: &'static str,
+    source: &'static str,
+    endpoint: String,
+    observed_wallet: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_wallet: Option<String>,
+    observed_signature: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed_action: Option<Action>,
+    slot: u64,
+    selected_route: Route,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route_layout: Option<&'static str>,
+    mint: String,
+    transaction_role: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    submitted_at_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature_returned_at_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buy_send_signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    step_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_steps: Option<usize>,
+    checked: bool,
+    status: &'static str,
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confirmation_slot: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confirmation_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    err: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -910,7 +957,8 @@ impl CopyExecutor {
         observed_action: Action,
     ) -> bool {
         observed_action == Action::Sell
-            && self.options.auto_sell_after_buy_enabled()
+            && (self.options.auto_sell_after_buy_enabled()
+                || self.options.rust_trailing_sells_enabled())
             && execution_plan
                 .route_context
                 .as_ref()
@@ -923,7 +971,9 @@ impl CopyExecutor {
         mint: &str,
         route_context: Option<&RouteContext>,
     ) {
-        if !self.options.auto_sell_after_buy_enabled() {
+        if !self.options.auto_sell_after_buy_enabled()
+            && !self.options.rust_trailing_sells_enabled()
+        {
             return;
         }
         let Some(route_context) = route_context else {
@@ -991,6 +1041,7 @@ impl CopyExecutor {
         let confirmation = self
             .wait_for_signature_confirmation(
                 buy_line.send_signature.as_deref(),
+                "copy buy transaction",
                 self.options.rust_trailing_sell_confirmation_timeout_ms,
                 self.options.rust_trailing_sell_confirmation_poll_ms,
             )
@@ -1364,13 +1415,14 @@ impl CopyExecutor {
             return;
         };
 
-        let auto_sell_route_context = match trailing_sell_route_context_for_plan(execution_plan) {
-            Ok(route_context) => route_context,
-            Err(reason) => {
-                line.skip(reason);
-                return;
-            }
-        };
+        let auto_sell_route_context =
+            match trailing_sell_route_context_for_plan(self, execution_plan) {
+                Ok(route_context) => route_context,
+                Err(reason) => {
+                    line.skip(reason);
+                    return;
+                }
+            };
 
         let token_account = match copy_wallet_token_account_for_flashx_pump(
             Some(&auto_sell_route_context),
@@ -1586,22 +1638,29 @@ impl CopyExecutor {
     async fn wait_for_signature_confirmation(
         &self,
         signature: Option<&str>,
+        transaction_label: &'static str,
         timeout_ms: u64,
         poll_ms: u64,
     ) -> SignatureConfirmation {
         let Some(signature) = signature.filter(|value| !value.is_empty()) else {
             return SignatureConfirmation {
                 checked: false,
+                status: "missing_signature",
                 ok: false,
                 slot: None,
-                reason: Some("missing copy buy send signature".to_string()),
+                confirmation_status: None,
+                err: None,
+                reason: Some(format!("missing {transaction_label} signature")),
             };
         };
         let Some(rpc_url) = self.options.solana_rpc_url.as_deref() else {
             return SignatureConfirmation {
                 checked: false,
+                status: "error",
                 ok: false,
                 slot: None,
+                confirmation_status: None,
+                err: None,
                 reason: Some("missing SOLANA_RPC_URL".to_string()),
             };
         };
@@ -1649,8 +1708,11 @@ impl CopyExecutor {
                     if let Some(error) = response.error {
                         return SignatureConfirmation {
                             checked: true,
+                            status: "error",
                             ok: false,
                             slot: None,
+                            confirmation_status: None,
+                            err: None,
                             reason: Some(format!(
                                 "getSignatureStatuses RPC error: {}",
                                 error.message
@@ -1664,10 +1726,13 @@ impl CopyExecutor {
                         if let Some(error) = status.err {
                             return SignatureConfirmation {
                                 checked: true,
+                                status: "failed",
                                 ok: false,
                                 slot: status.slot,
+                                confirmation_status: status.confirmation_status,
+                                err: Some(error.clone()),
                                 reason: Some(format!(
-                                    "copy buy transaction landed with error: {error}"
+                                    "{transaction_label} landed with error: {error}"
                                 )),
                             };
                         }
@@ -1677,8 +1742,11 @@ impl CopyExecutor {
                         ) {
                             return SignatureConfirmation {
                                 checked: true,
+                                status: "landed",
                                 ok: true,
                                 slot: status.slot,
+                                confirmation_status: status.confirmation_status,
+                                err: None,
                                 reason: None,
                             };
                         }
@@ -1688,8 +1756,11 @@ impl CopyExecutor {
                     if started_at.elapsed() >= timeout {
                         return SignatureConfirmation {
                             checked: true,
+                            status: "error",
                             ok: false,
                             slot: None,
+                            confirmation_status: None,
+                            err: None,
                             reason: Some(error),
                         };
                     }
@@ -1699,13 +1770,48 @@ impl CopyExecutor {
             if started_at.elapsed() >= timeout {
                 return SignatureConfirmation {
                     checked: true,
+                    status: "not_found",
                     ok: false,
                     slot: None,
-                    reason: Some("copy buy confirmation timed out".to_string()),
+                    confirmation_status: None,
+                    err: None,
+                    reason: Some(format!(
+                        "{transaction_label} not found before confirmation timeout"
+                    )),
                 };
             }
             tokio::time::sleep(Duration::from_millis(poll_ms.max(1))).await;
         }
+    }
+
+    pub(crate) async fn confirm_copy_transaction(
+        &self,
+        line: CopyExecutionLine,
+    ) -> TransactionConfirmationLine {
+        let confirmation = self
+            .wait_for_signature_confirmation(
+                line.send_signature.as_deref(),
+                "copy buy transaction",
+                self.options.rust_trailing_sell_confirmation_timeout_ms,
+                self.options.rust_trailing_sell_confirmation_poll_ms,
+            )
+            .await;
+        TransactionConfirmationLine::from_copy_execution(&line, confirmation)
+    }
+
+    pub(crate) async fn confirm_rust_trailing_sell_transaction(
+        &self,
+        line: RustTrailingSellLine,
+    ) -> TransactionConfirmationLine {
+        let confirmation = self
+            .wait_for_signature_confirmation(
+                line.send_signature.as_deref(),
+                "rust trailing sell transaction",
+                self.options.rust_trailing_sell_confirmation_timeout_ms,
+                self.options.rust_trailing_sell_confirmation_poll_ms,
+            )
+            .await;
+        TransactionConfirmationLine::from_rust_trailing_sell(&line, confirmation)
     }
 
     fn trailing_sell_tx_fee_config(&self, plan: &TrailingSellPlan) -> TxFeeConfig {
@@ -1783,12 +1889,27 @@ fn auto_sell_route_context_for_plan(
 }
 
 fn trailing_sell_route_context_for_plan(
+    executor: &CopyExecutor,
     execution_plan: &ExecutionPlanLine,
 ) -> Result<RouteContext, &'static str> {
-    execution_plan
+    let route_context = execution_plan
         .route_context
         .clone()
-        .ok_or("missing rust trailing sell route context")
+        .ok_or("missing rust trailing sell route context")?;
+    if !is_direct_pump_route_context(&route_context) {
+        return Ok(route_context);
+    }
+    if is_direct_pump_sell_route_context(&route_context) {
+        return Ok(route_context);
+    }
+
+    let Ok(cache) = executor.direct_pump_sell_contexts.lock() else {
+        return Err("direct-pump sell-side route context cache unavailable");
+    };
+    cache
+        .get(&execution_plan.target_wallet, &execution_plan.mint)
+        .filter(is_direct_pump_sell_route_context)
+        .ok_or("missing direct-pump sell-side route context for rust trailing sell")
 }
 
 fn is_direct_pump_route_context(route_context: &RouteContext) -> bool {
@@ -2255,6 +2376,9 @@ impl CopyExecutionOutput {
             CopyExecutionOutput::RustTrailingSell(line) => {
                 serde_json::to_writer(&mut *writer, line)?
             }
+            CopyExecutionOutput::TransactionConfirmation(line) => {
+                serde_json::to_writer(&mut *writer, line)?
+            }
         }
         writer.write_all(b"\n")?;
         writer.flush()?;
@@ -2268,7 +2392,82 @@ impl From<CopyExecutionLine> for CopyExecutionOutput {
     }
 }
 
+impl TransactionConfirmationLine {
+    fn from_copy_execution(line: &CopyExecutionLine, confirmation: SignatureConfirmation) -> Self {
+        Self {
+            schema: "copytrade.transactionConfirmation.v1",
+            observed_at_ms: line.observed_at_ms,
+            confirmation_at_ms: now_ms(),
+            provider: "shredstream",
+            source: "jito-proxy",
+            endpoint: line.endpoint.clone(),
+            observed_wallet: line.observed_wallet.clone(),
+            copy_wallet: line.copy_wallet.clone(),
+            observed_signature: line.observed_signature.clone(),
+            observed_action: Some(line.observed_action),
+            slot: line.slot,
+            selected_route: line.selected_route,
+            route_layout: line.route_layout,
+            mint: line.mint.clone(),
+            transaction_role: "copy_buy",
+            signature: line.send_signature.clone(),
+            submitted_at_ms: line.send_submitted_at_ms,
+            signature_returned_at_ms: line.signature_returned_at_ms,
+            buy_send_signature: None,
+            step_index: None,
+            total_steps: None,
+            checked: confirmation.checked,
+            status: confirmation.status,
+            ok: confirmation.ok,
+            confirmation_slot: confirmation.slot,
+            confirmation_status: confirmation.confirmation_status,
+            err: confirmation.err,
+            reason: confirmation.reason,
+        }
+    }
+
+    fn from_rust_trailing_sell(
+        line: &RustTrailingSellLine,
+        confirmation: SignatureConfirmation,
+    ) -> Self {
+        Self {
+            schema: "copytrade.transactionConfirmation.v1",
+            observed_at_ms: line.observed_at_ms,
+            confirmation_at_ms: now_ms(),
+            provider: "shredstream",
+            source: "jito-proxy",
+            endpoint: line.endpoint.clone(),
+            observed_wallet: line.observed_wallet.clone(),
+            copy_wallet: line.copy_wallet.clone(),
+            observed_signature: line.observed_signature.clone(),
+            observed_action: None,
+            slot: line.slot,
+            selected_route: line.selected_route,
+            route_layout: line.route_layout,
+            mint: line.mint.clone(),
+            transaction_role: "rust_trailing_sell",
+            signature: line.send_signature.clone(),
+            submitted_at_ms: line.submitted_at_ms,
+            signature_returned_at_ms: line.signature_returned_at_ms,
+            buy_send_signature: line.buy_send_signature.clone(),
+            step_index: Some(line.step_index),
+            total_steps: Some(line.total_steps),
+            checked: confirmation.checked,
+            status: confirmation.status,
+            ok: confirmation.ok,
+            confirmation_slot: confirmation.slot,
+            confirmation_status: confirmation.confirmation_status,
+            err: confirmation.err,
+            reason: confirmation.reason,
+        }
+    }
+}
+
 impl RustTrailingSellLine {
+    pub(crate) fn was_sent(&self) -> bool {
+        self.sent && self.decision == "sent"
+    }
+
     fn new(
         buy_line: &CopyExecutionLine,
         plan: &TrailingSellPlan,
@@ -2736,8 +2935,11 @@ struct TokenAccountBalanceValue {
 #[derive(Debug)]
 struct SignatureConfirmation {
     checked: bool,
+    status: &'static str,
     ok: bool,
     slot: Option<u64>,
+    confirmation_status: Option<String>,
+    err: Option<serde_json::Value>,
     reason: Option<String>,
 }
 
@@ -2876,11 +3078,12 @@ mod tests {
                     creator_vault: dummy,
                     event_authority: dummy,
                     global_volume_accumulator: Some(dummy),
-                    user_volume_accumulator: dummy,
+                    user_volume_accumulator: Some(dummy),
                     fee_config: dummy,
                     fee_program: dummy,
                     bonding_curve_v2: dummy,
                     buyback_fee_recipient: dummy,
+                    buyback_fee_recipient_token_account: None,
                 })
             }
             FlashxPumpLayout::MigratedAmm => {
@@ -3029,15 +3232,28 @@ mod tests {
     }
 
     #[test]
-    fn direct_pump_trailing_sell_accepts_buy_side_context() {
+    fn direct_pump_trailing_sell_requires_sell_side_context() {
+        let mut options = disabled_options();
+        options.rust_trailing_sells_enabled = true;
+        let executor = executor(options);
         let mut plan = allowed_plan();
         plan.route_context = Some(flashx_context(FlashxPumpLayout::DirectPump, 1));
 
-        let route_context = trailing_sell_route_context_for_plan(&plan)
-            .expect("rust trailing sell should use copied buy route context");
+        assert_eq!(
+            trailing_sell_route_context_for_plan(&executor, &plan).unwrap_err(),
+            "missing direct-pump sell-side route context for rust trailing sell"
+        );
 
-        assert!(is_direct_pump_route_context(&route_context));
-        assert!(!is_direct_pump_sell_route_context(&route_context));
+        let sell_context = flashx_direct_sell_context();
+        executor.observe_direct_pump_sell_route_context(
+            &plan.target_wallet,
+            &plan.mint,
+            Some(&sell_context),
+        );
+        let route_context = trailing_sell_route_context_for_plan(&executor, &plan)
+            .expect("rust trailing sell should use cached sell-side context");
+
+        assert!(is_direct_pump_sell_route_context(&route_context));
     }
 
     #[test]
@@ -3054,6 +3270,56 @@ mod tests {
         let route_context = auto_sell_route_context_for_plan(&executor, &plan)
             .expect("target sell context should be directly usable");
         assert!(is_direct_pump_sell_route_context(&route_context));
+    }
+
+    #[test]
+    fn target_sell_auto_sell_can_be_armed_by_rust_trailing_sell_mode() {
+        let mut options = disabled_options();
+        options.rust_trailing_sells_enabled = true;
+        let executor = executor(options);
+        let mut plan = allowed_plan();
+        plan.route_context = Some(flashx_direct_sell_context());
+
+        assert!(executor.should_spawn_auto_sell_on_target_sell(&plan, Action::Sell));
+        assert!(!executor.should_spawn_auto_sell_on_target_sell(&plan, Action::Buy));
+    }
+
+    #[test]
+    fn target_sell_auto_sell_keeps_route_context_through_shadow_skip() {
+        let mut options = disabled_options();
+        options.rust_trailing_sells_enabled = true;
+        let executor = executor(options);
+        let parsed = crate::parser::ParsedTrade {
+            target_wallet: "target".to_string(),
+            action: Action::Sell,
+            mint: "abcPumpIsNotLowerpump".to_string(),
+            route: Route::FlashxPump,
+            sol_amount: None,
+            token_amount: Some(42.0),
+            route_context: Some(flashx_direct_sell_context()),
+        };
+        let signal = crate::event::shadow_signal_line(
+            1,
+            "local".to_string(),
+            "observed".to_string(),
+            2,
+            1,
+            &parsed,
+        );
+
+        assert!(!signal.copyable);
+        assert!(signal.route_context.is_some());
+        let plan = execution_plan_line(
+            &signal,
+            3,
+            PlannerOptions {
+                copy_sol_amount: None,
+            },
+        );
+
+        assert!(!plan.allowed);
+        assert!(plan.route_context.is_some());
+        assert!(executor.should_spawn_auto_sell_on_target_sell(&plan, Action::Sell));
     }
 
     #[test]
@@ -3309,6 +3575,160 @@ mod tests {
         assert_eq!(
             json.get("mint").and_then(serde_json::Value::as_str),
             Some(plan.mint.as_str())
+        );
+    }
+
+    #[test]
+    fn transaction_confirmation_line_records_failed_copy_buy_status() {
+        let plan = allowed_plan();
+        let mut line = CopyExecutionLine::new(
+            &plan,
+            Action::Buy,
+            Some(0.0005),
+            &disabled_options(),
+            sample_timings(),
+        );
+        line.copy_wallet = Some(COPY_WALLET.to_string());
+        line.sent = true;
+        line.decision = "sent";
+        line.route_layout = Some("direct-pump");
+        line.send_signature = Some("copy-buy-signature".to_string());
+        line.send_submitted_at_ms = Some(10);
+        line.signature_returned_at_ms = Some(11);
+
+        let confirmation = SignatureConfirmation {
+            checked: true,
+            status: "failed",
+            ok: false,
+            slot: Some(42),
+            confirmation_status: Some("confirmed".to_string()),
+            err: Some(serde_json::json!({
+                "InstructionError": [1, { "Custom": 6024 }]
+            })),
+            reason: Some("copy buy transaction landed with error".to_string()),
+        };
+        let confirmation_line =
+            TransactionConfirmationLine::from_copy_execution(&line, confirmation);
+        let json = serde_json::to_value(&confirmation_line).expect("confirmation line serializes");
+
+        assert_eq!(
+            json.get("schema").and_then(serde_json::Value::as_str),
+            Some("copytrade.transactionConfirmation.v1")
+        );
+        assert_eq!(
+            json.get("transactionRole")
+                .and_then(serde_json::Value::as_str),
+            Some("copy_buy")
+        );
+        assert_eq!(
+            json.get("observedAction")
+                .and_then(serde_json::Value::as_str),
+            Some("buy")
+        );
+        assert_eq!(
+            json.get("signature").and_then(serde_json::Value::as_str),
+            Some("copy-buy-signature")
+        );
+        assert_eq!(
+            json.get("status").and_then(serde_json::Value::as_str),
+            Some("failed")
+        );
+        assert_eq!(
+            json.get("ok").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            json.get("confirmationSlot")
+                .and_then(serde_json::Value::as_u64),
+            Some(42)
+        );
+        assert!(json.get("err").is_some());
+    }
+
+    #[test]
+    fn transaction_confirmation_line_records_trailing_sell_not_found_status() {
+        let plan = allowed_plan();
+        let mut buy_line = CopyExecutionLine::new(
+            &plan,
+            Action::Buy,
+            Some(0.0005),
+            &disabled_options(),
+            sample_timings(),
+        );
+        buy_line.send_signature = Some("copy-buy-signature".to_string());
+        buy_line.copy_wallet_token_account = Some("copy-token-account".to_string());
+        let trailing_sell_plan = TrailingSellPlan {
+            mode: TrailingSellMode::CustomSteps,
+            percent_basis: TrailingSellPercentBasis::RemainingBalance,
+            steps: vec![TrailingSellStep {
+                delay_ms: 500,
+                percent: 50.0,
+            }],
+            sell_slippage_percent: Some(8.0),
+            sell_priority_fee_sol: Some(0.00002),
+            priority_fee_micro_lamports: Some(250_000),
+            jito_tip_lamports: Some(10_000),
+            jito_tip_account: Some(COPY_WALLET.to_string()),
+        };
+        let mut line = RustTrailingSellLine::new(
+            &buy_line,
+            &trailing_sell_plan,
+            0,
+            1,
+            trailing_sell_plan.steps[0],
+            1_000,
+            &disabled_options(),
+        );
+        line.sent = true;
+        line.decision = "sent";
+        line.send_signature = Some("trailing-sell-signature".to_string());
+        line.submitted_at_ms = Some(20);
+        line.signature_returned_at_ms = Some(21);
+
+        let confirmation = SignatureConfirmation {
+            checked: true,
+            status: "not_found",
+            ok: false,
+            slot: None,
+            confirmation_status: None,
+            err: None,
+            reason: Some(
+                "rust trailing sell transaction not found before confirmation timeout".to_string(),
+            ),
+        };
+        let confirmation_line =
+            TransactionConfirmationLine::from_rust_trailing_sell(&line, confirmation);
+        let json = serde_json::to_value(&confirmation_line).expect("confirmation line serializes");
+
+        assert_eq!(
+            json.get("schema").and_then(serde_json::Value::as_str),
+            Some("copytrade.transactionConfirmation.v1")
+        );
+        assert_eq!(
+            json.get("transactionRole")
+                .and_then(serde_json::Value::as_str),
+            Some("rust_trailing_sell")
+        );
+        assert_eq!(
+            json.get("signature").and_then(serde_json::Value::as_str),
+            Some("trailing-sell-signature")
+        );
+        assert_eq!(
+            json.get("buySendSignature")
+                .and_then(serde_json::Value::as_str),
+            Some("copy-buy-signature")
+        );
+        assert_eq!(
+            json.get("status").and_then(serde_json::Value::as_str),
+            Some("not_found")
+        );
+        assert_eq!(
+            json.get("stepIndex").and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            json.get("totalSteps").and_then(serde_json::Value::as_u64),
+            Some(1)
         );
     }
 

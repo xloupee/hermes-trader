@@ -713,7 +713,7 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
     copy_wallet: &str,
     mint: &str,
     token_amount_raw: u64,
-    pda_cache: Option<&CopyPdaCache>,
+    _pda_cache: Option<&CopyPdaCache>,
     allow_direct_pump_buy_context: bool,
 ) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
     if !allow_direct_pump_buy_context && context.data.get(17).copied() != Some(1) {
@@ -726,35 +726,39 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
     let copy_wallet_pubkey = parse_pubkey(copy_wallet)?;
     let token_program = resolved_pubkey(context, "tokenProgram")?;
     let mint = parse_pubkey(mint)?;
-    let copy_user_volume_accumulator =
-        user_volume_accumulator_address_cached(pda_cache, &copy_wallet_pubkey, &pump_program);
 
     let mut sell_data = Vec::with_capacity(24);
     sell_data.extend_from_slice(&PUMP_FUN_SELL_DISCRIMINATOR);
     sell_data.extend_from_slice(&token_amount_raw.to_le_bytes());
     sell_data.extend_from_slice(&0u64.to_le_bytes());
 
+    let mut sell_accounts = vec![
+        AccountMeta::new_readonly(resolved_pubkey(context, "globalConfig")?, false),
+        AccountMeta::new(resolved_pubkey(context, "feeRecipient")?, false),
+        AccountMeta::new_readonly(mint, false),
+        AccountMeta::new(resolved_pubkey(context, "bondingCurve")?, false),
+        AccountMeta::new(resolved_pubkey(context, "associatedBondingCurve")?, false),
+        AccountMeta::new(copy_wallet_token_account, false),
+        AccountMeta::new(copy_wallet_pubkey, true),
+        AccountMeta::new_readonly(resolved_pubkey(context, "systemProgram")?, false),
+        AccountMeta::new(resolved_pubkey(context, "creatorVault")?, false),
+        AccountMeta::new_readonly(token_program, false),
+        AccountMeta::new_readonly(resolved_pubkey(context, "eventAuthority")?, false),
+        AccountMeta::new_readonly(resolved_pubkey(context, "pumpProgram")?, false),
+        AccountMeta::new_readonly(resolved_pubkey(context, "feeConfig")?, false),
+        AccountMeta::new_readonly(resolved_pubkey(context, "feeProgram")?, false),
+        AccountMeta::new_readonly(resolved_pubkey(context, "bondingCurveV2")?, false),
+        AccountMeta::new(resolved_pubkey(context, "buybackFeeRecipient")?, false),
+    ];
+    if let Some(buyback_fee_recipient_token_account) =
+        context.resolved_pubkey("buybackFeeRecipientTokenAccount")
+    {
+        sell_accounts.push(AccountMeta::new(buyback_fee_recipient_token_account, false));
+    }
+
     let sell_instruction = Instruction {
         program_id: pump_program,
-        accounts: vec![
-            AccountMeta::new_readonly(resolved_pubkey(context, "globalConfig")?, false),
-            AccountMeta::new(resolved_pubkey(context, "feeRecipient")?, false),
-            AccountMeta::new_readonly(mint, false),
-            AccountMeta::new(resolved_pubkey(context, "bondingCurve")?, false),
-            AccountMeta::new(resolved_pubkey(context, "associatedBondingCurve")?, false),
-            AccountMeta::new(copy_wallet_token_account, false),
-            AccountMeta::new(copy_wallet_pubkey, true),
-            AccountMeta::new_readonly(resolved_pubkey(context, "systemProgram")?, false),
-            AccountMeta::new(resolved_pubkey(context, "creatorVault")?, false),
-            AccountMeta::new_readonly(token_program, false),
-            AccountMeta::new_readonly(resolved_pubkey(context, "eventAuthority")?, false),
-            AccountMeta::new_readonly(resolved_pubkey(context, "pumpProgram")?, false),
-            AccountMeta::new_readonly(resolved_pubkey(context, "feeConfig")?, false),
-            AccountMeta::new_readonly(resolved_pubkey(context, "feeProgram")?, false),
-            AccountMeta::new(copy_user_volume_accumulator, false),
-            AccountMeta::new_readonly(resolved_pubkey(context, "bondingCurveV2")?, false),
-            AccountMeta::new(resolved_pubkey(context, "buybackFeeRecipient")?, false),
-        ],
+        accounts: sell_accounts,
         data: sell_data,
     };
 
@@ -1659,6 +1663,8 @@ mod tests {
         }));
         let bonding_curve_v2 = resolved_account_for_test(context, "bondingCurveV2");
         let buyback_fee_recipient = resolved_account_for_test(context, "buybackFeeRecipient");
+        let buyback_fee_recipient_token_account =
+            resolved_account_for_test(context, "buybackFeeRecipientTokenAccount");
         assert_eq!(build.instructions[1].accounts.len(), 17);
         assert_eq!(
             build.instructions[1].accounts[8].pubkey.to_string(),
@@ -1672,20 +1678,21 @@ mod tests {
         assert!(!build.instructions[1].accounts[9].is_writable);
         assert_eq!(
             build.instructions[1].accounts[14].pubkey.to_string(),
-            "A6z9cMVt6RovLTYpLbkawnTDEGtFpLuEgE3t7BYHJCm2"
-        );
-        assert!(build.instructions[1].accounts[14].is_writable);
-        assert_eq!(
-            build.instructions[1].accounts[15].pubkey.to_string(),
             bonding_curve_v2
         );
+        assert!(!build.instructions[1].accounts[14].is_writable);
         assert_eq!(
-            build.instructions[1].accounts[16].pubkey.to_string(),
+            build.instructions[1].accounts[15].pubkey.to_string(),
             buyback_fee_recipient
         );
         assert_eq!(
-            build.instructions[1].accounts[16].pubkey.to_string(),
+            build.instructions[1].accounts[15].pubkey.to_string(),
             "5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD"
+        );
+        assert!(build.instructions[1].accounts[15].is_writable);
+        assert_eq!(
+            build.instructions[1].accounts[16].pubkey.to_string(),
+            buyback_fee_recipient_token_account
         );
         assert!(build.instructions[1].accounts[16].is_writable);
     }
@@ -2020,11 +2027,14 @@ mod tests {
                     creator_vault: pubkey("82L33tWkcKBcXFPyUiLJtRmnGomhCzyitELKNoXrJ2T"),
                     event_authority: pubkey("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1"),
                     global_volume_accumulator: None,
-                    user_volume_accumulator: pubkey("8aHZJSt6frgjRTTfg4foDXjZHMyZ2ZQQjpwcWzzCvAGp"),
+                    user_volume_accumulator: None,
                     fee_config: pubkey("8Wf5TiAheLUqBrKXeYg2JtAFFMWtKdG2BSFgqUcPVwTt"),
                     fee_program: pubkey("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"),
                     bonding_curve_v2: pubkey("EYyZtDHLiBnLLw9u4z7uLrUoom3ZkrZugmhmqw48mNh6"),
                     buyback_fee_recipient: pubkey("5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD"),
+                    buyback_fee_recipient_token_account: Some(pubkey(
+                        "5eHhjP8JaYkz83CWwvGU2uMUXefd3AazWGx4gpcuEEYD",
+                    )),
                 },
             ),
         })

@@ -177,11 +177,7 @@ pub(crate) fn shadow_signal_line(
             Some("shadow mode only copies buy actions")
         },
         account_key_count,
-        route_context: if copyable {
-            parsed.route_context.clone()
-        } else {
-            None
-        },
+        route_context: parsed.route_context.clone(),
     }
 }
 

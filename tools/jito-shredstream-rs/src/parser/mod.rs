@@ -115,11 +115,12 @@ pub(crate) struct DirectPumpAccounts {
     pub(crate) creator_vault: Pubkey,
     pub(crate) event_authority: Pubkey,
     pub(crate) global_volume_accumulator: Option<Pubkey>,
-    pub(crate) user_volume_accumulator: Pubkey,
+    pub(crate) user_volume_accumulator: Option<Pubkey>,
     pub(crate) fee_config: Pubkey,
     pub(crate) fee_program: Pubkey,
     pub(crate) bonding_curve_v2: Pubkey,
     pub(crate) buyback_fee_recipient: Pubkey,
+    pub(crate) buyback_fee_recipient_token_account: Option<Pubkey>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,11 +209,12 @@ impl DirectPumpAccounts {
             "creatorVault" => self.creator_vault,
             "eventAuthority" => self.event_authority,
             "globalVolumeAccumulator" => self.global_volume_accumulator?,
-            "userVolumeAccumulator" => self.user_volume_accumulator,
+            "userVolumeAccumulator" => self.user_volume_accumulator?,
             "feeConfig" => self.fee_config,
             "feeProgram" => self.fee_program,
             "bondingCurveV2" => self.bonding_curve_v2,
             "buybackFeeRecipient" => self.buyback_fee_recipient,
+            "buybackFeeRecipientTokenAccount" => self.buyback_fee_recipient_token_account?,
             _ => return None,
         })
     }
@@ -233,7 +235,6 @@ impl DirectPumpAccounts {
             resolved("tokenProgram", self.token_program),
             resolved("creatorVault", self.creator_vault),
             resolved("eventAuthority", self.event_authority),
-            resolved("userVolumeAccumulator", self.user_volume_accumulator),
             resolved("feeConfig", self.fee_config),
             resolved("feeProgram", self.fee_program),
             resolved("bondingCurveV2", self.bonding_curve_v2),
@@ -241,6 +242,17 @@ impl DirectPumpAccounts {
         ];
         if let Some(pubkey) = self.global_volume_accumulator {
             accounts.insert(14, resolved("globalVolumeAccumulator", pubkey));
+        }
+        if let Some(pubkey) = self.user_volume_accumulator {
+            let index = if self.global_volume_accumulator.is_some() {
+                15
+            } else {
+                14
+            };
+            accounts.insert(index, resolved("userVolumeAccumulator", pubkey));
+        }
+        if let Some(pubkey) = self.buyback_fee_recipient_token_account {
+            accounts.push(resolved("buybackFeeRecipientTokenAccount", pubkey));
         }
         accounts
     }

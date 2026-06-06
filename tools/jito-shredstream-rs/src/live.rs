@@ -183,6 +183,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                     if handle_copy_execution_result(
                         &mut copy_executions,
                         copy_execution,
+                        &copy_executor,
+                        &copy_execution_tx,
                         options.one_shot_copy_send,
                     )? {
                         eprintln!("one-shot copy send completed; exiting");
@@ -396,6 +398,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                         if drain_copy_execution_results(
                             &mut copy_execution_rx,
                             &mut copy_executions,
+                            &copy_executor,
+                            &copy_execution_tx,
                             options.one_shot_copy_send,
                         )? {
                             eprintln!("one-shot copy send completed; exiting");
@@ -442,6 +446,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
         if drain_copy_execution_results(
             &mut copy_execution_rx,
             &mut copy_executions,
+            &copy_executor,
+            &copy_execution_tx,
             options.one_shot_copy_send,
         )? {
             eprintln!("one-shot copy send completed; exiting");
@@ -675,10 +681,18 @@ fn nonzero_capacity(value: usize) -> usize {
 fn drain_copy_execution_results(
     copy_execution_rx: &mut mpsc::UnboundedReceiver<CopyExecutionOutput>,
     copy_executions: &mut CopyExecutionWriter,
+    copy_executor: &Arc<CopyExecutor>,
+    copy_execution_tx: &mpsc::UnboundedSender<CopyExecutionOutput>,
     one_shot_copy_send: bool,
 ) -> Result<bool> {
     while let Ok(copy_execution) = copy_execution_rx.try_recv() {
-        if handle_copy_execution_result(copy_executions, copy_execution, one_shot_copy_send)? {
+        if handle_copy_execution_result(
+            copy_executions,
+            copy_execution,
+            copy_executor,
+            copy_execution_tx,
+            one_shot_copy_send,
+        )? {
             return Ok(true);
         }
     }
@@ -688,11 +702,54 @@ fn drain_copy_execution_results(
 fn handle_copy_execution_result(
     copy_executions: &mut CopyExecutionWriter,
     copy_execution: CopyExecutionOutput,
+    copy_executor: &Arc<CopyExecutor>,
+    copy_execution_tx: &mpsc::UnboundedSender<CopyExecutionOutput>,
     one_shot_copy_send: bool,
 ) -> Result<bool> {
     let one_shot_sent = one_shot_copy_send && copy_execution.was_sent();
     copy_executions.write(&copy_execution)?;
+    enqueue_transaction_confirmation(copy_executor, copy_execution_tx, &copy_execution);
     Ok(one_shot_sent)
+}
+
+fn enqueue_transaction_confirmation(
+    copy_executor: &Arc<CopyExecutor>,
+    copy_execution_tx: &mpsc::UnboundedSender<CopyExecutionOutput>,
+    copy_execution: &CopyExecutionOutput,
+) {
+    match copy_execution {
+        CopyExecutionOutput::Copy(line) if line.was_sent() => {
+            let copy_executor = Arc::clone(copy_executor);
+            let copy_execution_tx = copy_execution_tx.clone();
+            let line = line.clone();
+            tokio::spawn(async move {
+                let confirmation = copy_executor.confirm_copy_transaction(line).await;
+                if copy_execution_tx
+                    .send(CopyExecutionOutput::TransactionConfirmation(confirmation))
+                    .is_err()
+                {
+                    eprintln!("copy confirmation result dropped; receiver closed");
+                }
+            });
+        }
+        CopyExecutionOutput::RustTrailingSell(line) if line.was_sent() => {
+            let copy_executor = Arc::clone(copy_executor);
+            let copy_execution_tx = copy_execution_tx.clone();
+            let line = line.clone();
+            tokio::spawn(async move {
+                let confirmation = copy_executor
+                    .confirm_rust_trailing_sell_transaction(line)
+                    .await;
+                if copy_execution_tx
+                    .send(CopyExecutionOutput::TransactionConfirmation(confirmation))
+                    .is_err()
+                {
+                    eprintln!("rust trailing sell confirmation result dropped; receiver closed");
+                }
+            });
+        }
+        _ => {}
+    }
 }
 
 impl ShadowSignalWriter {

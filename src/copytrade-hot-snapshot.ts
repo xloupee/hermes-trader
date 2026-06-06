@@ -134,7 +134,7 @@ export function createCopyTradeHotPathSnapshot({
     sequence,
     generatedAtMs,
     routing,
-    subscribers: routing.liveTradingEnabled && !routing.emergencyStopped
+    subscribers: !routing.emergencyStopped
       ? subscribers
           .map((subscriber) => snapshotSubscriber({
             subscriber,

@@ -144,6 +144,41 @@ test("copy trade hot-path snapshot skips incomplete or disabled copy state", () 
   assert.deepEqual(snapshot.subscribers.map((entry) => entry.chatId), ["complete"]);
 });
 
+test("copy trade hot-path snapshot exports warm config when Node live trading is disabled", () => {
+  const snapshot = createCopyTradeHotPathSnapshot({
+    subscribers: [subscriber({ chatId: "complete" })],
+    routing: {
+      ...routing,
+      liveTradingEnabled: false
+    },
+    dailySpentSolByChatId: {
+      complete: 0
+    },
+    sequence: 1,
+    generatedAtMs: 1
+  });
+
+  assert.deepEqual(snapshot.subscribers.map((entry) => entry.chatId), ["complete"]);
+});
+
+test("copy trade hot-path snapshot still fails closed during emergency stop", () => {
+  const snapshot = createCopyTradeHotPathSnapshot({
+    subscribers: [subscriber({ chatId: "complete" })],
+    routing: {
+      ...routing,
+      liveTradingEnabled: false,
+      emergencyStopped: true
+    },
+    dailySpentSolByChatId: {
+      complete: 0
+    },
+    sequence: 1,
+    generatedAtMs: 1
+  });
+
+  assert.deepEqual(snapshot.subscribers, []);
+});
+
 test("copy trade hot-path snapshot skips settings that would violate warm risk caps", () => {
   const snapshot = createCopyTradeHotPathSnapshot({
     subscribers: [

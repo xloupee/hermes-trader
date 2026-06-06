@@ -26,7 +26,8 @@ struct SnapshotFile {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SnapshotRouting {
-    live_trading_enabled: bool,
+    #[serde(rename = "liveTradingEnabled")]
+    _live_trading_enabled: bool,
     emergency_stopped: bool,
 }
 
@@ -65,7 +66,7 @@ impl TelegramSnapshotConfig {
         }
 
         let mut targets = HashMap::new();
-        if snapshot.routing.live_trading_enabled && !snapshot.routing.emergency_stopped {
+        if !snapshot.routing.emergency_stopped {
             for subscriber in snapshot.subscribers {
                 if let Some(copy_wallet) = copy_wallet {
                     if subscriber.trading_wallet_public_key != copy_wallet {
@@ -132,7 +133,7 @@ mod tests {
               "generatedAtMs": 1,
               "checksum": "ignored",
               "routing": {{
-                "liveTradingEnabled": true,
+                "liveTradingEnabled": false,
                 "emergencyStopped": false
               }},
               "subscribers": [

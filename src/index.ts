@@ -1,6 +1,8 @@
 import "dotenv/config";
+import { execFile } from "node:child_process";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { promisify } from "node:util";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { buildMigrationReplyMarkup, escapeHtml, extractMigrationData, formatMigrationMessage, getEventId } from "./format.js";
 import { createTelegramCommandPoller } from "./commands.js";
@@ -113,6 +115,11 @@ import { createShredstreamWalletObserver } from "./shredstream-wallet-observer.j
 import { createSubscriberStore } from "./subscribers.js";
 import { createSupabaseCopyTradeRecorderFromEnv, createSupabaseSubscriberStoreFromEnv } from "./subscribers-supabase.js";
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
+import {
+  createCopyTradeHotPathSnapshot,
+  createCopyTradeHotSnapshotSubscriberStore,
+  writeCopyTradeHotPathSnapshotFile
+} from "./copytrade-hot-snapshot.js";
 import { asRecord, errorMessage, isRecord, stringValue } from "./types.js";
 import {
   buildWalletTradeReplyMarkup,
@@ -243,6 +250,7 @@ const TOKEN_2022_PROGRAM_ADDRESS = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 const DIRECT_PUMP_FAST_STATE_PREFETCH_MAX_IN_FLIGHT = 4;
 const DIRECT_PUMP_FAST_STATE_PREFETCH_MAX_QUEUED = 400;
 const DIRECT_PUMP_FAST_STATE_PREFETCH_RETRY_DELAYS_MS = [0, 100, 400, 1200, 2500];
+const execFileAsync = promisify(execFile);
 const directPumpFastStatePrefetchQueue: Array<{ mint: string; event: LooseRecord }> = [];
 const directPumpFastStatePrefetchPending = new Set<string>();
 const directPumpFastStatePrefetchStats = {
@@ -522,6 +530,14 @@ const config: BotConfig = {
   copyTradeBuyPressureSellMinBuys: positiveIntegerFromEnv(process.env.COPY_TRADE_BUY_PRESSURE_SELL_MIN_BUYS, 1),
   copyTradeBuyPressureSellMinTotalSol: nonNegativeNumberFromEnv(process.env.COPY_TRADE_BUY_PRESSURE_SELL_MIN_TOTAL_SOL, 0),
   copyTradeBuyPressureSellStatePath: process.env.COPY_TRADE_BUY_PRESSURE_SELL_STATE_PATH || "data/copytrade-buy-pressure-sells.json",
+  copyTradeHotSnapshotEnabled: process.env.COPY_TRADE_HOT_SNAPSHOT_ENABLED === "true",
+  copyTradeHotSnapshotPath:
+    process.env.COPY_TRADE_HOT_SNAPSHOT_PATH ||
+    process.env.JITO_TELEGRAM_SNAPSHOT_PATH ||
+    "data/jito-telegram-copy-snapshot.json",
+  copyTradeHotSnapshotReloadCommand:
+    process.env.COPY_TRADE_HOT_SNAPSHOT_RELOAD_COMMAND ||
+    process.env.JITO_COPY_LIVE_RELOAD_COMMAND,
   directExecutionEnabled: process.env.DIRECT_EXECUTION_ENABLED === "true",
   directExecutionLiveEnabled: process.env.DIRECT_EXECUTION_LIVE_ENABLED === "true",
   directExecutionBuildOnly: process.env.DIRECT_EXECUTION_BUILD_ONLY === "true",
@@ -584,7 +600,7 @@ const directSolanaReadConnections: DirectSolanaReadConnection[] = directSolanaSe
 let isShuttingDown = false;
 let copyTradeEmergencyStopped = false;
 const pumpFunCoinInfoRetryDelaysMs = [0, 750, 1500, 3000, 6000];
-const subscribers =
+const baseSubscribers =
   config.supabaseUrl && config.supabaseServiceRoleKey
     ? createSupabaseSubscriberStoreFromEnv({
         url: config.supabaseUrl,
@@ -595,6 +611,12 @@ const subscribers =
         path: config.telegramSubscribersPath,
         initialChatIds: [config.telegramChatId]
       });
+const subscribers = createCopyTradeHotSnapshotSubscriberStore(baseSubscribers, {
+  onChange: queueCopyTradeHotPathSnapshotRefresh,
+  onError: (error, reason) => {
+    console.warn(`Copy trade hot snapshot refresh failed after ${reason}: ${errorMessage(error)}`);
+  }
+});
 const subscriberStoreLabel = config.supabaseUrl && config.supabaseServiceRoleKey ? "Supabase" : "JSON";
 const copyTradeRecorder =
   config.supabaseUrl && config.supabaseServiceRoleKey
@@ -626,6 +648,8 @@ const copyTradeBuyIdempotency =
 const copyTradeBuyPressureSellStore = createJsonCopyTradeBuyPressureSellStore({
   path: config.copyTradeBuyPressureSellStatePath
 });
+let copyTradeHotPathSnapshotSequence = 0;
+let copyTradeHotPathSnapshotQueue: Promise<void> = Promise.resolve();
 let platformFeeTreasuryWarmup: Promise<string | null> | null = null;
 let platformFeeTreasuryVerified: string | null = null;
 let platformFeeTreasuryBlockedReason: string | null = null;
@@ -658,6 +682,95 @@ function copyTradeExecutionModeConfig(): BotConfig & { copyTradeEmergencyStopped
 
 function copyTradeLatencyMode(): "dry" | "live" {
   return copyTradeLiveExecutionEnabled(copyTradeExecutionModeConfig()) ? "live" : "dry";
+}
+
+function queueCopyTradeHotPathSnapshotRefresh(reason: string): Promise<void> {
+  if (!config.copyTradeHotSnapshotEnabled) {
+    return Promise.resolve();
+  }
+
+  const next = copyTradeHotPathSnapshotQueue
+    .catch(() => undefined)
+    .then(() => refreshCopyTradeHotPathSnapshot(reason));
+  copyTradeHotPathSnapshotQueue = next;
+  return next;
+}
+
+async function refreshCopyTradeHotPathSnapshot(reason: string): Promise<void> {
+  const snapshot = createCopyTradeHotPathSnapshot({
+    subscribers: baseSubscribers.list(),
+    sequence: copyTradeHotPathSnapshotSequence + 1,
+    routing: {
+      executionProvider: config.copyTradeExecutionProvider,
+      pool: config.copyTradePool,
+      defaultSlippage: config.copyTradeSlippage,
+      defaultPriorityFee: config.copyTradePriorityFee,
+      maxBuySol: config.copyTradeMaxBuySol,
+      dailySolCap: config.copyTradeDailySolCap,
+      maxSignalAgeMs: config.copyTradeMaxSignalAgeMs,
+      minWalletReserveSol: config.copyTradeMinWalletReserveSol,
+      allowedSources: config.copyTradeAllowedSources,
+      maxSlippage: config.copyTradeMaxSlippage,
+      maxPriorityFee: config.copyTradeMaxPriorityFee,
+      maxCopyWalletsPerChat: config.copyTradeMaxCopyWalletsPerChat,
+      liveTradingEnabled: copyTradeLiveExecutionEnabled(copyTradeExecutionModeConfig()),
+      emergencyStopped: copyTradeEmergencyStopped
+    }
+  });
+  copyTradeHotPathSnapshotSequence = snapshot.sequence;
+  await writeCopyTradeHotPathSnapshotFile(config.copyTradeHotSnapshotPath, snapshot);
+
+  const targetCount = new Set(snapshot.subscribers.flatMap((subscriber) => subscriber.wallets.map((wallet) => wallet.address))).size;
+  console.log(
+    [
+      "Copy trade hot snapshot refreshed",
+      `reason=${reason}`,
+      `sequence=${snapshot.sequence}`,
+      `subscribers=${snapshot.subscribers.length}`,
+      `targets=${targetCount}`,
+      `path=${config.copyTradeHotSnapshotPath}`
+    ].join(" | ")
+  );
+
+  if (copyTradeHotSnapshotReloadNeeded(reason)) {
+    await runCopyTradeHotSnapshotReloadCommand(reason);
+  }
+}
+
+async function runCopyTradeHotSnapshotReloadCommand(reason: string): Promise<void> {
+  const command = config.copyTradeHotSnapshotReloadCommand?.trim();
+
+  if (!command) {
+    return;
+  }
+
+  await execFileAsync("sh", ["-lc", command], {
+    timeout: 30_000,
+    env: {
+      ...process.env,
+      COPY_TRADE_HOT_SNAPSHOT_REASON: reason,
+      COPY_TRADE_HOT_SNAPSHOT_PATH: config.copyTradeHotSnapshotPath,
+      COPY_TRADE_HOT_SNAPSHOT_SEQUENCE: String(copyTradeHotPathSnapshotSequence)
+    }
+  });
+}
+
+function copyTradeHotSnapshotReloadNeeded(reason: string): boolean {
+  return reason === "startup" ||
+    reason === "copytrade.emergency_stop" ||
+    reason === "copytrade.emergency_resume" ||
+    reason === "subscriber.remove" ||
+    reason === "subscriber.setNotificationsPaused" ||
+    reason === "subscriber.watchCopyTradeWallet" ||
+    reason === "subscriber.setCopyTradeWalletEnabled" ||
+    reason === "subscriber.unwatchCopyTradeWallet" ||
+    reason === "subscriber.unwatchAllCopyTradeWallets" ||
+    reason === "subscriber.setTradingWallet" ||
+    reason === "subscriber.setActiveTradingWallet" ||
+    reason === "subscriber.removeTradingWallet" ||
+    reason === "subscriber.removeAllTradingWallets" ||
+    reason === "subscriber.setCopyAmountSol" ||
+    reason === "subscriber.setCopyTargetWallet";
 }
 
 type CopyTradeExecutionResult = PumpPortalLightningTradeResult | TradeExecutionResult;
@@ -1156,6 +1269,14 @@ function logCopyTradeExecutionState(): void {
       `cashback=${cashbackConfig.enabled ? `${cashbackConfig.feeShareBps}bps` : "disabled"}`
     ].join(" | ")
   );
+  console.log(
+    [
+      "Copy trade hot snapshot",
+      `enabled=${config.copyTradeHotSnapshotEnabled ? "true" : "false"}`,
+      `path=${config.copyTradeHotSnapshotPath}`,
+      `reload=${config.copyTradeHotSnapshotReloadCommand ? "configured" : "off"}`
+    ].join(" | ")
+  );
 
   const platformFeeBlockedReason = platformFeeConfigBlockedReason({
     enabled: config.platformFeeEnabled,
@@ -1220,6 +1341,7 @@ async function persistCopyTradeEmergencyStopCleared(chatId: string | number): Pr
 async function activateCopyTradeEmergencyStop(chatId: string | number): Promise<string> {
   copyTradeEmergencyStopped = true;
   await persistCopyTradeEmergencyStop(chatId);
+  await queueCopyTradeHotPathSnapshotRefresh("copytrade.emergency_stop");
   const message = formatCopyTradeExecutionStateLog(copyTradeExecutionModeConfig());
 
   console.warn(`Copy trade emergency stop activated by ${chatId}: ${message}`);
@@ -1229,6 +1351,7 @@ async function activateCopyTradeEmergencyStop(chatId: string | number): Promise<
 async function clearCopyTradeEmergencyStop(chatId: string | number): Promise<string> {
   copyTradeEmergencyStopped = false;
   await persistCopyTradeEmergencyStopCleared(chatId);
+  await queueCopyTradeHotPathSnapshotRefresh("copytrade.emergency_resume");
   const message = formatCopyTradeExecutionStateLog(copyTradeExecutionModeConfig());
 
   console.warn(`Copy trade emergency stop cleared by ${chatId}: ${message}`);
@@ -5254,6 +5377,7 @@ assertConfig();
 await subscribers.init();
 await loadCopyTradeEmergencyStop();
 await loadCopyTradeBuyPressureSellWatchers();
+await queueCopyTradeHotPathSnapshotRefresh("startup");
 console.log(`Using ${subscriberStoreLabel} subscriber storage`);
 console.log(`Loaded ${subscribers.count()} verified Telegram subscriber(s)`);
 logCopyTradeExecutionState();

@@ -114,6 +114,9 @@ export interface BotConfig extends MigrationFormatConfig {
   copyTradeBuyPressureSellMinBuys: number;
   copyTradeBuyPressureSellMinTotalSol: number;
   copyTradeBuyPressureSellStatePath: string;
+  copyTradeHotSnapshotEnabled: boolean;
+  copyTradeHotSnapshotPath: string;
+  copyTradeHotSnapshotReloadCommand?: string;
   directExecutionEnabled: boolean;
   directExecutionLiveEnabled: boolean;
   directExecutionBuildOnly: boolean;

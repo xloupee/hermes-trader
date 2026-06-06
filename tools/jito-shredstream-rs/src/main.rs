@@ -11,6 +11,7 @@ mod parser;
 mod planner;
 mod proto;
 mod signal;
+mod telegram_snapshot;
 mod tx_builder;
 
 #[derive(Debug, Parser)]
@@ -85,6 +86,9 @@ pub(crate) struct LiveOptions {
 
     #[arg(long, env = "JITO_COPY_PLAN_SOL_AMOUNT")]
     pub(crate) copy_plan_sol_amount: Option<f64>,
+
+    #[arg(long, env = "JITO_TELEGRAM_SNAPSHOT_PATH")]
+    pub(crate) telegram_snapshot_path: Option<PathBuf>,
 
     #[arg(long, env = "JITO_TX_BUILD_PLANS_PATH")]
     pub(crate) tx_build_plans_path: Option<PathBuf>,

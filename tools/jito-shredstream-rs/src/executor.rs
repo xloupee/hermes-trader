@@ -10,7 +10,7 @@ use crate::{
     signal::SignalTimings,
     tx_builder::{
         build_auto_sell_unsigned_flashx_pump_with_cache,
-        build_full_copy_unsigned_flashx_pump_with_fees_and_cache,
+        build_full_copy_unsigned_flashx_pump_with_fees_and_cache_and_spend,
         copy_wallet_token_account_for_flashx_pump, CopyPdaCache, TxBuildError, TxFeeConfig,
     },
     LiveOptions,
@@ -559,6 +559,15 @@ impl CopyExecutor {
         if !observed_sol_amount.is_finite() || observed_sol_amount <= 0.0 {
             skip_guard!("observed SOL amount is not confidently bounded");
         }
+        let Some(planned_copy_sol_amount) = execution_plan.spend_sol_amount else {
+            skip_guard!("missing planned copy SOL amount");
+        };
+        if !planned_copy_sol_amount.is_finite() || planned_copy_sol_amount <= 0.0 {
+            skip_guard!("invalid planned copy SOL amount");
+        }
+        let Some(copy_spend_lamports) = sol_to_lamports(planned_copy_sol_amount) else {
+            skip_guard!("invalid planned copy SOL amount");
+        };
 
         let Some(max_copy_sol) = self.options.max_copy_sol else {
             skip_guard!("missing max copy SOL guard");
@@ -571,8 +580,8 @@ impl CopyExecutor {
                 "max copy SOL guard exceeds first-live cap {FIRST_LIVE_MAX_COPY_SOL_CAP}"
             ));
         }
-        if observed_sol_amount > max_copy_sol {
-            skip_guard!("observed spend exceeds max copy SOL guard");
+        if planned_copy_sol_amount > max_copy_sol {
+            skip_guard!("planned copy spend exceeds max copy SOL guard");
         }
 
         let Some(copy_wallet) = self.options.copy_wallet.as_deref() else {
@@ -591,12 +600,13 @@ impl CopyExecutor {
 
         let prebuild_guards_us = guards_started_at.elapsed().as_micros();
         let unsigned_build_started_at = Instant::now();
-        let build = match build_full_copy_unsigned_flashx_pump_with_fees_and_cache(
+        let build = match build_full_copy_unsigned_flashx_pump_with_fees_and_cache_and_spend(
             execution_plan.route_context.as_ref(),
             copy_wallet,
             &execution_plan.mint,
             &self.options.tx_fee_config(),
             Some(&self.pda_cache),
+            Some(copy_spend_lamports),
         ) {
             Ok(build) => build,
             Err(error) => {
@@ -2489,7 +2499,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn observed_amount_above_guard_blocks_before_keypair() {
+    async fn planned_amount_above_guard_blocks_before_keypair() {
         let mut options = disabled_options();
         options.simulate_copy_tx = true;
         options.max_copy_sol = Some(0.0004);
@@ -2502,7 +2512,7 @@ mod tests {
         assert_eq!(line.decision, "skip");
         assert_eq!(
             line.reason.as_deref(),
-            Some("observed spend exceeds max copy SOL guard")
+            Some("planned copy spend exceeds max copy SOL guard")
         );
         assert!(!line.signed);
         assert!(!line.sent);

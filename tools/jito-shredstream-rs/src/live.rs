@@ -19,6 +19,7 @@ use crate::{
         shredstream_proxy_client::ShredstreamProxyClient, SubscribeEntriesRequest,
     },
     signal::{SignalObservationWriter, SignalTimings},
+    telegram_snapshot::TelegramSnapshotConfig,
     LiveOptions,
 };
 use anyhow::{Context, Result};
@@ -36,7 +37,14 @@ use std::{
 use tokio::sync::mpsc;
 
 pub(crate) async fn run(options: LiveOptions) -> Result<()> {
-    let target_wallets = parse_target_wallets(&options.target_wallets)?;
+    let telegram_snapshot = TelegramSnapshotConfig::load(
+        options.telegram_snapshot_path.as_deref(),
+        options.copy_wallet.as_deref(),
+    )?;
+    let target_wallets = match &telegram_snapshot {
+        Some(snapshot) => snapshot.target_wallets(),
+        None => parse_target_wallets(&options.target_wallets)?,
+    };
     let target_wallet_pubkey_set = target_wallets
         .iter()
         .map(|wallet| Pubkey::from_str(wallet))
@@ -75,6 +83,13 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
         target_wallets.len(),
         options.limit
     );
+    if let Some(snapshot) = &telegram_snapshot {
+        eprintln!(
+            "loaded Telegram Jito snapshot sequence={}; activeCopyTargets={}",
+            snapshot.sequence(),
+            target_wallets.len()
+        );
+    }
 
     let mut seen = SeenSignatures::new(options.dedupe_capacity);
     let mut shadow_signals = ShadowSignalWriter::new(options.shadow_signals_path.as_deref())
@@ -330,7 +345,14 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             &shadow_signal,
                             now_ms(),
                             PlannerOptions {
-                                copy_sol_amount: options.copy_plan_sol_amount,
+                                copy_sol_amount: telegram_snapshot
+                                    .as_ref()
+                                    .and_then(|snapshot| {
+                                        snapshot
+                                            .target_config(&parsed.target_wallet)
+                                            .map(|target| target.copy_amount_sol)
+                                    })
+                                    .or(options.copy_plan_sol_amount),
                             },
                         );
                         enqueue_copy_execution(

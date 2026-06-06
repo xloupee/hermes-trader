@@ -145,6 +145,22 @@ fn build_copy_unsigned_flashx_pump_with_cache(
     mint: &str,
     pda_cache: Option<&CopyPdaCache>,
 ) -> Result<CopyUnsignedTxBuild, TxBuildError> {
+    build_copy_unsigned_flashx_pump_with_cache_and_spend(
+        route_context,
+        copy_wallet,
+        mint,
+        pda_cache,
+        None,
+    )
+}
+
+fn build_copy_unsigned_flashx_pump_with_cache_and_spend(
+    route_context: Option<&RouteContext>,
+    copy_wallet: &str,
+    mint: &str,
+    pda_cache: Option<&CopyPdaCache>,
+    copy_spend_lamports: Option<u64>,
+) -> Result<CopyUnsignedTxBuild, TxBuildError> {
     let Some(RouteContext::FlashxPump(context)) = route_context else {
         return Err(TxBuildError::UnsupportedLayout(
             "unsupported flashx-pump copy layout",
@@ -158,12 +174,20 @@ fn build_copy_unsigned_flashx_pump_with_cache(
     }
 
     match context.layout {
-        FlashxPumpLayout::DirectPump => {
-            build_copy_unsigned_flashx_direct_pump(context, copy_wallet, mint, pda_cache)
-        }
-        FlashxPumpLayout::MigratedAmm => {
-            build_copy_unsigned_flashx_migrated_amm(context, copy_wallet, mint, pda_cache)
-        }
+        FlashxPumpLayout::DirectPump => build_copy_unsigned_flashx_direct_pump(
+            context,
+            copy_wallet,
+            mint,
+            pda_cache,
+            copy_spend_lamports,
+        ),
+        FlashxPumpLayout::MigratedAmm => build_copy_unsigned_flashx_migrated_amm(
+            context,
+            copy_wallet,
+            mint,
+            pda_cache,
+            copy_spend_lamports,
+        ),
     }
 }
 
@@ -212,6 +236,7 @@ fn build_copy_unsigned_flashx_direct_pump(
     copy_wallet: &str,
     mint: &str,
     pda_cache: Option<&CopyPdaCache>,
+    copy_spend_lamports: Option<u64>,
 ) -> Result<CopyUnsignedTxBuild, TxBuildError> {
     let token_program = resolved_pubkey(context, "tokenProgram")?;
     let copy_wallet = parse_pubkey(copy_wallet)?;
@@ -228,9 +253,11 @@ fn build_copy_unsigned_flashx_direct_pump(
     let copy_user_volume_accumulator =
         user_volume_accumulator_address_cached(pda_cache, &copy_wallet, &pump_program);
 
-    let spendable_sol_in = read_u64_le(&context.data, 1).ok_or(
-        TxBuildError::InvalidInstruction("missing flashx SOL amount"),
-    )?;
+    let spendable_sol_in = copy_spend_lamports
+        .or_else(|| read_u64_le(&context.data, 1))
+        .ok_or(TxBuildError::InvalidInstruction(
+            "missing flashx SOL amount",
+        ))?;
 
     let mut buy_data = Vec::with_capacity(25);
     buy_data.extend_from_slice(&PUMP_FUN_BUY_EXACT_SOL_IN_DISCRIMINATOR);
@@ -275,6 +302,7 @@ fn build_copy_unsigned_flashx_migrated_amm(
     copy_wallet: &str,
     mint: &str,
     pda_cache: Option<&CopyPdaCache>,
+    copy_spend_lamports: Option<u64>,
 ) -> Result<CopyUnsignedTxBuild, TxBuildError> {
     let copy_wallet = parse_pubkey(copy_wallet)?;
     let mint = parse_pubkey(mint)?;
@@ -301,9 +329,11 @@ fn build_copy_unsigned_flashx_migrated_amm(
     let copy_user_volume_accumulator =
         user_volume_accumulator_address_cached(pda_cache, &copy_wallet, &pump_amm_program);
 
-    let spendable_sol_in = read_u64_le(&context.data, 1).ok_or(
-        TxBuildError::InvalidInstruction("missing flashx SOL amount"),
-    )?;
+    let spendable_sol_in = copy_spend_lamports
+        .or_else(|| read_u64_le(&context.data, 1))
+        .ok_or(TxBuildError::InvalidInstruction(
+            "missing flashx SOL amount",
+        ))?;
 
     let mut setup_data = Vec::with_capacity(10);
     setup_data.push(1);
@@ -411,8 +441,31 @@ pub(crate) fn build_full_copy_unsigned_flashx_pump_with_fees_and_cache(
     fee_config: &TxFeeConfig,
     pda_cache: Option<&CopyPdaCache>,
 ) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
-    let copy_build =
-        build_copy_unsigned_flashx_pump_with_cache(route_context, copy_wallet, mint, pda_cache)?;
+    build_full_copy_unsigned_flashx_pump_with_fees_and_cache_and_spend(
+        route_context,
+        copy_wallet,
+        mint,
+        fee_config,
+        pda_cache,
+        None,
+    )
+}
+
+pub(crate) fn build_full_copy_unsigned_flashx_pump_with_fees_and_cache_and_spend(
+    route_context: Option<&RouteContext>,
+    copy_wallet: &str,
+    mint: &str,
+    fee_config: &TxFeeConfig,
+    pda_cache: Option<&CopyPdaCache>,
+    copy_spend_lamports: Option<u64>,
+) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
+    let copy_build = build_copy_unsigned_flashx_pump_with_cache_and_spend(
+        route_context,
+        copy_wallet,
+        mint,
+        pda_cache,
+        copy_spend_lamports,
+    )?;
     let Some(RouteContext::FlashxPump(context)) = route_context else {
         return Err(TxBuildError::UnsupportedLayout(
             "unsupported flashx-pump copy layout",
@@ -1166,6 +1219,29 @@ mod tests {
             &build.instructions[2].data[0..8],
             &PUMP_FUN_BUY_EXACT_SOL_IN_DISCRIMINATOR
         );
+    }
+
+    #[test]
+    fn planned_copy_spend_overrides_observed_flashx_sol_amount() {
+        let transaction = replay_transaction(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/flashx/live-buy-2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo.tx.base64"
+        )));
+        let account_keys = live_direct_pump_buy_hydrated_account_keys(&transaction);
+        let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
+            .expect("live direct Pump FLASHX buy should parse");
+
+        let build = build_full_copy_unsigned_flashx_pump_with_fees_and_cache_and_spend(
+            parsed.route_context.as_ref(),
+            COPY_WALLET,
+            &parsed.mint,
+            &TxFeeConfig::default(),
+            None,
+            Some(777_000),
+        )
+        .expect("full copy transaction shell should build with planned spend override");
+
+        assert_eq!(read_u64_le(&build.instructions[2].data, 8), Some(777_000));
     }
 
     #[test]

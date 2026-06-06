@@ -483,6 +483,8 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
     let pump_program = *pump_fun_program_id();
     let copy_wallet_token_account = copy_build.copy_wallet_token_account;
     let copy_wallet_pubkey = parse_pubkey(copy_wallet)?;
+    let token_program = resolved_pubkey(context, "tokenProgram")?;
+    let mint = parse_pubkey(mint)?;
 
     let mut sell_data = Vec::with_capacity(24);
     sell_data.extend_from_slice(&PUMP_FUN_SELL_DISCRIMINATOR);
@@ -494,14 +496,14 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
         accounts: vec![
             AccountMeta::new_readonly(resolved_pubkey(context, "globalConfig")?, false),
             AccountMeta::new(resolved_pubkey(context, "feeRecipient")?, false),
-            AccountMeta::new_readonly(parse_pubkey(mint)?, false),
+            AccountMeta::new_readonly(mint, false),
             AccountMeta::new(resolved_pubkey(context, "bondingCurve")?, false),
             AccountMeta::new(resolved_pubkey(context, "associatedBondingCurve")?, false),
             AccountMeta::new(copy_wallet_token_account, false),
             AccountMeta::new(copy_wallet_pubkey, true),
             AccountMeta::new_readonly(resolved_pubkey(context, "systemProgram")?, false),
             AccountMeta::new(resolved_pubkey(context, "creatorVault")?, false),
-            AccountMeta::new_readonly(resolved_pubkey(context, "tokenProgram")?, false),
+            AccountMeta::new_readonly(token_program, false),
             AccountMeta::new_readonly(resolved_pubkey(context, "eventAuthority")?, false),
             AccountMeta::new_readonly(resolved_pubkey(context, "pumpProgram")?, false),
             AccountMeta::new_readonly(resolved_pubkey(context, "feeConfig")?, false),

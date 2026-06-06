@@ -4,7 +4,7 @@ use crate::{
     event::now_ms,
     parser::{
         associated_token_program_id, compute_budget_program_id, read_u64_le, system_program_id,
-        Action, Route, RouteContext,
+        Action, FlashxPumpLayout, Route, RouteContext,
     },
     planner::ExecutionPlanLine,
     signal::SignalTimings,
@@ -1051,6 +1051,10 @@ fn auto_sell_token_amount_raw(route_context: Option<&RouteContext>, token_balanc
     let Some(RouteContext::FlashxPump(context)) = route_context else {
         return token_balance_raw;
     };
+
+    if context.layout == FlashxPumpLayout::DirectPump {
+        return token_balance_raw;
+    }
 
     match read_u64_le(&context.data, 9) {
         Some(min_tokens_out) if min_tokens_out > 0 => token_balance_raw.min(min_tokens_out),
@@ -2114,12 +2118,12 @@ mod tests {
     }
 
     #[test]
-    fn direct_auto_sell_caps_stale_balance_to_target_min_out() {
+    fn direct_auto_sell_uses_copy_wallet_balance() {
         let route_context = flashx_context(FlashxPumpLayout::DirectPump, 23_000_000_000);
 
         assert_eq!(
             auto_sell_token_amount_raw(Some(&route_context), 47_000_000_000),
-            23_000_000_000
+            47_000_000_000
         );
     }
 

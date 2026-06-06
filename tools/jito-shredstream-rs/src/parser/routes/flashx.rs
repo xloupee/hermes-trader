@@ -1,8 +1,9 @@
 use crate::parser::{
-    associated_token_program_id, flashx_router_program_id, pump_amm_program_id, read_u64_le,
-    token_2022_program_id, token_program_id, Action, DirectPumpAccounts, FlashxPumpLayout,
-    FlashxPumpResolvedAccounts, FlashxPumpRouteContext, MigratedAmmAccounts, ParsedTrade, Route,
-    RouteContext, RouteInstructionAccount, LAMPORTS_PER_SOL, PUMP_FUN_TOKEN_DECIMALS, SOL_MINT,
+    associated_token_program_id, flashx_router_program_id, pump_amm_program_id,
+    pump_fun_program_id, read_u64_le, token_2022_program_id, token_program_id, Action,
+    DirectPumpAccounts, FlashxPumpLayout, FlashxPumpResolvedAccounts, FlashxPumpRouteContext,
+    MigratedAmmAccounts, ParsedTrade, Route, RouteContext, RouteInstructionAccount,
+    LAMPORTS_PER_SOL, PUMP_FUN_TOKEN_DECIMALS, SOL_MINT,
 };
 use solana_message::compiled_instruction::CompiledInstruction;
 use solana_message::VersionedMessage;
@@ -157,30 +158,41 @@ pub(crate) fn route_context(
     account_keys: &[Pubkey],
     parsed: &ParsedTrade,
 ) -> Option<RouteContext> {
-    if parsed.action != Action::Buy {
-        return None;
-    }
-
     let accounts = instruction.accounts.as_slice();
 
-    if is_migrated_amm_buy_layout(&accounts, account_keys, parsed, &instruction.data) {
-        return Some(RouteContext::FlashxPump(FlashxPumpRouteContext {
-            layout: FlashxPumpLayout::MigratedAmm,
-            program_id: *flashx_router_program_id(),
-            accounts: route_instruction_accounts(message, instruction, account_keys)?,
-            data: instruction.data.clone(),
-            resolved_accounts: migrated_amm_resolved_accounts(&accounts, account_keys)?,
-        }));
-    }
+    match parsed.action {
+        Action::Buy => {
+            if is_migrated_amm_buy_layout(&accounts, account_keys, parsed, &instruction.data) {
+                return Some(RouteContext::FlashxPump(FlashxPumpRouteContext {
+                    layout: FlashxPumpLayout::MigratedAmm,
+                    program_id: *flashx_router_program_id(),
+                    accounts: route_instruction_accounts(message, instruction, account_keys)?,
+                    data: instruction.data.clone(),
+                    resolved_accounts: migrated_amm_resolved_accounts(&accounts, account_keys)?,
+                }));
+            }
 
-    if is_direct_pump_buy_layout(&accounts, account_keys, parsed, &instruction.data) {
-        return Some(RouteContext::FlashxPump(FlashxPumpRouteContext {
-            layout: FlashxPumpLayout::DirectPump,
-            program_id: *flashx_router_program_id(),
-            accounts: route_instruction_accounts(message, instruction, account_keys)?,
-            data: instruction.data.clone(),
-            resolved_accounts: direct_pump_resolved_accounts(&accounts, account_keys)?,
-        }));
+            if is_direct_pump_buy_layout(&accounts, account_keys, parsed, &instruction.data) {
+                return Some(RouteContext::FlashxPump(FlashxPumpRouteContext {
+                    layout: FlashxPumpLayout::DirectPump,
+                    program_id: *flashx_router_program_id(),
+                    accounts: route_instruction_accounts(message, instruction, account_keys)?,
+                    data: instruction.data.clone(),
+                    resolved_accounts: direct_pump_buy_resolved_accounts(&accounts, account_keys)?,
+                }));
+            }
+        }
+        Action::Sell => {
+            if is_direct_pump_sell_layout(&accounts, account_keys, parsed, &instruction.data) {
+                return Some(RouteContext::FlashxPump(FlashxPumpRouteContext {
+                    layout: FlashxPumpLayout::DirectPump,
+                    program_id: *flashx_router_program_id(),
+                    accounts: Vec::new(),
+                    data: instruction.data.clone(),
+                    resolved_accounts: direct_pump_sell_resolved_accounts(&accounts, account_keys)?,
+                }));
+            }
+        }
     }
 
     None
@@ -249,6 +261,24 @@ fn is_direct_pump_buy_layout(
             .is_some_and(|account| account.to_string() == parsed.mint)
 }
 
+fn is_direct_pump_sell_layout(
+    accounts: &[u8],
+    account_keys: &[Pubkey],
+    parsed: &ParsedTrade,
+    data: &[u8],
+) -> bool {
+    accounts.len() >= 25
+        && data.get(17).copied() == Some(1)
+        && account_key_at(accounts, account_keys, 1)
+            .is_some_and(|account| account.to_string() == parsed.target_wallet)
+        && account_key_at(accounts, account_keys, 10)
+            .is_some_and(|account| account.to_string() == parsed.mint)
+        && account_key_at(accounts, account_keys, 4)
+            .is_some_and(|account| account == flashx_router_program_id())
+        && account_key_at(accounts, account_keys, 5)
+            .is_some_and(|account| account == pump_fun_program_id())
+}
+
 fn route_instruction_accounts(
     message: &VersionedMessage,
     instruction: &CompiledInstruction,
@@ -307,7 +337,7 @@ fn migrated_amm_resolved_accounts(
     ))
 }
 
-fn direct_pump_resolved_accounts(
+fn direct_pump_buy_resolved_accounts(
     accounts: &[u8],
     account_keys: &[Pubkey],
 ) -> Option<FlashxPumpResolvedAccounts> {
@@ -326,12 +356,40 @@ fn direct_pump_resolved_accounts(
         token_program: *account_key_at(accounts, account_keys, 16)?,
         creator_vault: *account_key_at(accounts, account_keys, 17)?,
         event_authority: *account_key_at(accounts, account_keys, 18)?,
-        global_volume_accumulator: *account_key_at(accounts, account_keys, 20)?,
+        global_volume_accumulator: Some(*account_key_at(accounts, account_keys, 20)?),
         user_volume_accumulator: *account_key_at(accounts, account_keys, 21)?,
         fee_config: *account_key_at(accounts, account_keys, 22)?,
         fee_program: *account_key_at(accounts, account_keys, 23)?,
         bonding_curve_v2: *account_key_at(accounts, account_keys, 24)?,
         buyback_fee_recipient: *account_key_at(accounts, account_keys, 25)?,
+    }))
+}
+
+fn direct_pump_sell_resolved_accounts(
+    accounts: &[u8],
+    account_keys: &[Pubkey],
+) -> Option<FlashxPumpResolvedAccounts> {
+    Some(FlashxPumpResolvedAccounts::DirectPump(DirectPumpAccounts {
+        payer: *account_key_at(accounts, account_keys, 1)?,
+        target_wallet: *account_key_at(accounts, account_keys, 1)?,
+        flashx_router_program: *account_key_at(accounts, account_keys, 4)?,
+        pump_program: *account_key_at(accounts, account_keys, 5)?,
+        global_config: *account_key_at(accounts, account_keys, 8)?,
+        fee_recipient: *account_key_at(accounts, account_keys, 9)?,
+        mint: *account_key_at(accounts, account_keys, 10)?,
+        bonding_curve: *account_key_at(accounts, account_keys, 11)?,
+        associated_bonding_curve: *account_key_at(accounts, account_keys, 12)?,
+        user_token_account: *account_key_at(accounts, account_keys, 13)?,
+        system_program: *account_key_at(accounts, account_keys, 15)?,
+        token_program: *account_key_at(accounts, account_keys, 17)?,
+        creator_vault: *account_key_at(accounts, account_keys, 16)?,
+        event_authority: *account_key_at(accounts, account_keys, 18)?,
+        global_volume_accumulator: None,
+        user_volume_accumulator: *account_key_at(accounts, account_keys, 22)?,
+        fee_config: *account_key_at(accounts, account_keys, 20)?,
+        fee_program: *account_key_at(accounts, account_keys, 21)?,
+        bonding_curve_v2: *account_key_at(accounts, account_keys, 23)?,
+        buyback_fee_recipient: *account_key_at(accounts, account_keys, 24)?,
     }))
 }
 

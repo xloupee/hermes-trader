@@ -25,9 +25,10 @@ use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction::Transaction;
 use std::{
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::task::JoinSet;
@@ -39,6 +40,7 @@ const ASSOCIATED_TOKEN_ACCOUNT_RENT_LAMPORTS_ESTIMATE: u64 = 2_100_000;
 const SEND_WARM_TIMEOUT_MS: u64 = 750;
 const AUTO_SELL_BALANCE_ATTEMPTS: usize = 8;
 const AUTO_SELL_BALANCE_RETRY_MS: u64 = 250;
+const DIRECT_PUMP_SELL_CONTEXT_CACHE_CAPACITY: usize = 512;
 
 pub(crate) struct CopyExecutor {
     options: CopyExecutionOptions,
@@ -48,6 +50,20 @@ pub(crate) struct CopyExecutor {
     blockhash_cache: Option<BlockhashCache>,
     address_lookup_tables: AddressLookupTableCache,
     pda_cache: CopyPdaCache,
+    direct_pump_sell_contexts: Mutex<DirectPumpSellContextCache>,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct DirectPumpSellContextKey {
+    target_wallet: String,
+    mint: String,
+}
+
+#[derive(Debug)]
+struct DirectPumpSellContextCache {
+    capacity: usize,
+    entries: HashMap<DirectPumpSellContextKey, RouteContext>,
+    order: VecDeque<DirectPumpSellContextKey>,
 }
 
 #[derive(Clone, Debug)]
@@ -402,6 +418,9 @@ impl CopyExecutor {
             blockhash_cache,
             address_lookup_tables,
             pda_cache: CopyPdaCache::default(),
+            direct_pump_sell_contexts: Mutex::new(DirectPumpSellContextCache::new(
+                DIRECT_PUMP_SELL_CONTEXT_CACHE_CAPACITY,
+            )),
         })
     }
 
@@ -724,6 +743,27 @@ impl CopyExecutor {
         line.was_sent() && self.options.auto_sell_after_buy_enabled()
     }
 
+    pub(crate) fn observe_direct_pump_sell_route_context(
+        &self,
+        target_wallet: &str,
+        mint: &str,
+        route_context: Option<&RouteContext>,
+    ) {
+        if !self.options.auto_sell_after_buy_enabled() {
+            return;
+        }
+        let Some(route_context) = route_context else {
+            return;
+        };
+        if !is_direct_pump_sell_route_context(route_context) {
+            return;
+        }
+        let Ok(mut cache) = self.direct_pump_sell_contexts.lock() else {
+            return;
+        };
+        cache.insert(target_wallet, mint, route_context.clone());
+    }
+
     pub(crate) async fn handle_auto_sell_result(
         &self,
         mut line: CopyExecutionLine,
@@ -889,8 +929,16 @@ impl CopyExecutor {
             return;
         };
 
+        let auto_sell_route_context = match auto_sell_route_context_for_plan(self, execution_plan) {
+            Ok(route_context) => route_context,
+            Err(reason) => {
+                line.skip_auto_sell(reason);
+                return;
+            }
+        };
+
         let token_account = match copy_wallet_token_account_for_flashx_pump(
-            execution_plan.route_context.as_ref(),
+            Some(&auto_sell_route_context),
             copy_wallet,
             &execution_plan.mint,
             Some(&self.pda_cache),
@@ -917,7 +965,7 @@ impl CopyExecutor {
             }
         };
         let token_amount_raw =
-            auto_sell_token_amount_raw(execution_plan.route_context.as_ref(), token_balance_raw);
+            auto_sell_token_amount_raw(Some(&auto_sell_route_context), token_balance_raw);
         line.auto_sell_token_amount_raw = Some(token_amount_raw);
 
         let Some(cached_blockhash) = cached_blockhash(self.blockhash_cache.as_ref()) else {
@@ -933,7 +981,7 @@ impl CopyExecutor {
         };
 
         let build = match build_auto_sell_unsigned_flashx_pump_with_cache(
-            execution_plan.route_context.as_ref(),
+            Some(&auto_sell_route_context),
             copy_wallet,
             &execution_plan.mint,
             token_amount_raw,
@@ -1080,6 +1128,78 @@ impl CopyExecutor {
             .parse::<u64>()
             .map_err(|error| format!("parse token account balance: {error}"))
     }
+}
+
+impl DirectPumpSellContextCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn insert(&mut self, target_wallet: &str, mint: &str, route_context: RouteContext) {
+        let key = DirectPumpSellContextKey {
+            target_wallet: target_wallet.to_string(),
+            mint: mint.to_string(),
+        };
+        if !self.entries.contains_key(&key) {
+            self.order.push_back(key.clone());
+        }
+        self.entries.insert(key, route_context);
+        while self.entries.len() > self.capacity {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+    }
+
+    fn get(&self, target_wallet: &str, mint: &str) -> Option<RouteContext> {
+        let key = DirectPumpSellContextKey {
+            target_wallet: target_wallet.to_string(),
+            mint: mint.to_string(),
+        };
+        self.entries.get(&key).cloned()
+    }
+}
+
+fn auto_sell_route_context_for_plan(
+    executor: &CopyExecutor,
+    execution_plan: &ExecutionPlanLine,
+) -> Result<RouteContext, &'static str> {
+    let Some(route_context) = execution_plan.route_context.as_ref() else {
+        return Err("missing auto-sell route context");
+    };
+
+    if !is_direct_pump_route_context(route_context) {
+        return Ok(route_context.clone());
+    }
+
+    let Ok(cache) = executor.direct_pump_sell_contexts.lock() else {
+        return Err("direct-pump sell-side route context cache unavailable");
+    };
+    cache
+        .get(&execution_plan.target_wallet, &execution_plan.mint)
+        .filter(is_direct_pump_sell_route_context)
+        .ok_or("missing direct-pump sell-side route context")
+}
+
+fn is_direct_pump_route_context(route_context: &RouteContext) -> bool {
+    matches!(
+        route_context,
+        RouteContext::FlashxPump(context) if context.layout == FlashxPumpLayout::DirectPump
+    )
+}
+
+fn is_direct_pump_sell_route_context(route_context: &RouteContext) -> bool {
+    matches!(
+        route_context,
+        RouteContext::FlashxPump(context)
+            if context.layout == FlashxPumpLayout::DirectPump
+                && context.data.get(17).copied() == Some(1)
+    )
 }
 
 fn auto_sell_token_amount_raw(route_context: Option<&RouteContext>, token_balance_raw: u64) -> u64 {
@@ -1913,7 +2033,7 @@ mod tests {
                     token_program: dummy,
                     creator_vault: dummy,
                     event_authority: dummy,
-                    global_volume_accumulator: dummy,
+                    global_volume_accumulator: Some(dummy),
                     user_volume_accumulator: dummy,
                     fee_config: dummy,
                     fee_program: dummy,
@@ -1964,6 +2084,13 @@ mod tests {
         })
     }
 
+    fn flashx_direct_sell_context() -> RouteContext {
+        let mut route_context = flashx_context(FlashxPumpLayout::DirectPump, 1);
+        let RouteContext::FlashxPump(context) = &mut route_context;
+        context.data[17] = 1;
+        route_context
+    }
+
     fn executor(options: CopyExecutionOptions) -> CopyExecutor {
         let send_endpoints = Arc::new(options.selected_send_endpoints());
         CopyExecutor {
@@ -1974,6 +2101,9 @@ mod tests {
             blockhash_cache: None,
             address_lookup_tables: AddressLookupTableCache::default(),
             pda_cache: CopyPdaCache::default(),
+            direct_pump_sell_contexts: Mutex::new(DirectPumpSellContextCache::new(
+                DIRECT_PUMP_SELL_CONTEXT_CACHE_CAPACITY,
+            )),
         }
     }
 
@@ -2029,6 +2159,31 @@ mod tests {
         assert!(line.buy_latency_test_isolated);
         assert!(!line.auto_sell_enabled);
         assert!(!line.auto_sell_simulation_requested);
+    }
+
+    #[test]
+    fn direct_pump_auto_sell_uses_cached_sell_side_context() {
+        let mut options = disabled_options();
+        options.auto_sell_after_buy = true;
+        let executor = executor(options);
+        let mut plan = allowed_plan();
+        plan.route_context = Some(flashx_context(FlashxPumpLayout::DirectPump, 1));
+
+        assert_eq!(
+            auto_sell_route_context_for_plan(&executor, &plan).unwrap_err(),
+            "missing direct-pump sell-side route context"
+        );
+
+        let sell_context = flashx_direct_sell_context();
+        executor.observe_direct_pump_sell_route_context(
+            &plan.target_wallet,
+            &plan.mint,
+            Some(&sell_context),
+        );
+        let route_context =
+            auto_sell_route_context_for_plan(&executor, &plan).expect("sell context should cache");
+
+        assert!(is_direct_pump_sell_route_context(&route_context));
     }
 
     #[test]

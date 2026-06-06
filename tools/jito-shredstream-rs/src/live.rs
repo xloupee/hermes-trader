@@ -8,6 +8,7 @@ use crate::{
     executor::{CopyExecutionLine, CopyExecutor},
     parser::{
         classify_wallet_mention, parse_trade_for_mentioned_targets, versioned_tx_signature_string,
+        Action,
     },
     planner::{
         copy_tx_plan_line, execution_plan_line, tx_build_plan_line, unsigned_tx_plan_line,
@@ -275,6 +276,13 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                     Some(parsed) => {
                         let trade_parsed_at = Instant::now();
                         let trade_parsed_at_ms = now_ms();
+                        if parsed.action == Action::Sell {
+                            copy_executor.observe_direct_pump_sell_route_context(
+                                &parsed.target_wallet,
+                                &parsed.mint,
+                                parsed.route_context.as_ref(),
+                            );
+                        }
                         let timings = SignalTimings {
                             grpc_message_received_at_ms,
                             entries_deserialized_at_ms,

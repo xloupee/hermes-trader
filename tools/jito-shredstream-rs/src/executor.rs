@@ -3,8 +3,8 @@ use crate::{
     blockhash::{cached_blockhash, BlockhashCache},
     event::now_ms,
     parser::{
-        associated_token_program_id, compute_budget_program_id, read_u64_le, system_program_id,
-        Action, FlashxPumpLayout, Route, RouteContext,
+        associated_token_program_id, compute_budget_program_id, pump_fun_program_id, read_u64_le,
+        system_program_id, Action, FlashxPumpLayout, Route, RouteContext,
     },
     planner::ExecutionPlanLine,
     signal::SignalTimings,
@@ -36,6 +36,7 @@ use std::{
 use tokio::task::JoinSet;
 
 const FIRST_LIVE_MAX_COPY_SOL_CAP: f64 = 0.001;
+pub(crate) const DEFAULT_MIGRATED_AMM_MIN_COPY_SOL: f64 = 0.00099;
 const LAMPORTS_PER_SOL: f64 = 1_000_000_000.0;
 const SIGNATURE_FEE_LAMPORTS_ESTIMATE: u64 = 5_000;
 const ASSOCIATED_TOKEN_ACCOUNT_RENT_LAMPORTS_ESTIMATE: u64 = 2_100_000;
@@ -116,6 +117,8 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) jito_auth_uuid: Option<String>,
     pub(crate) max_copy_sol: Option<f64>,
     pub(crate) max_total_copy_spend_sol: Option<f64>,
+    pub(crate) migrated_amm_min_copy_sol: f64,
+    pub(crate) migrated_amm_small_copy_mode: MigratedAmmSmallCopyMode,
     pub(crate) copy_wallet: Option<String>,
     pub(crate) copy_keypair_path: Option<PathBuf>,
     pub(crate) solana_rpc_url: Option<String>,
@@ -133,6 +136,12 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) jito_tip_account: Option<String>,
     pub(crate) warm_send_endpoints: bool,
     pub(crate) send_endpoint_warm_interval_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum MigratedAmmSmallCopyMode {
+    Skip,
+    Floor,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -560,6 +569,8 @@ impl CopyExecutor {
                 .map(ToString::to_string),
             max_copy_sol: options.max_copy_sol,
             max_total_copy_spend_sol: options.max_total_copy_spend_sol,
+            migrated_amm_min_copy_sol: options.migrated_amm_min_copy_sol,
+            migrated_amm_small_copy_mode: options.migrated_amm_small_copy_mode,
             copy_wallet: options.copy_wallet.clone(),
             copy_keypair_path: options.copy_keypair_path.clone(),
             solana_rpc_url: options.solana_rpc_url.clone(),
@@ -755,6 +766,19 @@ impl CopyExecutor {
         let Some(copy_spend_lamports) = sol_to_lamports(planned_copy_sol_amount) else {
             skip_guard!("invalid planned copy SOL amount");
         };
+        let effective_copy_spend_lamports = match copy_spend_after_migrated_amm_guard(
+            &self.options,
+            execution_plan.route_context.as_ref(),
+            copy_spend_lamports,
+        ) {
+            Ok(CopySpendDecision::Use(lamports)) => lamports,
+            Ok(CopySpendDecision::Skip(reason)) | Err(reason) => skip_guard!(reason),
+        };
+        let effective_planned_copy_sol_amount = lamports_to_sol(effective_copy_spend_lamports);
+        if effective_copy_spend_lamports != copy_spend_lamports {
+            line.planned_copy_sol_amount = Some(effective_planned_copy_sol_amount);
+            line.planned_copy_spend_lamports = Some(effective_copy_spend_lamports);
+        }
 
         let Some(max_copy_sol) = self.options.max_copy_sol else {
             skip_guard!("missing max copy SOL guard");
@@ -767,7 +791,7 @@ impl CopyExecutor {
                 "max copy SOL guard exceeds first-live cap {FIRST_LIVE_MAX_COPY_SOL_CAP}"
             ));
         }
-        if planned_copy_sol_amount > max_copy_sol {
+        if effective_planned_copy_sol_amount > max_copy_sol {
             skip_guard!("planned copy spend exceeds max copy SOL guard");
         }
 
@@ -793,7 +817,7 @@ impl CopyExecutor {
             &execution_plan.mint,
             &self.options.tx_fee_config(),
             Some(&self.pda_cache),
-            Some(copy_spend_lamports),
+            Some(effective_copy_spend_lamports),
         ) {
             Ok(build) => build,
             Err(error) => {
@@ -2058,6 +2082,38 @@ fn update_optimistic_trailing_sell_balance_raw(
     Some(sellable_balance_raw.saturating_sub(sold_amount_raw))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum CopySpendDecision {
+    Use(u64),
+    Skip(String),
+}
+
+fn copy_spend_after_migrated_amm_guard(
+    options: &CopyExecutionOptions,
+    route_context: Option<&RouteContext>,
+    copy_spend_lamports: u64,
+) -> Result<CopySpendDecision, String> {
+    if !matches!(
+        route_context,
+        Some(RouteContext::FlashxPump(context)) if context.layout == FlashxPumpLayout::MigratedAmm
+    ) {
+        return Ok(CopySpendDecision::Use(copy_spend_lamports));
+    }
+
+    let min_copy_lamports = options.migrated_amm_min_copy_lamports()?;
+    if copy_spend_lamports >= min_copy_lamports {
+        return Ok(CopySpendDecision::Use(copy_spend_lamports));
+    }
+
+    match options.migrated_amm_small_copy_mode {
+        MigratedAmmSmallCopyMode::Skip => Ok(CopySpendDecision::Skip(format!(
+            "migrated AMM copy spend {} lamports below min {} lamports",
+            copy_spend_lamports, min_copy_lamports
+        ))),
+        MigratedAmmSmallCopyMode::Floor => Ok(CopySpendDecision::Use(min_copy_lamports)),
+    }
+}
+
 fn estimate_total_copy_spend_lamports(
     build: &crate::tx_builder::FullCopyUnsignedTxBuild,
     route_context: Option<&RouteContext>,
@@ -2065,8 +2121,7 @@ fn estimate_total_copy_spend_lamports(
     let Some(RouteContext::FlashxPump(context)) = route_context else {
         return Err("missing route context for total spend guard".to_string());
     };
-    let spendable_sol_in = read_u64_le(&context.data, 1)
-        .ok_or_else(|| "missing flashx SOL amount for total spend guard".to_string())?;
+    let spendable_sol_in = copy_input_lamports_from_build(build, context)?;
 
     let mut total = spendable_sol_in
         .checked_add(SIGNATURE_FEE_LAMPORTS_ESTIMATE)
@@ -2084,6 +2139,31 @@ fn estimate_total_copy_spend_lamports(
     }
 
     Ok(total)
+}
+
+fn copy_input_lamports_from_build(
+    build: &crate::tx_builder::FullCopyUnsignedTxBuild,
+    context: &crate::parser::FlashxPumpRouteContext,
+) -> Result<u64, String> {
+    match context.layout {
+        FlashxPumpLayout::MigratedAmm => build
+            .instructions
+            .iter()
+            .find(|instruction| {
+                instruction.program_id == context.program_id
+                    && instruction.data.first().copied() == Some(1)
+            })
+            .and_then(|instruction| read_u64_le(&instruction.data, 1))
+            .ok_or_else(|| "missing copied flashx SOL amount for total spend guard".to_string()),
+        FlashxPumpLayout::DirectPump => build
+            .instructions
+            .iter()
+            .find(|instruction| instruction.program_id == *pump_fun_program_id())
+            .and_then(|instruction| read_u64_le(&instruction.data, 8))
+            .ok_or_else(|| {
+                "missing copied direct-pump SOL amount for total spend guard".to_string()
+            }),
+    }
 }
 
 fn estimate_priority_fee_lamports(
@@ -2610,6 +2690,11 @@ impl RustTrailingSellLine {
 }
 
 impl CopyExecutionOptions {
+    fn migrated_amm_min_copy_lamports(&self) -> Result<u64, String> {
+        sol_to_lamports(self.migrated_amm_min_copy_sol)
+            .ok_or_else(|| "invalid migrated AMM min copy SOL guard".to_string())
+    }
+
     fn max_total_copy_spend_lamports(&self) -> Result<Option<u64>, String> {
         self.max_total_copy_spend_sol
             .map(|value| {
@@ -3020,6 +3105,8 @@ mod tests {
             jito_auth_uuid: None,
             max_copy_sol: None,
             max_total_copy_spend_sol: None,
+            migrated_amm_min_copy_sol: DEFAULT_MIGRATED_AMM_MIN_COPY_SOL,
+            migrated_amm_small_copy_mode: MigratedAmmSmallCopyMode::Skip,
             copy_wallet: None,
             copy_keypair_path: None,
             solana_rpc_url: None,
@@ -3369,9 +3456,47 @@ mod tests {
     }
 
     #[test]
-    fn total_copy_spend_estimate_includes_input_setup_fees_and_tip() {
+    fn migrated_amm_small_copy_guard_skips_or_floors_below_min() {
+        let route_context = flashx_context(FlashxPumpLayout::MigratedAmm, 1);
+        let mut options = disabled_options();
+        let min_lamports = options.migrated_amm_min_copy_lamports().unwrap();
+
+        assert_eq!(
+            copy_spend_after_migrated_amm_guard(&options, Some(&route_context), 100_000).unwrap(),
+            CopySpendDecision::Skip(format!(
+                "migrated AMM copy spend 100000 lamports below min {} lamports",
+                min_lamports
+            ))
+        );
+        assert_eq!(
+            copy_spend_after_migrated_amm_guard(&options, Some(&route_context), min_lamports)
+                .unwrap(),
+            CopySpendDecision::Use(min_lamports)
+        );
+
+        options.migrated_amm_small_copy_mode = MigratedAmmSmallCopyMode::Floor;
+        assert_eq!(
+            copy_spend_after_migrated_amm_guard(&options, Some(&route_context), 100_000).unwrap(),
+            CopySpendDecision::Use(min_lamports)
+        );
+    }
+
+    #[test]
+    fn migrated_amm_small_copy_guard_does_not_touch_direct_pump() {
+        let route_context = flashx_context(FlashxPumpLayout::DirectPump, 1);
+        let options = disabled_options();
+
+        assert_eq!(
+            copy_spend_after_migrated_amm_guard(&options, Some(&route_context), 100_000).unwrap(),
+            CopySpendDecision::Use(100_000)
+        );
+    }
+
+    #[test]
+    fn total_copy_spend_estimate_uses_copied_input_setup_fees_and_tip() {
         let route_context = flashx_context(FlashxPumpLayout::MigratedAmm, 1);
         let compute_budget_program = crate::parser::COMPUTE_BUDGET_PROGRAM_ID.parse().unwrap();
+        let flashx_program = crate::parser::FLASHX_ROUTER_PROGRAM_ID.parse().unwrap();
         let associated_token_program = crate::parser::ASSOCIATED_TOKEN_PROGRAM_ID.parse().unwrap();
         let system_program = crate::parser::SYSTEM_PROGRAM_ID.parse().unwrap();
         let copy_wallet = COPY_WALLET.parse().unwrap();
@@ -3382,6 +3507,9 @@ mod tests {
         compute_limit_data.extend_from_slice(&400_000u32.to_le_bytes());
         let mut compute_price_data = vec![3];
         compute_price_data.extend_from_slice(&250_000u64.to_le_bytes());
+        let mut flashx_setup_data = vec![1];
+        flashx_setup_data.extend_from_slice(&777_000u64.to_le_bytes());
+        flashx_setup_data.push(42);
         let mut tip_data = Vec::new();
         tip_data.extend_from_slice(&2u32.to_le_bytes());
         tip_data.extend_from_slice(&10_000u64.to_le_bytes());
@@ -3389,7 +3517,7 @@ mod tests {
             route_layout: "migrated-amm",
             copy_wallet_token_account: COPY_WALLET.parse().unwrap(),
             estimated_required_signer: COPY_WALLET.parse().unwrap(),
-            setup_instruction_count: 4,
+            setup_instruction_count: 5,
             main_instruction_count: 1,
             instructions: vec![
                 solana_instruction::Instruction {
@@ -3408,6 +3536,11 @@ mod tests {
                     data: vec![1],
                 },
                 solana_instruction::Instruction {
+                    program_id: flashx_program,
+                    accounts: vec![solana_instruction::AccountMeta::new(copy_wallet, true)],
+                    data: flashx_setup_data,
+                },
+                solana_instruction::Instruction {
                     program_id: system_program,
                     accounts: vec![
                         solana_instruction::AccountMeta::new(copy_wallet, true),
@@ -3420,7 +3553,7 @@ mod tests {
 
         assert_eq!(
             estimate_total_copy_spend_lamports(&build, Some(&route_context)).unwrap(),
-            990_000
+            777_000
                 + SIGNATURE_FEE_LAMPORTS_ESTIMATE
                 + 100_000
                 + 10_000
@@ -3930,6 +4063,31 @@ mod tests {
             line.reason.as_deref(),
             Some("max copy SOL guard exceeds first-live cap 0.001")
         );
+        assert!(!line.signed);
+        assert!(!line.sent);
+    }
+
+    #[tokio::test]
+    async fn migrated_amm_small_copy_skips_before_keypair() {
+        let mut options = disabled_options();
+        options.simulate_copy_tx = true;
+        options.max_copy_sol = Some(0.001);
+        options.copy_wallet = Some(COPY_WALLET.to_string());
+        let mut plan = allowed_plan();
+        plan.spend_sol_amount = Some(0.0001);
+        plan.route_context = Some(flashx_context(FlashxPumpLayout::MigratedAmm, 1));
+        let min_lamports = options.migrated_amm_min_copy_lamports().unwrap();
+
+        let line = executor(options)
+            .handle(&plan, Action::Buy, Some(0.00099), sample_timings())
+            .await;
+        let expected_reason = format!(
+            "migrated AMM copy spend 100000 lamports below min {} lamports",
+            min_lamports
+        );
+
+        assert_eq!(line.decision, "skip");
+        assert_eq!(line.reason.as_deref(), Some(expected_reason.as_str()));
         assert!(!line.signed);
         assert!(!line.sent);
     }

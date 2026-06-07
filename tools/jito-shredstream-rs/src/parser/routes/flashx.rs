@@ -187,7 +187,7 @@ pub(crate) fn route_context(
                 return Some(RouteContext::FlashxPump(FlashxPumpRouteContext {
                     layout: FlashxPumpLayout::DirectPump,
                     program_id: *flashx_router_program_id(),
-                    accounts: Vec::new(),
+                    accounts: route_instruction_accounts(message, instruction, account_keys)?,
                     data: instruction.data.clone(),
                     resolved_accounts: direct_pump_sell_resolved_accounts(&accounts, account_keys)?,
                 }));

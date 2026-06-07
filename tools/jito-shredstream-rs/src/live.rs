@@ -718,19 +718,35 @@ fn enqueue_transaction_confirmation(
     copy_execution: &CopyExecutionOutput,
 ) {
     match copy_execution {
-        CopyExecutionOutput::Copy(line) if line.was_sent() => {
-            let copy_executor = Arc::clone(copy_executor);
-            let copy_execution_tx = copy_execution_tx.clone();
-            let line = line.clone();
-            tokio::spawn(async move {
-                let confirmation = copy_executor.confirm_copy_transaction(line).await;
-                if copy_execution_tx
-                    .send(CopyExecutionOutput::TransactionConfirmation(confirmation))
-                    .is_err()
-                {
-                    eprintln!("copy confirmation result dropped; receiver closed");
-                }
-            });
+        CopyExecutionOutput::Copy(line) => {
+            if line.was_sent() {
+                let copy_executor = Arc::clone(copy_executor);
+                let copy_execution_tx = copy_execution_tx.clone();
+                let line = line.clone();
+                tokio::spawn(async move {
+                    let confirmation = copy_executor.confirm_copy_transaction(line).await;
+                    if copy_execution_tx
+                        .send(CopyExecutionOutput::TransactionConfirmation(confirmation))
+                        .is_err()
+                    {
+                        eprintln!("copy confirmation result dropped; receiver closed");
+                    }
+                });
+            }
+            if line.auto_sell_was_sent() {
+                let copy_executor = Arc::clone(copy_executor);
+                let copy_execution_tx = copy_execution_tx.clone();
+                let line = line.clone();
+                tokio::spawn(async move {
+                    let confirmation = copy_executor.confirm_auto_sell_transaction(line).await;
+                    if copy_execution_tx
+                        .send(CopyExecutionOutput::TransactionConfirmation(confirmation))
+                        .is_err()
+                    {
+                        eprintln!("auto-sell confirmation result dropped; receiver closed");
+                    }
+                });
+            }
         }
         CopyExecutionOutput::RustTrailingSell(line) if line.was_sent() => {
             let copy_executor = Arc::clone(copy_executor);

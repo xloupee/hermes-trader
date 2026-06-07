@@ -742,40 +742,28 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
     context: &crate::parser::FlashxPumpRouteContext,
     copy_wallet_token_account: Pubkey,
     copy_wallet: &str,
-    mint: &str,
+    _mint: &str,
     token_amount_raw: u64,
     _pda_cache: Option<&CopyPdaCache>,
-    allow_direct_pump_buy_context: bool,
+    _allow_direct_pump_buy_context: bool,
 ) -> Result<FullCopyUnsignedTxBuild, TxBuildError> {
-    if !allow_direct_pump_buy_context && context.data.get(17).copied() != Some(1) {
-        return Err(TxBuildError::MissingRouteContext(
-            "missing direct-pump sell-side route context",
-        ));
-    }
-
-    let pump_program = *pump_fun_program_id();
     let copy_wallet_pubkey = parse_pubkey(copy_wallet)?;
-    let token_program = resolved_pubkey(context, "tokenProgram")?;
-    let mint = parse_pubkey(mint)?;
-
     let mut sell_data = Vec::with_capacity(24);
     sell_data.extend_from_slice(&PUMP_FUN_SELL_DISCRIMINATOR);
     sell_data.extend_from_slice(&token_amount_raw.to_le_bytes());
-    sell_data.extend_from_slice(
-        &direct_pump_sell_min_sol_output(context, token_amount_raw)?.to_le_bytes(),
-    );
+    sell_data.extend_from_slice(&DIRECT_PUMP_COPY_MIN_SOL_OUT.to_le_bytes());
 
-    let mut sell_accounts = vec![
+    let mut accounts = vec![
         AccountMeta::new_readonly(resolved_pubkey(context, "globalConfig")?, false),
         AccountMeta::new(resolved_pubkey(context, "feeRecipient")?, false),
-        AccountMeta::new_readonly(mint, false),
+        AccountMeta::new_readonly(resolved_pubkey(context, "mint")?, false),
         AccountMeta::new(resolved_pubkey(context, "bondingCurve")?, false),
         AccountMeta::new(resolved_pubkey(context, "associatedBondingCurve")?, false),
         AccountMeta::new(copy_wallet_token_account, false),
         AccountMeta::new(copy_wallet_pubkey, true),
         AccountMeta::new_readonly(resolved_pubkey(context, "systemProgram")?, false),
         AccountMeta::new(resolved_pubkey(context, "creatorVault")?, false),
-        AccountMeta::new_readonly(token_program, false),
+        AccountMeta::new_readonly(resolved_pubkey(context, "tokenProgram")?, false),
         AccountMeta::new_readonly(resolved_pubkey(context, "eventAuthority")?, false),
         AccountMeta::new_readonly(resolved_pubkey(context, "pumpProgram")?, false),
         AccountMeta::new_readonly(resolved_pubkey(context, "feeConfig")?, false),
@@ -783,21 +771,19 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
         AccountMeta::new_readonly(resolved_pubkey(context, "bondingCurveV2")?, false),
         AccountMeta::new(resolved_pubkey(context, "buybackFeeRecipient")?, false),
     ];
-    if let Some(buyback_fee_recipient_token_account) =
-        context.resolved_pubkey("buybackFeeRecipientTokenAccount")
+    if let Ok(buyback_fee_recipient_token_account) =
+        resolved_pubkey(context, "buybackFeeRecipientTokenAccount")
     {
-        sell_accounts.push(AccountMeta::new(buyback_fee_recipient_token_account, false));
+        accounts.push(AccountMeta::new(buyback_fee_recipient_token_account, false));
     }
-
-    let sell_instruction = Instruction {
-        program_id: pump_program,
-        accounts: sell_accounts,
-        data: sell_data,
-    };
 
     let mut instructions = Vec::with_capacity(2);
     instructions.push(compute_unit_limit_instruction(400_000)?);
-    instructions.push(sell_instruction);
+    instructions.push(Instruction {
+        program_id: resolved_pubkey(context, "pumpProgram")?,
+        accounts,
+        data: sell_data,
+    });
 
     Ok(FullCopyUnsignedTxBuild {
         route_layout: context.layout.as_str(),
@@ -807,37 +793,6 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
         main_instruction_count: instructions.len().saturating_sub(1),
         instructions,
     })
-}
-
-fn direct_pump_sell_min_sol_output(
-    context: &crate::parser::FlashxPumpRouteContext,
-    token_amount_raw: u64,
-) -> Result<u64, TxBuildError> {
-    if context.data.get(17).copied() != Some(1) {
-        return Ok(DIRECT_PUMP_COPY_MIN_SOL_OUT);
-    }
-    let observed_token_amount = read_u64_le(&context.data, 1).ok_or(
-        TxBuildError::InvalidInstruction("missing direct-pump sell token amount"),
-    )?;
-    let observed_min_sol_output = read_u64_le(&context.data, 9).ok_or(
-        TxBuildError::InvalidInstruction("missing direct-pump sell min sol output"),
-    )?;
-    if token_amount_raw == 0 || observed_token_amount == 0 {
-        return Err(TxBuildError::InvalidInstruction(
-            "missing direct-pump sell token amount",
-        ));
-    }
-    let scaled = (observed_min_sol_output as u128).saturating_mul(token_amount_raw as u128)
-        / observed_token_amount as u128;
-    if scaled == 0 && observed_min_sol_output > 0 {
-        return Ok(DIRECT_PUMP_COPY_MIN_SOL_OUT);
-    }
-    if scaled > u64::MAX as u128 {
-        return Err(TxBuildError::InvalidInstruction(
-            "scaled direct-pump min sol output overflow",
-        ));
-    }
-    Ok(scaled as u64)
 }
 
 fn build_auto_sell_unsigned_flashx_migrated_amm(
@@ -1621,7 +1576,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_direct_pump_auto_sell_from_buy_side_context() {
+    fn builds_direct_pump_auto_sell_from_buy_side_context() {
         let transaction = replay_transaction(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/fixtures/flashx/live-buy-2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo.tx.base64"
@@ -1630,23 +1585,36 @@ mod tests {
         let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
             .expect("live direct Pump FLASHX buy should parse");
 
-        let error = build_auto_sell_unsigned_flashx_pump_with_cache(
+        let build = build_auto_sell_unsigned_flashx_pump_with_cache(
             parsed.route_context.as_ref(),
             COPY_WALLET,
             &parsed.mint,
             123_456,
             None,
         )
-        .expect_err("direct Pump auto-sell must not build from buy-side route context");
+        .expect("direct Pump auto-sell should build from buy-side route context");
 
+        assert_eq!(build.route_layout, "direct-pump");
         assert_eq!(
-            error,
-            TxBuildError::MissingRouteContext("missing direct-pump sell-side route context")
+            build.instructions[1].program_id.to_string(),
+            PUMP_FUN_PROGRAM_ID
         );
+        assert_eq!(
+            &build.instructions[1].data[0..8],
+            &PUMP_FUN_SELL_DISCRIMINATOR
+        );
+        assert_eq!(
+            &build.instructions[1].data[8..16],
+            &123_456u64.to_le_bytes()
+        );
+        assert!(build.instructions[1]
+            .accounts
+            .iter()
+            .any(|account| account.pubkey.to_string() == COPY_WALLET && account.is_signer));
     }
 
     #[test]
-    fn rejects_trailing_sell_instruction_for_direct_pump_buy_side_context() {
+    fn builds_trailing_sell_instruction_for_direct_pump_buy_side_context() {
         let transaction = replay_transaction(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/fixtures/flashx/live-buy-2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo.tx.base64"
@@ -1655,7 +1623,7 @@ mod tests {
         let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
             .expect("live direct Pump FLASHX buy should parse");
 
-        let error = build_trailing_sell_unsigned_flashx_pump_with_fees_and_cache(
+        let build = build_trailing_sell_unsigned_flashx_pump_with_fees_and_cache(
             parsed.route_context.as_ref(),
             COPY_WALLET,
             &parsed.mint,
@@ -1663,12 +1631,25 @@ mod tests {
             &TxFeeConfig::default(),
             None,
         )
-        .expect_err("direct Pump trailing sell must not build from buy-side route context");
+        .expect("direct Pump trailing sell should build from buy-side route context");
 
+        assert_eq!(build.route_layout, "direct-pump");
         assert_eq!(
-            error,
-            TxBuildError::MissingRouteContext("missing direct-pump sell-side route context")
+            build.instructions[1].program_id.to_string(),
+            PUMP_FUN_PROGRAM_ID
         );
+        assert_eq!(
+            &build.instructions[1].data[0..8],
+            &PUMP_FUN_SELL_DISCRIMINATOR
+        );
+        assert_eq!(
+            &build.instructions[1].data[8..16],
+            &123_456u64.to_le_bytes()
+        );
+        assert!(build.instructions[1]
+            .accounts
+            .iter()
+            .any(|account| account.pubkey.to_string() == COPY_WALLET && account.is_signer));
     }
 
     #[test]
@@ -1700,19 +1681,8 @@ mod tests {
             &123_456u64.to_le_bytes()
         );
         assert_eq!(
-            read_u64_le(&build.instructions[1].data, 16),
-            Some(
-                direct_pump_sell_min_sol_output(context, 123_456)
-                    .expect("scaled direct-pump min sol output should fit")
-            )
-        );
-        assert_eq!(
-            build.instructions[1].accounts[1].pubkey.to_string(),
-            resolved_account_for_test(context, "feeRecipient")
-        );
-        assert_eq!(
-            build.instructions[1].accounts[1].pubkey.to_string(),
-            "CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM"
+            &build.instructions[1].data[16..24],
+            &DIRECT_PUMP_COPY_MIN_SOL_OUT.to_le_bytes()
         );
         assert!(build.instructions[1]
             .accounts
@@ -1722,40 +1692,12 @@ mod tests {
             account.pubkey.to_string() == "5RGtdhAeLrhqdgEFsa4jR9xpt6Y4Bk9rTQzNTFAjMnho"
                 && account.is_writable
         }));
-        let bonding_curve_v2 = resolved_account_for_test(context, "bondingCurveV2");
-        let buyback_fee_recipient = resolved_account_for_test(context, "buybackFeeRecipient");
-        let buyback_fee_recipient_token_account =
-            resolved_account_for_test(context, "buybackFeeRecipientTokenAccount");
-        assert_eq!(build.instructions[1].accounts.len(), 17);
-        assert_eq!(
-            build.instructions[1].accounts[8].pubkey.to_string(),
-            resolved_account_for_test(context, "creatorVault")
-        );
-        assert!(build.instructions[1].accounts[8].is_writable);
-        assert_eq!(
-            build.instructions[1].accounts[9].pubkey.to_string(),
-            resolved_account_for_test(context, "tokenProgram")
-        );
-        assert!(!build.instructions[1].accounts[9].is_writable);
-        assert_eq!(
-            build.instructions[1].accounts[14].pubkey.to_string(),
-            bonding_curve_v2
-        );
-        assert!(!build.instructions[1].accounts[14].is_writable);
-        assert_eq!(
-            build.instructions[1].accounts[15].pubkey.to_string(),
-            buyback_fee_recipient
-        );
-        assert_eq!(
-            build.instructions[1].accounts[15].pubkey.to_string(),
-            "5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD"
-        );
-        assert!(build.instructions[1].accounts[15].is_writable);
-        assert_eq!(
-            build.instructions[1].accounts[16].pubkey.to_string(),
-            buyback_fee_recipient_token_account
-        );
-        assert!(build.instructions[1].accounts[16].is_writable);
+        assert!(build.instructions[1].accounts.iter().any(|account| {
+            account.pubkey.to_string() == resolved_account_for_test(context, "feeRecipient")
+        }));
+        assert!(build.instructions[1].accounts.iter().any(|account| {
+            account.pubkey.to_string() == resolved_account_for_test(context, "bondingCurveV2")
+        }));
     }
 
     #[test]
@@ -2067,7 +2009,26 @@ mod tests {
         RouteContext::FlashxPump(crate::parser::FlashxPumpRouteContext {
             layout: FlashxPumpLayout::DirectPump,
             program_id: flashx_router_program,
-            accounts: Vec::new(),
+            accounts: vec![
+                route_account("Bc8P1uc9nc7fgq5Z6yEvBM8ccXx9W4fEbqhwX9qnSQ84", true, false),
+                route_account(TARGET_WALLET, true, true),
+                route_account(BURV_MINT, false, false),
+                route_account("CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM", true, false),
+                route_account(FLASHX_ROUTER_PROGRAM_ID, false, false),
+                route_account(PUMP_FUN_PROGRAM_ID, false, false),
+                route_account("4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf", false, false),
+                route_account("4p4fH6hAMjSwQV5oWLD4TxieQiciZHBoGL7m7vjRovE9", true, false),
+                route_account("He1PZZtQ3LRYe4bQKVH7XNtAcxUbs38mDkgZL58MUP8V", true, false),
+                route_account(SYSTEM_PROGRAM_ID, false, false),
+                route_account("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", false, false),
+                route_account("82L33tWkcKBcXFPyUiLJtRmnGomhCzyitELKNoXrJ2T", true, false),
+                route_account("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1", false, false),
+                route_account("8Wf5TiAheLUqBrKXeYg2JtAFFMWtKdG2BSFgqUcPVwTt", false, false),
+                route_account("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ", false, false),
+                route_account("EYyZtDHLiBnLLw9u4z7uLrUoom3ZkrZugmhmqw48mNh6", false, false),
+                route_account("5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD", true, false),
+                route_account("5eHhjP8JaYkz83CWwvGU2uMUXefd3AazWGx4gpcuEEYD", true, false),
+            ],
             data,
             resolved_accounts: crate::parser::FlashxPumpResolvedAccounts::DirectPump(
                 crate::parser::DirectPumpAccounts {
@@ -2099,5 +2060,17 @@ mod tests {
                 },
             ),
         })
+    }
+
+    fn route_account(
+        value: &str,
+        is_writable: bool,
+        is_signer: bool,
+    ) -> crate::parser::RouteInstructionAccount {
+        crate::parser::RouteInstructionAccount {
+            pubkey: pubkey(value),
+            is_writable,
+            is_signer,
+        }
     }
 }

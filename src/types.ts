@@ -118,6 +118,13 @@ export interface BotConfig extends MigrationFormatConfig {
   copyTradeRustTrailingSellsLookbackMs: number;
   copyTradeRustTrailingSellsStartupLookbackMs: number;
   copyTradeRustTrailingSellsMaxRows: number;
+  copyTradeRustExecutionAlertsEnabled: boolean;
+  copyTradeRustExecutionAlertsSource: "supabase" | "local-jsonl";
+  copyTradeRustExecutionAlertsLocalExecutionsPath: string;
+  copyTradeRustExecutionAlertsPollMs: number;
+  copyTradeRustExecutionAlertsLookbackMs: number;
+  copyTradeRustExecutionAlertsStartupLookbackMs: number;
+  copyTradeRustExecutionAlertsMaxRows: number;
   copyTradeBuyPressureSellEnabled: boolean;
   copyTradeBuyPressureSellPercent: number;
   copyTradeBuyPressureSellTimeoutMs: number;
@@ -126,6 +133,7 @@ export interface BotConfig extends MigrationFormatConfig {
   copyTradeBuyPressureSellStatePath: string;
   copyTradeHotSnapshotEnabled: boolean;
   copyTradeHotSnapshotPath: string;
+  copyTradeHotSnapshotKeypairDir: string;
   copyTradeHotSnapshotReloadCommand?: string;
   directExecutionEnabled: boolean;
   directExecutionLiveEnabled: boolean;

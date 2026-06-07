@@ -10,6 +10,7 @@
     "shred-listener": "npm run build && node dist/shred-listener.js",
     "chat-id": "npm run build && node dist/get-chat-id.js",
     "past-migrations": "npm run build && node dist/past-migrations.js",
+    "feed-latency": "node scripts/compare-wallet-feed-latency.mjs",
     "import-subscribers": "npm run build && node dist/import-subscribers.js",
     "shredstream-decoder:check": "cargo check --manifest-path tools/shredstream-rs/Cargo.toml",
     "shredstream-decoder:test": "cargo test --manifest-path tools/shredstream-rs/Cargo.toml",

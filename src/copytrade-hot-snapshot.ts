@@ -52,6 +52,7 @@ export interface CopyTradeHotPathSnapshotTrailingSellConfig {
 export interface CopyTradeHotPathSnapshotSubscriber {
   chatId: string;
   tradingWalletPublicKey: string;
+  signerKeypairPath: string | null;
   copyAmountSol: number;
   retryFailedBuys: boolean;
   buySlippage: number | null;
@@ -146,12 +147,14 @@ export function createCopyTradeHotPathSnapshot({
   routing,
   sequence,
   dailySpentSolByChatId,
+  signerKeypairDir,
   generatedAtMs = Date.now()
 }: {
   subscribers: SubscriberRecord[];
   routing: CopyTradeHotPathSnapshotRouting;
   sequence: number;
   dailySpentSolByChatId?: DailySpentSolLookup;
+  signerKeypairDir?: string | null;
   generatedAtMs?: number;
 }): CopyTradeHotPathSnapshot {
   if (!Number.isSafeInteger(sequence) || sequence <= 0) {
@@ -168,7 +171,8 @@ export function createCopyTradeHotPathSnapshot({
           .map((subscriber) => snapshotSubscriber({
             subscriber,
             routing,
-            dailySpentSolByChatId
+            dailySpentSolByChatId,
+            signerKeypairDir
           }))
           .filter((subscriber): subscriber is CopyTradeHotPathSnapshotSubscriber => Boolean(subscriber))
           .sort((a, b) => a.chatId.localeCompare(b.chatId))
@@ -246,11 +250,13 @@ export function createCopyTradeHotSnapshotSubscriberStore(
 function snapshotSubscriber({
   subscriber,
   routing,
-  dailySpentSolByChatId
+  dailySpentSolByChatId,
+  signerKeypairDir
 }: {
   subscriber: SubscriberRecord;
   routing: CopyTradeHotPathSnapshotRouting;
   dailySpentSolByChatId?: DailySpentSolLookup;
+  signerKeypairDir?: string | null;
 }): CopyTradeHotPathSnapshotSubscriber | null {
   const tradingWallet = subscriber.tradingWallet;
   const copyAmountSol = finitePositiveNumber(subscriber.copyAmountSol);
@@ -306,6 +312,7 @@ function snapshotSubscriber({
   return {
     chatId: subscriber.chatId,
     tradingWalletPublicKey: tradingWallet.publicKey,
+    signerKeypairPath: signerKeypairPathForWallet(signerKeypairDir, tradingWallet.publicKey),
     copyAmountSol,
     retryFailedBuys: subscriber.copyTradeRetryFailedBuys === true,
     buySlippage,
@@ -319,6 +326,11 @@ function snapshotSubscriber({
     dailySpentSol,
     wallets
   };
+}
+
+function signerKeypairPathForWallet(dir: string | null | undefined, publicKey: string): string | null {
+  const normalizedDir = dir?.trim().replace(/\/+$/, "");
+  return normalizedDir ? `${normalizedDir}/${publicKey}.json` : null;
 }
 
 function isLocalSolanaTradingWalletReady(wallet: TradingWallet | null): wallet is TradingWallet {

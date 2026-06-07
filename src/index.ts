@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { execFile } from "node:child_process";
-import { appendFile, mkdir, open, readFile, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, open, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
 import { Connection, PublicKey } from "@solana/web3.js";
@@ -559,6 +559,32 @@ const config: BotConfig = {
     0
   ),
   copyTradeRustTrailingSellsMaxRows: positiveIntegerFromEnv(process.env.COPY_TRADE_RUST_TRAILING_SELLS_MAX_ROWS, 50),
+  copyTradeRustExecutionAlertsEnabled: process.env.COPY_TRADE_RUST_EXECUTION_ALERTS_ENABLED === "true",
+  copyTradeRustExecutionAlertsSource: rustTrailingSellSourceFromEnv(
+    process.env.COPY_TRADE_RUST_EXECUTION_ALERTS_SOURCE ||
+    process.env.COPY_TRADE_RUST_TRAILING_SELLS_SOURCE
+  ),
+  copyTradeRustExecutionAlertsLocalExecutionsPath:
+    process.env.COPY_TRADE_RUST_EXECUTION_ALERTS_LOCAL_EXECUTIONS_PATH ||
+    process.env.COPY_TRADE_RUST_TRAILING_SELLS_LOCAL_EXECUTIONS_PATH ||
+    process.env.JITO_COPY_EXECUTIONS_PATH ||
+    "/var/log/jito-copy-executions-vps.jsonl",
+  copyTradeRustExecutionAlertsPollMs: positiveIntegerFromEnv(
+    process.env.COPY_TRADE_RUST_EXECUTION_ALERTS_POLL_MS,
+    1000
+  ),
+  copyTradeRustExecutionAlertsLookbackMs: positiveIntegerFromEnv(
+    process.env.COPY_TRADE_RUST_EXECUTION_ALERTS_LOOKBACK_MS,
+    60_000
+  ),
+  copyTradeRustExecutionAlertsStartupLookbackMs: nonNegativeIntegerFromEnv(
+    process.env.COPY_TRADE_RUST_EXECUTION_ALERTS_STARTUP_LOOKBACK_MS,
+    0
+  ),
+  copyTradeRustExecutionAlertsMaxRows: positiveIntegerFromEnv(
+    process.env.COPY_TRADE_RUST_EXECUTION_ALERTS_MAX_ROWS,
+    50
+  ),
   copyTradeBuyPressureSellEnabled: process.env.COPY_TRADE_BUY_PRESSURE_SELL_ENABLED === "true",
   copyTradeBuyPressureSellPercent: percentFromEnv(process.env.COPY_TRADE_BUY_PRESSURE_SELL_PERCENT, 100),
   copyTradeBuyPressureSellTimeoutMs: positiveIntegerFromEnv(process.env.COPY_TRADE_BUY_PRESSURE_SELL_TIMEOUT_MS, 120_000),
@@ -570,6 +596,10 @@ const config: BotConfig = {
     process.env.COPY_TRADE_HOT_SNAPSHOT_PATH ||
     process.env.JITO_TELEGRAM_SNAPSHOT_PATH ||
     "data/jito-telegram-copy-snapshot.json",
+  copyTradeHotSnapshotKeypairDir:
+    process.env.COPY_TRADE_HOT_SNAPSHOT_KEYPAIR_DIR ||
+    process.env.JITO_COPY_KEYPAIR_DIR ||
+    "/etc/jito-copy-wallets",
   copyTradeHotSnapshotReloadCommand:
     process.env.COPY_TRADE_HOT_SNAPSHOT_RELOAD_COMMAND ||
     process.env.JITO_COPY_LIVE_RELOAD_COMMAND,
@@ -615,7 +645,9 @@ const buyPressureSellTimers = new Map<string, NodeJS.Timeout>();
 const activeBuyPressureSellWatchers = new Map<string, CopyTradeBuyPressureSellWatcher>();
 const activeBuyPressureSellTriggers = new Set<string>();
 const rustTrailingSellExecutionKeys = new Set<string>();
+const rustCopyBuyAlertExecutionKeys = new Set<string>();
 const rustTrailingSellPollStartedAtMs = Date.now();
+const rustCopyBuyAlertPollStartedAtMs = Date.now();
 const copyBuySubmissionGuard = createCopyBuySubmissionGuard();
 const copyBuySemanticSubmissionGuard = createCopyBuySubmissionGuard();
 const copyTradeSignalRaceTracker = createCopyTradeSignalRaceTracker();
@@ -697,6 +729,9 @@ let rustTrailingSellPollerTimer: NodeJS.Timeout | null = null;
 let rustTrailingSellPollerRunning = false;
 let rustTrailingSellLocalFileOffset: number | null = null;
 let rustTrailingSellLocalFileRemainder = "";
+let rustCopyBuyAlertPollerRunning = false;
+let rustCopyBuyAlertLocalFileOffset: number | null = null;
+let rustCopyBuyAlertLocalFileRemainder = "";
 
 const baseSubscriptionMethods: PumpPortalSubscription[] = ["subscribeNewToken", "subscribeMigration"];
 
@@ -738,9 +773,11 @@ function queueCopyTradeHotPathSnapshotRefresh(reason: string): Promise<void> {
 }
 
 async function refreshCopyTradeHotPathSnapshot(reason: string): Promise<void> {
+  const subscriberRecords = baseSubscribers.list();
   const snapshot = createCopyTradeHotPathSnapshot({
-    subscribers: baseSubscribers.list(),
+    subscribers: subscriberRecords,
     sequence: copyTradeHotPathSnapshotSequence + 1,
+    signerKeypairDir: config.copyTradeHotSnapshotKeypairDir,
     routing: {
       executionProvider: config.copyTradeExecutionProvider,
       pool: config.copyTradePool,
@@ -763,6 +800,11 @@ async function refreshCopyTradeHotPathSnapshot(reason: string): Promise<void> {
     }
   });
   copyTradeHotPathSnapshotSequence = snapshot.sequence;
+  await writeCopyTradeHotSnapshotKeypairFiles({
+    subscribers: subscriberRecords,
+    snapshot,
+    keypairDir: config.copyTradeHotSnapshotKeypairDir
+  });
   await writeCopyTradeHotPathSnapshotFile(config.copyTradeHotSnapshotPath, snapshot);
 
   const targetCount = new Set(snapshot.subscribers.flatMap((subscriber) => subscriber.wallets.map((wallet) => wallet.address))).size;
@@ -773,12 +815,65 @@ async function refreshCopyTradeHotPathSnapshot(reason: string): Promise<void> {
       `sequence=${snapshot.sequence}`,
       `subscribers=${snapshot.subscribers.length}`,
       `targets=${targetCount}`,
+      `signers=${snapshot.subscribers.filter((subscriber) => subscriber.signerKeypairPath).length}`,
       `path=${config.copyTradeHotSnapshotPath}`
     ].join(" | ")
   );
 
   if (copyTradeHotSnapshotReloadNeeded(reason)) {
     await runCopyTradeHotSnapshotReloadCommand(reason);
+  }
+}
+
+async function writeCopyTradeHotSnapshotKeypairFiles({
+  subscribers,
+  snapshot,
+  keypairDir
+}: {
+  subscribers: SubscriberRecord[];
+  snapshot: ReturnType<typeof createCopyTradeHotPathSnapshot>;
+  keypairDir: string;
+}): Promise<void> {
+  const signerPaths = snapshot.subscribers
+    .map((subscriber) => ({
+      publicKey: subscriber.tradingWalletPublicKey,
+      path: subscriber.signerKeypairPath
+    }))
+    .filter((entry): entry is { publicKey: string; path: string } => Boolean(entry.path));
+
+  if (signerPaths.length === 0) {
+    return;
+  }
+
+  await mkdir(keypairDir, { recursive: true, mode: 0o700 });
+  const walletsByPublicKey = new Map<string, TradingWallet>();
+  for (const subscriber of subscribers) {
+    const wallet = subscriber.tradingWallet;
+    if (
+      wallet?.publicKey &&
+      wallet.provider === "local-solana" &&
+      wallet.encryptedSecretKey
+    ) {
+      walletsByPublicKey.set(wallet.publicKey, wallet);
+    }
+  }
+
+  for (const { publicKey, path } of signerPaths) {
+    const wallet = walletsByPublicKey.get(publicKey);
+    if (!wallet) {
+      throw new Error(`copy trade hot snapshot signer wallet missing for ${publicKey}`);
+    }
+    const signer = cachedLocalSolanaSigner(wallet);
+    if (signer.publicKey.toBase58() !== publicKey) {
+      throw new Error(`copy trade hot snapshot signer mismatch for ${publicKey}`);
+    }
+    const tempPath = `${path}.${process.pid}.tmp`;
+    await writeFile(tempPath, `${JSON.stringify(Array.from(signer.secretKey))}\n`, {
+      encoding: "utf8",
+      mode: 0o600
+    });
+    await rename(tempPath, path);
+    await chmod(path, 0o600);
   }
 }
 
@@ -1412,6 +1507,15 @@ function logCopyTradeExecutionState(): void {
       `enabled=${config.copyTradeHotSnapshotEnabled ? "true" : "false"}`,
       `path=${config.copyTradeHotSnapshotPath}`,
       `reload=${config.copyTradeHotSnapshotReloadCommand ? "configured" : "off"}`
+    ].join(" | ")
+  );
+  console.log(
+    [
+      "Rust copy buy Telegram alerts",
+      `enabled=${config.copyTradeRustExecutionAlertsEnabled ? "true" : "false"}`,
+      `source=${config.copyTradeRustExecutionAlertsSource}`,
+      `pollMs=${config.copyTradeRustExecutionAlertsPollMs}`,
+      `maxRows=${config.copyTradeRustExecutionAlertsMaxRows}`
     ].join(" | ")
   );
 
@@ -3536,6 +3640,16 @@ async function notifySkippedAutoCopyBuy({
     ].join("; ")
   );
 
+  if (rustJitoSnapshotModeActive()) {
+    console.warn(
+      [
+        "Suppressing legacy skipped auto copy buy Telegram alert because Rust/Jito snapshot mode is active",
+        "Rust copy buy alerts are emitted from copytrade_local_executions"
+      ].join("; ")
+    );
+    return;
+  }
+
   const message = formatSkippedAutoCopyBuyMessage({ subscriber, trade, reason });
   if (!message) {
     return;
@@ -3551,6 +3665,10 @@ async function notifySkippedAutoCopyBuy({
   } catch (error) {
     console.warn(`Could not send skipped auto copy buy alert to ${subscriber.chatId}: ${errorMessage(error)}`);
   }
+}
+
+function rustJitoSnapshotModeActive(): boolean {
+  return config.copyTradeHotSnapshotEnabled && config.copyTradeHotSnapshotPath.trim().length > 0;
 }
 
 function formatSkippedAutoCopyBuyMessage({
@@ -5231,6 +5349,75 @@ function startRustTrailingSellPoller(): void {
   });
 }
 
+function rustCopyBuyAlertPollerDisabledReason(): string | null {
+  if (!config.copyTradeRustExecutionAlertsEnabled) {
+    return "COPY_TRADE_RUST_EXECUTION_ALERTS_ENABLED is not true";
+  }
+
+  if (
+    config.copyTradeRustExecutionAlertsSource === "supabase" &&
+    (!config.supabaseUrl || !config.supabaseServiceRoleKey)
+  ) {
+    return "missing Supabase config";
+  }
+
+  if (
+    config.copyTradeRustExecutionAlertsSource === "local-jsonl" &&
+    !config.copyTradeRustExecutionAlertsLocalExecutionsPath
+  ) {
+    return "missing COPY_TRADE_RUST_EXECUTION_ALERTS_LOCAL_EXECUTIONS_PATH";
+  }
+
+  return null;
+}
+
+function startRustCopyBuyAlertPoller(): void {
+  const disabledReason = rustCopyBuyAlertPollerDisabledReason();
+  if (disabledReason) {
+    if (config.copyTradeRustExecutionAlertsEnabled) {
+      console.warn(`Rust copy buy Telegram alert poller disabled: ${disabledReason}`);
+    }
+    return;
+  }
+
+  console.log(
+    [
+      "Rust copy buy Telegram alert poller enabled",
+      `source=${config.copyTradeRustExecutionAlertsSource}`,
+      `pollMs=${config.copyTradeRustExecutionAlertsPollMs}`,
+      `lookbackMs=${config.copyTradeRustExecutionAlertsLookbackMs}`
+    ].join(" | ")
+  );
+
+  setInterval(() => {
+    pollRustCopyBuyExecutionAlerts().catch((error) => {
+      console.warn(`Rust copy buy Telegram alert poll failed: ${errorMessage(error)}`);
+    });
+  }, config.copyTradeRustExecutionAlertsPollMs);
+
+  pollRustCopyBuyExecutionAlerts().catch((error) => {
+    console.warn(`Initial Rust copy buy Telegram alert poll failed: ${errorMessage(error)}`);
+  });
+}
+
+async function pollRustCopyBuyExecutionAlerts(): Promise<void> {
+  if (rustCopyBuyAlertPollerRunning || isShuttingDown) {
+    return;
+  }
+
+  rustCopyBuyAlertPollerRunning = true;
+  try {
+    const rows = await fetchRecentRustCopyBuyAlertRows();
+    for (const row of rows) {
+      notifyRustCopyBuyExecution(row).catch((error) => {
+        console.warn(`Rust copy buy Telegram alert failed: ${errorMessage(error)}`);
+      });
+    }
+  } finally {
+    rustCopyBuyAlertPollerRunning = false;
+  }
+}
+
 async function pollRustTrailingSellExecutions(): Promise<void> {
   if (rustTrailingSellPollerRunning || isShuttingDown) {
     return;
@@ -5249,49 +5436,46 @@ async function pollRustTrailingSellExecutions(): Promise<void> {
   }
 }
 
-async function fetchRecentRustCopyBuyExecutionRows(): Promise<RustCopyTradeLocalExecutionRow[]> {
-  if (config.copyTradeRustTrailingSellsSource === "local-jsonl") {
-    return fetchNewRustCopyBuyExecutionRowsFromLocalFile();
-  }
+const RUST_COPY_BUY_EXECUTION_SELECT_COLUMNS = [
+  "id",
+  "created_at",
+  "observed_at_ms",
+  "provider",
+  "source",
+  "observed_wallet",
+  "copy_wallet",
+  "observed_signature",
+  "send_signature",
+  "slot",
+  "copy_slot",
+  "selected_route",
+  "route_layout",
+  "mint",
+  "observed_action",
+  "observed_sol_amount",
+  "decision",
+  "sent",
+  "dry_run",
+  "send_enabled",
+  "raw_execution",
+  "chain_report"
+];
 
+async function fetchRustCopyBuyExecutionRowsFromSupabase({
+  sinceMs,
+  limit
+}: {
+  sinceMs: number;
+  limit: number;
+}): Promise<RustCopyTradeLocalExecutionRow[]> {
   const base = config.supabaseUrl?.trim().replace(/\/+$/, "");
   const serviceRoleKey = config.supabaseServiceRoleKey;
   if (!base || !serviceRoleKey) {
     return [];
   }
 
-  const sinceMs = Math.max(
-    Date.now() - config.copyTradeRustTrailingSellsLookbackMs,
-    rustTrailingSellPollStartedAtMs - config.copyTradeRustTrailingSellsStartupLookbackMs
-  );
   const url = new URL(`${base}/rest/v1/copytrade_local_executions`);
-  url.searchParams.set(
-    "select",
-    [
-      "id",
-      "created_at",
-      "observed_at_ms",
-      "provider",
-      "source",
-      "observed_wallet",
-      "copy_wallet",
-      "observed_signature",
-      "send_signature",
-      "slot",
-      "copy_slot",
-      "selected_route",
-      "route_layout",
-      "mint",
-      "observed_action",
-      "observed_sol_amount",
-      "decision",
-      "sent",
-      "dry_run",
-      "send_enabled",
-      "raw_execution",
-      "chain_report"
-    ].join(",")
-  );
+  url.searchParams.set("select", RUST_COPY_BUY_EXECUTION_SELECT_COLUMNS.join(","));
   url.searchParams.set("provider", "eq.shredstream");
   url.searchParams.set("observed_action", "eq.buy");
   url.searchParams.set("decision", "eq.sent");
@@ -5301,7 +5485,7 @@ async function fetchRecentRustCopyBuyExecutionRows(): Promise<RustCopyTradeLocal
   url.searchParams.set("mint", "not.is.null");
   url.searchParams.set("created_at", `gte.${new Date(sinceMs).toISOString()}`);
   url.searchParams.set("order", "created_at.asc");
-  url.searchParams.set("limit", String(config.copyTradeRustTrailingSellsMaxRows));
+  url.searchParams.set("limit", String(limit));
 
   const response = await fetch(url, {
     headers: {
@@ -5322,6 +5506,36 @@ async function fetchRecentRustCopyBuyExecutionRows(): Promise<RustCopyTradeLocal
   return body
     .map(normalizeRustCopyBuyExecutionRow)
     .filter((row): row is RustCopyTradeLocalExecutionRow => row !== null);
+}
+
+async function fetchRecentRustCopyBuyExecutionRows(): Promise<RustCopyTradeLocalExecutionRow[]> {
+  if (config.copyTradeRustTrailingSellsSource === "local-jsonl") {
+    return fetchNewRustCopyBuyExecutionRowsFromLocalFile();
+  }
+
+  const sinceMs = Math.max(
+    Date.now() - config.copyTradeRustTrailingSellsLookbackMs,
+    rustTrailingSellPollStartedAtMs - config.copyTradeRustTrailingSellsStartupLookbackMs
+  );
+  return fetchRustCopyBuyExecutionRowsFromSupabase({
+    sinceMs,
+    limit: config.copyTradeRustTrailingSellsMaxRows
+  });
+}
+
+async function fetchRecentRustCopyBuyAlertRows(): Promise<RustCopyTradeLocalExecutionRow[]> {
+  if (config.copyTradeRustExecutionAlertsSource === "local-jsonl") {
+    return fetchNewRustCopyBuyAlertRowsFromLocalFile();
+  }
+
+  const sinceMs = Math.max(
+    Date.now() - config.copyTradeRustExecutionAlertsLookbackMs,
+    rustCopyBuyAlertPollStartedAtMs - config.copyTradeRustExecutionAlertsStartupLookbackMs
+  );
+  return fetchRustCopyBuyExecutionRowsFromSupabase({
+    sinceMs,
+    limit: config.copyTradeRustExecutionAlertsMaxRows
+  });
 }
 
 async function fetchNewRustCopyBuyExecutionRowsFromLocalFile(): Promise<RustCopyTradeLocalExecutionRow[]> {
@@ -5357,6 +5571,52 @@ async function fetchNewRustCopyBuyExecutionRowsFromLocalFile(): Promise<RustCopy
   const text = rustTrailingSellLocalFileRemainder + buffer.toString("utf8");
   const lines = text.split(/\r?\n/);
   rustTrailingSellLocalFileRemainder = lines.pop() || "";
+
+  return lines
+    .map((line) => {
+      try {
+        return JSON.parse(line) as unknown;
+      } catch {
+        return null;
+      }
+    })
+    .map(normalizeRustCopyBuyExecutionRow)
+    .filter((row): row is RustCopyTradeLocalExecutionRow => row !== null);
+}
+
+async function fetchNewRustCopyBuyAlertRowsFromLocalFile(): Promise<RustCopyTradeLocalExecutionRow[]> {
+  const path = config.copyTradeRustExecutionAlertsLocalExecutionsPath;
+  let currentStat: Awaited<ReturnType<typeof stat>>;
+  try {
+    currentStat = await stat(path);
+  } catch (error) {
+    console.warn(`Rust copy buy alert local source unavailable at ${path}: ${errorMessage(error)}`);
+    return [];
+  }
+
+  if (rustCopyBuyAlertLocalFileOffset === null || currentStat.size < rustCopyBuyAlertLocalFileOffset) {
+    rustCopyBuyAlertLocalFileOffset = currentStat.size;
+    rustCopyBuyAlertLocalFileRemainder = "";
+    return [];
+  }
+
+  if (currentStat.size === rustCopyBuyAlertLocalFileOffset) {
+    return [];
+  }
+
+  const length = currentStat.size - rustCopyBuyAlertLocalFileOffset;
+  const buffer = Buffer.alloc(length);
+  const handle = await open(path, "r");
+  try {
+    await handle.read(buffer, 0, length, rustCopyBuyAlertLocalFileOffset);
+  } finally {
+    await handle.close();
+  }
+  rustCopyBuyAlertLocalFileOffset = currentStat.size;
+
+  const text = rustCopyBuyAlertLocalFileRemainder + buffer.toString("utf8");
+  const lines = text.split(/\r?\n/);
+  rustCopyBuyAlertLocalFileRemainder = lines.pop() || "";
 
   return lines
     .map((line) => {
@@ -5430,6 +5690,118 @@ function normalizeRustCopyBuyExecutionRow(value: unknown): RustCopyTradeLocalExe
     raw_execution: isRecord(value.raw_execution) ? asRecord(value.raw_execution) : value,
     chain_report: asRecord(value.chain_report)
   };
+}
+
+async function notifyRustCopyBuyExecution(row: RustCopyTradeLocalExecutionRow): Promise<void> {
+  const key = rustTrailingSellExecutionKey(row);
+  if (!rememberRustCopyBuyAlertExecution(key)) {
+    return;
+  }
+
+  const entries = activeCopyTradeEntriesForTarget(row.observed_wallet)
+    .filter((entry) => entry.subscriber.tradingWallet?.publicKey === row.copy_wallet);
+
+  if (entries.length === 0) {
+    console.warn(
+      `Skipping Rust copy buy Telegram alert for ${row.observed_wallet}:${row.copy_wallet}:${row.mint}: no active Telegram copy target matched`
+    );
+    return;
+  }
+
+  await Promise.all(entries.map(async (entry) => {
+    const trade = walletTradeFromRustCopyBuyExecution(row, entry.label);
+    const message = formatAutoCopyBuyMessage({
+      trade,
+      tradingWalletPublicKey: row.copy_wallet,
+      copyAmountSol: rustCopyBuyAlertCopyAmountSol(row, entry.subscriber),
+      result: tradeExecutionResultFromRustCopyBuyExecution(row)
+    });
+
+    if (!message) {
+      return;
+    }
+
+    await sendTelegramMessage({
+      token: config.telegramToken,
+      chatId: entry.subscriber.chatId,
+      text: message,
+      replyMarkup: buildWalletTradeReplyMarkup(trade)
+    }).catch((error) => {
+      console.warn(`Could not send Rust copy buy alert to ${entry.subscriber.chatId}: ${errorMessage(error)}`);
+    });
+  }));
+}
+
+function rustCopyBuyAlertCopyAmountSol(row: RustCopyTradeLocalExecutionRow, subscriber: SubscriberRecord): number {
+  return finiteNumberValue(row.raw_execution.plannedCopySolAmount)
+    ?? lamportsToSolNumber(finiteNumberValue(row.raw_execution.plannedCopySpendLamports))
+    ?? subscriber.copyAmountSol
+    ?? 0;
+}
+
+function lamportsToSolNumber(lamports: number | null): number | null {
+  return lamports === null ? null : lamports / 1_000_000_000;
+}
+
+function tradeExecutionResultFromRustCopyBuyExecution(row: RustCopyTradeLocalExecutionRow): TradeExecutionResult {
+  const buyStatus = stringValue(row.chain_report.buyStatus);
+  const chainStatus = stringValue(row.chain_report.status);
+  const failed = buyStatus === "buyFailedOnChain" || chainStatus === "failed";
+  const submittedAtMs = finiteNumberValue(row.raw_execution.sendSubmittedAtMs)
+    ?? row.execution_at_ms
+    ?? row.observed_at_ms
+    ?? null;
+  const confirmedAtMs = chainStatus === "landed"
+    ? (finiteNumberValue(row.chain_report.blockTime) !== null ? finiteNumberValue(row.chain_report.blockTime)! * 1000 : null)
+    : null;
+
+  return {
+    ok: !failed,
+    status: failed ? "failed" : chainStatus === "landed" || buyStatus === "buyLanded" ? "confirmed" : "submitted",
+    provider: "direct-auto",
+    route: copyTradeRouteForProvider("direct-auto"),
+    signature: row.send_signature,
+    errorText: failed ? chainErrorText(row.chain_report) : null,
+    raw: {
+      rustCopyTradeLocalExecution: {
+        id: row.id,
+        observedSignature: row.observed_signature,
+        sendSignature: row.send_signature,
+        selectedRoute: row.selected_route,
+        routeLayout: row.route_layout,
+        decision: row.decision
+      },
+      rawExecution: row.raw_execution,
+      chainReport: row.chain_report
+    },
+    submittedAtMs,
+    confirmedAtMs,
+    slot: row.copy_slot,
+    metadata: {
+      source: "copytrade_local_executions",
+      observedSignature: row.observed_signature,
+      observedWallet: row.observed_wallet,
+      copyWallet: row.copy_wallet,
+      selectedRoute: row.selected_route,
+      routeLayout: row.route_layout
+    },
+    platformFee: null
+  };
+}
+
+function chainErrorText(report: LooseRecord): string | null {
+  const error = firstValue([report], ["err", "error", "errorText", "reason"]);
+  if (typeof error === "string") {
+    return error;
+  }
+  if (error === null || error === undefined) {
+    return null;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
 }
 
 async function scheduleRustTrailingSellsForExecution(row: RustCopyTradeLocalExecutionRow): Promise<void> {
@@ -5506,6 +5878,21 @@ function rememberRustTrailingSellExecution(key: string): boolean {
     const oldest = rustTrailingSellExecutionKeys.values().next().value;
     if (oldest) {
       rustTrailingSellExecutionKeys.delete(oldest);
+    }
+  }
+  return true;
+}
+
+function rememberRustCopyBuyAlertExecution(key: string): boolean {
+  if (rustCopyBuyAlertExecutionKeys.has(key)) {
+    return false;
+  }
+
+  rustCopyBuyAlertExecutionKeys.add(key);
+  if (rustCopyBuyAlertExecutionKeys.size > 5000) {
+    const oldest = rustCopyBuyAlertExecutionKeys.values().next().value;
+    if (oldest) {
+      rustCopyBuyAlertExecutionKeys.delete(oldest);
     }
   }
   return true;
@@ -5991,6 +6378,7 @@ if (config.heliusWebhookAuthHeader) {
 }
 yellowstoneWalletMonitor.start();
 shredstreamWalletObserver.start();
+startRustCopyBuyAlertPoller();
 startRustTrailingSellPoller();
 migrationListener.start();
 geyserWalletTradeListener.start();

@@ -114,6 +114,7 @@ test("copy trade hot-path snapshot is deterministic and checksummed", () => {
     "WalletB1111111111111111111111111111111111"
   ]);
   assert.doesNotMatch(JSON.stringify(snapshot), /encrypted|encryptedSecretKey|apiKeyLast4|abcd/);
+  assert.equal(snapshot.subscribers[0].signerKeypairPath, null);
   assert.equal(snapshot.subscribers[0].dailySpentSol, 0.1);
   assert.deepEqual(snapshot.subscribers[0].wallets[0].trailingSell, routing.defaultTrailingSell);
   assert.equal(snapshot.subscribers[0].effectiveSellSlippage, routing.defaultSlippage);
@@ -168,6 +169,29 @@ test("copy trade hot-path snapshot exports wallet trailing sell overrides and se
       { delayMs: 750, percent: 100 }
     ]
   });
+});
+
+test("copy trade hot-path snapshot exports signer keypair refs without key material", () => {
+  const snapshot = createCopyTradeHotPathSnapshot({
+    subscribers: [
+      subscriber({
+        tradingWalletPublicKey: "SignerWallet1111111111111111111111111111111"
+      })
+    ],
+    routing,
+    signerKeypairDir: "/etc/jito-copy-wallets",
+    dailySpentSolByChatId: {
+      "chat-1": 0
+    },
+    sequence: 9,
+    generatedAtMs: 1
+  });
+
+  assert.equal(
+    snapshot.subscribers[0].signerKeypairPath,
+    "/etc/jito-copy-wallets/SignerWallet1111111111111111111111111111111.json"
+  );
+  assert.doesNotMatch(JSON.stringify(snapshot), /encrypted|encryptedSecretKey|apiKeyLast4|abcd/);
 });
 
 test("copy trade hot-path snapshot skips incomplete or disabled copy state", () => {

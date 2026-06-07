@@ -187,7 +187,7 @@ pub(crate) fn route_context(
                 return Some(RouteContext::FlashxPump(FlashxPumpRouteContext {
                     layout: FlashxPumpLayout::DirectPump,
                     program_id: *flashx_router_program_id(),
-                    accounts: Vec::new(),
+                    accounts: route_instruction_accounts(message, instruction, account_keys)?,
                     data: instruction.data.clone(),
                     resolved_accounts: direct_pump_sell_resolved_accounts(&accounts, account_keys)?,
                 }));
@@ -302,6 +302,7 @@ fn migrated_amm_resolved_accounts(
     accounts: &[u8],
     account_keys: &[Pubkey],
 ) -> Option<FlashxPumpResolvedAccounts> {
+    let suffix = migrated_amm_suffix_accounts(accounts, account_keys)?;
     Some(FlashxPumpResolvedAccounts::MigratedAmm(
         MigratedAmmAccounts {
             payer: *account_key_at(accounts, account_keys, 1)?,
@@ -327,14 +328,59 @@ fn migrated_amm_resolved_accounts(
             coin_creator_vault_authority: *account_key_at(accounts, account_keys, 27)?,
             global_volume_accumulator: *account_key_at(accounts, account_keys, 28)?,
             user_volume_accumulator: *account_key_at(accounts, account_keys, 29)?,
+            user_volume_accumulator_quote_token_account: suffix
+                .user_volume_accumulator_quote_token_account,
             fee_config: *account_key_at(accounts, account_keys, 30)?,
             fee_program: *account_key_at(accounts, account_keys, 31)?,
-            pool_v2: account_key_at(accounts, account_keys, 32).copied(),
+            pool_v2: suffix.pool_v2,
+            buyback_fee_recipient: suffix.buyback_fee_recipient,
+            buyback_fee_recipient_token_account: suffix.buyback_fee_recipient_token_account,
+        },
+    ))
+}
+
+struct MigratedAmmSuffixAccounts {
+    user_volume_accumulator_quote_token_account: Option<Pubkey>,
+    pool_v2: Option<Pubkey>,
+    buyback_fee_recipient: Option<Pubkey>,
+    buyback_fee_recipient_token_account: Option<Pubkey>,
+}
+
+fn migrated_amm_suffix_accounts(
+    accounts: &[u8],
+    account_keys: &[Pubkey],
+) -> Option<MigratedAmmSuffixAccounts> {
+    let mint = *account_key_at(accounts, account_keys, 12)?;
+    let expected_pool_v2 =
+        Pubkey::find_program_address(&[b"pool-v2", mint.as_ref()], pump_amm_program_id()).0;
+
+    if account_key_at(accounts, account_keys, 32).copied() == Some(expected_pool_v2) {
+        return Some(MigratedAmmSuffixAccounts {
+            user_volume_accumulator_quote_token_account: None,
+            pool_v2: Some(expected_pool_v2),
             buyback_fee_recipient: account_key_at(accounts, account_keys, 33).copied(),
             buyback_fee_recipient_token_account: account_key_at(accounts, account_keys, 34)
                 .copied(),
-        },
-    ))
+        });
+    }
+
+    if account_key_at(accounts, account_keys, 33).copied() == Some(expected_pool_v2) {
+        return Some(MigratedAmmSuffixAccounts {
+            user_volume_accumulator_quote_token_account: account_key_at(accounts, account_keys, 32)
+                .copied(),
+            pool_v2: Some(expected_pool_v2),
+            buyback_fee_recipient: account_key_at(accounts, account_keys, 34).copied(),
+            buyback_fee_recipient_token_account: account_key_at(accounts, account_keys, 35)
+                .copied(),
+        });
+    }
+
+    Some(MigratedAmmSuffixAccounts {
+        user_volume_accumulator_quote_token_account: None,
+        pool_v2: account_key_at(accounts, account_keys, 32).copied(),
+        buyback_fee_recipient: account_key_at(accounts, account_keys, 33).copied(),
+        buyback_fee_recipient_token_account: account_key_at(accounts, account_keys, 34).copied(),
+    })
 }
 
 fn direct_pump_buy_resolved_accounts(
@@ -357,11 +403,14 @@ fn direct_pump_buy_resolved_accounts(
         creator_vault: *account_key_at(accounts, account_keys, 17)?,
         event_authority: *account_key_at(accounts, account_keys, 18)?,
         global_volume_accumulator: Some(*account_key_at(accounts, account_keys, 20)?),
-        user_volume_accumulator: *account_key_at(accounts, account_keys, 21)?,
+        user_volume_accumulator: Some(*account_key_at(accounts, account_keys, 21)?),
         fee_config: *account_key_at(accounts, account_keys, 22)?,
         fee_program: *account_key_at(accounts, account_keys, 23)?,
         bonding_curve_v2: *account_key_at(accounts, account_keys, 24)?,
         buyback_fee_recipient: *account_key_at(accounts, account_keys, 25)?,
+        buyback_fee_recipient_token_account: account_key_at(accounts, account_keys, 27)
+            .filter(|account| *account != flashx_router_program_id())
+            .copied(),
     }))
 }
 
@@ -385,11 +434,14 @@ fn direct_pump_sell_resolved_accounts(
         creator_vault: *account_key_at(accounts, account_keys, 16)?,
         event_authority: *account_key_at(accounts, account_keys, 18)?,
         global_volume_accumulator: None,
-        user_volume_accumulator: *account_key_at(accounts, account_keys, 22)?,
+        user_volume_accumulator: None,
         fee_config: *account_key_at(accounts, account_keys, 20)?,
         fee_program: *account_key_at(accounts, account_keys, 21)?,
-        bonding_curve_v2: *account_key_at(accounts, account_keys, 23)?,
-        buyback_fee_recipient: *account_key_at(accounts, account_keys, 24)?,
+        bonding_curve_v2: *account_key_at(accounts, account_keys, 22)?,
+        buyback_fee_recipient: *account_key_at(accounts, account_keys, 23)?,
+        buyback_fee_recipient_token_account: account_key_at(accounts, account_keys, 24)
+            .filter(|account| *account != flashx_router_program_id())
+            .copied(),
     }))
 }
 
@@ -411,8 +463,8 @@ mod tests {
     use crate::{
         event::normalized_event,
         parser::{
-            static_account_keys, versioned_tx_signature_string, FLASHX_ROUTER_PROGRAM_ID, SOL_MINT,
-            TOKEN_2022_PROGRAM_ID,
+            static_account_keys, versioned_tx_signature_string, FLASHX_ROUTER_PROGRAM_ID,
+            PUMP_FUN_PROGRAM_ID, SOL_MINT, SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID,
         },
     };
     use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -428,6 +480,7 @@ mod tests {
     const MIGRATED_MINT: &str = "wXfe7vz2t8an9Ca5dy72ChU54fRvtefDRmb4rzUpump";
     const LIVE_MIGRATED_MINT: &str = "J6UVkdPVe4cbd6qGJHdoacMa7zvN3tiaordcyZRspump";
     const LIVE_DIRECT_PUMP_MINT: &str = "8VigmMkK7f9FvTBDd8S2UmweezCgeBX4y5Xp4jMfpump";
+    const LIVE_DIRECT_PUMP_SELL_MINT: &str = "5crWJiLmj6ZgtLqfbWiMkryo9vxs96cJhVcq5VFkpump";
     const NON_SUFFIX_MIGRATED_MINT: &str = "9uV9GPNMS6WpjYBr95tbuLKWHkgRHZhN9weYxERuwobo";
     const COPY_WALLET: &str = "FqhpPL63symHForRGfxPbGi4wDpe5jQqAVjntbbBqA5W";
 
@@ -488,6 +541,38 @@ mod tests {
         assert!((value["tokenAmount"].as_f64().unwrap() - 104_905.207_774).abs() < f64::EPSILON);
         assert!(value.get("solAmount").is_none());
         assert!(value["output"].get("amount").is_none());
+    }
+
+    #[test]
+    fn parses_live_direct_pump_sell_route_context_from_target_sell() {
+        let transaction = live_direct_pump_sell_transaction();
+        let account_keys = static_account_keys(&transaction);
+        let parsed =
+            crate::parser::parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
+                .expect("live direct Pump sell should parse");
+
+        assert_eq!(parsed.action, Action::Sell);
+        assert_eq!(parsed.mint, LIVE_DIRECT_PUMP_SELL_MINT);
+        let RouteContext::FlashxPump(context) = parsed
+            .route_context
+            .as_ref()
+            .expect("live direct Pump sell should resolve route context");
+        assert_eq!(context.layout, FlashxPumpLayout::DirectPump);
+        assert_eq!(
+            context
+                .resolved_pubkey("mint")
+                .map(|pubkey| pubkey.to_string())
+                .as_deref(),
+            Some(LIVE_DIRECT_PUMP_SELL_MINT)
+        );
+        assert!(context.resolved_pubkey("userVolumeAccumulator").is_none());
+        assert_eq!(
+            context
+                .resolved_pubkey("buybackFeeRecipientTokenAccount")
+                .map(|pubkey| pubkey.to_string())
+                .as_deref(),
+            Some("5eHhjP8JaYkz83CWwvGU2uMUXefd3AazWGx4gpcuEEYD")
+        );
     }
 
     #[test]
@@ -799,6 +884,59 @@ mod tests {
                     program_id_index: 1,
                     accounts,
                     data,
+                }],
+            }),
+        }
+    }
+
+    fn live_direct_pump_sell_transaction() -> VersionedTransaction {
+        let account_keys = vec![
+            pubkey(TARGET_WALLET),
+            pubkey(FLASHX_ROUTER_PROGRAM_ID),
+            pubkey("HwvHGuNdBwZkqMnNW4rrCh6VnMMy2K29u3uPrgbRkopw"),
+            pubkey("BhUimdz2Mr41p1RF3pY6wtCncxhEUgo7oaBXkFkZXkJK"),
+            pubkey("6yGKUgoJYTGSsbJ1MbgKaRYq1gADVafecUGLtqWbMSk"),
+            pubkey("EWQzRSwFmB9QxDZpHuPAjgKXprtLCUmvHAKJf6TV8iJz"),
+            pubkey("CFzb8zvhad9MpLcDP3ZAQWej6fiNmFHBvbYZb3sNBacE"),
+            pubkey("8aHZJSt6frgjRTTfg4foDXjZHMyZ2ZQQjpwcWzzCvAGp"),
+            pubkey(SYSTEM_PROGRAM_ID),
+            pubkey(SYSTEM_PROGRAM_ID),
+            pubkey(SYSTEM_PROGRAM_ID),
+            pubkey("8GG1EWaPbS7yHoWELsGKWm1QtrAjxD4dGQWFRaKkoAwk"),
+            pubkey(LIVE_DIRECT_PUMP_SELL_MINT),
+            pubkey("DkqLRb1K85dbU93arHhYARr5Jm67gNyTK91BKviXueCD"),
+            pubkey("4FobGn5ZWYquoJkxMzh2VUAWvV36xMgxQ3M7uG1pGGhd"),
+            pubkey("FWsW1xNtWscwNmKv6wVsU1iTzRN6wmmk3MjxRP5tT7hz"),
+            pubkey("5eHhjP8JaYkz83CWwvGU2uMUXefd3AazWGx4gpcuEEYD"),
+            pubkey("3PvqoztjnRxaAiFmLuEfqZkU4GSbjUareks8S2xCZaTa"),
+            pubkey(SYSTEM_PROGRAM_ID),
+            pubkey(PUMP_FUN_PROGRAM_ID),
+            pubkey("4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf"),
+            pubkey(TOKEN_2022_PROGRAM_ID),
+            pubkey("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1"),
+            pubkey("8Wf5TiAheLUqBrKXeYg2JtAFFMWtKdG2BSFgqUcPVwTt"),
+            pubkey("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"),
+        ];
+
+        VersionedTransaction {
+            signatures: vec![],
+            message: VersionedMessage::Legacy(Message {
+                header: MessageHeader {
+                    num_required_signatures: 0,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                account_keys,
+                recent_blockhash: Hash::default(),
+                instructions: vec![CompiledInstruction {
+                    program_id_index: 1,
+                    accounts: vec![
+                        2, 0, 14, 10, 1, 19, 11, 3, 20, 15, 12, 4, 5, 2, 0, 10, 6, 21, 22, 19, 23,
+                        24, 7, 13, 16, 1, 17, 1, 1, 1, 1,
+                    ],
+                    data: vec![
+                        0, 87, 75, 106, 36, 8, 0, 0, 0, 8, 215, 8, 0, 0, 0, 0, 0, 1, 1, 26, 50, 0,
+                    ],
                 }],
             }),
         }

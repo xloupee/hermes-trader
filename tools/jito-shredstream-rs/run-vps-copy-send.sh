@@ -48,6 +48,8 @@ export JITO_COPY_WALLET="${JITO_COPY_WALLET:-FqhpPL63symHForRGfxPbGi4wDpe5jQqAVj
 export JITO_COPY_KEYPAIR_PATH="${JITO_COPY_KEYPAIR_PATH:-/etc/jito-copy-keypair.json}"
 export JITO_MAX_COPY_SOL="${JITO_MAX_COPY_SOL:-0.001}"
 export JITO_MAX_TOTAL_COPY_SPEND_SOL="${JITO_MAX_TOTAL_COPY_SPEND_SOL:-0.0035}"
+export JITO_MIGRATED_AMM_MIN_COPY_SOL="${JITO_MIGRATED_AMM_MIN_COPY_SOL:-0.00099}"
+export JITO_MIGRATED_AMM_SMALL_COPY_MODE="${JITO_MIGRATED_AMM_SMALL_COPY_MODE:-skip}"
 export JITO_FAST_COPY_SEND="${JITO_FAST_COPY_SEND:-YES}"
 export JITO_SEND_FANOUT="${JITO_SEND_FANOUT:-false}"
 export JITO_SEND_RPC_URLS="${JITO_SEND_RPC_URLS:-${DIRECT_EXECUTION_SEND_RPC_URLS:-$SOLANA_RPC_URL}}"
@@ -160,6 +162,15 @@ validate_positive_sol() {
 }
 
 validate_positive_sol JITO_MAX_TOTAL_COPY_SPEND_SOL "$JITO_MAX_TOTAL_COPY_SPEND_SOL"
+validate_positive_sol JITO_MIGRATED_AMM_MIN_COPY_SOL "$JITO_MIGRATED_AMM_MIN_COPY_SOL"
+case "$JITO_MIGRATED_AMM_SMALL_COPY_MODE" in
+  skip|floor)
+    ;;
+  *)
+    echo "JITO_MIGRATED_AMM_SMALL_COPY_MODE must be skip or floor; got $JITO_MIGRATED_AMM_SMALL_COPY_MODE" >&2
+    exit 1
+    ;;
+esac
 
 if [[ -n "$JITO_TIP_LAMPORTS" && "$JITO_TIP_LAMPORTS" != "0" && -z "$JITO_TIP_ACCOUNT" ]]; then
   echo "JITO_TIP_ACCOUNT must be set when JITO_TIP_LAMPORTS is positive" >&2
@@ -172,6 +183,8 @@ echo "  target: $SHREDSTREAM_TARGET_WALLETS"
 echo "  copy wallet: $JITO_COPY_WALLET"
 echo "  max copy SOL: $JITO_MAX_COPY_SOL"
 echo "  max total copy spend SOL: $JITO_MAX_TOTAL_COPY_SPEND_SOL"
+echo "  migrated AMM min copy SOL: $JITO_MIGRATED_AMM_MIN_COPY_SOL"
+echo "  migrated AMM small copy mode: $JITO_MIGRATED_AMM_SMALL_COPY_MODE"
 echo "  executions: $JITO_COPY_EXECUTIONS_PATH"
 echo "  copy execution concurrency: $JITO_COPY_EXECUTION_CONCURRENCY"
 echo "  copy execution queue capacity: $JITO_COPY_EXECUTION_QUEUE_CAPACITY"

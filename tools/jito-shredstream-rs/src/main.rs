@@ -90,6 +90,13 @@ pub(crate) struct LiveOptions {
     #[arg(long, env = "JITO_TELEGRAM_SNAPSHOT_PATH")]
     pub(crate) telegram_snapshot_path: Option<PathBuf>,
 
+    #[arg(
+        long,
+        env = "JITO_TELEGRAM_SNAPSHOT_RELOAD_MS",
+        default_value_t = 1_000
+    )]
+    pub(crate) telegram_snapshot_reload_ms: u64,
+
     #[arg(long, env = "JITO_TX_BUILD_PLANS_PATH")]
     pub(crate) tx_build_plans_path: Option<PathBuf>,
 
@@ -158,6 +165,21 @@ pub(crate) struct LiveOptions {
 
     #[arg(long, env = "JITO_MAX_TOTAL_COPY_SPEND_SOL")]
     pub(crate) max_total_copy_spend_sol: Option<f64>,
+
+    #[arg(
+        long,
+        env = "JITO_MIGRATED_AMM_MIN_COPY_SOL",
+        default_value_t = executor::DEFAULT_MIGRATED_AMM_MIN_COPY_SOL
+    )]
+    pub(crate) migrated_amm_min_copy_sol: f64,
+
+    #[arg(
+        long,
+        env = "JITO_MIGRATED_AMM_SMALL_COPY_MODE",
+        default_value = "skip",
+        value_enum
+    )]
+    pub(crate) migrated_amm_small_copy_mode: executor::MigratedAmmSmallCopyMode,
 
     #[arg(long, env = "JITO_COPY_KEYPAIR_PATH")]
     pub(crate) copy_keypair_path: Option<PathBuf>,

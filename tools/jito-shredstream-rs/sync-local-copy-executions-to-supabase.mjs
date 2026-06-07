@@ -8,7 +8,8 @@ const DEFAULT_SUPABASE_CWD = `${process.env.HOME || ""}/Documents/pumpfunnoti`;
 const DEFAULT_WATCH_INTERVAL_MS = 1000;
 const DEFAULT_REFRESH_INTERVAL_MS = 5000;
 const DEFAULT_REFRESH_RECENT_LIMIT = 1;
-const DEFAULT_NEW_ROW_BACKFILL = 0;
+const DEFAULT_NEW_ROW_BACKFILL = 20;
+const DEFAULT_RPC_TIMEOUT_MS = 5000;
 const confirmedTransactionCache = new Map();
 const blockSignatureCache = new Map();
 
@@ -60,8 +61,7 @@ function readJsonl(path, { recentLimit = 0 } = {}) {
   const lines = readFileSync(path, "utf8")
     .split(/\r?\n/)
     .filter((line) => line.trim().length > 0);
-  const selectedLines = recentLimit > 0 ? lines.slice(-recentLimit) : lines;
-  return selectedLines
+  const rows = lines
     .map((line, index) => {
       try {
         return JSON.parse(line);
@@ -70,6 +70,7 @@ function readJsonl(path, { recentLimit = 0 } = {}) {
       }
     })
     .filter((row) => row.schema === "copytrade.localExecution.v1");
+  return recentLimit > 0 ? rows.slice(-recentLimit) : rows;
 }
 
 function sqlString(value) {
@@ -95,16 +96,29 @@ async function rpc(method, params) {
   if (!process.env.SOLANA_RPC_URL) {
     return null;
   }
-  const response = await fetch(process.env.SOLANA_RPC_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params })
-  });
-  const body = await response.json();
-  if (body.error) {
-    throw new Error(`${method} RPC error: ${JSON.stringify(body.error)}`);
+  const timeoutMs = positiveInteger(process.env.JITO_SYNC_RPC_TIMEOUT_MS, DEFAULT_RPC_TIMEOUT_MS);
+  const abort = new AbortController();
+  const timeout = setTimeout(() => abort.abort(), timeoutMs);
+  try {
+    const response = await fetch(process.env.SOLANA_RPC_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      signal: abort.signal
+    });
+    const body = await response.json();
+    if (body.error) {
+      throw new Error(`${method} RPC error: ${JSON.stringify(body.error)}`);
+    }
+    return body.result;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`${method} RPC timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  return body.result;
 }
 
 async function confirmedTransaction(signature) {
@@ -1084,6 +1098,7 @@ export {
   dedupeRows,
   executionKey,
   fetchBlockSignatures,
+  readJsonl,
   syncLimitForCycle,
   autoSellStatus
 };

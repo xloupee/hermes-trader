@@ -4,16 +4,25 @@ use crate::executor::{
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use solana_pubkey::Pubkey;
-use std::{collections::HashMap, fs::File, path::Path, str::FromStr};
+use std::{
+    collections::HashMap,
+    fs::File,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct TelegramSnapshotConfig {
     sequence: u64,
-    targets: HashMap<String, TelegramTargetConfig>,
+    checksum: String,
+    targets: HashMap<String, Vec<TelegramTargetConfig>>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct TelegramTargetConfig {
+    pub(crate) chat_id: String,
+    pub(crate) copy_wallet: String,
+    pub(crate) signer_keypair_path: Option<PathBuf>,
     pub(crate) copy_amount_sol: f64,
     pub(crate) trailing_sell: Option<TrailingSellPlan>,
 }
@@ -23,6 +32,8 @@ pub(crate) struct TelegramTargetConfig {
 struct SnapshotFile {
     version: u64,
     sequence: u64,
+    #[serde(default)]
+    checksum: String,
     routing: SnapshotRouting,
     subscribers: Vec<SnapshotSubscriber>,
 }
@@ -50,7 +61,11 @@ struct SnapshotRouting {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SnapshotSubscriber {
+    #[serde(default)]
+    chat_id: Option<String>,
     trading_wallet_public_key: String,
+    #[serde(default)]
+    signer_keypair_path: Option<String>,
     copy_amount_sol: f64,
     #[serde(default)]
     sell_slippage: Option<f64>,
@@ -108,17 +123,43 @@ impl TelegramSnapshotConfig {
             );
         }
 
-        let mut targets = HashMap::new();
+        let has_snapshot_signer_refs = snapshot.subscribers.iter().any(|subscriber| {
+            subscriber
+                .signer_keypair_path
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty())
+        });
+        let mut targets: HashMap<String, Vec<TelegramTargetConfig>> = HashMap::new();
         if !snapshot.routing.emergency_stopped {
             for subscriber in snapshot.subscribers {
-                if let Some(copy_wallet) = copy_wallet {
-                    if subscriber.trading_wallet_public_key != copy_wallet {
-                        continue;
+                if !has_snapshot_signer_refs {
+                    if let Some(copy_wallet) = copy_wallet {
+                        if subscriber.trading_wallet_public_key != copy_wallet {
+                            continue;
+                        }
                     }
                 }
                 if !subscriber.copy_amount_sol.is_finite() || subscriber.copy_amount_sol <= 0.0 {
                     continue;
                 }
+                let copy_wallet = subscriber.trading_wallet_public_key.trim().to_string();
+                if Pubkey::from_str(&copy_wallet).is_err() {
+                    continue;
+                }
+                let signer_keypair_path = subscriber
+                    .signer_keypair_path
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from);
+                let chat_id = subscriber
+                    .chat_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("unknown")
+                    .to_string();
 
                 let sell_slippage_percent = subscriber
                     .effective_sell_slippage
@@ -149,19 +190,23 @@ impl TelegramSnapshotConfig {
                                 snapshot.routing.jito_tip_account.clone(),
                             )
                         });
-                    targets.insert(
-                        wallet.address,
-                        TelegramTargetConfig {
+                    targets
+                        .entry(wallet.address)
+                        .or_default()
+                        .push(TelegramTargetConfig {
+                            chat_id: chat_id.clone(),
+                            copy_wallet: copy_wallet.clone(),
+                            signer_keypair_path: signer_keypair_path.clone(),
                             copy_amount_sol: subscriber.copy_amount_sol,
                             trailing_sell,
-                        },
-                    );
+                        });
                 }
             }
         }
 
         Ok(Some(TelegramSnapshotConfig {
             sequence: snapshot.sequence,
+            checksum: snapshot.checksum,
             targets,
         }))
     }
@@ -170,14 +215,39 @@ impl TelegramSnapshotConfig {
         self.sequence
     }
 
+    pub(crate) fn fingerprint(&self) -> String {
+        format!("{}:{}", self.sequence, self.checksum)
+    }
+
     pub(crate) fn target_wallets(&self) -> Vec<String> {
         let mut wallets = self.targets.keys().cloned().collect::<Vec<_>>();
         wallets.sort();
         wallets
     }
 
-    pub(crate) fn target_config(&self, target_wallet: &str) -> Option<&TelegramTargetConfig> {
-        self.targets.get(target_wallet)
+    pub(crate) fn target_configs(&self, target_wallet: &str) -> &[TelegramTargetConfig] {
+        self.targets
+            .get(target_wallet)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub(crate) fn active_profile_count(&self) -> usize {
+        self.targets.values().map(Vec::len).sum()
+    }
+
+    pub(crate) fn signer_keypair_paths(&self) -> Vec<(String, PathBuf)> {
+        let mut paths = Vec::new();
+        for configs in self.targets.values() {
+            for config in configs {
+                if let Some(path) = &config.signer_keypair_path {
+                    paths.push((config.copy_wallet.clone(), path.clone()));
+                }
+            }
+        }
+        paths.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        paths.dedup();
+        paths
     }
 }
 
@@ -309,18 +379,9 @@ mod tests {
             snapshot.target_wallets(),
             vec![TARGET_B.to_string(), TARGET_A.to_string()]
         );
-        assert_eq!(
-            snapshot.target_config(TARGET_A).unwrap().copy_amount_sol,
-            0.0007
-        );
-        assert!(snapshot
-            .target_config(TARGET_A)
-            .unwrap()
-            .trailing_sell
-            .is_none());
-        let trailing_sell = snapshot
-            .target_config(TARGET_B)
-            .unwrap()
+        assert_eq!(snapshot.target_configs(TARGET_A)[0].copy_amount_sol, 0.0007);
+        assert!(snapshot.target_configs(TARGET_A)[0].trailing_sell.is_none());
+        let trailing_sell = snapshot.target_configs(TARGET_B)[0]
             .trailing_sell
             .as_ref()
             .expect("target B trailing sell config");
@@ -350,7 +411,68 @@ mod tests {
             trailing_sell.jito_tip_account.as_deref(),
             Some("96gYZGLnUQYgE8MWWpYJw8yRjnvB51rAhbG1SogE3uSG")
         );
-        assert!(snapshot.target_config(OTHER_WALLET).is_none());
+        assert!(snapshot.target_configs(OTHER_WALLET).is_empty());
+        assert_eq!(snapshot.active_profile_count(), 2);
+        assert!(snapshot.signer_keypair_paths().is_empty());
+    }
+
+    #[test]
+    fn keeps_multiple_profiles_per_target_when_snapshot_exports_signer_refs() {
+        let path = write_snapshot(&format!(
+            r#"{{
+              "version": 1,
+              "sequence": 44,
+              "generatedAtMs": 1,
+              "checksum": "ignored",
+              "routing": {{
+                "liveTradingEnabled": true,
+                "emergencyStopped": false
+              }},
+              "subscribers": [
+                {{
+                  "chatId": "chat-1",
+                  "tradingWalletPublicKey": "{COPY_WALLET}",
+                  "signerKeypairPath": "/etc/jito-copy-wallets/{COPY_WALLET}.json",
+                  "copyAmountSol": 0.0007,
+                  "wallets": [{{ "address": "{TARGET_A}", "label": "A" }}]
+                }},
+                {{
+                  "chatId": "chat-2",
+                  "tradingWalletPublicKey": "{OTHER_WALLET}",
+                  "signerKeypairPath": "/etc/jito-copy-wallets/{OTHER_WALLET}.json",
+                  "copyAmountSol": 0.0009,
+                  "wallets": [{{ "address": "{TARGET_A}", "label": "A" }}]
+                }}
+              ]
+            }}"#
+        ));
+
+        let snapshot = TelegramSnapshotConfig::load(Some(path.as_path()), Some(COPY_WALLET))
+            .expect("snapshot loads")
+            .expect("snapshot config");
+
+        let configs = snapshot.target_configs(TARGET_A);
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].chat_id, "chat-1");
+        assert_eq!(configs[0].copy_wallet, COPY_WALLET);
+        assert_eq!(configs[0].copy_amount_sol, 0.0007);
+        assert_eq!(configs[1].chat_id, "chat-2");
+        assert_eq!(configs[1].copy_wallet, OTHER_WALLET);
+        assert_eq!(configs[1].copy_amount_sol, 0.0009);
+        assert_eq!(snapshot.active_profile_count(), 2);
+        assert_eq!(
+            snapshot.signer_keypair_paths(),
+            vec![
+                (
+                    OTHER_WALLET.to_string(),
+                    std::path::PathBuf::from(format!("/etc/jito-copy-wallets/{OTHER_WALLET}.json"))
+                ),
+                (
+                    COPY_WALLET.to_string(),
+                    std::path::PathBuf::from(format!("/etc/jito-copy-wallets/{COPY_WALLET}.json"))
+                )
+            ]
+        );
     }
 
     #[test]

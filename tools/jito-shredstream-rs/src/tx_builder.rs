@@ -74,7 +74,7 @@ struct FlashxWrappedSolAccountKey {
 
 const PUMP_FUN_BUY_EXACT_SOL_IN_DISCRIMINATOR: [u8; 8] = [56, 252, 116, 8, 158, 223, 205, 95];
 const PUMP_FUN_COPY_MIN_TOKENS_OUT: u64 = 1;
-const FLASHX_MIGRATED_COPY_MIN_BASE_AMOUNT_OUT: u64 = 1;
+const DIRECT_PUMP_COPY_MIN_SOL_OUT: u64 = 1;
 
 pub(crate) fn build_unsigned_flashx_pump(
     route_context: Option<&RouteContext>,
@@ -405,9 +405,40 @@ fn rewrite_flashx_migrated_amounts(
             "missing flashx migrated amounts",
         ));
     }
+    let min_base_amount_out = scaled_flashx_migrated_min_base_amount_out(data, quote_amount_in)?;
     data[1..9].copy_from_slice(&quote_amount_in.to_le_bytes());
-    data[9..17].copy_from_slice(&FLASHX_MIGRATED_COPY_MIN_BASE_AMOUNT_OUT.to_le_bytes());
+    data[9..17].copy_from_slice(&min_base_amount_out.to_le_bytes());
     Ok(())
+}
+
+fn scaled_flashx_migrated_min_base_amount_out(
+    data: &[u8],
+    quote_amount_in: u64,
+) -> Result<u64, TxBuildError> {
+    let observed_quote_amount_in = read_u64_le(data, 1).ok_or(TxBuildError::InvalidInstruction(
+        "missing flashx migrated quote amount",
+    ))?;
+    let observed_min_base_amount_out = read_u64_le(data, 9).ok_or(
+        TxBuildError::InvalidInstruction("missing flashx migrated min base amount"),
+    )?;
+    if quote_amount_in == 0 || observed_quote_amount_in == 0 {
+        return Err(TxBuildError::InvalidInstruction(
+            "missing flashx migrated quote amount",
+        ));
+    }
+    let scaled = (observed_min_base_amount_out as u128).saturating_mul(quote_amount_in as u128)
+        / observed_quote_amount_in as u128;
+    if scaled == 0 && observed_min_base_amount_out > 0 {
+        return Err(TxBuildError::InvalidInstruction(
+            "scaled flashx migrated min base amount rounds to zero",
+        ));
+    }
+    if scaled > u64::MAX as u128 {
+        return Err(TxBuildError::InvalidInstruction(
+            "scaled flashx migrated min base amount overflow",
+        ));
+    }
+    Ok(scaled as u64)
 }
 
 pub(crate) fn build_full_copy_unsigned_flashx_pump(
@@ -730,7 +761,9 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
     let mut sell_data = Vec::with_capacity(24);
     sell_data.extend_from_slice(&PUMP_FUN_SELL_DISCRIMINATOR);
     sell_data.extend_from_slice(&token_amount_raw.to_le_bytes());
-    sell_data.extend_from_slice(&0u64.to_le_bytes());
+    sell_data.extend_from_slice(
+        &direct_pump_sell_min_sol_output(context, token_amount_raw)?.to_le_bytes(),
+    );
 
     let mut sell_accounts = vec![
         AccountMeta::new_readonly(resolved_pubkey(context, "globalConfig")?, false),
@@ -774,6 +807,37 @@ fn build_auto_sell_unsigned_flashx_direct_pump(
         main_instruction_count: instructions.len().saturating_sub(1),
         instructions,
     })
+}
+
+fn direct_pump_sell_min_sol_output(
+    context: &crate::parser::FlashxPumpRouteContext,
+    token_amount_raw: u64,
+) -> Result<u64, TxBuildError> {
+    if context.data.get(17).copied() != Some(1) {
+        return Ok(DIRECT_PUMP_COPY_MIN_SOL_OUT);
+    }
+    let observed_token_amount = read_u64_le(&context.data, 1).ok_or(
+        TxBuildError::InvalidInstruction("missing direct-pump sell token amount"),
+    )?;
+    let observed_min_sol_output = read_u64_le(&context.data, 9).ok_or(
+        TxBuildError::InvalidInstruction("missing direct-pump sell min sol output"),
+    )?;
+    if token_amount_raw == 0 || observed_token_amount == 0 {
+        return Err(TxBuildError::InvalidInstruction(
+            "missing direct-pump sell token amount",
+        ));
+    }
+    let scaled = (observed_min_sol_output as u128).saturating_mul(token_amount_raw as u128)
+        / observed_token_amount as u128;
+    if scaled == 0 && observed_min_sol_output > 0 {
+        return Ok(DIRECT_PUMP_COPY_MIN_SOL_OUT);
+    }
+    if scaled > u64::MAX as u128 {
+        return Err(TxBuildError::InvalidInstruction(
+            "scaled direct-pump min sol output overflow",
+        ));
+    }
+    Ok(scaled as u64)
 }
 
 fn build_auto_sell_unsigned_flashx_migrated_amm(
@@ -1248,6 +1312,12 @@ mod tests {
         let account_keys = live_migrated_buy_hydrated_account_keys(&transaction);
         let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
             .expect("live migrated FLASHX buy should parse");
+        let RouteContext::FlashxPump(context) = parsed
+            .route_context
+            .as_ref()
+            .expect("live migrated FLASHX route context should parse");
+        let observed_min_base_amount_out =
+            read_u64_le(&context.data, 9).expect("fixture has migrated AMM min base amount");
 
         let build = build_copy_unsigned_flashx_pump(
             parsed.route_context.as_ref(),
@@ -1285,7 +1355,7 @@ mod tests {
         assert_eq!(read_u64_le(&build.instructions[1].data, 1), Some(990_000));
         assert_eq!(
             read_u64_le(&build.instructions[1].data, 9),
-            Some(FLASHX_MIGRATED_COPY_MIN_BASE_AMOUNT_OUT)
+            Some(observed_min_base_amount_out)
         );
         assert_eq!(build.instructions[1].accounts.len(), 44);
         assert!(build.instructions[1]
@@ -1322,7 +1392,10 @@ mod tests {
         );
         assert_eq!(
             read_u64_le(&override_build.instructions[1].data, 9),
-            Some(FLASHX_MIGRATED_COPY_MIN_BASE_AMOUNT_OUT)
+            Some(
+                scaled_flashx_migrated_min_base_amount_out(&context.data, 777_000)
+                    .expect("scaled min base amount should fit")
+            )
         );
 
         assert!(!build.instructions[1]
@@ -1606,6 +1679,7 @@ mod tests {
             &build.instructions[1].data[8..16],
             &123_456u64.to_le_bytes()
         );
+        assert_eq!(&build.instructions[1].data[16..24], &1u64.to_le_bytes());
         assert_eq!(
             build.instructions[1].accounts[5].pubkey,
             build.copy_wallet_token_account
@@ -1644,7 +1718,13 @@ mod tests {
             &build.instructions[1].data[8..16],
             &123_456u64.to_le_bytes()
         );
-        assert_eq!(&build.instructions[1].data[16..24], &0u64.to_le_bytes());
+        assert_eq!(
+            read_u64_le(&build.instructions[1].data, 16),
+            Some(
+                direct_pump_sell_min_sol_output(context, 123_456)
+                    .expect("scaled direct-pump min sol output should fit")
+            )
+        );
         assert_eq!(
             build.instructions[1].accounts[1].pubkey.to_string(),
             resolved_account_for_test(context, "feeRecipient")

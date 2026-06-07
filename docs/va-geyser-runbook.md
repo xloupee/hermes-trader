@@ -1,6 +1,6 @@
 # VA RPC and Geyser Runbook
 
-This runbook keeps three changes separate: using the VA Solana RPC, enabling direct execution, and promoting Geyser from observe-only to a copy-trade trigger.
+This runbook covers the VA Solana node used by the bot for RPC access and the Yellowstone Geyser wallet feed. Treat RPC, direct execution, and Geyser signal promotion as separate changes. Changing `SOLANA_RPC_URL` must not automatically enable live trading.
 
 ## Endpoints
 
@@ -9,11 +9,15 @@ This runbook keeps three changes separate: using the VA Solana RPC, enabling dir
 - Geyser gRPC: `http://va.pixellabz.io:9000`
 - Geyser stream limit: 20 streams
 
-The production VPS egress IP must be whitelisted by the VA node operator. The current VPS IP used for the bot is `157.90.240.233`.
+The server IP must be allowlisted by the VA node operator. To check the public IP to provide:
 
-## RPC Access Check
+```bash
+curl -sS https://api.ipify.org && echo
+```
 
-Run these from the host that will run the bot:
+## RPC Smoke Tests
+
+Run these from the machine that will run the bot:
 
 ```bash
 curl -sS -H 'Content-Type: application/json' \
@@ -25,131 +29,216 @@ curl -sS -H 'Content-Type: application/json' \
   http://va.pixellabz.io/
 ```
 
-Expected: `getHealth` returns `ok`, and `getSlot` returns a current slot. If either returns `403`, the host IP is not whitelisted.
+Expected result: `getHealth` returns `ok`, and `getSlot` returns a recent slot number.
 
 ## RPC-Only Rollout
 
-Set only:
+Use this when only moving Solana RPC reads/sends to the VA node:
 
-```bash
+```env
 SOLANA_RPC_URL=http://va.pixellabz.io/
 ```
 
-Restart the existing service and confirm startup logs include the plain VA RPC endpoint. Changing RPC does not enable live trading by itself; live behavior is still gated by `COPY_TRADE_ENABLED`, `COPY_TRADE_DRY_RUN`, execution provider settings, direct execution mode flags, optional wallet gates, and emergency stop state.
+Leave copy-trade and direct-execution gates unchanged:
+
+```env
+COPY_TRADE_ENABLED=false
+COPY_TRADE_DRY_RUN=true
+DIRECT_EXECUTION_ENABLED=false
+DIRECT_EXECUTION_LIVE_ENABLED=false
+GEYSER_ENABLED=false
+COPY_TRADE_SIGNAL_PROVIDER=pumpportal
+```
+
+Restart the bot, then confirm startup logs still show live trading disabled unless you intentionally enabled it. RPC replacement alone should not change whether orders can be submitted.
 
 Rollback:
 
-```bash
+```env
 SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
 ```
 
-or restore the previous provider URL and restart the service.
+## Direct-Execution Canary
 
-## Direct Execution
+Direct execution controls whether the bot locally builds/signs/sends copy-trade transactions. It is independent from the Geyser feed.
 
-Use tiny caps first:
+Safe canary defaults:
 
-```bash
-COPY_TRADE_EXECUTION_PROVIDER=direct-auto
+```env
 COPY_TRADE_ENABLED=true
 COPY_TRADE_DRY_RUN=false
-COPY_TRADE_MAX_BUY_SOL=0.001
-COPY_TRADE_DAILY_SOL_CAP=0.003
-COPY_TRADE_MAX_SIGNAL_AGE_MS=60000
-COPY_TRADE_MAX_SLIPPAGE=15
-COPY_TRADE_MAX_PRIORITY_FEE=0.0002
+COPY_TRADE_EXECUTION_PROVIDER=direct-auto
 DIRECT_EXECUTION_ENABLED=true
 DIRECT_EXECUTION_LIVE_ENABLED=true
-DIRECT_EXECUTION_BUILD_ONLY=false
-DIRECT_EXECUTION_SIMULATE_ONLY=false
 DIRECT_EXECUTION_CONFIRMATION_MODE=background
+DIRECT_EXECUTION_CANARY_CHAT_IDS=1355697770
+DIRECT_EXECUTION_CANARY_WALLETS=
+COPY_TRADE_MAX_BUY_SOL=0
+COPY_TRADE_DAILY_SOL_CAP=0
+COPY_TRADE_MAX_SIGNAL_AGE_MS=0
+COPY_TRADE_MAX_SLIPPAGE=0
+COPY_TRADE_MAX_PRIORITY_FEE=0
+COPY_TRADE_MAX_COPY_WALLETS_PER_CHAT=0
 ```
 
-Keep one funded hot wallet and one copied wallet in scope. Verify the submitted buy signature on-chain, treasury/platform-fee deltas if fees are enabled, and any post-buy sell automation before increasing caps.
+Expected startup log:
 
-Rollback direct execution:
+```text
+Copy trade execution state: LIVE | executionProvider=direct-auto | COPY_TRADE_ENABLED=true | COPY_TRADE_DRY_RUN=false | ...
+Direct execution controls | provider=direct-auto | enabled=true | live=true | ...
+```
 
-```bash
-COPY_TRADE_EXECUTION_PROVIDER=pumpportal-lightning
+Rollback direct execution separately from RPC/Geyser:
+
+```env
+COPY_TRADE_ENABLED=false
+COPY_TRADE_DRY_RUN=true
 DIRECT_EXECUTION_LIVE_ENABLED=false
 ```
 
-For a hard stop, set `COPY_TRADE_ENABLED=false`, `COPY_TRADE_DRY_RUN=true`, or activate the copy-trade emergency stop from Telegram.
-
 ## Geyser Observe-Only
 
-Start with:
+Use observe-only mode first to prove the feed parses watched-wallet transactions without triggering orders or alerts:
 
-```bash
+```env
 GEYSER_ENABLED=true
 GEYSER_GRPC_URL=http://va.pixellabz.io:9000
-GEYSER_GRPC_TOKEN=
-GEYSER_COMMITMENT=processed
-GEYSER_SHADOW_ONLY=true
-GEYSER_RECONNECT_MS=2000
+GEYSER_X_TOKEN=
 COPY_TRADE_SIGNAL_PROVIDER=pumpportal
 ```
 
-Expected logs:
+Expected startup log:
 
-- `Yellowstone gRPC subscribed to <n> wallet(s) at processed commitment in shadow mode`
-- `Yellowstone wallet trade candidate: ...`
-- `Yellowstone shadow wallet trade event: ...`
-- `Yellowstone wallet trade rejected: ...` for unsupported, vote, failed, non-SOL-quote, or ambiguous transactions
+```text
+Copy trade signal provider | mode=pumpportal | pumpPortal=trigger | geyser=diagnostic
+Connected to Geyser stream for 1 watched wallet(s)
+```
 
-Observe-only Geyser writes wallet-trade log entries but does not trigger Telegram alerts or copy buys.
+If there are no watched/copy-trade wallets, the expected log is:
 
-The monitor uses shared transaction subscriptions for watched wallets. Do not create one Geyser stream per wallet; stay under the 20-stream limit by keeping a single shared bot stream.
+```text
+Geyser listener idle: no watched wallets
+```
+
+## Geyser Client Smoke Test
+
+The repo dependency can connect without reflection. Use the bot logs as the primary smoke test, or run a short local script after `npm install`:
+
+```bash
+node --input-type=module <<'NODE'
+import Client from "@triton-one/yellowstone-grpc";
+const client = new Client("http://va.pixellabz.io:9000", undefined, {});
+const stream = await client.subscribe();
+stream.on("data", () => {
+  console.log("geyser update received");
+  stream.end();
+  process.exit(0);
+});
+stream.on("error", (error) => {
+  console.error(error.message);
+  process.exit(1);
+});
+stream.write({
+  slots: { client: {} },
+  accounts: {},
+  transactions: {},
+  transactionsStatus: {},
+  blocks: {},
+  blocksMeta: {},
+  entry: {},
+  accountsDataSlice: [],
+  commitment: 0
+});
+setTimeout(() => {
+  console.log("connected; no update received before timeout");
+  stream.end();
+  process.exit(0);
+}, 5000);
+NODE
+```
 
 ## Feed Comparison
 
-Let PumpPortal, Helius, and Geyser run for a defined canary window with active watched wallets. Keep PumpPortal as the trigger:
+Parsed wallet events are written to `WALLET_TRADE_LOG_PATH`, defaulting to `logs/wallet-trades.jsonl`.
+
+Run:
 
 ```bash
-COPY_TRADE_SIGNAL_PROVIDER=pumpportal
-GEYSER_SHADOW_ONLY=true
+npm run wallet-feed-report -- --path=logs/wallet-trades.jsonl --limit=50
 ```
 
-Then summarize:
+Useful narrower window:
 
 ```bash
-npm run feed-latency -- --log logs/wallet-trades.jsonl
+npm run wallet-feed-report -- --path=logs/wallet-trades.jsonl --since=2026-05-30T00:00:00Z --limit=50
 ```
 
-If you captured service logs to a file, include parser rejection counts:
+Read the output:
 
-```bash
-npm run feed-latency -- --log logs/wallet-trades.jsonl --app-log logs/service.log
-```
+- `matchedGroups` shows events seen by more than one provider.
+- `Matched winners` shows which provider was first.
+- `pumpportal->geyser` or `geyser->pumpportal` shows lag after the winning provider.
+- `parseErrors=0` is expected.
 
-The report groups events by `signature + targetWallet + mint`, shows which provider saw each signature first, p50/p90 lag where timestamps are available, duplicate counts, missing-provider counts, parser/source counts, and example signatures for manual explorer review.
+## Parallel Signal Race
 
-## Geyser Promotion
+After observe-only parsing is clean, enable parallel race mode:
 
-Only promote after observe-only parser output is clean and the comparison report shows Geyser is faster and reliable enough.
-
-Canary promotion:
-
-```bash
-GEYSER_SHADOW_ONLY=false
+```env
+GEYSER_ENABLED=true
+GEYSER_GRPC_URL=http://va.pixellabz.io:9000
 COPY_TRADE_SIGNAL_PROVIDER=parallel
 ```
 
-In `parallel`, PumpPortal and Geyser can both emit the same source transaction, but the shared signature/wallet duplicate guard plus durable copy-buy idempotency allow only one copy-buy attempt per copied mint/chat. Keep the same tiny direct-exec caps from the direct execution section.
+Expected startup log:
 
-Geyser-only mode:
-
-```bash
-COPY_TRADE_SIGNAL_PROVIDER=geyser
+```text
+Copy trade signal provider | mode=parallel | pumpPortal=trigger | geyser=trigger
+Connected to Geyser stream for 1 watched wallet(s)
+Connected to PumpPortal websocket
 ```
 
-Do not use Geyser-only until parallel mode has clean evidence across a live canary window.
+Expected race log on a watched-wallet buy:
 
-Rollback signal provider:
+```text
+Copy trade signal race: {"event":"copy_trade_signal_race","mode":"parallel","provider":"pumpportal","outcome":"won",...}
+Copy trade signal race: {"event":"copy_trade_signal_race","mode":"parallel","provider":"geyser","outcome":"duplicate",...}
+```
 
-```bash
+Only copyable SOL-to-token buys should claim the race. Sells and stale/source-blocked signals should log `outcome":"skipped"` and must not submit copy buys.
+
+Rollback Geyser signal promotion without disabling RPC or direct execution:
+
+```env
 COPY_TRADE_SIGNAL_PROVIDER=pumpportal
-GEYSER_SHADOW_ONLY=true
 ```
 
-Then restart the service and confirm startup logs show `Copy trade signal provider: pumpportal`.
+Rollback the Geyser stream entirely:
+
+```env
+GEYSER_ENABLED=false
+COPY_TRADE_SIGNAL_PROVIDER=pumpportal
+```
+
+## Stream Limit Guidance
+
+The VA Geyser endpoint allows 20 streams. This bot should use one shared Geyser stream and place all watched/copy-trade wallets into that subscription. Do not start multiple bot instances against the same endpoint unless the operator has confirmed there is spare stream capacity.
+
+Safe operating rules:
+
+- Keep one production bot process.
+- Do not run background experiments that create their own long-lived Geyser streams.
+- Prefer `setWallets`/subscription refreshes inside the running bot over starting extra clients.
+- Stop local test scripts after smoke testing.
+
+## Deployment Checklist
+
+1. Confirm the server IP is allowlisted.
+2. Run RPC smoke tests.
+3. Deploy the code.
+4. Start with `COPY_TRADE_SIGNAL_PROVIDER=pumpportal`.
+5. Enable `GEYSER_ENABLED=true` and verify observe-only logs.
+6. Run `npm run wallet-feed-report` after watched-wallet activity.
+7. Enable `COPY_TRADE_SIGNAL_PROVIDER=parallel` only after parser quality is clean.
+8. Keep direct execution gates, canary chat/wallet lists, and trade caps separate from RPC/Geyser changes.
+9. Roll back the smallest layer needed: signal provider, Geyser stream, direct execution, or RPC.

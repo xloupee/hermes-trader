@@ -431,31 +431,35 @@ export function formatMigrationMessage(event: LooseRecord, config: MigrationForm
     lines.push(`<code>${escapeHtml(migration.coinAddress)}</code>`);
   }
 
-  if (migration.marketCap !== null) {
-    const marketCap = migration.marketCapUsd !== null ? formatUsd(migration.marketCapUsd) : formatSol(migration.marketCapSol);
-    lines.push("");
-    lines.push(`<b>💵 Market Cap:</b> ${escapeHtml(marketCap)}`);
-  }
+  const signalLines = [
+    migration.marketCap !== null
+      ? `├ Market Cap: ${escapeHtml(migration.marketCapUsd !== null ? formatUsd(migration.marketCapUsd) : formatSol(migration.marketCapSol))}`
+      : null,
+    `├ Cashback: ${formatBooleanStatus(migration.cashbackEnabled)}`,
+    `├ Agent Buybacks: ${formatBooleanStatus(migration.agentBuybacksEnabled)}`,
+    `└ Creator Fees: ${formatCreatorFeeStatus(migration)}`
+  ].filter((line): line is string => line !== null);
 
-  lines.push(`<b>💸 Cashback:</b> ${formatBooleanStatus(migration.cashbackEnabled)}`);
-  lines.push(`<b>🤖 Agent Buybacks:</b> ${formatBooleanStatus(migration.agentBuybacksEnabled)}`);
-  lines.push(`<b>👤 Creator Fees:</b> ${formatCreatorFeeStatus(migration)}`);
+  lines.push("");
+  lines.push("<b>📊 Signal</b>");
+  lines.push(...signalLines);
 
   if (migration.transactionAnalysis) {
     const flow = migration.transactionAnalysis;
     const flowLines = [];
 
     if (flow.networkFeeSol !== null && flow.networkFeeSol !== undefined) {
-      flowLines.push(`<b>Network Fee:</b> ${escapeHtml(formatSolUsd(flow.networkFeeSol, migration.solUsdPrice))}`);
+      flowLines.push(`├ Network Fee: ${escapeHtml(formatSolUsd(flow.networkFeeSol, migration.solUsdPrice))}`);
     }
 
     for (const recipient of flow.recipients || []) {
       flowLines.push(
-        `<b>${escapeHtml(recipient.label)}:</b> +${escapeHtml(formatSolUsd(recipient.deltaSol, migration.solUsdPrice))} <code>${escapeHtml(shortenAddress(recipient.address))}</code>`
+        `├ ${escapeHtml(recipient.label)}: +${escapeHtml(formatSolUsd(recipient.deltaSol, migration.solUsdPrice))} <code>${escapeHtml(shortenAddress(recipient.address))}</code>`
       );
     }
 
     if (flowLines.length > 0) {
+      flowLines[flowLines.length - 1] = flowLines[flowLines.length - 1].replace(/^├/, "└");
       lines.push("");
       lines.push("<b>💧 Fees / SOL Flow</b>");
       lines.push(...flowLines);
@@ -470,7 +474,8 @@ export function formatMigrationMessage(event: LooseRecord, config: MigrationForm
 
   if (fallbackLinks.length > 0) {
     lines.push("");
-    lines.push(`<b>🔗 Links:</b> ${fallbackLinks.join(" | ")}`);
+    lines.push("<b>🔗 Links</b>");
+    lines.push(...fallbackLinks.map((item, index) => `${index === fallbackLinks.length - 1 ? "└" : "├"} ${item}`));
   }
 
   return lines.join("\n");

@@ -5,6 +5,7 @@ import type {
   TradeExecutionProvider,
   TradeExecutionResult
 } from "./trade-execution.js";
+import type { PlatformFeeSplit } from "./platform-fee.js";
 import {
   buildDirectRouteMetadata,
   tradeExecutionFailedResult,
@@ -35,6 +36,7 @@ export interface DirectTransactionPayload {
   instructions: DirectInstruction[];
   signers: unknown[];
   metadata: Record<string, unknown>;
+  platformFee?: PlatformFeeSplit | null;
 }
 
 export interface PumpSdkLike {
@@ -89,11 +91,15 @@ export async function buildDirectPumpTransaction({
       });
     }
 
-    const prefixed = request.platformFeeInstruction ? [request.platformFeeInstruction, ...instructions] : instructions;
+    const withPlatformFee = request.platformFeeInstruction
+      ? request.action === "sell"
+        ? [...instructions, request.platformFeeInstruction]
+        : [request.platformFeeInstruction, ...instructions]
+      : instructions;
     return {
       provider,
       route,
-      instructions: prefixed,
+      instructions: withPlatformFee,
       signers: [],
       metadata: {
         ...(request.metadata || {}),

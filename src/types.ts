@@ -2,6 +2,7 @@ export type LooseRecord = Record<string, unknown>;
 
 export type TelegramChatId = string | number;
 export type AlertModeValue = "migrations" | "newtokens" | "both";
+export type CopyTradeSignalProvider = "pumpportal" | "parallel" | "shredstream" | "all";
 export type TrailingSellMode = "custom_steps" | "formula";
 export type TrailingSellPercentBasis = "remaining_balance" | "original_position";
 
@@ -23,6 +24,7 @@ export interface WatchedWallet {
   label: string | null;
   addedAt: string;
   updatedAt: string;
+  copyTradeEnabled?: boolean;
   trailingSellConfig?: TrailingSellConfig | null;
 }
 
@@ -55,6 +57,11 @@ export interface BotConfig extends MigrationFormatConfig {
   pumpPortalWalletKeyEncryptionSecret?: string;
   migrationLogPath: string;
   walletTradeLogPath: string;
+  pumpPortalDiscoveryLogPath: string;
+  shredstreamCompareEnabled: boolean;
+  shredstreamWalletObserverEnabled: boolean;
+  shredstreamWalletObserverStatsIntervalMs: number;
+  walletFeedDiagnosticWallets: WatchedWallet[];
   copyTradeEmergencyStopPath: string;
   heliusApiKey?: string;
   heliusApiBaseUrl: string;
@@ -72,6 +79,9 @@ export interface BotConfig extends MigrationFormatConfig {
   pumpFunCoinApiBaseUrl: string;
   solUsdPriceUrl: string;
   solanaRpcUrl: string;
+  geyserEnabled: boolean;
+  geyserGrpcUrl?: string;
+  geyserXToken?: string;
   transactionFlowEnabled: boolean;
   transactionAccountLabels?: string;
   alertModeLabel?: string;
@@ -79,7 +89,7 @@ export interface BotConfig extends MigrationFormatConfig {
   notifyOnShutdown: boolean;
   copyTradeEnabled: boolean;
   copyTradeDryRun: boolean;
-  copyTradeSignalProvider: "pumpportal" | "geyser" | "parallel";
+  copyTradeSignalProvider: CopyTradeSignalProvider;
   copyTradeExecutionProvider: "pumpportal-lightning" | "direct-pump" | "direct-pumpswap" | "direct-auto";
   copyTradeSlippage: number;
   copyTradePriorityFee: number;
@@ -98,26 +108,60 @@ export interface BotConfig extends MigrationFormatConfig {
   copyTradeTrailingSellTrailPercent: number;
   copyTradeTrailingSellIntervalMs: number;
   copyTradeTrailingSellMaxBuilds: number;
+  copyTradeRustTrailingSellsEnabled: boolean;
+  copyTradeRustTrailingSellsLiveEnabled: boolean;
+  copyTradeRustTrailingSellsSource: "supabase" | "local-jsonl";
+  copyTradeRustTrailingSellsLocalExecutionsPath: string;
+  copyTradeRustTrailingSellsExecutionProvider: "pumpportal-lightning" | "direct-pump" | "direct-pumpswap" | "direct-auto";
+  copyTradeRustTrailingSellsPollMs: number;
+  copyTradeRustTrailingSellsConfirmationPollMs: number;
+  copyTradeRustTrailingSellsLookbackMs: number;
+  copyTradeRustTrailingSellsStartupLookbackMs: number;
+  copyTradeRustTrailingSellsMaxRows: number;
+  copyTradeRustExecutionAlertsEnabled: boolean;
+  copyTradeRustExecutionAlertsSource: "supabase" | "local-jsonl";
+  copyTradeRustExecutionAlertsLocalExecutionsPath: string;
+  copyTradeRustExecutionAlertsPollMs: number;
+  copyTradeRustExecutionAlertsLookbackMs: number;
+  copyTradeRustExecutionAlertsStartupLookbackMs: number;
+  copyTradeRustExecutionAlertsMaxRows: number;
   copyTradeBuyPressureSellEnabled: boolean;
   copyTradeBuyPressureSellPercent: number;
   copyTradeBuyPressureSellTimeoutMs: number;
   copyTradeBuyPressureSellMinBuys: number;
   copyTradeBuyPressureSellMinTotalSol: number;
   copyTradeBuyPressureSellStatePath: string;
+  copyTradeHotSnapshotEnabled: boolean;
+  copyTradeHotSnapshotPath: string;
+  copyTradeHotSnapshotKeypairDir: string;
+  copyTradeHotSnapshotReloadCommand?: string;
   directExecutionEnabled: boolean;
   directExecutionLiveEnabled: boolean;
   directExecutionBuildOnly: boolean;
   directExecutionSimulateOnly: boolean;
+  directExecutionSimulateBeforeSend: boolean;
   directExecutionSkipPreflight: boolean;
   directExecutionConfirmationMode: "inline" | "background";
   directExecutionMaxRetries: number;
   directExecutionBlockhashCacheMs: number;
   directExecutionBlockhashWarmIntervalMs: number;
+  directExecutionSdkWarmIntervalMs: number;
+  directExecutionObservedCreatorVaultLookup: boolean;
+  directExecutionSendRpcUrls: string[];
+  directExecutionJitoSendUrls: string[];
+  directExecutionJitoAuthUuid?: string;
+  directExecutionAllowAllChats: boolean;
   directExecutionCanaryChatIds: string[];
   directExecutionCanaryWallets: string[];
   platformFeeEnabled: boolean;
   platformFeeBps: number;
   platformFeeTreasury?: string;
+  cashbackEnabled: boolean;
+  cashbackFeeShareBps: number;
+  cashbackMinClaimSol: number;
+  cashbackPayoutWalletPublicKey?: string;
+  cashbackPayoutWalletSecretKey?: string;
+  cashbackMaxPayoutSolPerDay: number;
 }
 
 export interface LegacyBotConfig extends MigrationFormatConfig {
@@ -162,6 +206,7 @@ export interface TelegramChat {
 }
 
 export interface TelegramMessage {
+  message_id?: number;
   text?: string;
   chat?: TelegramChat;
 }
@@ -203,11 +248,13 @@ export interface SubscriberStore {
   remove: (chatId: TelegramChatId) => Promise<void>;
   get: (chatId: TelegramChatId) => SubscriberRecord | null;
   setMode: (chatId: TelegramChatId, mode: AlertModeValue | null) => Promise<boolean>;
+  setNotificationsPaused: (chatId: TelegramChatId, paused: boolean) => Promise<boolean>;
   watchWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
   renameWallet: (chatId: TelegramChatId, address: string, label: string | null) => Promise<boolean>;
   unwatchWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   watchCopyTradeWallet: (chatId: TelegramChatId, address: string, label?: string | null) => Promise<boolean>;
   renameCopyTradeWallet: (chatId: TelegramChatId, address: string, label: string | null) => Promise<boolean>;
+  setCopyTradeWalletEnabled: (chatId: TelegramChatId, address: string, enabled: boolean) => Promise<boolean>;
   unwatchCopyTradeWallet: (chatId: TelegramChatId, address: string) => Promise<boolean>;
   unwatchAllCopyTradeWallets: (chatId: TelegramChatId) => Promise<number>;
   setCopyTradeWalletTrailingSellConfig: (
@@ -232,6 +279,7 @@ export interface SubscriberStore {
   setCopyTradeRetryFailedBuys: (chatId: TelegramChatId, enabled: boolean) => Promise<boolean>;
   setCopyTradeBuyPressureSellEnabled: (chatId: TelegramChatId, enabled: boolean) => Promise<boolean>;
   setCopyTradeBuyPressureSellTimeoutMs: (chatId: TelegramChatId, timeoutMs: number | null) => Promise<boolean>;
+  setCashbackPayoutWallet: (chatId: TelegramChatId, address: string | null) => Promise<boolean>;
   resetCopyTradeExecutionSettings: (chatId: TelegramChatId) => Promise<boolean>;
   setCopyTargetWallet: (chatId: TelegramChatId, address: string | null) => Promise<boolean>;
   listWatchedWallets: (chatId: TelegramChatId) => WatchedWallet[];
@@ -244,6 +292,7 @@ export interface SubscriberStore {
 export interface SubscriberRecord {
   chatId: string;
   mode: AlertModeValue | null;
+  notificationsPaused: boolean;
   watchedWallets: WatchedWallet[];
   copyTradeWallets: WatchedWallet[];
   tradingWallet: TradingWallet | null;
@@ -258,6 +307,7 @@ export interface SubscriberRecord {
   copyTradeRetryFailedBuys: boolean;
   copyTradeBuyPressureSellEnabled: boolean;
   copyTradeBuyPressureSellTimeoutMs: number | null;
+  cashbackPayoutWalletAddress: string | null;
   copyTargetWalletAddress: string | null;
   verifiedAt: string;
   updatedAt: string;
@@ -287,7 +337,7 @@ export interface WalletTradeAsset {
 
 export interface WalletTradeData {
   observedAt: string;
-  provider: "pumpportal" | "helius" | "yellowstone";
+  provider: "pumpportal" | "helius" | "yellowstone" | "geyser" | "shredstream";
   targetWallet: string;
   label: string | null;
   action: WalletTradeAction;
@@ -363,6 +413,29 @@ export interface PumpPortalLightningTradeResult {
 export type CopyTradeExecutionAction = "buy" | "sell";
 export type CopyTradeExecutionStatus = "submitted" | "failed" | "skipped" | "simulated" | "confirmed" | "expired";
 
+export interface CopyTradeLatencySummaryRecord {
+  event: "copy_trade_latency_summary";
+  chatId: string | null;
+  sourceWallet: string | null;
+  tradingWallet: string | null;
+  observedSignature: string | null;
+  mint: string | null;
+  mode: "dry" | "live";
+  status: string;
+  reason: string | null;
+  signature: string | null;
+  targetObservedToSubmitMs: number;
+  targetBlockTimeToSubmitMs: number | null;
+  targetSlot: number | null;
+  copySlot: number | null;
+  slotDelta: number | null;
+  buildMs: number | null;
+  sendMs: number | null;
+  winnerProvider: string | null;
+  sendRpcWinner: string | null;
+  sendRpcCount: number | null;
+}
+
 export interface CopyTradeExecutionRecord {
   chatId: string;
   sourceWalletAddress: string;
@@ -379,6 +452,7 @@ export interface CopyTradeExecutionRecord {
   observedTrade: WalletTradeData;
   request: unknown;
   response: unknown;
+  latencySummary?: CopyTradeLatencySummaryRecord | null;
   trailingSellStepIndex?: number | null;
   trailingSellTotalSteps?: number | null;
   createdAt?: string;
@@ -391,6 +465,7 @@ export interface CopyTradeExecutionStatusUpdate {
   status: CopyTradeExecutionStatus;
   errorText?: string | null;
   response?: unknown;
+  latencySummary?: CopyTradeLatencySummaryRecord | null;
   trailingSellStepIndex?: number | null;
   trailingSellTotalSteps?: number | null;
 }

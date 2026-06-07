@@ -43,6 +43,7 @@ export interface CopyTradeBuyIdempotencyClaimInput {
   provider: WalletTradeData["provider"];
   request: PumpPortalLightningTradeRequest;
   retryFailed?: boolean;
+  allowRepeat?: boolean;
   now?: string;
 }
 
@@ -60,10 +61,12 @@ export interface CopyTradeBuyIdempotencyStore {
 export function copyTradeBuyIdempotencyKey({
   chatId,
   mint,
+  observedSignature,
   action = "buy"
 }: {
   chatId: string | null | undefined;
   mint: string | null | undefined;
+  observedSignature?: string | null | undefined;
   action?: "buy";
 }): string | null {
   const normalizedChatId = chatId?.trim();
@@ -73,7 +76,10 @@ export function copyTradeBuyIdempotencyKey({
     return null;
   }
 
-  return [normalizedChatId, normalizedMint, action].join(":");
+  const normalizedObservedSignature = observedSignature?.trim();
+  return normalizedObservedSignature
+    ? [normalizedChatId, normalizedMint, action, normalizedObservedSignature].join(":")
+    : [normalizedChatId, normalizedMint, action].join(":");
 }
 
 interface StoredCopyTradeBuyIdempotencyFile {
@@ -112,6 +118,10 @@ type SupabaseClientLike = {
   from: (table: string) => any;
 };
 
+function normalizeProvider(value: unknown): WalletTradeData["provider"] {
+  return value === "geyser" || value === "helius" || value === "pumpportal" || value === "shredstream" ? value : "helius";
+}
+
 function baseRecord(input: CopyTradeBuyIdempotencyClaimInput): CopyTradeBuyIdempotencyRecord {
   const now = input.now || new Date().toISOString();
 
@@ -141,7 +151,7 @@ function normalizeRecord(value: unknown): CopyTradeBuyIdempotencyRecord | null {
   const record = asRecord(value);
   const amountSol = Number(record.amountSol ?? record.amount_sol);
   const status = record.status === "submitted" || record.status === "failed" ? record.status : "claimed";
-  const provider = record.provider === "pumpportal" ? "pumpportal" : "helius";
+  const provider = normalizeProvider(record.provider);
   const request = asRecord(record.request) as unknown as PumpPortalLightningTradeRequest;
 
   if (
@@ -188,7 +198,7 @@ function recordFromSupabaseRow(row: SupabaseCopyTradeBuyIdempotencyRow): CopyTra
     mint: row.mint,
     action: "buy",
     amountSol: Number(row.amount_sol),
-    provider: row.provider === "pumpportal" ? "pumpportal" : "helius",
+    provider: normalizeProvider(row.provider),
     request: asRecord(row.request) as unknown as PumpPortalLightningTradeRequest,
     status: row.status,
     resultSignature: row.result_signature,
@@ -256,6 +266,10 @@ function failedRecord(
 }
 
 function sameSemanticBuy(record: CopyTradeBuyIdempotencyRecord, input: CopyTradeBuyIdempotencyClaimInput): boolean {
+  if (input.retryFailed) {
+    return false;
+  }
+
   return record.chatId === input.chatId && record.mint === input.mint && record.action === (input.action || "buy");
 }
 
@@ -324,7 +338,9 @@ export function createJsonCopyTradeBuyIdempotencyStore({
     claimBuy(input) {
       return withLock(async () => {
         const data = await readLocalFile(path);
-        const existing = data.records.find((record) => record.key === input.key || sameSemanticBuy(record, input)) || null;
+        const existing = data.records.find((record) =>
+          record.key === input.key || (!input.allowRepeat && sameSemanticBuy(record, input))
+        ) || null;
 
         if (existing) {
           if (input.retryFailed && existing.status === "failed") {
@@ -390,6 +406,14 @@ function isMissingSupabaseRelation(error: SupabaseErrorLike | null): boolean {
   );
 }
 
+function isUnsupportedProviderConstraint(error: SupabaseErrorLike | null): boolean {
+  return Boolean(
+    error &&
+      error.code === "23514" &&
+      /provider_check|provider.*check constraint|violates check constraint/i.test(error.message || "")
+  );
+}
+
 function formatSupabaseError(error: SupabaseErrorLike | null): Error | null {
   return error ? new Error(error.message || "Supabase copy trade idempotency request failed") : null;
 }
@@ -419,7 +443,7 @@ export function createSupabaseCopyTradeBuyIdempotencyStore({
   let warnedAboutFallback = false;
 
   function activateFallback(error: SupabaseErrorLike | null): boolean {
-    if (!fallback || !isMissingSupabaseRelation(error)) {
+    if (!fallback || (!isMissingSupabaseRelation(error) && !isUnsupportedProviderConstraint(error))) {
       return false;
     }
 
@@ -428,8 +452,8 @@ export function createSupabaseCopyTradeBuyIdempotencyStore({
     if (!warnedAboutFallback) {
       warnedAboutFallback = true;
       console.warn(
-        `Supabase copy trade idempotency table is unavailable; using local JSON idempotency fallback: ${
-          error?.message || "missing relation"
+        `Supabase copy trade idempotency table is unavailable or incompatible; using local JSON idempotency fallback: ${
+          error?.message || "schema unavailable"
         }`
       );
     }
@@ -451,6 +475,10 @@ export function createSupabaseCopyTradeBuyIdempotencyStore({
 
     if (byKey.data) {
       return recordFromSupabaseRow(byKey.data as SupabaseCopyTradeBuyIdempotencyRow);
+    }
+
+    if (input.allowRepeat) {
+      return null;
     }
 
     const bySemantic = await client

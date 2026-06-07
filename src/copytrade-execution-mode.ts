@@ -46,7 +46,7 @@ export function copyTradeExecutionStateLabel(config: CopyTradeExecutionModeConfi
 }
 
 export function formatCopyTradeExecutionStateLog(config: CopyTradeExecutionModeConfig): string {
-  const provider = config.copyTradeExecutionProvider || "pumpportal-lightning";
+  const provider = config.copyTradeExecutionProvider || "direct-auto";
   const directProvider = provider === "direct-pump" || provider === "direct-pumpswap" || provider === "direct-auto";
 
   return [
@@ -55,7 +55,7 @@ export function formatCopyTradeExecutionStateLog(config: CopyTradeExecutionModeC
     `COPY_TRADE_ENABLED=${config.copyTradeEnabled ? "true" : "false"}`,
     `COPY_TRADE_DRY_RUN=${config.copyTradeDryRun ? "true" : "false"}`,
     `emergencyStop=${config.copyTradeEmergencyStopped ? "active" : "inactive"}`,
-    `livePumpPortalSubmissions=${!directProvider && copyTradeLiveExecutionEnabled(config) ? "allowed" : "blocked"}`,
+    "livePumpPortalSubmissions=blocked",
     `directExecution=${config.directExecutionEnabled ? "enabled" : "disabled"}`,
     `directLive=${config.directExecutionLiveEnabled ? "enabled" : "disabled"}`,
     `directMode=${config.directExecutionBuildOnly ? "build-only" : config.directExecutionSimulateOnly ? "simulate-only" : "send"}`

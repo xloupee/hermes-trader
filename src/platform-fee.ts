@@ -70,9 +70,9 @@ export function calculatePlatformFeeSplit({
   const treasury = normalizedTreasury(config.treasury);
   const blockedReason = platformFeeConfigBlockedReason(config);
 
-  if (!config.enabled || action !== "buy" || blockedReason || bps === 0) {
+  if (!config.enabled || blockedReason || bps === 0) {
     return {
-      enabled: Boolean(config.enabled && action === "buy" && !blockedReason && bps > 0),
+      enabled: Boolean(config.enabled && !blockedReason && bps > 0),
       bps,
       treasury,
       budgetLamports: budget,

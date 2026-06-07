@@ -6,6 +6,7 @@ import {
   createCopyTradeLatencyTrace,
   createCopyTradeLatencyTracker,
   formatCopyTradeLatencyLog,
+  formatCopyTradeLatencySummary,
   recordCopyTradeLatencyMilestone
 } from "../dist/copytrade-latency.js";
 
@@ -27,7 +28,11 @@ test("index runtime wires Helius receipt and normalization timestamps into copy 
   );
   assert.match(
     indexSource,
-    /handlePumpPortalAccountTrade[\s\S]*sendCopyTradeSimulationAlert\([\s\S]*receivedAtMs,\s*[\r\n\s]*normalizedAtMs: receivedAtMs/
+    /handlePumpPortalAccountTrade[\s\S]*handleWalletTradeSignal\(trade, \{[\s\S]*receivedAtMs,\s*[\r\n\s]*normalizedAtMs: receivedAtMs/
+  );
+  assert.match(
+    indexSource,
+    /handleWalletTradeSignal[\s\S]*sendCopyTradeSimulationAlert\([\s\S]*receivedAtMs,\s*[\r\n\s]*normalizedAtMs/
   );
   assert.match(
     indexSource,
@@ -63,23 +68,23 @@ test("index runtime wires Helius receipt and normalization timestamps into copy 
   );
   assert.match(
     indexSource,
-    /fastDirectCopyBuyPath[\s\S]*copyBuySemanticSubmissionGuard\.reserve\(copyBuySemanticKey\)[\s\S]*copyTradeBuyIdempotency\.claimBuy/
+    /fastDirectCopyBuyPath[\s\S]*copyBuySemanticSubmissionGuard\.reserve\(copyBuySemanticKey\)[\s\S]*deferredDurableCopyBuyClaim =/
   );
   assert.match(
     indexSource,
-    /copyTradeBuyIdempotency\.claimBuy\([\s\S]*retryFailed: subscriber\.copyTradeRetryFailedBuys[\s\S]*if \(!idempotencyClaim\.claimed\)/
+    /persistDeferredCopyTradeBuyIdempotency[\s\S]*copyTradeBuyIdempotency\.claimBuy\(claim\.input\)[\s\S]*Fast direct copy buy submitted before durable duplicate check/
   );
   assert.match(
     indexSource,
-    /copyTradeBuyIdempotency\.claimBuy\([\s\S]*latencyTracker\.mark\("risk_checked"/
+    /else \{[\s\S]*copyTradeBuyIdempotency\.claimBuy\(claimInput\)[\s\S]*if \(!idempotencyClaim\.claimed\)/
   );
-  assert.doesNotMatch(
+  assert.match(
     indexSource,
-    /deferredDurableCopyBuyClaimKey/
+    /latencyTracker\.mark\("submit_started"\)[\s\S]*executeCopyTradeBuy/
   );
-  assert.doesNotMatch(
+  assert.match(
     indexSource,
-    /submitted before durable duplicate check/
+    /else if \(deferredDurableCopyBuyClaim\) \{[\s\S]*persistDeferredCopyTradeBuyIdempotency/
   );
   assert.match(
     indexSource,
@@ -103,7 +108,11 @@ test("index runtime wires Helius receipt and normalization timestamps into copy 
   );
   assert.match(
     indexSource,
-    /function scheduleCopyTradeTrailingSellsAfterConfirmation[\s\S]*await waitForSignatureConfirmation\(buySignature\)[\s\S]*await scheduleCopyTradeTrailingSells/
+    /function scheduleCopyTradeTrailingSellsAfterConfirmation[\s\S]*await waitForSignatureConfirmationResult\([\s\S]*buySignature[\s\S]*await scheduleCopyTradePostConfirmationExits/
+  );
+  assert.match(
+    indexSource,
+    /function scheduleCopyTradePostConfirmationExits[\s\S]*await scheduleCopyTradeTrailingSells/
   );
   assert.match(
     indexSource,
@@ -154,6 +163,52 @@ test("copy trade latency trace records deterministic total and stage timings", (
       balance_checked_to_submit_started: 15,
       submit_started_to_submit_finished: 65
     }
+  });
+});
+
+test("copy trade latency summary flattens submit timing and slot delta", () => {
+  let trace = createCopyTradeLatencyTrace({ context, nowMs: 2_000 });
+  trace = recordCopyTradeLatencyMilestone({ trace, milestone: "normalized", nowMs: 2_004 });
+  trace = recordCopyTradeLatencyMilestone({ trace, milestone: "direct_build_started", nowMs: 2_010 });
+  trace = recordCopyTradeLatencyMilestone({ trace, milestone: "direct_build_finished", nowMs: 2_040 });
+  trace = recordCopyTradeLatencyMilestone({ trace, milestone: "direct_raw_send_started", nowMs: 2_045 });
+  trace = recordCopyTradeLatencyMilestone({ trace, milestone: "direct_raw_signature_returned", nowMs: 2_057 });
+  trace = recordCopyTradeLatencyMilestone({
+    trace,
+    milestone: "submit_finished",
+    nowMs: 2_080,
+    details: {
+      status: "submitted",
+      signature: "CopyBuySignature111111111111111111111111111"
+    }
+  });
+
+  assert.deepEqual(formatCopyTradeLatencySummary(trace, undefined, {
+    targetTimestamp: 1,
+    targetSlot: 100,
+    copySlot: 101,
+    winnerProvider: "shredstream"
+  }), {
+    event: "copy_trade_latency_summary",
+    chatId: "-1001234567890",
+    sourceWallet: "SourceWallet111111111111111111111111111111",
+    tradingWallet: "TradingWallet111111111111111111111111111",
+    observedSignature: "ObservedSignature11111111111111111111111111",
+    mint: "Mint111111111111111111111111111111111111111",
+    mode: "live",
+    status: "submitted",
+    reason: null,
+    signature: "CopyBuySignature111111111111111111111111111",
+    targetObservedToSubmitMs: 80,
+    targetBlockTimeToSubmitMs: 1080,
+    targetSlot: 100,
+    copySlot: 101,
+    slotDelta: 1,
+    buildMs: 30,
+    sendMs: 12,
+    winnerProvider: "shredstream",
+    sendRpcWinner: null,
+    sendRpcCount: null
   });
 });
 

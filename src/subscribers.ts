@@ -45,8 +45,7 @@ export function normalizeTrailingSellConfig(value: unknown, fallbackNow = new Da
       };
     })
     .filter((step): step is { delayMs: number; percent: number } => Boolean(step))
-    .slice(0, 20)
-    .sort((left, right) => left.delayMs - right.delayMs);
+    .slice(0, 20);
 
   if (steps.length === 0 && value !== null && value !== undefined) {
     return null;
@@ -69,6 +68,7 @@ export function makeSubscriber(chatId: string, mode: AlertModeValue | null, now 
   return {
     chatId,
     mode,
+    notificationsPaused: false,
     watchedWallets: [],
     copyTradeWallets: [],
     tradingWallet: null,
@@ -83,6 +83,7 @@ export function makeSubscriber(chatId: string, mode: AlertModeValue | null, now 
     copyTradeRetryFailedBuys: false,
     copyTradeBuyPressureSellEnabled: false,
     copyTradeBuyPressureSellTimeoutMs: null,
+    cashbackPayoutWalletAddress: null,
     copyTargetWalletAddress: null,
     verifiedAt: now,
     updatedAt: now
@@ -113,6 +114,7 @@ export function normalizeWatchedWallet(value: unknown, fallbackNow = new Date().
     label,
     addedAt: typeof record.addedAt === "string" ? record.addedAt : fallbackNow,
     updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : fallbackNow,
+    copyTradeEnabled: record.copyTradeEnabled === false || record.copy_trade_enabled === false ? false : true,
     trailingSellConfig: normalizeTrailingSellConfig(record.trailingSellConfig ?? record.trailing_sell_config, fallbackNow)
   };
 }
@@ -153,6 +155,7 @@ export function mergeSubscriber(
   subscribers.set(chatId, {
     chatId,
     mode,
+    notificationsPaused: existing?.notificationsPaused === true,
     watchedWallets: existing?.watchedWallets || [],
     copyTradeWallets: existing?.copyTradeWallets || [],
     tradingWallet: existing?.tradingWallet || null,
@@ -167,6 +170,7 @@ export function mergeSubscriber(
     copyTradeRetryFailedBuys: existing?.copyTradeRetryFailedBuys === true,
     copyTradeBuyPressureSellEnabled: existing?.copyTradeBuyPressureSellEnabled === true,
     copyTradeBuyPressureSellTimeoutMs: finiteNumber(existing?.copyTradeBuyPressureSellTimeoutMs),
+    cashbackPayoutWalletAddress: stringValue(existing?.cashbackPayoutWalletAddress) || null,
     copyTargetWalletAddress: stringValue(existing?.copyTargetWalletAddress) || null,
     verifiedAt: typeof verifiedAt === "string" ? verifiedAt : existing?.verifiedAt || now,
     updatedAt: typeof updatedAt === "string" ? updatedAt : existing?.updatedAt || now
@@ -274,10 +278,12 @@ function loadSubscriberRecordInto(subscribers: Map<string, SubscriberRecord>, va
   const nextWatchedWallets = legacyCopyTarget
     ? watchedWallets.filter((wallet) => wallet.address !== legacyCopyTarget)
     : watchedWallets;
+  const notificationsPaused = record.notificationsPaused === true || record.notifications_paused === true;
 
   if (existing) {
     subscribers.set(chatId, {
       ...existing,
+      notificationsPaused,
       watchedWallets: nextWatchedWallets.length > 0 || watchedWallets.length > 0 ? dedupeWatchedWallets(nextWatchedWallets) : existing.watchedWallets,
       copyTradeWallets: nextCopyTradeWallets.length > 0 ? dedupeWatchedWallets(nextCopyTradeWallets) : existing.copyTradeWallets,
       tradingWallet: tradingWallet || existing.tradingWallet || nextTradingWallets[0] || null,
@@ -295,6 +301,9 @@ function loadSubscriberRecordInto(subscribers: Map<string, SubscriberRecord>, va
       copyTradeBuyPressureSellTimeoutMs:
         finiteNumber(record.copyTradeBuyPressureSellTimeoutMs ?? record.copy_trade_buy_pressure_sell_timeout_ms) ??
           existing.copyTradeBuyPressureSellTimeoutMs,
+      cashbackPayoutWalletAddress:
+        stringValue(record.cashbackPayoutWalletAddress ?? record.cashback_payout_wallet_address)?.trim() ||
+          existing.cashbackPayoutWalletAddress,
       copyTargetWalletAddress: legacyCopyTarget || existing.copyTargetWalletAddress
     });
   }
@@ -462,6 +471,25 @@ export function createSubscriberStore({
       subscribers.set(normalized, {
         ...(existing || makeSubscriber(normalized, mode)),
         mode,
+        notificationsPaused: false,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return true;
+    },
+    async setNotificationsPaused(chatId, paused) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      subscribers.set(normalized, {
+        ...existing,
+        notificationsPaused: paused,
+        mode: paused ? null : existing.mode,
         updatedAt: new Date().toISOString()
       });
       await save();
@@ -569,6 +597,7 @@ export function createSubscriberStore({
         label: nextLabel,
         addedAt: previous?.addedAt || now,
         updatedAt: now,
+        copyTradeEnabled: previous?.copyTradeEnabled === false ? false : true,
         trailingSellConfig: previous?.trailingSellConfig || null
       });
 
@@ -602,6 +631,40 @@ export function createSubscriberStore({
           ? {
               ...wallet,
               label: label?.trim() || null,
+              updatedAt: now
+            }
+          : wallet
+      );
+
+      subscribers.set(normalized, {
+        ...existing,
+        copyTradeWallets: dedupeWatchedWallets(copyTradeWallets),
+        updatedAt: now
+      });
+      await save();
+      return true;
+    },
+    async setCopyTradeWalletEnabled(chatId, address, enabled) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const walletIndex = existing.copyTradeWallets.findIndex((wallet) => wallet.address === address);
+
+      if (walletIndex === -1) {
+        return false;
+      }
+
+      const now = new Date().toISOString();
+      const copyTradeWallets = existing.copyTradeWallets.map((wallet, index) =>
+        index === walletIndex
+          ? {
+              ...wallet,
+              copyTradeEnabled: enabled,
               updatedAt: now
             }
           : wallet
@@ -1014,6 +1077,23 @@ export function createSubscriberStore({
       await save();
       return true;
     },
+    async setCashbackPayoutWallet(chatId, address) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      subscribers.set(normalized, {
+        ...existing,
+        cashbackPayoutWalletAddress: address,
+        updatedAt: new Date().toISOString()
+      });
+      await save();
+      return true;
+    },
     async resetCopyTradeExecutionSettings(chatId) {
       await load();
       const normalized = normalizeChatId(chatId);
@@ -1061,6 +1141,7 @@ export function createSubscriberStore({
                   label: existing.watchedWallets.find((wallet) => wallet.address === address)?.label || null,
                   addedAt: now,
                   updatedAt: now,
+                  copyTradeEnabled: true,
                   trailingSellConfig: null
                 }
               ]),

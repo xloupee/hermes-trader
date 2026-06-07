@@ -10,15 +10,16 @@ import {
   normalizeTrailingSellConfig,
   seedSubscriberMap
 } from "./subscribers.js";
-import type {
-  AlertModeValue,
-  CopyTradeExecutionRecord,
-  CopyTradeExecutionStatusUpdate,
-  SubscriberRecord,
-  SubscriberStore,
-  TelegramChatId,
-  TradingWallet,
-  WatchedWallet
+import {
+  asRecord,
+  type AlertModeValue,
+  type CopyTradeExecutionRecord,
+  type CopyTradeExecutionStatusUpdate,
+  type SubscriberRecord,
+  type SubscriberStore,
+  type TelegramChatId,
+  type TradingWallet,
+  type WatchedWallet
 } from "./types.js";
 
 interface SupabaseErrorLike {
@@ -28,6 +29,7 @@ interface SupabaseErrorLike {
 export interface SubscriberRow {
   chat_id: string;
   mode: string | null;
+  notifications_paused?: boolean | null;
   copy_wallet_address: string | null;
   copy_wallet_addresses?: string[] | null;
   copy_amount_sol: string | number | null;
@@ -38,6 +40,7 @@ export interface SubscriberRow {
   copy_trade_retry_failed_buys?: boolean | null;
   copy_trade_buy_pressure_sell_enabled?: boolean | null;
   copy_trade_buy_pressure_sell_timeout_ms?: string | number | null;
+  cashback_payout_wallet_address?: string | null;
   copy_target_wallet_address: string | null;
   active_trading_wallet_public_key?: string | null;
   verified_at: string;
@@ -92,6 +95,19 @@ export interface CopyTradeExecutionRow {
   observed_trade: unknown;
   request: unknown;
   response: unknown;
+  observed_signature?: string | null;
+  target_observed_to_submit_ms?: number | null;
+  target_blocktime_to_submit_ms?: number | null;
+  build_ms?: number | null;
+  send_ms?: number | null;
+  winner_provider?: string | null;
+  send_rpc_winner?: string | null;
+  send_rpc_count?: number | null;
+  target_slot?: number | null;
+  copy_slot?: number | null;
+  slot_delta?: number | null;
+  latency_status?: string | null;
+  latency_summary?: unknown;
   trailing_sell_step_index: number | null;
   trailing_sell_total_steps: number | null;
   created_at?: string;
@@ -138,12 +154,20 @@ function subscriberRow(
   record: SubscriberRecord,
   {
     includeRetryFailedBuys = true,
-    includeBuyPressureSell = true
-  }: { includeRetryFailedBuys?: boolean; includeBuyPressureSell?: boolean } = {}
+    includeBuyPressureSell = true,
+    includeCashbackPayoutWallet = true,
+    includeNotificationsPaused = true
+  }: {
+    includeRetryFailedBuys?: boolean;
+    includeBuyPressureSell?: boolean;
+    includeCashbackPayoutWallet?: boolean;
+    includeNotificationsPaused?: boolean;
+  } = {}
 ): Omit<SubscriberRow, "telegram_watched_wallets"> {
   const row: Omit<SubscriberRow, "telegram_watched_wallets"> = {
     chat_id: record.chatId,
     mode: record.mode,
+    notifications_paused: record.notificationsPaused,
     copy_wallet_address: null,
     copy_wallet_addresses: [],
     copy_amount_sol: record.copyAmountSol,
@@ -154,6 +178,7 @@ function subscriberRow(
     copy_trade_retry_failed_buys: record.copyTradeRetryFailedBuys,
     copy_trade_buy_pressure_sell_enabled: record.copyTradeBuyPressureSellEnabled,
     copy_trade_buy_pressure_sell_timeout_ms: record.copyTradeBuyPressureSellTimeoutMs,
+    cashback_payout_wallet_address: record.cashbackPayoutWalletAddress,
     copy_target_wallet_address: record.copyTargetWalletAddress,
     active_trading_wallet_public_key: record.tradingWallet?.publicKey || null,
     verified_at: record.verifiedAt,
@@ -167,6 +192,14 @@ function subscriberRow(
   if (!includeBuyPressureSell) {
     delete row.copy_trade_buy_pressure_sell_enabled;
     delete row.copy_trade_buy_pressure_sell_timeout_ms;
+  }
+
+  if (!includeCashbackPayoutWallet) {
+    delete row.cashback_payout_wallet_address;
+  }
+
+  if (!includeNotificationsPaused) {
+    delete row.notifications_paused;
   }
 
   return row;
@@ -185,8 +218,24 @@ function watchedWalletRow(chatId: string, wallet: WatchedWallet): WatchedWalletR
 function copyTradeWalletRow(chatId: string, wallet: WatchedWallet): WatchedWalletRow {
   return {
     ...watchedWalletRow(chatId, wallet),
-    trailing_sell_config: wallet.trailingSellConfig ?? null
+    trailing_sell_config: copyTradeWalletTrailingSellConfigValue(wallet)
   };
+}
+
+function copyTradeWalletTrailingSellConfigValue(wallet: WatchedWallet): unknown {
+  if (wallet.trailingSellConfig) {
+    return {
+      ...wallet.trailingSellConfig,
+      copyTradeEnabled: wallet.copyTradeEnabled !== false
+    };
+  }
+
+  return wallet.copyTradeEnabled === false ? { copyTradeEnabled: false } : null;
+}
+
+function copyTradeEnabledFromTrailingSellConfig(value: unknown): boolean {
+  const record = asRecord(value);
+  return record.copyTradeEnabled === false || record.copy_trade_enabled === false ? false : true;
 }
 
 const TRADING_WALLET_STATE_PREFIX = "trading_wallets_v1:";
@@ -294,7 +343,20 @@ function redactSensitivePayload(value: unknown): unknown {
   return redacted;
 }
 
-function copyTradeExecutionRow(record: CopyTradeExecutionRecord): CopyTradeExecutionRow {
+function responseWithLatencySummary(response: unknown, latencySummary: unknown): unknown {
+  if (!latencySummary || !response || typeof response !== "object" || Array.isArray(response)) {
+    return response;
+  }
+
+  return {
+    ...(response as Record<string, unknown>),
+    latencySummary
+  };
+}
+
+export function copyTradeExecutionRow(record: CopyTradeExecutionRecord): CopyTradeExecutionRow {
+  const latency = record.latencySummary || null;
+  const redactedLatency = latency ? redactSensitivePayload(latency) : null;
   const row: CopyTradeExecutionRow = {
     chat_id: record.chatId,
     source_wallet_address: record.sourceWalletAddress,
@@ -310,7 +372,20 @@ function copyTradeExecutionRow(record: CopyTradeExecutionRecord): CopyTradeExecu
     http_status: record.httpStatus,
     observed_trade: redactSensitivePayload(record.observedTrade),
     request: redactSensitivePayload(record.request),
-    response: redactSensitivePayload(record.response),
+    response: responseWithLatencySummary(redactSensitivePayload(record.response), redactedLatency),
+    observed_signature: latency?.observedSignature ?? record.observedTrade.signature ?? null,
+    target_observed_to_submit_ms: latency?.targetObservedToSubmitMs ?? null,
+    target_blocktime_to_submit_ms: latency?.targetBlockTimeToSubmitMs ?? null,
+    build_ms: latency?.buildMs ?? null,
+    send_ms: latency?.sendMs ?? null,
+    winner_provider: latency?.winnerProvider ?? null,
+    send_rpc_winner: latency?.sendRpcWinner ?? null,
+    send_rpc_count: latency?.sendRpcCount ?? null,
+    target_slot: latency?.targetSlot ?? null,
+    copy_slot: latency?.copySlot ?? null,
+    slot_delta: latency?.slotDelta ?? null,
+    latency_status: latency?.status ?? null,
+    latency_summary: redactedLatency,
     trailing_sell_step_index: record.trailingSellStepIndex ?? null,
     trailing_sell_total_steps: record.trailingSellTotalSteps ?? null
   };
@@ -320,6 +395,41 @@ function copyTradeExecutionRow(record: CopyTradeExecutionRecord): CopyTradeExecu
   }
 
   return row;
+}
+
+function legacyCopyTradeExecutionRow(row: CopyTradeExecutionRow): Omit<CopyTradeExecutionRow,
+  "observed_signature" |
+  "target_observed_to_submit_ms" |
+  "target_blocktime_to_submit_ms" |
+  "build_ms" |
+  "send_ms" |
+  "winner_provider" |
+  "send_rpc_winner" |
+  "send_rpc_count" |
+  "target_slot" |
+  "copy_slot" |
+  "slot_delta" |
+  "latency_status" |
+  "latency_summary"
+> {
+  const {
+    observed_signature: _observedSignature,
+    target_observed_to_submit_ms: _targetObserved,
+    target_blocktime_to_submit_ms: _targetBlocktime,
+    build_ms: _buildMs,
+    send_ms: _sendMs,
+    winner_provider: _winnerProvider,
+    send_rpc_winner: _sendRpcWinner,
+    send_rpc_count: _sendRpcCount,
+    target_slot: _targetSlot,
+    copy_slot: _copySlot,
+    slot_delta: _slotDelta,
+    latency_status: _latencyStatus,
+    latency_summary: _latencySummary,
+    ...legacyRow
+  } = row;
+
+  return legacyRow;
 }
 
 export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
@@ -337,6 +447,7 @@ export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
         label: wallet.label,
         addedAt: wallet.added_at,
         updatedAt: wallet.updated_at,
+        copyTradeEnabled: copyTradeEnabledFromTrailingSellConfig(wallet.trailing_sell_config),
         trailingSellConfig: normalizeTrailingSellConfig(wallet.trailing_sell_config, wallet.updated_at)
       }))
     : [];
@@ -385,6 +496,7 @@ export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
   return {
     chatId: row.chat_id,
     mode: normalizeMode(row.mode),
+    notificationsPaused: row.notifications_paused === true,
     watchedWallets: dedupeWatchedWallets(nextWatchedWallets),
     copyTradeWallets: dedupeWatchedWallets(nextCopyTradeWallets),
     tradingWallet,
@@ -399,6 +511,7 @@ export function subscriberFromRow(row: SubscriberRow): SubscriberRecord {
     copyTradeRetryFailedBuys: row.copy_trade_retry_failed_buys === true,
     copyTradeBuyPressureSellEnabled: row.copy_trade_buy_pressure_sell_enabled === true,
     copyTradeBuyPressureSellTimeoutMs: numericValue(row.copy_trade_buy_pressure_sell_timeout_ms ?? null),
+    cashbackPayoutWalletAddress: row.cashback_payout_wallet_address || null,
     copyTargetWalletAddress: legacyCopyTarget,
     verifiedAt: row.verified_at,
     updatedAt: row.updated_at
@@ -421,7 +534,17 @@ export function createSupabaseCopyTradeRecorder({
 
   return {
     async recordCopyTradeExecution(record) {
-      const { error } = await client.from("telegram_copytrade_executions").insert(copyTradeExecutionRow(record));
+      const row = copyTradeExecutionRow(record);
+      const { error } = await client.from("telegram_copytrade_executions").insert(row);
+      if (isMissingSupabaseColumn(error) && record.latencySummary) {
+        const retry = await client.from("telegram_copytrade_executions").insert(legacyCopyTradeExecutionRow(row));
+        const retryError = formatSupabaseError(retry.error);
+
+        if (retryError) {
+          throw retryError;
+        }
+        return;
+      }
       const formattedError = formatSupabaseError(error);
 
       if (formattedError) {
@@ -433,9 +556,27 @@ export function createSupabaseCopyTradeRecorder({
         status: update.status,
         error_text: update.errorText ?? null
       };
+      const latency = update.latencySummary || null;
+      const redactedLatency = latency ? redactSensitivePayload(latency) : null;
+
+      if (latency) {
+        values.observed_signature = latency.observedSignature;
+        values.target_observed_to_submit_ms = latency.targetObservedToSubmitMs;
+        values.target_blocktime_to_submit_ms = latency.targetBlockTimeToSubmitMs;
+        values.build_ms = latency.buildMs;
+        values.send_ms = latency.sendMs;
+        values.winner_provider = latency.winnerProvider;
+        values.send_rpc_winner = latency.sendRpcWinner;
+        values.send_rpc_count = latency.sendRpcCount;
+        values.target_slot = latency.targetSlot;
+        values.copy_slot = latency.copySlot;
+        values.slot_delta = latency.slotDelta;
+        values.latency_status = latency.status;
+        values.latency_summary = redactedLatency;
+      }
 
       if ("response" in update) {
-        values.response = redactSensitivePayload(update.response ?? null);
+        values.response = responseWithLatencySummary(redactSensitivePayload(update.response ?? null), redactedLatency);
       }
 
       let query = client
@@ -458,6 +599,49 @@ export function createSupabaseCopyTradeRecorder({
       }
 
       const { error } = await query;
+      if (isMissingSupabaseColumn(error) && latency) {
+        const legacyValues = { ...values };
+        delete legacyValues.observed_signature;
+        delete legacyValues.target_observed_to_submit_ms;
+        delete legacyValues.target_blocktime_to_submit_ms;
+        delete legacyValues.build_ms;
+        delete legacyValues.send_ms;
+        delete legacyValues.winner_provider;
+        delete legacyValues.send_rpc_winner;
+        delete legacyValues.send_rpc_count;
+        delete legacyValues.target_slot;
+        delete legacyValues.copy_slot;
+        delete legacyValues.slot_delta;
+        delete legacyValues.latency_status;
+        delete legacyValues.latency_summary;
+
+        let retry = client
+          .from("telegram_copytrade_executions")
+          .update(legacyValues)
+          .eq("chat_id", update.chatId)
+          .eq("action", update.action)
+          .eq("signature", update.signature);
+
+        if (typeof update.trailingSellStepIndex === "number") {
+          retry = retry.eq("trailing_sell_step_index", update.trailingSellStepIndex);
+        } else {
+          retry = retry.is("trailing_sell_step_index", null);
+        }
+
+        if (typeof update.trailingSellTotalSteps === "number") {
+          retry = retry.eq("trailing_sell_total_steps", update.trailingSellTotalSteps);
+        } else {
+          retry = retry.is("trailing_sell_total_steps", null);
+        }
+
+        const retryResult = await retry;
+        const retryError = formatSupabaseError(retryResult.error);
+
+        if (retryError) {
+          throw retryError;
+        }
+        return;
+      }
       const formattedError = formatSupabaseError(error);
 
       if (formattedError) {
@@ -484,7 +668,7 @@ export function createSupabaseSubscriberRepository({
   return {
     async listSubscribers() {
       const subscriberSelect =
-        "chat_id,mode,copy_wallet_address,copy_wallet_addresses,copy_amount_sol,copy_trade_buy_slippage_percent,copy_trade_buy_priority_fee_sol,copy_trade_sell_slippage_percent,copy_trade_sell_priority_fee_sol,copy_trade_retry_failed_buys,copy_trade_buy_pressure_sell_enabled,copy_trade_buy_pressure_sell_timeout_ms,copy_target_wallet_address,active_trading_wallet_public_key,verified_at,updated_at";
+        "chat_id,mode,notifications_paused,copy_wallet_address,copy_wallet_addresses,copy_amount_sol,copy_trade_buy_slippage_percent,copy_trade_buy_priority_fee_sol,copy_trade_sell_slippage_percent,copy_trade_sell_priority_fee_sol,copy_trade_retry_failed_buys,copy_trade_buy_pressure_sell_enabled,copy_trade_buy_pressure_sell_timeout_ms,cashback_payout_wallet_address,copy_target_wallet_address,active_trading_wallet_public_key,verified_at,updated_at";
       const legacySubscriberSelect =
         "chat_id,mode,copy_wallet_address,copy_wallet_addresses,copy_amount_sol,copy_trade_buy_slippage_percent,copy_trade_buy_priority_fee_sol,copy_trade_sell_slippage_percent,copy_trade_sell_priority_fee_sol,copy_target_wallet_address,active_trading_wallet_public_key,verified_at,updated_at";
       const subscriberResult = await client
@@ -511,13 +695,15 @@ export function createSupabaseSubscriberRepository({
 
       const [
         { data: watchedRows, error: watchedError },
-        { data: copyTradeRows, error: copyTradeError },
+        copyTradeResult,
         tradingWalletResult
       ] = await Promise.all([
         client.from("telegram_watched_wallets").select("chat_id,address,label,added_at,updated_at"),
         client.from("telegram_copytrade_wallets").select("chat_id,address,label,added_at,updated_at,trailing_sell_config"),
         client.from("telegram_trading_wallets").select("chat_id,public_key,encrypted_api_key,api_key_last4,provider,kind,encrypted_secret_key,secret_key_format,key_last4,label,created_at,updated_at")
       ]);
+      let copyTradeRows = copyTradeResult.data as unknown;
+      let copyTradeError = copyTradeResult.error;
       let tradingWalletRows = tradingWalletResult.data as unknown;
       let tradingWalletError = tradingWalletResult.error;
 
@@ -559,7 +745,9 @@ export function createSupabaseSubscriberRepository({
         if (
           subscriber.copyTradeRetryFailedBuys ||
           subscriber.copyTradeBuyPressureSellEnabled ||
-          subscriber.copyTradeBuyPressureSellTimeoutMs !== null
+          subscriber.copyTradeBuyPressureSellTimeoutMs !== null ||
+          subscriber.cashbackPayoutWalletAddress !== null ||
+          subscriber.notificationsPaused
         ) {
           const formattedError = formatSupabaseError(error);
           throw formattedError || new Error("Supabase subscriber store request failed");
@@ -567,7 +755,12 @@ export function createSupabaseSubscriberRepository({
 
         const fallbackResult = await client
           .from("telegram_subscribers")
-          .upsert(subscriberRow(subscriber, { includeRetryFailedBuys: false, includeBuyPressureSell: false }), { onConflict: "chat_id" });
+          .upsert(subscriberRow(subscriber, {
+            includeRetryFailedBuys: false,
+            includeBuyPressureSell: false,
+            includeCashbackPayoutWallet: false,
+            includeNotificationsPaused: false
+          }), { onConflict: "chat_id" });
         error = fallbackResult.error;
       }
 
@@ -727,6 +920,7 @@ export function createSupabaseSubscriberStore({
       const next = subscribers.has(normalized)
         ? {
             ...(subscribers.get(normalized) || makeSubscriber(normalized, null, now)),
+            notificationsPaused: false,
             updatedAt: now
           }
         : makeSubscriber(normalized, null, now);
@@ -759,6 +953,27 @@ export function createSupabaseSubscriberStore({
       const next = {
         ...(subscribers.get(normalized) || makeSubscriber(normalized, mode)),
         mode,
+        notificationsPaused: false,
+        updatedAt: new Date().toISOString()
+      };
+
+      await repository.upsertSubscriber(next);
+      subscribers.set(normalized, next);
+      return true;
+    },
+    async setNotificationsPaused(chatId, paused) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const next = {
+        ...existing,
+        notificationsPaused: paused,
+        mode: paused ? null : existing.mode,
         updatedAt: new Date().toISOString()
       };
 
@@ -867,7 +1082,9 @@ export function createSupabaseSubscriberStore({
         address,
         label: label?.trim() || previous?.label || null,
         addedAt: previous?.addedAt || now,
-        updatedAt: now
+        updatedAt: now,
+        copyTradeEnabled: previous?.copyTradeEnabled === false ? false : true,
+        trailingSellConfig: previous?.trailingSellConfig || null
       };
       const next = {
         ...existing,
@@ -900,6 +1117,39 @@ export function createSupabaseSubscriberStore({
       const wallet = {
         ...existing.copyTradeWallets[walletIndex],
         label: label?.trim() || null,
+        updatedAt: now
+      };
+      const copyTradeWallets = existing.copyTradeWallets.map((entry, index) => (index === walletIndex ? wallet : entry));
+      const next = {
+        ...existing,
+        copyTradeWallets: dedupeWatchedWallets(copyTradeWallets),
+        updatedAt: now
+      };
+
+      await repository.upsertSubscriber(next);
+      await repository.upsertCopyTradeWallet(normalized, wallet);
+      subscribers.set(normalized, next);
+      return true;
+    },
+    async setCopyTradeWalletEnabled(chatId, address, enabled) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const existing = subscribers.get(normalized) || makeSubscriber(normalized, null);
+      const walletIndex = existing.copyTradeWallets.findIndex((wallet) => wallet.address === address);
+
+      if (walletIndex === -1) {
+        return false;
+      }
+
+      const now = new Date().toISOString();
+      const wallet = {
+        ...existing.copyTradeWallets[walletIndex],
+        copyTradeEnabled: enabled,
         updatedAt: now
       };
       const copyTradeWallets = existing.copyTradeWallets.map((entry, index) => (index === walletIndex ? wallet : entry));
@@ -1341,6 +1591,24 @@ export function createSupabaseSubscriberStore({
       subscribers.set(normalized, next);
       return true;
     },
+    async setCashbackPayoutWallet(chatId, address) {
+      await load();
+      const normalized = normalizeChatId(chatId);
+
+      if (!normalized || !subscribers.has(normalized)) {
+        return false;
+      }
+
+      const next = {
+        ...(subscribers.get(normalized) || makeSubscriber(normalized, null)),
+        cashbackPayoutWalletAddress: address,
+        updatedAt: new Date().toISOString()
+      };
+
+      await repository.upsertSubscriber(next);
+      subscribers.set(normalized, next);
+      return true;
+    },
     async resetCopyTradeExecutionSettings(chatId) {
       await load();
       const normalized = normalizeChatId(chatId);
@@ -1383,6 +1651,7 @@ export function createSupabaseSubscriberStore({
           label: existing.watchedWallets.find((watchedWallet) => watchedWallet.address === address)?.label || null,
           addedAt: now,
           updatedAt: now,
+          copyTradeEnabled: true,
           trailingSellConfig: null
         };
         const next = {

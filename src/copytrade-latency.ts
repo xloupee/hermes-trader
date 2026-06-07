@@ -5,6 +5,10 @@ export const copyTradeLatencyMilestones = [
   "risk_checked",
   "live_gate_checked",
   "balance_checked",
+  "direct_buy_state_refreshed",
+  "direct_wallet_checked",
+  "direct_signer_ready",
+  "direct_warmup_started",
   "direct_build_started",
   "direct_build_finished",
   "direct_blockhash_started",
@@ -66,6 +70,38 @@ export interface CopyTradeLatencyLogMetadata {
   signature: string | null;
   totalMs: number;
   stagesMs: Record<string, number>;
+}
+
+export interface CopyTradeLatencySummaryUpdate {
+  targetTimestamp?: number | null;
+  targetSlot?: number | null;
+  copySlot?: number | null;
+  winnerProvider?: string | null;
+  sendRpcWinner?: string | null;
+  sendRpcCount?: number | null;
+}
+
+export interface CopyTradeLatencySummaryMetadata {
+  event: "copy_trade_latency_summary";
+  chatId: string | null;
+  sourceWallet: string | null;
+  tradingWallet: string | null;
+  observedSignature: string | null;
+  mint: string | null;
+  mode: CopyTradeLatencyMode;
+  status: string;
+  reason: string | null;
+  signature: string | null;
+  targetObservedToSubmitMs: number;
+  targetBlockTimeToSubmitMs: number | null;
+  targetSlot: number | null;
+  copySlot: number | null;
+  slotDelta: number | null;
+  buildMs: number | null;
+  sendMs: number | null;
+  winnerProvider: string | null;
+  sendRpcWinner: string | null;
+  sendRpcCount: number | null;
 }
 
 export interface CopyTradeLatencyTracker {
@@ -209,6 +245,14 @@ function lastMilestone(trace: CopyTradeLatencyTrace): CopyTradeLatencyMilestoneR
   };
 }
 
+function finiteNumber(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function stageDuration(stagesMs: Record<string, number>, key: string): number | null {
+  return finiteNumber(stagesMs[key]);
+}
+
 export function formatCopyTradeLatencyLog(
   trace: CopyTradeLatencyTrace,
   details?: CopyTradeLatencyMilestoneDetails
@@ -232,6 +276,48 @@ export function formatCopyTradeLatencyLog(
     signature,
     totalMs: durationMs(trace.startedAtMs, latest.atMs),
     stagesMs: stageDurations(trace.milestones)
+  };
+}
+
+export function formatCopyTradeLatencySummary(
+  trace: CopyTradeLatencyTrace,
+  details?: CopyTradeLatencyMilestoneDetails,
+  update: CopyTradeLatencySummaryUpdate = {}
+): CopyTradeLatencySummaryMetadata {
+  const log = formatCopyTradeLatencyLog(trace, details);
+  const latest = lastMilestone(trace);
+  const targetTimestamp = finiteNumber(update.targetTimestamp);
+  const targetSlot = finiteNumber(update.targetSlot);
+  const copySlot = finiteNumber(update.copySlot);
+  const slotDelta = targetSlot !== null && copySlot !== null ? copySlot - targetSlot : null;
+  const targetBlockTimeToSubmitMs = targetTimestamp === null
+    ? null
+    : durationMs(targetTimestamp * 1000, latest.atMs);
+  const buildMs = stageDuration(log.stagesMs, "direct_build_started_to_direct_build_finished");
+  const sendMs = stageDuration(log.stagesMs, "direct_raw_send_started_to_direct_raw_signature_returned") ??
+    stageDuration(log.stagesMs, "submit_started_to_submit_finished");
+
+  return {
+    event: "copy_trade_latency_summary",
+    chatId: log.chatId,
+    sourceWallet: log.sourceWallet,
+    tradingWallet: log.tradingWallet,
+    observedSignature: log.observedSignature,
+    mint: log.mint,
+    mode: log.mode,
+    status: log.status,
+    reason: log.reason,
+    signature: log.signature,
+    targetObservedToSubmitMs: log.totalMs,
+    targetBlockTimeToSubmitMs,
+    targetSlot,
+    copySlot,
+    slotDelta,
+    buildMs,
+    sendMs,
+    winnerProvider: normalizeText(update.winnerProvider),
+    sendRpcWinner: normalizeText(update.sendRpcWinner),
+    sendRpcCount: finiteNumber(update.sendRpcCount)
   };
 }
 

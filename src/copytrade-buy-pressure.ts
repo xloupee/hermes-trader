@@ -104,6 +104,9 @@ function normalizeWalletTradeData(value: unknown): WalletTradeData | null {
   const record = asRecord(value);
   const targetWallet = stringValue(record.targetWallet)?.trim();
   const mint = stringValue(record.mint)?.trim() || null;
+  const provider = record.provider === "geyser" || record.provider === "helius" || record.provider === "pumpportal"
+    ? record.provider
+    : "pumpportal";
 
   if (!targetWallet || !mint) {
     return null;
@@ -111,7 +114,7 @@ function normalizeWalletTradeData(value: unknown): WalletTradeData | null {
 
   return {
     observedAt: stringValue(record.observedAt) || new Date().toISOString(),
-    provider: record.provider === "helius" ? "helius" : "pumpportal",
+    provider,
     targetWallet,
     label: stringValue(record.label)?.trim() || null,
     action: normalizeAction(record.action),

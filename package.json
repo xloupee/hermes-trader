@@ -7,12 +7,23 @@
     "build": "tsc",
     "start": "npm run build && node dist/index.js",
     "bot": "npm run build && node dist/bot.js",
+    "shred-listener": "npm run build && node dist/shred-listener.js",
     "chat-id": "npm run build && node dist/get-chat-id.js",
     "past-migrations": "npm run build && node dist/past-migrations.js",
     "feed-latency": "node scripts/compare-wallet-feed-latency.mjs",
     "import-subscribers": "npm run build && node dist/import-subscribers.js",
+    "shredstream-decoder:check": "cargo check --manifest-path tools/shredstream-rs/Cargo.toml",
+    "shredstream-decoder:test": "cargo test --manifest-path tools/shredstream-rs/Cargo.toml",
+    "shredstream-latency-report": "npm run build && node scripts/compare-shredstream-discovery-latency.mjs",
+    "shredstream-promotion-gate": "node scripts/shredstream-promotion-gate.mjs",
+    "shredstream-wallet-coverage-report": "node scripts/shredstream-wallet-coverage-report.mjs",
     "check": "tsc --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
+    "wallet-feed-readiness-report": "node scripts/wallet-feed-readiness-report.mjs",
+    "wallet-feed-report": "node scripts/wallet-feed-comparison-report.mjs",
+    "copytrade-latency-backfill": "node scripts/backfill-copytrade-latency-dashboard.mjs",
+    "cashback-reconciliation-report": "node scripts/cashback-reconciliation-report.mjs",
+    "cashback-admin": "npm run build && node dist/cashback-admin.js",
     "stop-local": "bash scripts/stop-local.sh",
     "deploy": "bash scripts/deploy.sh"
   },
@@ -29,7 +40,7 @@
     "ws": "^8.18.0"
   },
   "engines": {
-    "node": ">=20.18"
+    "node": ">=20.18.0"
   },
   "devDependencies": {
     "@types/bn.js": "^5.2.0",

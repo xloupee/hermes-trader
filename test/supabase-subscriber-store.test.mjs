@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createSupabaseSubscriberStore, importSubscribersToSupabase, subscriberFromRow } from "../dist/subscribers-supabase.js";
+import {
+  copyTradeExecutionRow,
+  createSupabaseSubscriberStore,
+  importSubscribersToSupabase,
+  subscriberFromRow
+} from "../dist/subscribers-supabase.js";
 
 const wallet = "Wallet111111111111111111111111111111111111111";
 const otherWallet = "Other111111111111111111111111111111111111111";
@@ -185,6 +190,7 @@ function subscriber(overrides = {}) {
     copyTradeRetryFailedBuys: false,
     copyTradeBuyPressureSellEnabled: false,
     copyTradeBuyPressureSellTimeoutMs: null,
+    cashbackPayoutWalletAddress: null,
     copyTargetWalletAddress: null,
     verifiedAt: "2026-05-22T00:00:00.000Z",
     updatedAt: "2026-05-22T00:00:00.000Z",
@@ -210,6 +216,72 @@ test("Supabase subscriber store can load stored rows plus explicit seeded chat i
   assert.equal(store.get("seed-chat")?.mode, "migrations");
   const stored = await repository.listSubscribers();
   assert.equal(stored.some((entry) => entry.chatId === "seed-chat"), true);
+});
+
+test("copy trade execution rows include latency dashboard fields and redact secrets", () => {
+  const row = copyTradeExecutionRow({
+    chatId: "chat-1",
+    sourceWalletAddress: wallet,
+    sourceWalletLabel: "Target",
+    tradingWalletPublicKey: otherWallet,
+    mint: "Mint1111111111111111111111111111111111111111",
+    action: "buy",
+    amount: "0.001",
+    denominatedInSol: "true",
+    status: "submitted",
+    signature: "copy-sig",
+    errorText: null,
+    httpStatus: null,
+    observedTrade: {
+      signature: "target-sig",
+      privateKey: "do-not-store"
+    },
+    request: {
+      encryptedSecretKey: "secret"
+    },
+    response: {
+      status: "submitted"
+    },
+    latencySummary: {
+      event: "copy_trade_latency_summary",
+      chatId: "chat-1",
+      sourceWallet: wallet,
+      tradingWallet: otherWallet,
+      observedSignature: "target-sig",
+      mint: "Mint1111111111111111111111111111111111111111",
+      mode: "live",
+      status: "submitted",
+      reason: null,
+      signature: "copy-sig",
+      targetObservedToSubmitMs: 47,
+      targetBlockTimeToSubmitMs: 321,
+      targetSlot: 10,
+      copySlot: 12,
+      slotDelta: 2,
+      buildMs: 21,
+      sendMs: 13,
+      winnerProvider: "pumpportal",
+      sendRpcWinner: "jito-1",
+      sendRpcCount: 4
+    }
+  });
+
+  assert.equal(row.observed_signature, "target-sig");
+  assert.equal(row.target_observed_to_submit_ms, 47);
+  assert.equal(row.target_blocktime_to_submit_ms, 321);
+  assert.equal(row.build_ms, 21);
+  assert.equal(row.send_ms, 13);
+  assert.equal(row.winner_provider, "pumpportal");
+  assert.equal(row.send_rpc_winner, "jito-1");
+  assert.equal(row.send_rpc_count, 4);
+  assert.equal(row.target_slot, 10);
+  assert.equal(row.copy_slot, 12);
+  assert.equal(row.slot_delta, 2);
+  assert.equal(row.latency_status, "submitted");
+  assert.equal(row.latency_summary.signature, "copy-sig");
+  assert.equal(row.response.latencySummary.signature, "copy-sig");
+  assert.equal(row.observed_trade.privateKey, "[redacted]");
+  assert.equal(row.request.encryptedSecretKey, "[redacted]");
 });
 
 test("Supabase subscriber store mirrors JSON store mutations", async () => {
@@ -288,11 +360,13 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
   assert.equal(await store.setCopyTradeRetryFailedBuys("chat-1", true), true);
   assert.equal(await store.setCopyTradeBuyPressureSellEnabled("chat-1", true), true);
   assert.equal(await store.setCopyTradeBuyPressureSellTimeoutMs("chat-1", 5000), true);
+  assert.equal(await store.setCashbackPayoutWallet("chat-1", wallet), true);
   assert.equal(await store.setCopyTradeBuySlippage("chat-2", 12.5), false);
   assert.equal(await store.setCopyTradeSellPriorityFee("chat-2", 0.0002), false);
   assert.equal(await store.setCopyTradeRetryFailedBuys("chat-2", true), false);
   assert.equal(await store.setCopyTradeBuyPressureSellEnabled("chat-2", true), false);
   assert.equal(await store.setCopyTradeBuyPressureSellTimeoutMs("chat-2", 5000), false);
+  assert.equal(await store.setCashbackPayoutWallet("chat-2", wallet), false);
   assert.equal(await store.watchCopyTradeWallet("chat-2", wallet, "Unverified"), false);
   assert.equal(store.get("chat-1")?.mode, "newtokens");
   assert.equal(store.get("chat-1")?.copyWalletAddress, otherWallet);
@@ -306,6 +380,7 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
   assert.equal(store.get("chat-1")?.copyTradeRetryFailedBuys, true);
   assert.equal(store.get("chat-1")?.copyTradeBuyPressureSellEnabled, true);
   assert.equal(store.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, 5000);
+  assert.equal(store.get("chat-1")?.cashbackPayoutWalletAddress, wallet);
   assert.equal(store.getTradingWallet("chat-1")?.publicKey, otherWallet);
   assert.equal(store.getTradingWallet("chat-1")?.apiKeyLast4, "ikey");
   assert.equal(store.getTradingWallet("chat-1")?.label, "Main Wallet");
@@ -333,6 +408,7 @@ test("Supabase subscriber store mirrors JSON store mutations", async () => {
   assert.equal(reloaded.get("chat-1")?.copyTradeRetryFailedBuys, true);
   assert.equal(reloaded.get("chat-1")?.copyTradeBuyPressureSellEnabled, true);
   assert.equal(reloaded.get("chat-1")?.copyTradeBuyPressureSellTimeoutMs, 5000);
+  assert.equal(reloaded.get("chat-1")?.cashbackPayoutWalletAddress, wallet);
   assert.equal(reloaded.getTradingWallet("chat-1")?.publicKey, otherWallet);
   assert.equal(reloaded.getTradingWallet("chat-1")?.label, "Main Wallet");
   assert.equal(await reloaded.renameTradingWallet("chat-1", null), true);

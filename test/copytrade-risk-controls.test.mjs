@@ -100,6 +100,31 @@ test("copy trade buy risk controls allow a small fresh signal inside all caps", 
   assert.equal(buyRiskReason(), null);
 });
 
+test("copy trade buy risk controls allow launch config with numeric caps disabled", () => {
+  const uncappedConfig = {
+    copyTradeMaxBuySol: 0,
+    copyTradeDailySolCap: 0,
+    copyTradeMaxSignalAgeMs: 0,
+    copyTradeMaxSlippage: 0,
+    copyTradeMaxPriorityFee: 0,
+    copyTradeMinWalletReserveSol: 0,
+    copyTradeMaxCopyWalletsPerChat: 0,
+    copyTradeAllowedSources: []
+  };
+
+  assert.equal(
+    copyTradeBuyRiskBlockedReason({
+      config: uncappedConfig,
+      request: buyRequest({ amount: 5, slippage: 99, priorityFee: 1.5 }),
+      trade: trade({ timestamp: (nowMs - 3_600_000) / 1000, source: "UNKNOWN_SOURCE" }),
+      copyTradeWalletCount: 50,
+      dailySpentSol: 100,
+      nowMs
+    }),
+    null
+  );
+});
+
 test("copy trade buy risk controls block amount above max buy SOL", () => {
   assert.match(
     buyRiskReason({ request: buyRequest({ amount: 0.006 }) }),

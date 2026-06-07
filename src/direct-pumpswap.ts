@@ -79,14 +79,16 @@ export async function buildDirectPumpSwapTransaction({
         ]
       : instructions;
 
-    const prefixed = request.platformFeeInstruction
-      ? [request.platformFeeInstruction, ...wrappedSolInstructions]
+    const withPlatformFee = request.platformFeeInstruction
+      ? request.action === "sell"
+        ? [...wrappedSolInstructions, request.platformFeeInstruction]
+        : [request.platformFeeInstruction, ...wrappedSolInstructions]
       : wrappedSolInstructions;
 
     return {
       provider,
       route,
-      instructions: prefixed,
+      instructions: withPlatformFee,
       signers: [],
       metadata: {
         ...(request.metadata || {}),

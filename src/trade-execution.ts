@@ -92,6 +92,12 @@ export interface DirectExecutionTimingMetadata {
   skipPreflight: boolean | null;
   maxRetries: number | null;
   blockhashCacheMs: number | null;
+  rawSendRpcCount: number | null;
+  rawSendWinner: string | null;
+  rawSendJitoEnabled: boolean | null;
+  rawSendJitoRpcCount: number | null;
+  rawSendJitoWinner: boolean | null;
+  rawSendErrors: Array<{ label: string; errorText: string }> | null;
   instructionCount: number | null;
   txBytes: number | null;
   unitsConsumed: number | null;
@@ -123,7 +129,7 @@ export function normalizeTradeExecutionProvider(value: string | null | undefined
 
 export function parseTradeExecutionProvider(
   value: string | null | undefined,
-  fallback: TradeExecutionProvider = "pumpportal-lightning"
+  fallback: TradeExecutionProvider = "direct-auto"
 ): TradeExecutionProvider {
   return normalizeTradeExecutionProvider(value) || fallback;
 }
@@ -312,15 +318,123 @@ export function formatTradeExecutionResultLog(result: TradeExecutionResult): str
 
   const timing = result.metadata.directSolanaTiming;
   if (timing && typeof timing === "object" && !Array.isArray(timing)) {
-    const durations = (timing as { timeToSignatureMs?: unknown; confirmationMs?: unknown; timeToConfirmationMs?: unknown });
+    const durations = (timing as {
+      timeToSignatureMs?: unknown;
+      confirmationMs?: unknown;
+      timeToConfirmationMs?: unknown;
+      rawSendMs?: unknown;
+      rawSendWinner?: unknown;
+      rawSendRpcCount?: unknown;
+      rawSendJitoEnabled?: unknown;
+      rawSendJitoWinner?: unknown;
+    });
     if (typeof durations.timeToSignatureMs === "number") {
       parts.push(`timeToSignatureMs=${durations.timeToSignatureMs}`);
+    }
+    if (typeof durations.rawSendMs === "number") {
+      parts.push(`rawSendMs=${durations.rawSendMs}`);
+    }
+    if (typeof durations.rawSendWinner === "string") {
+      parts.push(`rawSendWinner=${durations.rawSendWinner}`);
+    }
+    if (typeof durations.rawSendRpcCount === "number") {
+      parts.push(`rawSendRpcCount=${durations.rawSendRpcCount}`);
+    }
+    if (typeof durations.rawSendJitoEnabled === "boolean") {
+      parts.push(`jitoSend=${durations.rawSendJitoEnabled ? "enabled" : "off"}`);
+    }
+    if (durations.rawSendJitoWinner === true) {
+      parts.push("jitoWinner=true");
     }
     if (typeof durations.confirmationMs === "number") {
       parts.push(`confirmationMs=${durations.confirmationMs}`);
     }
     if (typeof durations.timeToConfirmationMs === "number") {
       parts.push(`timeToConfirmationMs=${durations.timeToConfirmationMs}`);
+    }
+  }
+
+  const buildTiming = result.metadata.directBuildTiming;
+  if (buildTiming && typeof buildTiming === "object" && !Array.isArray(buildTiming)) {
+    const totalMs = (buildTiming as { totalMs?: unknown }).totalMs;
+    const stages = (buildTiming as { stages?: unknown }).stages;
+    const buyAccounts = Array.isArray(stages)
+      ? stages.find((record) => {
+        return record &&
+          typeof record === "object" &&
+          (record as { stage?: unknown }).stage === "buy_accounts_ready";
+      }) as Record<string, unknown> | undefined
+      : undefined;
+    const instructionsReady = Array.isArray(stages)
+      ? stages.find((record) => {
+        return record &&
+          typeof record === "object" &&
+          (record as { stage?: unknown }).stage === "instructions_ready";
+      }) as Record<string, unknown> | undefined
+      : undefined;
+    const swapState = Array.isArray(stages)
+      ? stages.find((record) => {
+        return record &&
+          typeof record === "object" &&
+          (record as { stage?: unknown }).stage === "swap_state_ready";
+      }) as Record<string, unknown> | undefined
+      : undefined;
+    const quoteReady = Array.isArray(stages)
+      ? stages.find((record) => {
+        return record &&
+          typeof record === "object" &&
+          (record as { stage?: unknown }).stage === "quote_ready";
+      }) as Record<string, unknown> | undefined
+      : undefined;
+
+    if (typeof totalMs === "number") {
+      parts.push(`directBuildMs=${totalMs}`);
+    }
+    if (swapState) {
+      if (typeof swapState.durationMs === "number") {
+        parts.push(`directPumpSwapStateMs=${swapState.durationMs}`);
+      }
+      if (typeof swapState.source === "string") {
+        parts.push(`directPumpSwapState=${swapState.source}`);
+      }
+      if (typeof swapState.cachedStateSource === "string") {
+        parts.push(`directPumpSwapStateSource=${swapState.cachedStateSource}`);
+      }
+      if (typeof swapState.cachedStateAgeMs === "number") {
+        parts.push(`directPumpSwapStateAgeMs=${swapState.cachedStateAgeMs}`);
+      }
+    }
+    if (typeof quoteReady?.durationMs === "number") {
+      parts.push(`directQuoteMs=${quoteReady.durationMs}`);
+    }
+    if (typeof instructionsReady?.buyInstructionBuilder === "string") {
+      parts.push(`directBuyBuilder=${instructionsReady.buyInstructionBuilder}`);
+    }
+    if (typeof instructionsReady?.durationMs === "number") {
+      parts.push(`directInstructionsMs=${instructionsReady.durationMs}`);
+    }
+    if (buyAccounts) {
+      if (typeof buyAccounts.source === "string") {
+        parts.push(`directBuyState=${buyAccounts.source}`);
+      }
+      if (typeof buyAccounts.cachedStateSource === "string") {
+        parts.push(`directBuyStateSource=${buyAccounts.cachedStateSource}`);
+      }
+      if (typeof buyAccounts.cachedStateAgeMs === "number") {
+        parts.push(`directBuyStateAgeMs=${buyAccounts.cachedStateAgeMs}`);
+      }
+      if (typeof buyAccounts.creatorSource === "string") {
+        parts.push(`directCreatorSource=${buyAccounts.creatorSource}`);
+      }
+      if (typeof buyAccounts.creatorVerifiedAgeMs === "number") {
+        parts.push(`directCreatorAgeMs=${buyAccounts.creatorVerifiedAgeMs}`);
+      }
+      if (typeof buyAccounts.tokenProgram === "string") {
+        parts.push(`tokenProgram=${buyAccounts.tokenProgram}`);
+      }
+      if (buyAccounts.forceFreshBuyState === true) {
+        parts.push("forceFreshBuyState=true");
+      }
     }
   }
 

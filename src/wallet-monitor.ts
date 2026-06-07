@@ -68,6 +68,14 @@ function formatActionStatus(action: WalletTradeAction): string {
   return "⚪ Trade detected";
 }
 
+function nestedLine(index: number, total: number, text: string): string {
+  return `${index === total - 1 ? "└" : "├"} ${text}`;
+}
+
+function nestedLines(lines: string[]): string[] {
+  return lines.map((line, index) => nestedLine(index, lines.length, line));
+}
+
 export function isValidSolanaAddress(value: string): boolean {
   const trimmed = value.trim();
 
@@ -139,8 +147,9 @@ export function formatWalletTradeMessage(trade: WalletTradeData): string {
     "<b>👀 Wallet Trade</b>",
     formatActionStatus(trade.action),
     "",
-    `<b>🎯 Wallet:</b> ${escapeHtml(walletName)}`,
-    `<b>📌 Action:</b> ${escapeHtml(formatAction(trade.action))} ${trade.mint ? "a token" : "tokens"}`
+    "<b>🎯 Trade</b>",
+    `├ Wallet: ${escapeHtml(walletName)}`,
+    `└ Action: ${escapeHtml(formatAction(trade.action))} ${trade.mint ? "a token" : "tokens"}`
   ];
 
   lines.push("<b>🔎 Watched Wallet</b>");
@@ -159,37 +168,43 @@ export function formatWalletTradeMessage(trade: WalletTradeData): string {
 
   if (swapParts[0] || swapParts[1]) {
     lines.push("");
-    lines.push(`<b>🔁 Swap:</b> ${escapeHtml(swapParts[0] || "Unknown")} -> ${escapeHtml(swapParts[1] || "Unknown")}`);
+    lines.push("<b>🔁 Swap</b>");
+    lines.push(`└ ${escapeHtml(swapParts[0] || "Unknown")} -> ${escapeHtml(swapParts[1] || "Unknown")}`);
   }
 
   const amounts = [
     formatOptionalAmount(trade.solAmount, "SOL"),
     formatOptionalAmount(trade.tokenAmount, "tokens"),
     trade.marketCapSol === null ? null : `market cap ${formatNumber(trade.marketCapSol)} SOL`
-  ].filter(Boolean);
+  ].filter((item): item is string => Boolean(item));
 
   if (amounts.length > 0) {
     lines.push("");
-    lines.push(`<b>💰 Amounts:</b> ${escapeHtml(amounts.join(" | "))}`);
+    lines.push("<b>💰 Amounts</b>");
+    lines.push(...nestedLines(amounts.map((amount) => escapeHtml(amount))));
   }
 
-  if (trade.pool) {
-    lines.push(`<b>🏊 Pool:</b> ${escapeHtml(trade.pool)}`);
-  }
+  const routeLines = [
+    trade.pool ? `Pool: ${escapeHtml(trade.pool)}` : null,
+    trade.source ? `Source: ${escapeHtml(trade.source)}` : null
+  ].filter((line): line is string => line !== null);
 
-  if (trade.source) {
-    lines.push(`<b>📡 Source:</b> ${escapeHtml(trade.source)}`);
+  if (routeLines.length > 0) {
+    lines.push("");
+    lines.push("<b>📡 Route</b>");
+    lines.push(...nestedLines(routeLines));
   }
 
   const fallbackLinks = [
     link("Pump.fun", trade.pumpFunUrl),
     link("Solscan token", trade.solscanTokenUrl),
     link("Solscan tx", trade.solscanTxUrl)
-  ].filter(Boolean);
+  ].filter((item): item is string => Boolean(item));
 
   if (fallbackLinks.length > 0) {
     lines.push("");
-    lines.push(`<b>🔗 Links:</b> ${fallbackLinks.join(" | ")}`);
+    lines.push("<b>🔗 Links</b>");
+    lines.push(...nestedLines(fallbackLinks));
   }
 
   return lines.join("\n");
@@ -210,9 +225,9 @@ export function formatWalletTradeMessageWithCopySettings(trade: WalletTradeData,
 
   const lines = [message, "", "<b>⚡ Copy Trade Setup</b>"];
 
-  lines.push(`<b>👛 Copy Wallets:</b> ${copyWalletAddresses.length || "Not set"}`);
-  lines.push(...copyWalletAddresses.map((wallet) => `<code>${escapeHtml(wallet)}</code>`));
-  lines.push(`<b>💰 Copy Amount:</b> ${copyAmountSol ? `${formatNumber(copyAmountSol)} SOL` : "Not set"}`);
+  lines.push(`├ Copy Wallets: ${copyWalletAddresses.length || "Not set"}`);
+  lines.push(...copyWalletAddresses.map((wallet) => `├ <code>${escapeHtml(wallet)}</code>`));
+  lines.push(`└ Copy Amount: ${copyAmountSol ? `${formatNumber(copyAmountSol)} SOL` : "Not set"}`);
 
   if (copyWalletAddresses.length === 0 || !copyAmountSol) {
     lines.push("🔴 Setup is <b>incomplete</b>");
@@ -252,16 +267,19 @@ export function formatCopyTradeSimulationMessage(
     "<b>⚡ Copy Trade Simulation</b>",
     "🟡 Would buy this token",
     "",
-    `<b>🎯 Target:</b> ${escapeHtml(walletName)}`,
-    `<code>${escapeHtml(trade.targetWallet)}</code>`,
+    "<b>🎯 Target</b>",
+    `├ ${escapeHtml(walletName)}`,
+    `└ <code>${escapeHtml(trade.targetWallet)}</code>`,
     "",
-    `<b>👛 Copy Wallet:</b> <code>${escapeHtml(copyWalletAddress)}</code>`,
-    `<b>💰 Copy Amount:</b> ${formatNumber(copySettings.copyAmountSol)} SOL`,
+    "<b>⚙️ Copy Setup</b>",
+    `├ Copy Wallet: <code>${escapeHtml(copyWalletAddress)}</code>`,
+    `└ Copy Amount: ${formatNumber(copySettings.copyAmountSol)} SOL`,
     "",
     "<b>🪙 Contract Address</b>",
     `<code>${escapeHtml(trade.mint)}</code>`,
     "",
-    `<b>Build:</b> ${formatPumpPortalBuildStatus(pumpPortalBuild)}`
+    "<b>🧱 Build</b>",
+    `└ ${formatPumpPortalBuildStatus(pumpPortalBuild)}`
   ].join("\n");
 }
 
@@ -274,22 +292,22 @@ function isProviderNeutralTradeResult(result: FormattableTradeResult): result is
 function formatTradeResultStatus(result: FormattableTradeResult): string {
   if (isProviderNeutralTradeResult(result)) {
     if (result.ok) {
-      return result.signature ? `<b>Tx:</b> <code>${escapeHtml(result.signature)}</code>` : `<b>Status:</b> ${escapeHtml(result.status)}`;
+      return result.signature ? `<b>Trade</b>\n└ Tx: <code>${escapeHtml(result.signature)}</code>` : `<b>Trade</b>\n└ Status: ${escapeHtml(result.status)}`;
     }
 
     const detail = result.errorText?.trim();
     return detail
-      ? `<b>Trade failed:</b> ${escapeHtml(result.status)} - ${escapeHtml(detail)}`
-      : `<b>Trade failed:</b> ${escapeHtml(result.status)}`;
+      ? `<b>Trade</b>\n└ Failed: ${escapeHtml(result.status)} - ${escapeHtml(detail)}`
+      : `<b>Trade</b>\n└ Failed: ${escapeHtml(result.status)}`;
   }
 
   if (result.ok) {
-    return result.signature ? `<b>Tx:</b> <code>${escapeHtml(result.signature)}</code>` : "<b>Tx:</b> Submitted";
+    return result.signature ? `<b>Trade</b>\n└ Tx: <code>${escapeHtml(result.signature)}</code>` : "<b>Trade</b>\n└ Tx: Submitted";
   }
 
   const status = result.status === null ? "request failed" : `HTTP ${result.status}`;
   const detail = result.errorText?.trim();
-  return detail ? `<b>Trade failed:</b> ${escapeHtml(status)} - ${escapeHtml(detail)}` : `<b>Trade failed:</b> ${escapeHtml(status)}`;
+  return detail ? `<b>Trade</b>\n└ Failed: ${escapeHtml(status)} - ${escapeHtml(detail)}` : `<b>Trade</b>\n└ Failed: ${escapeHtml(status)}`;
 }
 
 export function formatAutoCopyBuyMessage({
@@ -312,20 +330,17 @@ export function formatAutoCopyBuyMessage({
     "<b>⚡ Auto Copy Buy</b>",
     result.ok ? "🟢 Buy submitted" : "🔴 Buy failed",
     "",
-    `<b>🎯 Target:</b> ${escapeHtml(walletName)}`,
-    `<b>👛 Trading Wallet:</b> <code>${escapeHtml(tradingWalletPublicKey)}</code>`,
-    `<b>💰 Copy Amount:</b> ${formatNumber(copyAmountSol)} SOL`,
-    ...formatPlatformFeeLines(result),
+    "<b>🎯 Copy Buy</b>",
+    `├ Target: ${escapeHtml(walletName)}`,
+    `├ Trading Wallet: <code>${escapeHtml(tradingWalletPublicKey)}</code>`,
+    `└ Copy Amount: ${formatNumber(copyAmountSol)} SOL`,
+    ...formatPlatformFeeBlock(result),
     "",
     "<b>🪙 Contract Address</b>",
     `<code>${escapeHtml(trade.mint)}</code>`,
     "",
     formatTradeResultStatus(result)
   ];
-
-  if (!trade.label) {
-    lines.splice(5, 0, `<code>${escapeHtml(trade.targetWallet)}</code>`);
-  }
 
   return lines.join("\n");
 }
@@ -336,9 +351,14 @@ function formatPlatformFeeLines(result: FormattableTradeResult): string[] {
   }
 
   return [
-    `<b>🏦 Platform Fee:</b> ${formatNumber(Number(result.platformFee.feeLamports) / 1_000_000_000)} SOL`,
-    `<b>📈 Trade Amount:</b> ${formatNumber(Number(result.platformFee.tradeLamports) / 1_000_000_000)} SOL`
+    `Platform Fee: ${formatNumber(Number(result.platformFee.feeLamports) / 1_000_000_000)} SOL`,
+    `Trade Amount: ${formatNumber(Number(result.platformFee.tradeLamports) / 1_000_000_000)} SOL`
   ];
+}
+
+function formatPlatformFeeBlock(result: FormattableTradeResult): string[] {
+  const lines = formatPlatformFeeLines(result);
+  return lines.length > 0 ? ["", "<b>🏦 Fees</b>", ...nestedLines(lines)] : [];
 }
 
 function formatPumpPortalBuildStatus(result?: PumpPortalLocalTradeBuildResult | null): string {
@@ -371,8 +391,9 @@ export function formatCopyTradeTrailingSellScheduledMessage({
     "<b>📉 Trailing Sells</b>",
     "🟢 Sell schedule created",
     "",
-    `<b>🎯 Target:</b> ${escapeHtml(walletName)}`,
-    `<b>🪜 Steps:</b> ${steps.length}`,
+    "<b>🎯 Sell Plan</b>",
+    `├ Target: ${escapeHtml(walletName)}`,
+    `└ Steps: ${steps.length}`,
     "",
     "<b>🪙 Contract Address</b>",
     `<code>${escapeHtml(trade.mint)}</code>`,
@@ -382,8 +403,11 @@ export function formatCopyTradeTrailingSellScheduledMessage({
 
   lines.push(
     ...steps.map((step, index) => {
-      const seconds = formatNumber(step.delayMs / 1000);
-      return `${index + 1}. Sell ${escapeHtml(String(step.request.amount))} after ${seconds}s`;
+      const previousDelayMs = index > 0 ? steps[index - 1].delayMs : 0;
+      const waitMs = Math.max(0, step.delayMs - previousDelayMs);
+      const seconds = formatNumber(waitMs / 1000);
+      const timing = index === 0 ? `after ${seconds}s` : `${seconds}s later`;
+      return nestedLine(index, steps.length, `Sell ${escapeHtml(String(step.request.amount))} ${timing}`);
     })
   );
 
@@ -407,12 +431,14 @@ export function formatCopyTradeTrailingSellSkippedMessage({
     "<b>📉 Trailing Sells</b>",
     "🟡 Sell schedule skipped",
     "",
-    `<b>🎯 Target:</b> ${escapeHtml(walletName)}`,
+    "<b>🎯 Sell Plan</b>",
+    `└ Target: ${escapeHtml(walletName)}`,
     "",
     "<b>🪙 Contract Address</b>",
     `<code>${escapeHtml(trade.mint)}</code>`,
     "",
-    `<b>Reason:</b> <code>${escapeHtml(reason)}</code>`
+    "<b>Reason</b>",
+    `└ <code>${escapeHtml(reason)}</code>`
   ].join("\n");
 }
 
@@ -438,9 +464,10 @@ export function formatCopyTradeTrailingSellResultMessage({
     "<b>📉 Trailing Sell</b>",
     statusLine,
     "",
-    `<b>🎯 Target:</b> ${escapeHtml(walletName)}`,
-    `<b>🪜 Step:</b> ${stepIndex + 1}/${totalSteps}`,
-    `<b>💰 Sell Amount:</b> ${escapeHtml(String(request.amount))}`,
+    "<b>🎯 Sell</b>",
+    `├ Target: ${escapeHtml(walletName)}`,
+    `├ Step: ${stepIndex + 1}/${totalSteps}`,
+    `└ Sell Amount: ${escapeHtml(String(request.amount))}`,
     "",
     "<b>🪙 Contract Address</b>",
     `<code>${escapeHtml(request.mint)}</code>`,
@@ -472,10 +499,11 @@ export function formatCopyTradeBuyPressureSellScheduledMessage({
     "<b>📈 Buy-Pressure Sell</b>",
     "🟢 Exit watcher armed",
     "",
-    `<b>🎯 Target:</b> ${escapeHtml(walletName)}`,
-    `<b>💰 Sell Amount:</b> ${formatNumber(watcher.sellPercent)}%`,
-    `<b>📊 Buy Trigger:</b> ${escapeHtml(buyThreshold)}`,
-    `<b>⏱️ Timeout:</b> ${formatNumber(timeoutSeconds)}s`,
+    "<b>🎯 Exit Rules</b>",
+    `├ Target: ${escapeHtml(walletName)}`,
+    `├ Sell Amount: ${formatNumber(watcher.sellPercent)}%`,
+    `├ Buy Trigger: ${escapeHtml(buyThreshold)}`,
+    `└ Timeout: ${formatNumber(timeoutSeconds)}s`,
     "",
     "<b>🪙 Contract Address</b>",
     `<code>${escapeHtml(trade.mint)}</code>`
@@ -505,10 +533,11 @@ export function formatCopyTradeBuyPressureSellResultMessage({
     "<b>📈 Buy-Pressure Sell</b>",
     statusLine,
     "",
-    `<b>🎯 Target:</b> ${escapeHtml(walletName)}`,
-    `<b>Why:</b> ${escapeHtml(reasonLabel)} - ${escapeHtml(trigger.reason)}`,
-    `<b>📊 Matched Buys:</b> ${escapeHtml(buyStats)}`,
-    `<b>💰 Sell Amount:</b> ${escapeHtml(String(request.amount))}`,
+    "<b>🎯 Exit</b>",
+    `├ Target: ${escapeHtml(walletName)}`,
+    `├ Why: ${escapeHtml(reasonLabel)} - ${escapeHtml(trigger.reason)}`,
+    `├ Matched Buys: ${escapeHtml(buyStats)}`,
+    `└ Sell Amount: ${escapeHtml(String(request.amount))}`,
     "",
     "<b>🪙 Contract Address</b>",
     `<code>${escapeHtml(request.mint)}</code>`,

@@ -1082,10 +1082,6 @@ impl CopyExecutor {
             if due_at_ms > now {
                 tokio::time::sleep(Duration::from_millis((due_at_ms - now) as u64)).await;
             }
-            if let Some(previous_blockhash) = last_sent_blockhash.as_deref() {
-                self.wait_for_distinct_trailing_sell_blockhash(previous_blockhash)
-                    .await;
-            }
 
             let mut line = RustTrailingSellLine::new(
                 &buy_line,
@@ -1099,6 +1095,24 @@ impl CopyExecutor {
             line.confirmation_checked = confirmation.checked;
             line.confirmation_ok = true;
             line.confirmation_slot = confirmation.slot;
+
+            if let Some(previous_blockhash) = last_sent_blockhash.as_deref() {
+                if !self
+                    .wait_for_distinct_trailing_sell_blockhash(previous_blockhash)
+                    .await
+                {
+                    line.skip("warm blockhash did not advance for rust trailing sell");
+                    if copy_execution_tx
+                        .send(CopyExecutionOutput::RustTrailingSell(line))
+                        .is_err()
+                    {
+                        eprintln!("rust trailing sell result dropped; receiver closed");
+                        return;
+                    }
+                    continue;
+                }
+            }
+
             self.handle_trailing_sell_step(
                 &mut line,
                 &execution_plan,
@@ -1125,17 +1139,17 @@ impl CopyExecutor {
         }
     }
 
-    async fn wait_for_distinct_trailing_sell_blockhash(&self, previous_blockhash: &str) {
+    async fn wait_for_distinct_trailing_sell_blockhash(&self, previous_blockhash: &str) -> bool {
         let started_at = Instant::now();
         let timeout = Duration::from_millis(TRAILING_SELL_DISTINCT_BLOCKHASH_TIMEOUT_MS);
         loop {
             if cached_blockhash(self.blockhash_cache.as_ref())
                 .is_some_and(|cached| cached.blockhash != previous_blockhash)
             {
-                return;
+                return true;
             }
             if started_at.elapsed() >= timeout {
-                return;
+                return false;
             }
             tokio::time::sleep(Duration::from_millis(
                 TRAILING_SELL_DISTINCT_BLOCKHASH_POLL_MS,
@@ -1936,7 +1950,7 @@ fn trailing_sell_route_context_for_plan(
         .and_then(|cache| cache.get(&execution_plan.target_wallet, &execution_plan.mint))
         .filter(is_direct_pump_sell_route_context);
 
-    Ok(cached_sell_context.unwrap_or(route_context))
+    cached_sell_context.ok_or("missing direct-pump sell-side route context")
 }
 
 fn is_direct_pump_route_context(route_context: &RouteContext) -> bool {
@@ -3259,17 +3273,17 @@ mod tests {
     }
 
     #[test]
-    fn direct_pump_trailing_sell_uses_buy_side_context_until_sell_context_arrives() {
+    fn direct_pump_trailing_sell_requires_sell_side_context() {
         let mut options = disabled_options();
         options.rust_trailing_sells_enabled = true;
         let executor = executor(options);
         let mut plan = allowed_plan();
         plan.route_context = Some(flashx_context(FlashxPumpLayout::DirectPump, 1));
 
-        let route_context = trailing_sell_route_context_for_plan(&executor, &plan)
-            .expect("rust trailing sell should use buy-side context before target sell");
-        assert!(is_direct_pump_route_context(&route_context));
-        assert!(!is_direct_pump_sell_route_context(&route_context));
+        assert_eq!(
+            trailing_sell_route_context_for_plan(&executor, &plan).unwrap_err(),
+            "missing direct-pump sell-side route context"
+        );
 
         let sell_context = flashx_direct_sell_context();
         executor.observe_direct_pump_sell_route_context(

@@ -694,7 +694,7 @@ pub(crate) fn build_trailing_sell_unsigned_flashx_pump_with_fees_and_cache(
         mint,
         token_amount_raw,
         pda_cache,
-        true,
+        false,
     )?;
     let copy_wallet_pubkey = parse_pubkey(copy_wallet)?;
     let mut fee_instructions = Vec::new();
@@ -1646,7 +1646,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_trailing_sell_instruction_for_direct_pump_buy_side_context() {
+    fn rejects_trailing_sell_instruction_for_direct_pump_buy_side_context() {
         let transaction = replay_transaction(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/fixtures/flashx/live-buy-2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo.tx.base64"
@@ -1655,7 +1655,7 @@ mod tests {
         let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
             .expect("live direct Pump FLASHX buy should parse");
 
-        let build = build_trailing_sell_unsigned_flashx_pump_with_fees_and_cache(
+        let error = build_trailing_sell_unsigned_flashx_pump_with_fees_and_cache(
             parsed.route_context.as_ref(),
             COPY_WALLET,
             &parsed.mint,
@@ -1663,31 +1663,12 @@ mod tests {
             &TxFeeConfig::default(),
             None,
         )
-        .expect("rust trailing sell can build from owned-position buy-side context");
+        .expect_err("direct Pump trailing sell must not build from buy-side route context");
 
-        assert_eq!(build.route_layout, "direct-pump");
-        assert_eq!(build.instructions.len(), 2);
         assert_eq!(
-            build.instructions[1].program_id.to_string(),
-            PUMP_FUN_PROGRAM_ID
+            error,
+            TxBuildError::MissingRouteContext("missing direct-pump sell-side route context")
         );
-        assert_eq!(
-            &build.instructions[1].data[0..8],
-            &PUMP_FUN_SELL_DISCRIMINATOR
-        );
-        assert_eq!(
-            &build.instructions[1].data[8..16],
-            &123_456u64.to_le_bytes()
-        );
-        assert_eq!(&build.instructions[1].data[16..24], &1u64.to_le_bytes());
-        assert_eq!(
-            build.instructions[1].accounts[5].pubkey,
-            build.copy_wallet_token_account
-        );
-        assert!(build.instructions[1]
-            .accounts
-            .iter()
-            .any(|account| account.pubkey.to_string() == COPY_WALLET && account.is_signer));
     }
 
     #[test]

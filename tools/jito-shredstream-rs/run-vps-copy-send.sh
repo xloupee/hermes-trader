@@ -55,6 +55,11 @@ export JITO_SEND_FANOUT="${JITO_SEND_FANOUT:-false}"
 export JITO_SEND_RPC_URLS="${JITO_SEND_RPC_URLS:-${DIRECT_EXECUTION_SEND_RPC_URLS:-$SOLANA_RPC_URL}}"
 export JITO_BLOCK_ENGINE_SEND_URLS="${JITO_BLOCK_ENGINE_SEND_URLS:-${DIRECT_EXECUTION_JITO_SEND_URLS:-}}"
 export JITO_BLOCK_ENGINE_AUTH_UUID="${JITO_BLOCK_ENGINE_AUTH_UUID:-${DIRECT_EXECUTION_JITO_AUTH_UUID:-}}"
+export JITO_HELIUS_SENDER_ENABLED="${JITO_HELIUS_SENDER_ENABLED:-false}"
+export JITO_HELIUS_SENDER_URLS="${JITO_HELIUS_SENDER_URLS:-}"
+export JITO_HELIUS_SENDER_SWQOS_ONLY="${JITO_HELIUS_SENDER_SWQOS_ONLY:-false}"
+export JITO_HELIUS_SENDER_TIP_LAMPORTS="${JITO_HELIUS_SENDER_TIP_LAMPORTS:-}"
+export JITO_HELIUS_SENDER_TIP_ACCOUNT="${JITO_HELIUS_SENDER_TIP_ACCOUNT:-}"
 export JITO_SIMULATE_COPY_TX="${JITO_SIMULATE_COPY_TX:-false}"
 export JITO_ENABLE_COPY_SEND="${JITO_ENABLE_COPY_SEND:-true}"
 export JITO_ONE_SHOT_COPY_SEND="${JITO_ONE_SHOT_COPY_SEND:-false}"
@@ -136,6 +141,7 @@ validate_capped_int \
   JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS \
   "$JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS"
 validate_capped_int JITO_TIP_LAMPORTS "$JITO_TIP_LAMPORTS" JITO_MAX_TIP_LAMPORTS "$JITO_MAX_TIP_LAMPORTS"
+validate_nonnegative_int JITO_HELIUS_SENDER_TIP_LAMPORTS "$JITO_HELIUS_SENDER_TIP_LAMPORTS"
 validate_capped_int \
   JITO_SELL_PRIORITY_FEE_MICRO_LAMPORTS \
   "$JITO_SELL_PRIORITY_FEE_MICRO_LAMPORTS" \
@@ -192,6 +198,44 @@ if [[ -n "$JITO_SELL_TIP_LAMPORTS" && "$JITO_SELL_TIP_LAMPORTS" != "0" && -z "$J
   echo "JITO_SELL_TIP_ACCOUNT must be set when JITO_SELL_TIP_LAMPORTS is positive" >&2
   exit 1
 fi
+HELIUS_SENDER_ENABLED_NORMALIZED="$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')"
+HELIUS_SENDER_SWQOS_NORMALIZED="$(printf '%s' "$JITO_HELIUS_SENDER_SWQOS_ONLY" | tr '[:upper:]' '[:lower:]')"
+case "$HELIUS_SENDER_ENABLED_NORMALIZED" in
+  yes|true|1|on)
+    case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_HELIUS_SENDER_ENABLED requires JITO_SEND_FANOUT=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_FAST_COPY_SEND" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_HELIUS_SENDER_ENABLED requires JITO_FAST_COPY_SEND=YES" >&2; exit 1 ;;
+    esac
+    if [[ -z "$JITO_HELIUS_SENDER_URLS" ]]; then
+      echo "JITO_HELIUS_SENDER_ENABLED requires JITO_HELIUS_SENDER_URLS" >&2
+      exit 1
+    fi
+    if [[ -z "$JITO_PRIORITY_FEE_MICRO_LAMPORTS" || "$JITO_PRIORITY_FEE_MICRO_LAMPORTS" == "0" ]]; then
+      echo "JITO_HELIUS_SENDER_ENABLED requires JITO_PRIORITY_FEE_MICRO_LAMPORTS" >&2
+      exit 1
+    fi
+    if [[ -z "$JITO_HELIUS_SENDER_TIP_LAMPORTS" || "$JITO_HELIUS_SENDER_TIP_LAMPORTS" == "0" ]]; then
+      echo "JITO_HELIUS_SENDER_ENABLED requires JITO_HELIUS_SENDER_TIP_LAMPORTS" >&2
+      exit 1
+    fi
+    HELIUS_SENDER_MIN_TIP=200000
+    case "$HELIUS_SENDER_SWQOS_NORMALIZED" in
+      yes|true|1|on) HELIUS_SENDER_MIN_TIP=5000 ;;
+    esac
+    if (( JITO_HELIUS_SENDER_TIP_LAMPORTS < HELIUS_SENDER_MIN_TIP )); then
+      echo "JITO_HELIUS_SENDER_TIP_LAMPORTS must be >= $HELIUS_SENDER_MIN_TIP lamports" >&2
+      exit 1
+    fi
+    if [[ -z "$JITO_HELIUS_SENDER_TIP_ACCOUNT" ]]; then
+      echo "JITO_HELIUS_SENDER_ENABLED requires JITO_HELIUS_SENDER_TIP_ACCOUNT" >&2
+      exit 1
+    fi
+    ;;
+esac
 
 echo "VPS LIVE COPY SEND IS ARMED"
 echo "  proxy: $JITO_SHREDSTREAM_PROXY_URL"
@@ -211,6 +255,15 @@ if [[ -n "$JITO_BLOCK_ENGINE_SEND_URLS" ]]; then
   echo "  jito send urls: $(printf '%s' "$JITO_BLOCK_ENGINE_SEND_URLS" | awk -F, '{print NF}') configured"
 else
   echo "  jito send urls: 0 configured"
+fi
+echo "  helius sender enabled: $JITO_HELIUS_SENDER_ENABLED"
+echo "  helius sender urls: $(if [[ -n "$JITO_HELIUS_SENDER_URLS" ]]; then printf '%s' "$JITO_HELIUS_SENDER_URLS" | awk -F, '{print NF}'; else printf '0'; fi) configured"
+echo "  helius sender swqos only: $JITO_HELIUS_SENDER_SWQOS_ONLY"
+echo "  helius sender tip lamports: ${JITO_HELIUS_SENDER_TIP_LAMPORTS:-0}"
+if [[ -n "$JITO_HELIUS_SENDER_TIP_ACCOUNT" ]]; then
+  echo "  helius sender tip account: configured"
+else
+  echo "  helius sender tip account: unset"
 fi
 echo "  simulate copy tx: $JITO_SIMULATE_COPY_TX"
 echo "  send enabled: $JITO_ENABLE_COPY_SEND"
@@ -262,4 +315,13 @@ LIVE_ARGS+=(
   --rust-trailing-sell-confirmation-timeout-ms "$JITO_RUST_TRAILING_SELL_CONFIRMATION_TIMEOUT_MS"
   --rust-trailing-sell-confirmation-poll-ms "$JITO_RUST_TRAILING_SELL_CONFIRMATION_POLL_MS"
 )
+if [[ -z "${JITO_HELIUS_SENDER_URLS:-}" ]]; then
+  unset JITO_HELIUS_SENDER_URLS
+fi
+if [[ -z "${JITO_HELIUS_SENDER_TIP_LAMPORTS:-}" ]]; then
+  unset JITO_HELIUS_SENDER_TIP_LAMPORTS
+fi
+if [[ -z "${JITO_HELIUS_SENDER_TIP_ACCOUNT:-}" ]]; then
+  unset JITO_HELIUS_SENDER_TIP_ACCOUNT
+fi
 exec "$WORKER_BIN" live "${LIVE_ARGS[@]}"

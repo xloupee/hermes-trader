@@ -12,6 +12,8 @@ pub(crate) struct TxFeeConfig {
     pub(crate) compute_unit_price_micro_lamports: Option<u64>,
     pub(crate) jito_tip_lamports: Option<u64>,
     pub(crate) jito_tip_account: Option<String>,
+    pub(crate) helius_sender_tip_lamports: Option<u64>,
+    pub(crate) helius_sender_tip_account: Option<String>,
 }
 
 #[derive(Debug)]
@@ -129,6 +131,47 @@ pub(crate) fn build_unsigned_flashx_pump(
 
 fn parse_pubkey(value: &str) -> Result<Pubkey, TxBuildError> {
     Pubkey::from_str(value).map_err(|_| TxBuildError::InvalidInstruction("invalid route pubkey"))
+}
+
+fn fee_tip_transfers(fee_config: &TxFeeConfig) -> Result<Vec<(Pubkey, u64)>, TxBuildError> {
+    let mut transfers = Vec::with_capacity(2);
+    push_fee_tip_transfer(
+        &mut transfers,
+        fee_config.jito_tip_lamports,
+        fee_config.jito_tip_account.as_deref(),
+        "missing Jito tip account",
+    )?;
+    push_fee_tip_transfer(
+        &mut transfers,
+        fee_config.helius_sender_tip_lamports,
+        fee_config.helius_sender_tip_account.as_deref(),
+        "missing Helius Sender tip account",
+    )?;
+    Ok(transfers)
+}
+
+fn push_fee_tip_transfer(
+    transfers: &mut Vec<(Pubkey, u64)>,
+    lamports: Option<u64>,
+    account: Option<&str>,
+    missing_account_error: &'static str,
+) -> Result<(), TxBuildError> {
+    let Some(lamports) = lamports.filter(|value| *value > 0) else {
+        return Ok(());
+    };
+    let Some(account) = account.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err(TxBuildError::MissingRouteContext(missing_account_error));
+    };
+    let account = parse_pubkey(account)?;
+    if let Some((_, existing_lamports)) = transfers
+        .iter_mut()
+        .find(|(existing_account, _)| *existing_account == account)
+    {
+        *existing_lamports = (*existing_lamports).max(lamports);
+    } else {
+        transfers.push((account, lamports));
+    }
+    Ok(())
 }
 
 pub(crate) fn build_copy_unsigned_flashx_pump(
@@ -549,20 +592,10 @@ pub(crate) fn build_full_copy_unsigned_flashx_pump_with_fees_and_cache_and_spend
         &associated_token_program,
         &system_program,
     ));
-    if let Some(tip_lamports) = fee_config.jito_tip_lamports.filter(|v| *v > 0) {
-        let Some(tip_account) = fee_config
-            .jito_tip_account
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            return Err(TxBuildError::MissingRouteContext(
-                "missing Jito tip account",
-            ));
-        };
+    for (tip_account, tip_lamports) in fee_tip_transfers(fee_config)? {
         instructions.push(system_transfer_instruction(
             &copy_wallet_pubkey,
-            &parse_pubkey(tip_account)?,
+            &tip_account,
             tip_lamports,
         )?);
     }
@@ -662,20 +695,10 @@ pub(crate) fn build_auto_sell_unsigned_flashx_pump_with_fees_and_cache(
     {
         fee_instructions.push(compute_unit_price_instruction(micro_lamports)?);
     }
-    if let Some(tip_lamports) = fee_config.jito_tip_lamports.filter(|value| *value > 0) {
-        let Some(tip_account) = fee_config
-            .jito_tip_account
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            return Err(TxBuildError::MissingRouteContext(
-                "missing Jito tip account",
-            ));
-        };
+    for (tip_account, tip_lamports) in fee_tip_transfers(fee_config)? {
         fee_instructions.push(system_transfer_instruction(
             &copy_wallet_pubkey,
-            &parse_pubkey(tip_account)?,
+            &tip_account,
             tip_lamports,
         )?);
     }
@@ -720,20 +743,10 @@ pub(crate) fn build_trailing_sell_unsigned_flashx_pump_with_fees_and_cache(
     {
         fee_instructions.push(compute_unit_price_instruction(micro_lamports)?);
     }
-    if let Some(tip_lamports) = fee_config.jito_tip_lamports.filter(|value| *value > 0) {
-        let Some(tip_account) = fee_config
-            .jito_tip_account
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            return Err(TxBuildError::MissingRouteContext(
-                "missing Jito tip account",
-            ));
-        };
+    for (tip_account, tip_lamports) in fee_tip_transfers(fee_config)? {
         fee_instructions.push(system_transfer_instruction(
             &copy_wallet_pubkey,
-            &parse_pubkey(tip_account)?,
+            &tip_account,
             tip_lamports,
         )?);
     }
@@ -1537,6 +1550,8 @@ mod tests {
             compute_unit_price_micro_lamports: Some(250_000),
             jito_tip_lamports: Some(1_000),
             jito_tip_account: Some("96gYZGLnUQYgE8MWWpYJw8yRjnvB51rAhbG1SogE3uSG".to_string()),
+            helius_sender_tip_lamports: None,
+            helius_sender_tip_account: None,
         };
 
         let build = build_full_copy_unsigned_flashx_pump_with_fees(
@@ -1590,6 +1605,104 @@ mod tests {
     }
 
     #[test]
+    fn fee_config_adds_helius_sender_tip_to_copy_transaction_shell() {
+        let transaction = replay_transaction(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/flashx/live-buy-2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo.tx.base64"
+        )));
+        let account_keys = live_direct_pump_buy_hydrated_account_keys(&transaction);
+        let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
+            .expect("live direct Pump FLASHX buy should parse");
+        let fee_config = TxFeeConfig {
+            compute_unit_price_micro_lamports: Some(250_000),
+            jito_tip_lamports: Some(1_000),
+            jito_tip_account: Some("96gYZGLnUQYgE8MWWpYJw8yRjnvB51rAhbG1SogE3uSG".to_string()),
+            helius_sender_tip_lamports: Some(200_000),
+            helius_sender_tip_account: Some(
+                "HWEoBxYs7ssKuudEjzjmpfJVX7Dvi7wescFsVx2L5yoY".to_string(),
+            ),
+        };
+
+        let build = build_full_copy_unsigned_flashx_pump_with_fees(
+            parsed.route_context.as_ref(),
+            COPY_WALLET,
+            &parsed.mint.to_string(),
+            &fee_config,
+        )
+        .expect("full copy transaction shell should build with Jito and Sender tips");
+
+        assert_eq!(build.setup_instruction_count, 5);
+        assert_eq!(build.main_instruction_count, 1);
+        assert_eq!(build.instructions.len(), 6);
+        assert_eq!(
+            build.instructions[3].accounts[1].pubkey.to_string(),
+            "96gYZGLnUQYgE8MWWpYJw8yRjnvB51rAhbG1SogE3uSG"
+        );
+        assert_eq!(
+            build.instructions[3].data,
+            [2u32.to_le_bytes().to_vec(), 1_000u64.to_le_bytes().to_vec()].concat()
+        );
+        assert_eq!(
+            build.instructions[4].accounts[1].pubkey.to_string(),
+            "HWEoBxYs7ssKuudEjzjmpfJVX7Dvi7wescFsVx2L5yoY"
+        );
+        assert_eq!(
+            build.instructions[4].data,
+            [
+                2u32.to_le_bytes().to_vec(),
+                200_000u64.to_le_bytes().to_vec()
+            ]
+            .concat()
+        );
+        assert_eq!(
+            build.instructions[5].program_id.to_string(),
+            PUMP_FUN_PROGRAM_ID
+        );
+    }
+
+    #[test]
+    fn fee_config_merges_same_jito_and_helius_sender_tip_account() {
+        let transaction = replay_transaction(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/flashx/live-buy-2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo.tx.base64"
+        )));
+        let account_keys = live_direct_pump_buy_hydrated_account_keys(&transaction);
+        let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
+            .expect("live direct Pump FLASHX buy should parse");
+        let tip_account = "96gYZGLnUQYgE8MWWpYJw8yRjnvB51rAhbG1SogE3uSG".to_string();
+        let fee_config = TxFeeConfig {
+            compute_unit_price_micro_lamports: None,
+            jito_tip_lamports: Some(1_000),
+            jito_tip_account: Some(tip_account.clone()),
+            helius_sender_tip_lamports: Some(200_000),
+            helius_sender_tip_account: Some(tip_account),
+        };
+
+        let build = build_full_copy_unsigned_flashx_pump_with_fees(
+            parsed.route_context.as_ref(),
+            COPY_WALLET,
+            &parsed.mint.to_string(),
+            &fee_config,
+        )
+        .expect("same tip account should build one merged transfer");
+
+        assert_eq!(build.setup_instruction_count, 3);
+        assert_eq!(build.instructions.len(), 4);
+        assert_eq!(
+            build.instructions[3].program_id.to_string(),
+            PUMP_FUN_PROGRAM_ID
+        );
+        assert_eq!(
+            build.instructions[2].data,
+            [
+                2u32.to_le_bytes().to_vec(),
+                200_000u64.to_le_bytes().to_vec()
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
     fn positive_jito_tip_requires_tip_account() {
         let transaction = replay_transaction(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1602,6 +1715,8 @@ mod tests {
             compute_unit_price_micro_lamports: None,
             jito_tip_lamports: Some(1_000),
             jito_tip_account: None,
+            helius_sender_tip_lamports: None,
+            helius_sender_tip_account: None,
         };
 
         let error = build_full_copy_unsigned_flashx_pump_with_fees(

@@ -10,7 +10,7 @@ const FLASHX_LOOKUP_TABLE: &str = "4vX5U9XsiY11infmC13d6VFPjvUqtuRw744r4o94dyow"
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AddressLookupTableCache {
-    tables: HashMap<String, Vec<Pubkey>>,
+    tables: HashMap<Pubkey, Vec<Pubkey>>,
     table_accounts: Vec<AddressLookupTableAccount>,
 }
 
@@ -26,6 +26,8 @@ impl AddressLookupTableCache {
         let mut tables = HashMap::with_capacity(table_keys.len());
 
         for table_key in table_keys {
+            let table_pubkey = Pubkey::from_str(table_key)
+                .with_context(|| format!("parse address lookup table {table_key}"))?;
             let addresses = match fetch_lookup_table_addresses(&client, rpc_url, table_key).await {
                 Ok(addresses) => addresses,
                 Err(error) if table_key == FLASHX_LOOKUP_TABLE => {
@@ -39,7 +41,7 @@ impl AddressLookupTableCache {
                         .with_context(|| format!("load address lookup table {table_key}"));
                 }
             };
-            tables.insert(table_key.to_string(), addresses);
+            tables.insert(table_pubkey, addresses);
         }
 
         let table_accounts = build_table_accounts(&tables)
@@ -73,11 +75,10 @@ impl AddressLookupTableCache {
         let mut readonly = Vec::new();
 
         for lookup in address_table_lookups {
-            let table_key = lookup.account_key.to_string();
-            let Some(addresses) = self.tables.get(&table_key) else {
+            let Some(addresses) = self.tables.get(&lookup.account_key) else {
                 return ExpandedAccountKeys {
                     keys,
-                    missing_lookup_table: Some(table_key),
+                    missing_lookup_table: Some(lookup.account_key),
                 };
             };
 
@@ -85,7 +86,7 @@ impl AddressLookupTableCache {
                 let Some(address) = addresses.get(*index as usize) else {
                     return ExpandedAccountKeys {
                         keys,
-                        missing_lookup_table: Some(table_key),
+                        missing_lookup_table: Some(lookup.account_key),
                     };
                 };
                 writable.push(*address);
@@ -95,7 +96,7 @@ impl AddressLookupTableCache {
                 let Some(address) = addresses.get(*index as usize) else {
                     return ExpandedAccountKeys {
                         keys,
-                        missing_lookup_table: Some(table_key),
+                        missing_lookup_table: Some(lookup.account_key),
                     };
                 };
                 readonly.push(*address);
@@ -118,7 +119,7 @@ impl AddressLookupTableCache {
 #[derive(Debug)]
 pub(crate) struct ExpandedAccountKeys {
     pub(crate) keys: Vec<Pubkey>,
-    pub(crate) missing_lookup_table: Option<String>,
+    pub(crate) missing_lookup_table: Option<Pubkey>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,9 +210,9 @@ fn base64_decode(value: &str) -> Result<Vec<u8>> {
 }
 
 fn build_table_accounts(
-    tables: &HashMap<String, Vec<Pubkey>>,
+    tables: &HashMap<Pubkey, Vec<Pubkey>>,
 ) -> Result<Vec<AddressLookupTableAccount>, String> {
-    let mut table_keys = tables.keys().cloned().collect::<Vec<_>>();
+    let mut table_keys = tables.keys().copied().collect::<Vec<_>>();
     table_keys.sort();
 
     table_keys
@@ -223,11 +224,7 @@ fn build_table_accounts(
                 .iter()
                 .copied()
                 .collect::<Vec<_>>();
-            Ok(AddressLookupTableAccount {
-                key: Pubkey::from_str(&key)
-                    .map_err(|error| format!("invalid lookup table key: {error}"))?,
-                addresses,
-            })
+            Ok(AddressLookupTableAccount { key, addresses })
         })
         .collect()
 }
@@ -279,10 +276,8 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/fixtures/flashx/migrated-buy-Jo9sxcrorVCGkmafhNDQKByQBDBTSqM99tS9R1mYs6DjvFZHxZFuFhAvdSemCxFqauPcqS1t17ir3iDScu7cQF5.tx.base64"
         )));
-        let tables = HashMap::from([(
-            MIGRATED_BUY_LOOKUP_TABLE.to_string(),
-            migrated_buy_lookup_table_addresses(),
-        )]);
+        let table_pubkey = Pubkey::from_str(MIGRATED_BUY_LOOKUP_TABLE).unwrap();
+        let tables = HashMap::from([(table_pubkey, migrated_buy_lookup_table_addresses())]);
         let cache = AddressLookupTableCache {
             table_accounts: build_table_accounts(&tables).unwrap(),
             tables,
@@ -290,7 +285,7 @@ mod tests {
 
         let expanded = cache.expanded_account_keys(&transaction);
 
-        assert_eq!(expanded.missing_lookup_table.as_deref(), None);
+        assert_eq!(expanded.missing_lookup_table, None);
         assert_eq!(expanded.keys.len(), 35);
         assert_eq!(
             expanded.keys.get(28).map(ToString::to_string).as_deref(),
@@ -307,8 +302,8 @@ mod tests {
         let expanded = AddressLookupTableCache::default().expanded_account_keys(&transaction);
 
         assert_eq!(
-            expanded.missing_lookup_table.as_deref(),
-            Some(MIGRATED_BUY_LOOKUP_TABLE)
+            expanded.missing_lookup_table,
+            Some(Pubkey::from_str(MIGRATED_BUY_LOOKUP_TABLE).unwrap())
         );
     }
 
@@ -318,10 +313,8 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/fixtures/flashx/live-buy-2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo.tx.base64"
         )));
-        let tables = HashMap::from([(
-            MIGRATED_BUY_LOOKUP_TABLE.to_string(),
-            migrated_buy_lookup_table_addresses(),
-        )]);
+        let table_pubkey = Pubkey::from_str(MIGRATED_BUY_LOOKUP_TABLE).unwrap();
+        let tables = HashMap::from([(table_pubkey, migrated_buy_lookup_table_addresses())]);
         let cache = AddressLookupTableCache {
             table_accounts: build_table_accounts(&tables).unwrap(),
             tables,
@@ -329,7 +322,7 @@ mod tests {
 
         let expanded = cache.expanded_account_keys(&transaction);
 
-        assert_eq!(expanded.missing_lookup_table.as_deref(), None);
+        assert_eq!(expanded.missing_lookup_table, None);
         assert_eq!(expanded.keys.len(), 26);
         assert_eq!(
             expanded.keys.get(21).map(ToString::to_string).as_deref(),

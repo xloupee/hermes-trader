@@ -1,5 +1,6 @@
 use crate::{
     address_lookup::AddressLookupTableCache,
+    balance_cache::WalletBalanceCache,
     blockhash::spawn_blockhash_cache,
     event::{
         normalized_event, now_ms, print_json, shadow_signal_line, wallet_mention_schema,
@@ -68,10 +69,27 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
         options.blockhash_refresh_ms,
         options.stats,
     );
+    let wallet_balance_cache =
+        wallet_balance_cache_from_options(&options, telegram_runtime.load_full().as_deref());
+    if let Some(cache) = &wallet_balance_cache {
+        cache.replace_wallets(active_copy_wallets(
+            telegram_runtime.load_full().as_deref(),
+            options.copy_wallet.as_deref(),
+        ));
+        match cache.refresh_once().await {
+            Ok(count) if options.stats => {
+                eprintln!("preloaded copy wallet balances; wallets={count}");
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("initial copy wallet balance refresh failed: {error}"),
+        }
+        cache.spawn_refresh_loop();
+    }
     let copy_executor = Arc::new(CopyExecutor::from_options(
         &options,
         blockhash_cache.clone(),
         address_lookup_tables.clone(),
+        wallet_balance_cache.clone(),
         telegram_runtime
             .load_full()
             .as_ref()
@@ -86,6 +104,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
         options.telegram_snapshot_path.clone(),
         options.copy_wallet.clone(),
         options.telegram_snapshot_reload_ms,
+        wallet_balance_cache,
     );
     let mut client = ShredstreamProxyClient::connect(options.endpoint.clone())
         .await
@@ -600,6 +619,7 @@ async fn handle_copy_execution_request(
             request.timings,
             request.executor_enqueued_at,
             request.copy_wallet,
+            Some(copy_execution_tx.clone()),
         )
         .await;
     let rust_trailing_sell_line = copy_executor
@@ -700,6 +720,7 @@ fn spawn_telegram_snapshot_reloader(
     telegram_snapshot_path: Option<std::path::PathBuf>,
     copy_wallet: Option<String>,
     reload_ms: u64,
+    wallet_balance_cache: Option<WalletBalanceCache>,
 ) {
     let Some(telegram_snapshot_path) = telegram_snapshot_path else {
         return;
@@ -735,6 +756,12 @@ fn spawn_telegram_snapshot_reloader(
 
             let keypairs =
                 CopyExecutor::load_snapshot_keypairs(runtime.snapshot.signer_keypair_paths());
+            if let Some(cache) = &wallet_balance_cache {
+                cache.replace_wallets(active_copy_wallets(Some(&runtime), copy_wallet.as_deref()));
+                if let Err(error) = cache.refresh_once().await {
+                    eprintln!("copy wallet balance refresh after snapshot reload failed: {error}");
+                }
+            }
             let sequence = runtime.snapshot.sequence();
             let target_wallet_count = runtime.target_wallet_pubkey_set.len();
             let active_profile_count = runtime.snapshot.active_profile_count();
@@ -760,6 +787,46 @@ fn load_telegram_runtime(
         snapshot,
         target_wallet_pubkey_set,
     }))
+}
+
+fn wallet_balance_cache_from_options(
+    options: &LiveOptions,
+    runtime: Option<&TelegramRuntimeConfig>,
+) -> Option<WalletBalanceCache> {
+    if !options.copy_wallet_balance_guard {
+        return None;
+    }
+    let rpc_url = options.solana_rpc_url.as_ref()?.trim();
+    if rpc_url.is_empty() {
+        return None;
+    }
+    Some(WalletBalanceCache::new(
+        rpc_url.to_string(),
+        options.copy_wallet_balance_refresh_ms,
+        options.copy_wallet_balance_stale_ms,
+        options.send_http_timeout_ms,
+        active_copy_wallets(runtime, options.copy_wallet.as_deref()),
+    ))
+}
+
+fn active_copy_wallets(
+    runtime: Option<&TelegramRuntimeConfig>,
+    fallback_copy_wallet: Option<&str>,
+) -> Vec<String> {
+    let mut wallets = runtime
+        .map(|runtime| runtime.snapshot.active_copy_wallets())
+        .unwrap_or_default();
+    if wallets.is_empty() {
+        if let Some(copy_wallet) = fallback_copy_wallet
+            .map(str::trim)
+            .filter(|wallet| !wallet.is_empty())
+        {
+            wallets.push(copy_wallet.to_string());
+        }
+    }
+    wallets.sort();
+    wallets.dedup();
+    wallets
 }
 
 struct SignalSideEffectRequest {
@@ -903,6 +970,7 @@ fn enqueue_transaction_confirmation(
                 }
             });
         }
+        CopyExecutionOutput::SendLaneAttribution(_) => {}
         _ => {}
     }
 }

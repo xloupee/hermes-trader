@@ -249,6 +249,18 @@ impl TelegramSnapshotConfig {
         paths.dedup();
         paths
     }
+
+    pub(crate) fn active_copy_wallets(&self) -> Vec<String> {
+        let mut wallets = Vec::new();
+        for configs in self.targets.values() {
+            for config in configs {
+                wallets.push(config.copy_wallet.clone());
+            }
+        }
+        wallets.sort();
+        wallets.dedup();
+        wallets
+    }
 }
 
 fn trailing_sell_plan_from_snapshot(

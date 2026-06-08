@@ -1,5 +1,6 @@
 use crate::{
     address_lookup::AddressLookupTableCache,
+    balance_cache::{WalletBalanceCache, WalletBalanceCheck},
     blockhash::{cached_blockhash, BlockhashCache},
     event::now_ms,
     parser::{
@@ -34,7 +35,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::task::JoinSet;
+use tokio::{sync::mpsc, task::JoinSet};
 
 pub(crate) const DEFAULT_MIGRATED_AMM_MIN_COPY_SOL: f64 = 0.00099;
 const LAMPORTS_PER_SOL: f64 = 1_000_000_000.0;
@@ -87,6 +88,7 @@ pub(crate) struct CopyExecutor {
     send_endpoints: Arc<Vec<SendEndpoint>>,
     blockhash_cache: Option<BlockhashCache>,
     address_lookup_tables: AddressLookupTableCache,
+    wallet_balance_cache: Option<WalletBalanceCache>,
     pda_cache: CopyPdaCache,
     direct_pump_sell_contexts: Mutex<DirectPumpSellContextCache>,
 }
@@ -133,8 +135,12 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) priority_fee_micro_lamports: Option<u64>,
     pub(crate) jito_tip_lamports: Option<u64>,
     pub(crate) jito_tip_account: Option<String>,
+    pub(crate) sell_priority_fee_micro_lamports: Option<u64>,
+    pub(crate) sell_jito_tip_lamports: Option<u64>,
+    pub(crate) sell_jito_tip_account: Option<String>,
     pub(crate) warm_send_endpoints: bool,
     pub(crate) send_endpoint_warm_interval_ms: u64,
+    pub(crate) copy_wallet_balance_guard: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -176,6 +182,17 @@ pub(crate) struct CopyExecutionLine {
     estimated_total_copy_spend_sol: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     estimated_total_copy_spend_lamports: Option<u64>,
+    copy_wallet_balance_guard: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_wallet_balance_lamports: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_wallet_balance_required_lamports: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_wallet_balance_fetched_at_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_wallet_balance_age_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_wallet_balance_reason: Option<String>,
     send_enabled: bool,
     dry_run: bool,
     simulation_requested: bool,
@@ -312,8 +329,44 @@ pub(crate) struct CopyExecutionLine {
 #[derive(Clone, Debug)]
 pub(crate) enum CopyExecutionOutput {
     Copy(CopyExecutionLine),
+    SendLaneAttribution(SendLaneAttributionLine),
     RustTrailingSell(RustTrailingSellLine),
     TransactionConfirmation(TransactionConfirmationLine),
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SendLaneAttributionLine {
+    schema: &'static str,
+    observed_at_ms: u128,
+    attribution_at_ms: u128,
+    provider: &'static str,
+    source: &'static str,
+    endpoint: String,
+    observed_wallet: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_wallet: Option<String>,
+    mint: String,
+    transaction_role: &'static str,
+    submission_group_id: String,
+    observed_signature: String,
+    send_signature: String,
+    first_ack_lane: String,
+    first_ack_at_ms: u128,
+    all_attempts: Vec<SendLaneAttemptAttribution>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SendLaneAttemptAttribution {
+    label: String,
+    kind: &'static str,
+    status: &'static str,
+    duration_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ack_at: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -354,6 +407,18 @@ pub(crate) struct TransactionConfirmationLine {
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     confirmation_slot: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slot_delta: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    landed_block_tx_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    landed_tx_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed_tx_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    txs_after_observed: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_position_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     confirmation_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -475,8 +540,23 @@ struct SendRpcAttemptLine {
 #[derive(Debug)]
 struct SendAttemptOutcome {
     attempt: SendRpcAttemptLine,
+    finished_at_ms: u128,
     signature: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct SendLaneAttributionContext {
+    observed_at_ms: u128,
+    provider: &'static str,
+    source: &'static str,
+    endpoint: String,
+    observed_wallet: String,
+    copy_wallet: Option<String>,
+    mint: String,
+    transaction_role: &'static str,
+    submission_group_id: String,
+    observed_signature: String,
 }
 
 struct SignedCopyTransaction {
@@ -554,6 +634,7 @@ impl CopyExecutor {
         options: &LiveOptions,
         blockhash_cache: Option<BlockhashCache>,
         address_lookup_tables: AddressLookupTableCache,
+        wallet_balance_cache: Option<WalletBalanceCache>,
         snapshot_keypair_paths: Vec<(String, PathBuf)>,
     ) -> Result<Self> {
         let execution_options = CopyExecutionOptions {
@@ -599,8 +680,29 @@ impl CopyExecutor {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToString::to_string),
+            sell_priority_fee_micro_lamports: positive_u64(
+                options.sell_priority_fee_micro_lamports,
+            )
+            .or_else(|| positive_u64(options.priority_fee_micro_lamports)),
+            sell_jito_tip_lamports: positive_u64(options.sell_jito_tip_lamports)
+                .or_else(|| positive_u64(options.jito_tip_lamports)),
+            sell_jito_tip_account: options
+                .sell_jito_tip_account
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .or_else(|| {
+                    options
+                        .jito_tip_account
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToString::to_string)
+                }),
             warm_send_endpoints: options.warm_send_endpoints,
             send_endpoint_warm_interval_ms: options.send_endpoint_warm_interval_ms,
+            copy_wallet_balance_guard: options.copy_wallet_balance_guard,
         };
 
         let keypair = match execution_options.copy_keypair_path.as_ref() {
@@ -623,6 +725,7 @@ impl CopyExecutor {
             send_endpoints,
             blockhash_cache,
             address_lookup_tables,
+            wallet_balance_cache,
             pda_cache: CopyPdaCache::default(),
             direct_pump_sell_contexts: Mutex::new(DirectPumpSellContextCache::new(
                 DIRECT_PUMP_SELL_CONTEXT_CACHE_CAPACITY,
@@ -735,6 +838,7 @@ impl CopyExecutor {
             timings,
             None,
             None,
+            None,
         )
         .await
     }
@@ -747,6 +851,7 @@ impl CopyExecutor {
         timings: SignalTimings,
         executor_enqueued_at: Instant,
         copy_wallet: Option<String>,
+        send_lane_attribution_tx: Option<mpsc::UnboundedSender<CopyExecutionOutput>>,
     ) -> CopyExecutionLine {
         self.handle_inner(
             execution_plan,
@@ -755,6 +860,7 @@ impl CopyExecutor {
             timings,
             Some(executor_enqueued_at),
             copy_wallet,
+            send_lane_attribution_tx,
         )
         .await
     }
@@ -767,6 +873,7 @@ impl CopyExecutor {
         timings: SignalTimings,
         executor_enqueued_at: Option<Instant>,
         copy_wallet_override: Option<String>,
+        send_lane_attribution_tx: Option<mpsc::UnboundedSender<CopyExecutionOutput>>,
     ) -> CopyExecutionLine {
         let executor_started_at = Instant::now();
         let mut line = CopyExecutionLine::new(
@@ -919,6 +1026,28 @@ impl CopyExecutor {
             }
         }
 
+        if self.options.copy_wallet_balance_guard {
+            let balance_check = match &self.wallet_balance_cache {
+                Some(cache) => cache.check(copy_wallet, estimated_total_spend_lamports),
+                None => WalletBalanceCheck {
+                    wallet: copy_wallet.to_string(),
+                    lamports: None,
+                    fetched_at_ms: None,
+                    age_ms: None,
+                    required_lamports: estimated_total_spend_lamports,
+                    reason: Some("copy wallet balance cache unavailable".to_string()),
+                },
+            };
+            let balance_reason = balance_check.reason.clone();
+            line.record_balance_check(balance_check);
+            if let Some(reason) = balance_reason {
+                line.record_guards_us(
+                    prebuild_guards_us + postbuild_guards_started_at.elapsed().as_micros(),
+                );
+                return line.skip(reason);
+            }
+        }
+
         let blockhash = match Hash::from_str(&cached_blockhash.blockhash) {
             Ok(blockhash) => blockhash,
             Err(error) => {
@@ -959,7 +1088,7 @@ impl CopyExecutor {
 
         line.signed = true;
         line.mark_signed();
-        line.copy_signature = Some(signed_tx.signature);
+        line.copy_signature = Some(signed_tx.signature.clone());
         line.tx_version = Some(signed_tx.tx_version);
         line.blockhash = Some(cached_blockhash.blockhash);
 
@@ -991,10 +1120,32 @@ impl CopyExecutor {
                 return line.skip("simulation failed; send blocked");
             }
             line.mark_send_submitted();
-            match self.send_transaction(&encoded_tx).await {
+            let attribution_context = SendLaneAttributionContext {
+                observed_at_ms: line.observed_at_ms,
+                provider: line.provider,
+                source: line.source,
+                endpoint: line.endpoint.clone(),
+                observed_wallet: line.observed_wallet.clone(),
+                copy_wallet: line.copy_wallet.clone(),
+                mint: line.mint.clone(),
+                transaction_role: "copy_buy",
+                submission_group_id: signed_tx.signature.clone(),
+                observed_signature: line.observed_signature.clone(),
+            };
+            match self
+                .send_transaction(
+                    &encoded_tx,
+                    Some(attribution_context),
+                    send_lane_attribution_tx,
+                )
+                .await
+            {
                 Ok(result) => {
                     line.sent = true;
                     line.mark_signature_returned();
+                    if let Some(cache) = &self.wallet_balance_cache {
+                        cache.optimistic_decrement(copy_wallet, estimated_total_spend_lamports);
+                    }
                     line.send_signature = Some(result.signature);
                     line.send_rpc_url_count = result.rpc_url_count;
                     line.send_rpc_winner = Some(result.rpc_winner);
@@ -1132,6 +1283,7 @@ impl CopyExecutor {
         let confirmation = self
             .wait_for_signature_confirmation(
                 buy_line.send_signature.as_deref(),
+                Some(&buy_line.observed_signature),
                 "copy buy transaction",
                 self.options.rust_trailing_sell_confirmation_timeout_ms,
                 self.options.rust_trailing_sell_confirmation_poll_ms,
@@ -1251,7 +1403,12 @@ impl CopyExecutor {
             .ok_or_else(|| "simulateTransaction result missing".to_string())
     }
 
-    async fn send_transaction(&self, encoded_tx: &str) -> Result<SendTransactionResult, String> {
+    async fn send_transaction(
+        &self,
+        encoded_tx: &str,
+        attribution_context: Option<SendLaneAttributionContext>,
+        attribution_tx: Option<mpsc::UnboundedSender<CopyExecutionOutput>>,
+    ) -> Result<SendTransactionResult, String> {
         let endpoints = self.send_endpoints.as_ref();
         if endpoints.is_empty() {
             return Err(
@@ -1275,6 +1432,19 @@ impl CopyExecutor {
                     .error
                     .unwrap_or_else(|| "sendTransaction failed".to_string()));
             };
+            let first_ack_at_ms = outcome.finished_at_ms;
+            if let (Some(context), Some(tx)) = (attribution_context, attribution_tx) {
+                spawn_send_lane_attribution_collector(
+                    JoinSet::new(),
+                    context,
+                    tx,
+                    signature.clone(),
+                    endpoint.label.clone(),
+                    first_ack_at_ms,
+                    attempts.clone(),
+                    Vec::new(),
+                );
+            }
             return Ok(SendTransactionResult {
                 signature,
                 rpc_url_count: 1,
@@ -1296,7 +1466,7 @@ impl CopyExecutor {
             });
         }
 
-        let mut errors = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
         let mut attempts = Vec::new();
         while let Some(result) = send_set.join_next().await {
             match result {
@@ -1304,9 +1474,27 @@ impl CopyExecutor {
                     let label = outcome.attempt.label.clone();
                     attempts.push(outcome.attempt);
                     if let Some(signature) = outcome.signature {
-                        // Keep the remaining sends alive. Fast ACK is useful for metrics, but
-                        // aborting slower lanes can prevent a better landing path from submitting.
-                        send_set.detach_all();
+                        let first_ack_at_ms = outcome.finished_at_ms;
+                        if let (Some(context), Some(tx)) = (attribution_context, attribution_tx) {
+                            spawn_send_lane_attribution_collector(
+                                send_set,
+                                context,
+                                tx,
+                                signature.clone(),
+                                label.clone(),
+                                first_ack_at_ms,
+                                attempts.clone(),
+                                errors
+                                    .iter()
+                                    .filter(|error| error.starts_with("join error:"))
+                                    .cloned()
+                                    .collect(),
+                            );
+                        } else {
+                            // Keep the remaining sends alive. Fast ACK is useful for metrics, but
+                            // aborting slower lanes can prevent a better landing path from submitting.
+                            send_set.detach_all();
+                        }
                         return Ok(SendTransactionResult {
                             signature,
                             rpc_url_count: endpoints.len(),
@@ -1416,7 +1604,7 @@ impl CopyExecutor {
             copy_wallet,
             &execution_plan.mint,
             token_amount_raw,
-            &self.options.tx_fee_config(),
+            &self.options.sell_tx_fee_config(),
             Some(&self.pda_cache),
         ) {
             Ok(build) => build,
@@ -1468,7 +1656,7 @@ impl CopyExecutor {
         }
 
         line.mark_auto_sell_submitted();
-        match self.send_transaction(&encoded_tx).await {
+        match self.send_transaction(&encoded_tx, None, None).await {
             Ok(result) => {
                 line.auto_sell_sent = true;
                 line.mark_auto_sell_signature_returned();
@@ -1635,7 +1823,7 @@ impl CopyExecutor {
         }
 
         line.mark_submitted();
-        match self.send_transaction(&encoded_tx).await {
+        match self.send_transaction(&encoded_tx, None, None).await {
             Ok(result) => {
                 line.sent = true;
                 line.mark_signature_returned();
@@ -1734,6 +1922,7 @@ impl CopyExecutor {
     async fn wait_for_signature_confirmation(
         &self,
         signature: Option<&str>,
+        observed_signature: Option<&str>,
         transaction_label: &'static str,
         timeout_ms: u64,
         poll_ms: u64,
@@ -1744,6 +1933,8 @@ impl CopyExecutor {
                 status: "missing_signature",
                 ok: false,
                 slot: None,
+                block_position: None,
+                block_position_error: None,
                 confirmation_status: None,
                 err: None,
                 reason: Some(format!("missing {transaction_label} signature")),
@@ -1755,6 +1946,8 @@ impl CopyExecutor {
                 status: "error",
                 ok: false,
                 slot: None,
+                block_position: None,
+                block_position_error: None,
                 confirmation_status: None,
                 err: None,
                 reason: Some("missing SOLANA_RPC_URL".to_string()),
@@ -1807,6 +2000,8 @@ impl CopyExecutor {
                             status: "error",
                             ok: false,
                             slot: None,
+                            block_position: None,
+                            block_position_error: None,
                             confirmation_status: None,
                             err: None,
                             reason: Some(format!(
@@ -1820,11 +2015,21 @@ impl CopyExecutor {
                         .and_then(|result| result.value.into_iter().next().flatten())
                     {
                         if let Some(error) = status.err {
+                            let (block_position, block_position_error) = self
+                                .fetch_landed_block_position(
+                                    rpc_url,
+                                    status.slot,
+                                    signature,
+                                    observed_signature,
+                                )
+                                .await;
                             return SignatureConfirmation {
                                 checked: true,
                                 status: "failed",
                                 ok: false,
                                 slot: status.slot,
+                                block_position,
+                                block_position_error,
                                 confirmation_status: status.confirmation_status,
                                 err: Some(error.clone()),
                                 reason: Some(format!(
@@ -1836,11 +2041,21 @@ impl CopyExecutor {
                             status.confirmation_status.as_deref(),
                             Some("confirmed") | Some("finalized")
                         ) {
+                            let (block_position, block_position_error) = self
+                                .fetch_landed_block_position(
+                                    rpc_url,
+                                    status.slot,
+                                    signature,
+                                    observed_signature,
+                                )
+                                .await;
                             return SignatureConfirmation {
                                 checked: true,
                                 status: "landed",
                                 ok: true,
                                 slot: status.slot,
+                                block_position,
+                                block_position_error,
                                 confirmation_status: status.confirmation_status,
                                 err: None,
                                 reason: None,
@@ -1855,6 +2070,8 @@ impl CopyExecutor {
                             status: "error",
                             ok: false,
                             slot: None,
+                            block_position: None,
+                            block_position_error: None,
                             confirmation_status: None,
                             err: None,
                             reason: Some(error),
@@ -1869,6 +2086,8 @@ impl CopyExecutor {
                     status: "submitted_not_landed",
                     ok: false,
                     slot: None,
+                    block_position: None,
+                    block_position_error: None,
                     confirmation_status: None,
                     err: None,
                     reason: Some(format!(
@@ -1880,6 +2099,101 @@ impl CopyExecutor {
         }
     }
 
+    async fn fetch_landed_block_position(
+        &self,
+        rpc_url: &str,
+        slot: Option<u64>,
+        signature: &str,
+        observed_signature: Option<&str>,
+    ) -> (Option<BlockPosition>, Option<String>) {
+        let Some(slot) = slot else {
+            return (None, None);
+        };
+
+        let request = async {
+            self.client
+                .post(rpc_url)
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": format!("block-position-{slot}"),
+                    "method": "getBlock",
+                    "params": [
+                        slot,
+                        {
+                            "encoding": "json",
+                            "transactionDetails": "signatures",
+                            "rewards": false,
+                            "maxSupportedTransactionVersion": 0
+                        }
+                    ]
+                }))
+                .send()
+                .await
+                .map_err(|error| format!("send getBlock request: {error}"))?
+                .error_for_status()
+                .map_err(|error| format!("getBlock HTTP status: {error}"))?
+                .json::<RpcResponse<BlockPositionResult>>()
+                .await
+                .map_err(|error| format!("decode getBlock response: {error}"))
+        };
+
+        let response = if self.options.send_http_timeout_ms > 0 {
+            match tokio::time::timeout(
+                Duration::from_millis(self.options.send_http_timeout_ms),
+                request,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(format!(
+                    "getBlock timed out after {}ms",
+                    self.options.send_http_timeout_ms
+                )),
+            }
+        } else {
+            request.await
+        };
+
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => return (None, Some(error)),
+        };
+        if let Some(error) = response.error {
+            return (None, Some(format!("getBlock RPC error: {}", error.message)));
+        }
+        let Some(result) = response.result else {
+            return (None, Some("getBlock result missing".to_string()));
+        };
+
+        let tx_count = result.signatures.len();
+        let landed_tx_index = result
+            .signatures
+            .iter()
+            .position(|candidate| candidate == signature);
+        let observed_tx_index = observed_signature
+            .filter(|value| !value.is_empty())
+            .and_then(|observed| {
+                result
+                    .signatures
+                    .iter()
+                    .position(|candidate| candidate == observed)
+            });
+        let txs_after_observed = match (observed_tx_index, landed_tx_index) {
+            (Some(observed), Some(landed)) => Some(landed as i64 - observed as i64),
+            _ => None,
+        };
+
+        (
+            Some(BlockPosition {
+                tx_count,
+                landed_tx_index,
+                observed_tx_index,
+                txs_after_observed,
+            }),
+            None,
+        )
+    }
+
     pub(crate) async fn confirm_copy_transaction(
         &self,
         line: CopyExecutionLine,
@@ -1887,6 +2201,7 @@ impl CopyExecutor {
         let confirmation = self
             .wait_for_signature_confirmation(
                 line.send_signature.as_deref(),
+                Some(&line.observed_signature),
                 "copy buy transaction",
                 self.options.rust_trailing_sell_confirmation_timeout_ms,
                 self.options.rust_trailing_sell_confirmation_poll_ms,
@@ -1902,6 +2217,7 @@ impl CopyExecutor {
         let confirmation = self
             .wait_for_signature_confirmation(
                 line.send_signature.as_deref(),
+                Some(&line.observed_signature),
                 "rust trailing sell transaction",
                 self.options.rust_trailing_sell_confirmation_timeout_ms,
                 self.options.rust_trailing_sell_confirmation_poll_ms,
@@ -1917,6 +2233,7 @@ impl CopyExecutor {
         let confirmation = self
             .wait_for_signature_confirmation(
                 line.auto_sell_send_signature.as_deref(),
+                Some(&line.observed_signature),
                 "auto-sell transaction",
                 self.options.rust_trailing_sell_confirmation_timeout_ms,
                 self.options.rust_trailing_sell_confirmation_poll_ms,
@@ -1929,13 +2246,107 @@ impl CopyExecutor {
         TxFeeConfig {
             compute_unit_price_micro_lamports: plan
                 .priority_fee_micro_lamports
-                .or(self.options.priority_fee_micro_lamports),
-            jito_tip_lamports: plan.jito_tip_lamports.or(self.options.jito_tip_lamports),
+                .or(self.options.sell_priority_fee_micro_lamports),
+            jito_tip_lamports: plan
+                .jito_tip_lamports
+                .or(self.options.sell_jito_tip_lamports),
             jito_tip_account: plan
                 .jito_tip_account
                 .clone()
-                .or_else(|| self.options.jito_tip_account.clone()),
+                .or_else(|| self.options.sell_jito_tip_account.clone()),
         }
+    }
+}
+
+fn spawn_send_lane_attribution_collector(
+    mut send_set: JoinSet<SendAttemptOutcome>,
+    context: SendLaneAttributionContext,
+    attribution_tx: mpsc::UnboundedSender<CopyExecutionOutput>,
+    send_signature: String,
+    first_ack_lane: String,
+    first_ack_at_ms: u128,
+    completed_attempts: Vec<SendRpcAttemptLine>,
+    completed_errors: Vec<String>,
+) {
+    tokio::spawn(async move {
+        let mut all_attempts: Vec<SendLaneAttemptAttribution> = completed_attempts
+            .into_iter()
+            .map(|attempt| {
+                let ack_at_ms = (attempt.status == "submitted"
+                    && attempt.signature.as_deref() == Some(send_signature.as_str()))
+                .then_some(first_ack_at_ms);
+                send_lane_attempt_attribution(attempt, ack_at_ms)
+            })
+            .collect();
+        all_attempts.extend(
+            completed_errors
+                .into_iter()
+                .map(|error| SendLaneAttemptAttribution {
+                    label: "fanout-join".to_string(),
+                    kind: "internal",
+                    status: "failed",
+                    duration_ms: 0,
+                    ack_at: None,
+                    error: Some(error),
+                }),
+        );
+
+        while let Some(result) = send_set.join_next().await {
+            match result {
+                Ok(outcome) => {
+                    let ack_at_ms = outcome.signature.as_ref().map(|_| outcome.finished_at_ms);
+                    all_attempts.push(send_lane_attempt_attribution(outcome.attempt, ack_at_ms));
+                }
+                Err(error) => all_attempts.push(SendLaneAttemptAttribution {
+                    label: "fanout-join".to_string(),
+                    kind: "internal",
+                    status: "failed",
+                    duration_ms: 0,
+                    ack_at: None,
+                    error: Some(format!("join error: {error}")),
+                }),
+            }
+        }
+
+        let line = SendLaneAttributionLine {
+            schema: "copytrade.sendLaneAttribution.v1",
+            observed_at_ms: context.observed_at_ms,
+            attribution_at_ms: now_ms(),
+            provider: context.provider,
+            source: context.source,
+            endpoint: context.endpoint,
+            observed_wallet: context.observed_wallet,
+            copy_wallet: context.copy_wallet,
+            mint: context.mint,
+            transaction_role: context.transaction_role,
+            submission_group_id: context.submission_group_id,
+            observed_signature: context.observed_signature,
+            send_signature,
+            first_ack_lane,
+            first_ack_at_ms,
+            all_attempts,
+        };
+
+        if attribution_tx
+            .send(CopyExecutionOutput::SendLaneAttribution(line))
+            .is_err()
+        {
+            eprintln!("send lane attribution result dropped; receiver closed");
+        }
+    });
+}
+
+fn send_lane_attempt_attribution(
+    attempt: SendRpcAttemptLine,
+    ack_at: Option<u128>,
+) -> SendLaneAttemptAttribution {
+    SendLaneAttemptAttribution {
+        label: attempt.label,
+        kind: attempt.kind,
+        status: attempt.status,
+        duration_ms: attempt.duration_ms,
+        ack_at,
+        error: attempt.error,
     }
 }
 
@@ -2412,6 +2823,12 @@ impl CopyExecutionLine {
             max_total_copy_spend_sol: options.max_total_copy_spend_sol,
             estimated_total_copy_spend_sol: None,
             estimated_total_copy_spend_lamports: None,
+            copy_wallet_balance_guard: options.copy_wallet_balance_guard,
+            copy_wallet_balance_lamports: None,
+            copy_wallet_balance_required_lamports: None,
+            copy_wallet_balance_fetched_at_ms: None,
+            copy_wallet_balance_age_ms: None,
+            copy_wallet_balance_reason: None,
             send_enabled: options.enable_copy_send,
             dry_run: options.dry_run,
             simulation_requested: options.simulate_copy_tx,
@@ -2529,6 +2946,14 @@ impl CopyExecutionLine {
         self.guards_us = Some(us);
     }
 
+    fn record_balance_check(&mut self, check: WalletBalanceCheck) {
+        self.copy_wallet_balance_lamports = check.lamports;
+        self.copy_wallet_balance_required_lamports = Some(check.required_lamports);
+        self.copy_wallet_balance_fetched_at_ms = check.fetched_at_ms;
+        self.copy_wallet_balance_age_ms = check.age_ms;
+        self.copy_wallet_balance_reason = check.reason;
+    }
+
     fn record_unsigned_build_us(&mut self, started_at: Instant) {
         self.unsigned_build_us = Some(started_at.elapsed().as_micros());
     }
@@ -2608,6 +3033,9 @@ impl CopyExecutionOutput {
 
         match self {
             CopyExecutionOutput::Copy(line) => serde_json::to_writer(&mut *writer, line)?,
+            CopyExecutionOutput::SendLaneAttribution(line) => {
+                serde_json::to_writer(&mut *writer, line)?
+            }
             CopyExecutionOutput::RustTrailingSell(line) => {
                 serde_json::to_writer(&mut *writer, line)?
             }
@@ -2625,6 +3053,10 @@ impl From<CopyExecutionLine> for CopyExecutionOutput {
     fn from(line: CopyExecutionLine) -> Self {
         CopyExecutionOutput::Copy(line)
     }
+}
+
+fn slot_delta(observed_slot: u64, confirmation_slot: Option<u64>) -> Option<i64> {
+    confirmation_slot.map(|slot| slot as i64 - observed_slot as i64)
 }
 
 impl TransactionConfirmationLine {
@@ -2655,6 +3087,24 @@ impl TransactionConfirmationLine {
             status: confirmation.status,
             ok: confirmation.ok,
             confirmation_slot: confirmation.slot,
+            slot_delta: slot_delta(line.slot, confirmation.slot),
+            landed_block_tx_count: confirmation
+                .block_position
+                .as_ref()
+                .map(|position| position.tx_count),
+            landed_tx_index: confirmation
+                .block_position
+                .as_ref()
+                .and_then(|position| position.landed_tx_index),
+            observed_tx_index: confirmation
+                .block_position
+                .as_ref()
+                .and_then(|position| position.observed_tx_index),
+            txs_after_observed: confirmation
+                .block_position
+                .as_ref()
+                .and_then(|position| position.txs_after_observed),
+            block_position_error: confirmation.block_position_error,
             confirmation_status: confirmation.confirmation_status,
             err: confirmation.err,
             reason: confirmation.reason,
@@ -2691,6 +3141,24 @@ impl TransactionConfirmationLine {
             status: confirmation.status,
             ok: confirmation.ok,
             confirmation_slot: confirmation.slot,
+            slot_delta: slot_delta(line.slot, confirmation.slot),
+            landed_block_tx_count: confirmation
+                .block_position
+                .as_ref()
+                .map(|position| position.tx_count),
+            landed_tx_index: confirmation
+                .block_position
+                .as_ref()
+                .and_then(|position| position.landed_tx_index),
+            observed_tx_index: confirmation
+                .block_position
+                .as_ref()
+                .and_then(|position| position.observed_tx_index),
+            txs_after_observed: confirmation
+                .block_position
+                .as_ref()
+                .and_then(|position| position.txs_after_observed),
+            block_position_error: confirmation.block_position_error,
             confirmation_status: confirmation.confirmation_status,
             err: confirmation.err,
             reason: confirmation.reason,
@@ -2731,6 +3199,24 @@ impl TransactionConfirmationLine {
             status: confirmation.status,
             ok: confirmation.ok,
             confirmation_slot: confirmation.slot,
+            slot_delta: slot_delta(line.slot, confirmation.slot),
+            landed_block_tx_count: confirmation
+                .block_position
+                .as_ref()
+                .map(|position| position.tx_count),
+            landed_tx_index: confirmation
+                .block_position
+                .as_ref()
+                .and_then(|position| position.landed_tx_index),
+            observed_tx_index: confirmation
+                .block_position
+                .as_ref()
+                .and_then(|position| position.observed_tx_index),
+            txs_after_observed: confirmation
+                .block_position
+                .as_ref()
+                .and_then(|position| position.txs_after_observed),
+            block_position_error: confirmation.block_position_error,
             confirmation_status: confirmation.confirmation_status,
             err: confirmation.err,
             reason: confirmation.reason,
@@ -2783,12 +3269,12 @@ impl RustTrailingSellLine {
             sell_priority_fee_sol: plan.sell_priority_fee_sol,
             priority_fee_micro_lamports: plan
                 .priority_fee_micro_lamports
-                .or(options.priority_fee_micro_lamports),
-            jito_tip_lamports: plan.jito_tip_lamports.or(options.jito_tip_lamports),
+                .or(options.sell_priority_fee_micro_lamports),
+            jito_tip_lamports: plan.jito_tip_lamports.or(options.sell_jito_tip_lamports),
             jito_tip_account: plan
                 .jito_tip_account
                 .clone()
-                .or_else(|| options.jito_tip_account.clone()),
+                .or_else(|| options.sell_jito_tip_account.clone()),
             confirmation_checked: false,
             confirmation_ok: false,
             confirmation_slot: None,
@@ -2874,6 +3360,14 @@ impl CopyExecutionOptions {
             compute_unit_price_micro_lamports: self.priority_fee_micro_lamports,
             jito_tip_lamports: self.jito_tip_lamports,
             jito_tip_account: self.jito_tip_account.clone(),
+        }
+    }
+
+    fn sell_tx_fee_config(&self) -> TxFeeConfig {
+        TxFeeConfig {
+            compute_unit_price_micro_lamports: self.sell_priority_fee_micro_lamports,
+            jito_tip_lamports: self.sell_jito_tip_lamports,
+            jito_tip_account: self.sell_jito_tip_account.clone(),
         }
     }
 
@@ -3098,6 +3592,7 @@ async fn send_transaction_attempt(
             );
             SendAttemptOutcome {
                 attempt,
+                finished_at_ms: now_ms(),
                 signature: Some(signature),
                 error: None,
             }
@@ -3118,6 +3613,7 @@ async fn send_transaction_attempt(
             );
             SendAttemptOutcome {
                 attempt,
+                finished_at_ms: now_ms(),
                 signature: None,
                 error: Some(sanitized),
             }
@@ -3229,9 +3725,19 @@ struct SignatureConfirmation {
     status: &'static str,
     ok: bool,
     slot: Option<u64>,
+    block_position: Option<BlockPosition>,
+    block_position_error: Option<String>,
     confirmation_status: Option<String>,
     err: Option<serde_json::Value>,
     reason: Option<String>,
+}
+
+#[derive(Debug)]
+struct BlockPosition {
+    tx_count: usize,
+    landed_tx_index: Option<usize>,
+    observed_tx_index: Option<usize>,
+    txs_after_observed: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3245,6 +3751,11 @@ struct SignatureStatusValue {
     confirmation_status: Option<String>,
     err: Option<serde_json::Value>,
     slot: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlockPositionResult {
+    signatures: Vec<String>,
 }
 
 #[cfg(test)]
@@ -3287,8 +3798,12 @@ mod tests {
             priority_fee_micro_lamports: None,
             jito_tip_lamports: None,
             jito_tip_account: None,
+            sell_priority_fee_micro_lamports: None,
+            sell_jito_tip_lamports: None,
+            sell_jito_tip_account: None,
             warm_send_endpoints: false,
             send_endpoint_warm_interval_ms: 0,
+            copy_wallet_balance_guard: true,
         }
     }
 
@@ -3445,6 +3960,7 @@ mod tests {
             send_endpoints,
             blockhash_cache: None,
             address_lookup_tables: AddressLookupTableCache::default(),
+            wallet_balance_cache: None,
             pda_cache: CopyPdaCache::default(),
             direct_pump_sell_contexts: Mutex::new(DirectPumpSellContextCache::new(
                 DIRECT_PUMP_SELL_CONTEXT_CACHE_CAPACITY,
@@ -4004,6 +4520,8 @@ mod tests {
             status: "failed",
             ok: false,
             slot: Some(42),
+            block_position: None,
+            block_position_error: None,
             confirmation_status: Some("confirmed".to_string()),
             err: Some(serde_json::json!({
                 "InstructionError": [1, { "Custom": 6024 }]
@@ -4071,6 +4589,8 @@ mod tests {
             status: "failed",
             ok: false,
             slot: Some(43),
+            block_position: None,
+            block_position_error: None,
             confirmation_status: Some("confirmed".to_string()),
             err: Some(serde_json::json!({
                 "InstructionError": [3, { "Custom": 6024 }]
@@ -4152,6 +4672,8 @@ mod tests {
             status: "submitted_not_landed",
             ok: false,
             slot: None,
+            block_position: None,
+            block_position_error: None,
             confirmation_status: None,
             err: None,
             reason: Some(
@@ -4432,5 +4954,57 @@ mod tests {
 
         line.decision = "sent";
         assert!(line.was_sent());
+    }
+
+    #[test]
+    fn send_lane_attribution_line_serializes_ack_attempts_without_causality_claim() {
+        let plan = allowed_plan();
+        let line = SendLaneAttributionLine {
+            schema: "copytrade.sendLaneAttribution.v1",
+            observed_at_ms: 100,
+            attribution_at_ms: 125,
+            provider: "shredstream",
+            source: "jito-proxy",
+            endpoint: "http://127.0.0.1:9999".to_string(),
+            observed_wallet: plan.target_wallet,
+            copy_wallet: Some(COPY_WALLET.to_string()),
+            mint: plan.mint,
+            transaction_role: "copy_buy",
+            submission_group_id: "signed-tx-signature".to_string(),
+            observed_signature: "observed-signature".to_string(),
+            send_signature: "send-signature".to_string(),
+            first_ack_lane: "rpc-primary:example.com".to_string(),
+            first_ack_at_ms: 112,
+            all_attempts: vec![SendLaneAttemptAttribution {
+                label: "rpc-primary:example.com".to_string(),
+                kind: "rpc",
+                status: "submitted",
+                duration_ms: 7,
+                ack_at: Some(112),
+                error: None,
+            }],
+        };
+
+        let json = serde_json::to_value(&line).expect("attribution line serializes");
+
+        assert_eq!(
+            json.get("schema").and_then(serde_json::Value::as_str),
+            Some("copytrade.sendLaneAttribution.v1")
+        );
+        assert_eq!(
+            json.get("submissionGroupId")
+                .and_then(serde_json::Value::as_str),
+            Some("signed-tx-signature")
+        );
+        assert_eq!(
+            json.get("firstAckLane").and_then(serde_json::Value::as_str),
+            Some("rpc-primary:example.com")
+        );
+        assert!(json.get("landingLane").is_none());
+        assert_eq!(
+            json.pointer("/allAttempts/0/ackAt")
+                .and_then(serde_json::Value::as_u64),
+            Some(112)
+        );
     }
 }

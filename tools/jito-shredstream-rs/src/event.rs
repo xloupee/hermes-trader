@@ -101,6 +101,8 @@ pub(crate) fn normalized_event(
     account_key_count: usize,
     parsed: ParsedTrade,
 ) -> NormalizedCopyTradeEvent {
+    let target_wallet = parsed.target_wallet.to_string();
+    let mint = parsed.mint.to_string();
     let (input, output) = match parsed.action {
         Action::Buy => (
             NormalizedAsset {
@@ -108,13 +110,13 @@ pub(crate) fn normalized_event(
                 amount: parsed.sol_amount,
             },
             NormalizedAsset {
-                mint: parsed.mint.clone(),
+                mint: mint.clone(),
                 amount: parsed.token_amount,
             },
         ),
         Action::Sell => (
             NormalizedAsset {
-                mint: parsed.mint.clone(),
+                mint: mint.clone(),
                 amount: parsed.token_amount,
             },
             NormalizedAsset {
@@ -130,9 +132,9 @@ pub(crate) fn normalized_event(
         provider: "shredstream",
         source: "jito-proxy",
         endpoint,
-        target_wallet: parsed.target_wallet,
+        target_wallet,
         action: parsed.action,
-        mint: parsed.mint,
+        mint,
         signature,
         slot,
         route: parsed.route,
@@ -161,9 +163,9 @@ pub(crate) fn shadow_signal_line(
         provider: "shredstream",
         source: "jito-proxy",
         endpoint,
-        target_wallet: parsed.target_wallet.clone(),
+        target_wallet: parsed.target_wallet.to_string(),
         action: parsed.action,
-        mint: parsed.mint.clone(),
+        mint: parsed.mint.to_string(),
         signature,
         slot,
         route: parsed.route,
@@ -192,6 +194,11 @@ pub(crate) fn now_ms() -> u128 {
 mod tests {
     use super::*;
     use crate::parser::{ParsedTrade, Route};
+    use solana_pubkey::Pubkey;
+    use std::str::FromStr;
+
+    const TARGET_WALLET: &str = "CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o";
+    const MINT: &str = "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump";
 
     #[test]
     fn shadow_signal_for_buy_records_would_copy_decision() {
@@ -202,9 +209,9 @@ mod tests {
             456,
             12,
             &ParsedTrade {
-                target_wallet: "wallet".to_string(),
+                target_wallet: pubkey(TARGET_WALLET),
                 action: Action::Buy,
-                mint: "mintpump".to_string(),
+                mint: pubkey(MINT),
                 route: Route::FlashxPump,
                 sol_amount: Some(0.00099),
                 token_amount: None,
@@ -232,9 +239,9 @@ mod tests {
             456,
             12,
             &ParsedTrade {
-                target_wallet: "wallet".to_string(),
+                target_wallet: pubkey(TARGET_WALLET),
                 action: Action::Sell,
-                mint: "mintpump".to_string(),
+                mint: pubkey(MINT),
                 route: Route::FlashxPump,
                 sol_amount: None,
                 token_amount: Some(42.0),
@@ -250,6 +257,10 @@ mod tests {
         assert_eq!(value["tokenAmount"], 42.0);
         assert_eq!(value["reason"], "shadow mode only copies buy actions");
         assert!(value.get("solAmount").is_none());
+    }
+
+    fn pubkey(value: &str) -> Pubkey {
+        Pubkey::from_str(value).expect("fixture pubkey is valid")
     }
 }
 

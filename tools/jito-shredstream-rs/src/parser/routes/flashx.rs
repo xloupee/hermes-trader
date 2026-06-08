@@ -1,9 +1,9 @@
 use crate::parser::{
     associated_token_program_id, flashx_router_program_id, pump_amm_program_id,
-    pump_fun_program_id, read_u64_le, token_2022_program_id, token_program_id, Action,
+    pump_fun_program_id, read_u64_le, sol_mint, token_2022_program_id, token_program_id, Action,
     DirectPumpAccounts, FlashxPumpLayout, FlashxPumpResolvedAccounts, FlashxPumpRouteContext,
     MigratedAmmAccounts, ParsedTrade, Route, RouteContext, RouteInstructionAccount,
-    LAMPORTS_PER_SOL, PUMP_FUN_TOKEN_DECIMALS, SOL_MINT,
+    LAMPORTS_PER_SOL, PUMP_FUN_TOKEN_DECIMALS,
 };
 use solana_message::compiled_instruction::CompiledInstruction;
 use solana_message::VersionedMessage;
@@ -43,9 +43,9 @@ pub(crate) fn parse(
 
     if target_wallets.contains(first_account) {
         return Some(ParsedTrade {
-            target_wallet: first_account.to_string(),
+            target_wallet: *first_account,
             action: Action::Buy,
-            mint: mint.to_string(),
+            mint: *mint,
             route: Route::FlashxPump,
             sol_amount: Some(amount_in as f64 / LAMPORTS_PER_SOL),
             token_amount: None,
@@ -55,9 +55,9 @@ pub(crate) fn parse(
 
     if target_wallets.contains(second_account) {
         return Some(ParsedTrade {
-            target_wallet: second_account.to_string(),
+            target_wallet: *second_account,
             action: Action::Sell,
-            mint: mint.to_string(),
+            mint: *mint,
             route: Route::FlashxPump,
             sol_amount: None,
             token_amount: Some(amount_in as f64 / PUMP_FUN_TOKEN_DECIMALS),
@@ -87,18 +87,18 @@ fn parse_migrated_amm_layout(
 
     match data.get(17).copied()? {
         0 => Some(ParsedTrade {
-            target_wallet: target_wallet.to_string(),
+            target_wallet: *target_wallet,
             action: Action::Buy,
-            mint: mint.to_string(),
+            mint: *mint,
             route: Route::FlashxPump,
             sol_amount: Some(amount_in as f64 / LAMPORTS_PER_SOL),
             token_amount: None,
             route_context: None,
         }),
         1 => Some(ParsedTrade {
-            target_wallet: target_wallet.to_string(),
+            target_wallet: *target_wallet,
             action: Action::Sell,
-            mint: mint.to_string(),
+            mint: *mint,
             route: Route::FlashxPump,
             sol_amount: None,
             token_amount: Some(amount_in as f64 / PUMP_FUN_TOKEN_DECIMALS),
@@ -126,9 +126,9 @@ fn parse_long_v2_layout(
     if let Some(mint) = account_key_at(accounts, account_keys, 19).filter(|mint| is_pump_mint(mint))
     {
         return Some(ParsedTrade {
-            target_wallet: target_wallet.to_string(),
+            target_wallet: *target_wallet,
             action: Action::Buy,
-            mint: mint.to_string(),
+            mint: *mint,
             route: Route::FlashxPump,
             sol_amount: Some(amount_in as f64 / LAMPORTS_PER_SOL),
             token_amount: None,
@@ -139,9 +139,9 @@ fn parse_long_v2_layout(
     if let Some(mint) = account_key_at(accounts, account_keys, 9).filter(|mint| is_pump_mint(mint))
     {
         return Some(ParsedTrade {
-            target_wallet: target_wallet.to_string(),
+            target_wallet: *target_wallet,
             action: Action::Sell,
-            mint: mint.to_string(),
+            mint: *mint,
             route: Route::FlashxPump,
             sol_amount: None,
             token_amount: Some(amount_in as f64 / PUMP_FUN_TOKEN_DECIMALS),
@@ -207,9 +207,8 @@ fn is_migrated_amm_buy_layout(
     is_migrated_amm_layout(accounts, account_keys)
         && data.get(17).copied() == Some(0)
         && account_key_at(accounts, account_keys, 1)
-            .is_some_and(|account| account.to_string() == parsed.target_wallet)
-        && account_key_at(accounts, account_keys, 12)
-            .is_some_and(|account| account.to_string() == parsed.mint)
+            .is_some_and(|account| account == &parsed.target_wallet)
+        && account_key_at(accounts, account_keys, 12).is_some_and(|account| account == &parsed.mint)
 }
 
 fn is_migrated_amm_layout(accounts: &[u8], account_keys: &[Pubkey]) -> bool {
@@ -219,8 +218,7 @@ fn is_migrated_amm_layout(accounts: &[u8], account_keys: &[Pubkey]) -> bool {
             .is_some_and(|account| account == flashx_router_program_id())
         && account_key_at(accounts, account_keys, 5)
             .is_some_and(|account| account == pump_amm_program_id())
-        && account_key_at(accounts, account_keys, 13)
-            .is_some_and(|account| account.to_string() == SOL_MINT)
+        && account_key_at(accounts, account_keys, 13).is_some_and(|account| account == sol_mint())
         && account_key_at(accounts, account_keys, 20).is_some_and(|account| {
             account == token_program_id() || account == token_2022_program_id()
         })
@@ -256,9 +254,8 @@ fn is_direct_pump_buy_layout(
     accounts.len() >= 32
         && data.get(17).copied() == Some(0)
         && account_key_at(accounts, account_keys, 0)
-            .is_some_and(|account| account.to_string() == parsed.target_wallet)
-        && account_key_at(accounts, account_keys, 10)
-            .is_some_and(|account| account.to_string() == parsed.mint)
+            .is_some_and(|account| account == &parsed.target_wallet)
+        && account_key_at(accounts, account_keys, 10).is_some_and(|account| account == &parsed.mint)
 }
 
 fn is_direct_pump_sell_layout(
@@ -270,9 +267,8 @@ fn is_direct_pump_sell_layout(
     accounts.len() >= 25
         && data.get(17).copied() == Some(1)
         && account_key_at(accounts, account_keys, 1)
-            .is_some_and(|account| account.to_string() == parsed.target_wallet)
-        && account_key_at(accounts, account_keys, 10)
-            .is_some_and(|account| account.to_string() == parsed.mint)
+            .is_some_and(|account| account == &parsed.target_wallet)
+        && account_key_at(accounts, account_keys, 10).is_some_and(|account| account == &parsed.mint)
         && account_key_at(accounts, account_keys, 4)
             .is_some_and(|account| account == flashx_router_program_id())
         && account_key_at(accounts, account_keys, 5)
@@ -552,7 +548,7 @@ mod tests {
                 .expect("live direct Pump sell should parse");
 
         assert_eq!(parsed.action, Action::Sell);
-        assert_eq!(parsed.mint, LIVE_DIRECT_PUMP_SELL_MINT);
+        assert_eq!(parsed.mint, pubkey(LIVE_DIRECT_PUMP_SELL_MINT));
         let RouteContext::FlashxPump(context) = parsed
             .route_context
             .as_ref()
@@ -584,7 +580,7 @@ mod tests {
                 .expect("non-suffix migrated FLASHX buy should parse");
 
         assert_eq!(parsed.action, Action::Buy);
-        assert_eq!(parsed.mint, NON_SUFFIX_MIGRATED_MINT);
+        assert_eq!(parsed.mint, pubkey(NON_SUFFIX_MIGRATED_MINT));
         let RouteContext::FlashxPump(context) = parsed
             .route_context
             .as_ref()
@@ -600,7 +596,7 @@ mod tests {
         let copy_build = crate::tx_builder::build_copy_unsigned_flashx_pump(
             parsed.route_context.as_ref(),
             COPY_WALLET,
-            &parsed.mint,
+            &parsed.mint.to_string(),
         )
         .expect("non-suffix migrated route should build copy instructions");
         assert_eq!(copy_build.route_layout, "migrated-amm");

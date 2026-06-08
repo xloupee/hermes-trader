@@ -29,6 +29,7 @@ COPYFILE_DISABLE=1 tar \
   --exclude='node_modules' \
   --exclude='logs' \
   --exclude='data' \
+  --exclude='supabase/.temp' \
   --exclude='.DS_Store' \
   --exclude='jito-shredstream-keypair.json' \
   --exclude='tools/shredstream-rs/target' \

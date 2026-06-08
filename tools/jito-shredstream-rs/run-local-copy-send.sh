@@ -28,8 +28,8 @@ export JITO_SHREDSTREAM_PROXY_URL="${JITO_SHREDSTREAM_PROXY_URL:-http://127.0.0.
 export SHREDSTREAM_TARGET_WALLETS="${SHREDSTREAM_TARGET_WALLETS:-A8myhNPHpPsq7e4gkPntbiQCgK7GL4M4smkyFzbHtvdS}"
 export JITO_COPY_WALLET="${JITO_COPY_WALLET:-FqhpPL63symHForRGfxPbGi4wDpe5jQqAVjntbbBqA5W}"
 export JITO_COPY_KEYPAIR_PATH="${JITO_COPY_KEYPAIR_PATH:-$HOME/.config/solana/copytrade-planning-keypair.json}"
-export JITO_MAX_COPY_SOL="${JITO_MAX_COPY_SOL:-0.001}"
-export JITO_MAX_TOTAL_COPY_SPEND_SOL="${JITO_MAX_TOTAL_COPY_SPEND_SOL:-0.0035}"
+export JITO_MAX_COPY_SOL="${JITO_MAX_COPY_SOL:-0}"
+export JITO_MAX_TOTAL_COPY_SPEND_SOL="${JITO_MAX_TOTAL_COPY_SPEND_SOL:-0}"
 export JITO_FAST_COPY_SEND="${JITO_FAST_COPY_SEND:-false}"
 export JITO_SEND_FANOUT="${JITO_SEND_FANOUT:-false}"
 export JITO_SEND_RPC_URLS="${JITO_SEND_RPC_URLS:-${DIRECT_EXECUTION_SEND_RPC_URLS:-$SOLANA_RPC_URL}}"
@@ -80,15 +80,6 @@ export JITO_PRINT_MENTIONS="${JITO_PRINT_MENTIONS:-true}"
 export JITO_WARM_SEND_ENDPOINTS="${JITO_WARM_SEND_ENDPOINTS:-true}"
 export JITO_SEND_ENDPOINT_WARM_INTERVAL_MS="${JITO_SEND_ENDPOINT_WARM_INTERVAL_MS:-15000}"
 
-case "$JITO_MAX_COPY_SOL" in
-  0.001|0.000[0-9]*)
-    ;;
-  *)
-    echo "JITO_MAX_COPY_SOL must be 0.001 or lower for first live send; got $JITO_MAX_COPY_SOL" >&2
-    exit 1
-    ;;
-esac
-
 validate_nonnegative_int() {
   local name="$1"
   local value="${2:-}"
@@ -135,7 +126,19 @@ validate_positive_sol() {
   fi
 }
 
-validate_positive_sol JITO_MAX_TOTAL_COPY_SPEND_SOL "$JITO_MAX_TOTAL_COPY_SPEND_SOL"
+validate_nonnegative_sol() {
+  local name="$1"
+  local value="${2:-}"
+
+  [[ -z "$value" ]] && return 0
+  if ! awk -v value="$value" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value + 0 >= 0) }'; then
+    echo "$name must be a nonnegative SOL amount; got $value" >&2
+    exit 1
+  fi
+}
+
+validate_nonnegative_sol JITO_MAX_COPY_SOL "$JITO_MAX_COPY_SOL"
+validate_nonnegative_sol JITO_MAX_TOTAL_COPY_SPEND_SOL "$JITO_MAX_TOTAL_COPY_SPEND_SOL"
 
 if [[ -n "$JITO_TIP_LAMPORTS" && "$JITO_TIP_LAMPORTS" != "0" && -z "$JITO_TIP_ACCOUNT" ]]; then
   echo "JITO_TIP_ACCOUNT must be set when JITO_TIP_LAMPORTS is positive" >&2

@@ -92,6 +92,13 @@ function sqlJson(value) {
   return `${sqlString(JSON.stringify(value ?? null))}::jsonb`;
 }
 
+function timestampFromMs(value) {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  return new Date(value).toISOString();
+}
+
 async function rpc(method, params) {
   if (!process.env.SOLANA_RPC_URL) {
     return null;
@@ -299,8 +306,9 @@ async function blockPositionDiagnostics(row, copyTransaction, rpcFn = rpc) {
 function unknownChainReport(row, unavailableReason) {
   const diagnostics = baseBlockPositionDiagnostics(row, null);
   diagnostics.unavailableReason = unavailableReason;
-  return {
-    status: "unknown",
+  const status = row.sendSignature || row.sent || row.decision === "sent" ? "submitted" : "unknown";
+  const report = {
+    status,
     slot: null,
     slotDeltaFromObserved: null,
     blockPositionDiagnostics: diagnostics,
@@ -322,6 +330,23 @@ function unknownChainReport(row, unavailableReason) {
     targetBlockTime: null,
     blockTime: null
   };
+  report.buyStatus = buyStatus(row, report);
+  report.autoSellStatus = autoSellStatus(row, null);
+  return report;
+}
+
+function displayTxDelta(report, fallback = null) {
+  const sameSlotTxDelta = report?.sameSlotTxDelta;
+  if (Number.isFinite(sameSlotTxDelta)) {
+    return sameSlotTxDelta;
+  }
+
+  const crossSlotTxDelta = report?.crossSlotPositionSummary?.crossSlotTxDelta;
+  if (Number.isFinite(crossSlotTxDelta)) {
+    return crossSlotTxDelta;
+  }
+
+  return fallback ?? null;
 }
 
 function submittedChainReport(signature, unavailableReason) {
@@ -436,6 +461,7 @@ function executionKey(row) {
     row.provider,
     row.observedSignature,
     row.observedWallet,
+    row.copyWallet,
     row.observedAction,
     row.mint
   ].join("\u0000");
@@ -553,6 +579,7 @@ async function buildRestRows(rows) {
       : {};
 
     records.push({
+      created_at: timestampFromMs(row.observedAtMs),
       observed_at_ms: Number.isFinite(row.observedAtMs) ? row.observedAtMs : null,
       execution_at_ms: Number.isFinite(row.executionAtMs) ? row.executionAtMs : null,
       provider: row.provider ?? null,
@@ -571,7 +598,7 @@ async function buildRestRows(rows) {
       same_slot_tx_delta: report?.sameSlotTxDelta ?? null,
       position_unavailable_reason: report?.positionUnavailableReason ?? null,
       slot_delta: report?.slotDelta ?? row.slotDelta ?? null,
-      tx_delta: report?.sameSlotTxDelta ?? row.txDelta ?? null,
+      tx_delta: displayTxDelta(report, row.txDelta),
       selected_route: row.selectedRoute ?? null,
       route_layout: row.routeLayout ?? null,
       mint: row.mint ?? null,
@@ -739,7 +766,7 @@ function stripOptionalRestColumns(records) {
 
 async function postExecutionRecords(base, records) {
   return fetch(
-    `${base}/rest/v1/copytrade_local_executions?on_conflict=provider,observed_signature,observed_wallet,observed_action,mint`,
+    `${base}/rest/v1/copytrade_local_executions?on_conflict=provider,observed_signature,observed_wallet,copy_wallet,observed_action,mint`,
     {
       method: "POST",
       headers: {
@@ -780,6 +807,7 @@ async function syncViaSupabaseRest(records) {
 
 async function buildSql(rows) {
   const columns = [
+    "created_at",
     "observed_at_ms",
     "execution_at_ms",
     "provider",
@@ -885,6 +913,7 @@ async function buildSql(rows) {
       : {};
 
     values.push(`(${[
+      sqlString(timestampFromMs(row.observedAtMs)),
       sqlNumber(row.observedAtMs),
       sqlNumber(row.executionAtMs),
       sqlString(row.provider),
@@ -903,7 +932,7 @@ async function buildSql(rows) {
       sqlNumber(report?.sameSlotTxDelta),
       sqlString(report?.positionUnavailableReason),
       sqlNumber(report?.slotDelta ?? row.slotDelta),
-      sqlNumber(report?.sameSlotTxDelta ?? row.txDelta),
+      sqlNumber(displayTxDelta(report, row.txDelta)),
       sqlString(row.selectedRoute),
       sqlString(row.routeLayout),
       sqlString(row.mint),
@@ -976,11 +1005,11 @@ async function buildSql(rows) {
   }
 
   const updates = columns
-    .filter((column) => !["provider", "observed_signature", "observed_wallet", "observed_action", "mint"].includes(column))
+    .filter((column) => !["provider", "observed_signature", "observed_wallet", "copy_wallet", "observed_action", "mint"].includes(column))
     .map((column) => `${column}=excluded.${column}`)
     .join(",");
 
-  return `insert into public.copytrade_local_executions (${columns.join(",")}) values ${values.join(",")} on conflict (provider, observed_signature, observed_wallet, observed_action, mint) do update set ${updates};`;
+  return `insert into public.copytrade_local_executions (${columns.join(",")}) values ${values.join(",")} on conflict (provider, observed_signature, observed_wallet, copy_wallet, observed_action, mint) do update set ${updates};`;
 }
 
 async function syncOnce(path, { recentLimit = 0 } = {}) {
@@ -1098,8 +1127,10 @@ export {
   dedupeRows,
   executionKey,
   fetchBlockSignatures,
+  displayTxDelta,
   readJsonl,
   syncLimitForCycle,
+  unknownChainReport,
   autoSellStatus
 };
 

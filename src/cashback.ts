@@ -21,6 +21,7 @@ export type CashbackLedgerAction = CopyTradeExecutionAction | "adjustment";
 export type CashbackLedgerEntryType = "trade" | "manual_adjustment";
 export type CashbackPayoutStatus = "pending" | "submitted" | "confirmed" | "failed";
 export type CashbackConfigValueSource = "global" | "subscriber_override";
+export type CashbackPlatformFeeCollectionStatus = "not_required" | "pending" | "submitted" | "confirmed" | "failed";
 
 export interface CashbackConfig {
   enabled: boolean;
@@ -57,6 +58,13 @@ export interface CashbackLedgerEntry {
   platformFeeLamports: bigint;
   cashbackLamports: bigint;
   cashbackFeeShareBps?: number | null;
+  platformFeeBps?: number | null;
+  platformFeeTreasury?: string | null;
+  platformFeeCollectionStatus?: CashbackPlatformFeeCollectionStatus | null;
+  platformFeeTransferSignature?: string | null;
+  platformFeeCollectionError?: string | null;
+  platformFeeCollectionAttempts?: number | null;
+  platformFeeCollectionUpdatedAt?: string | null;
   entryType?: CashbackLedgerEntryType;
   adjustmentReason?: string | null;
   adjustedBy?: string | null;
@@ -151,6 +159,19 @@ export interface CashbackStore {
     adjustedBy: string;
     executionKey?: string | null;
   }) => Promise<CashbackLedgerEntry>;
+  getLedgerEntryByExecutionKey: (executionKey: string) => Promise<CashbackLedgerEntry | null>;
+  listPlatformFeeCollections: (input: {
+    statuses: CashbackPlatformFeeCollectionStatus[];
+    limit?: number;
+  }) => Promise<CashbackLedgerEntry[]>;
+  updatePlatformFeeCollection: (input: {
+    executionKey: string;
+    collectionStatus: CashbackPlatformFeeCollectionStatus;
+    ledgerStatus?: CashbackLedgerStatus;
+    transferSignature?: string | null;
+    errorText?: string | null;
+    attempts?: number | null;
+  }) => Promise<void>;
   getSummary: (input: {
     chatId: TelegramChatId;
     tradingWalletPublicKey: string | null;
@@ -185,6 +206,13 @@ interface SupabaseCashbackLedgerRow {
   platform_fee_lamports: string | number;
   cashback_lamports: string | number;
   cashback_fee_share_bps?: number | null;
+  platform_fee_bps?: number | null;
+  platform_fee_treasury?: string | null;
+  platform_fee_collection_status?: CashbackPlatformFeeCollectionStatus | null;
+  platform_fee_transfer_signature?: string | null;
+  platform_fee_collection_error?: string | null;
+  platform_fee_collection_attempts?: number | null;
+  platform_fee_collection_updated_at?: string | null;
   entry_type?: CashbackLedgerEntryType | null;
   adjustment_reason?: string | null;
   adjusted_by?: string | null;
@@ -242,6 +270,13 @@ function ledgerEntryFromRow(row: SupabaseCashbackLedgerRow): CashbackLedgerEntry
     platformFeeLamports: bigintValue(row.platform_fee_lamports),
     cashbackLamports: bigintValue(row.cashback_lamports),
     cashbackFeeShareBps: row.cashback_fee_share_bps ?? null,
+    platformFeeBps: row.platform_fee_bps ?? null,
+    platformFeeTreasury: row.platform_fee_treasury || null,
+    platformFeeCollectionStatus: row.platform_fee_collection_status || "not_required",
+    platformFeeTransferSignature: row.platform_fee_transfer_signature || null,
+    platformFeeCollectionError: row.platform_fee_collection_error || null,
+    platformFeeCollectionAttempts: row.platform_fee_collection_attempts ?? 0,
+    platformFeeCollectionUpdatedAt: row.platform_fee_collection_updated_at || null,
     entryType: row.entry_type || "trade",
     adjustmentReason: row.adjustment_reason || null,
     adjustedBy: row.adjusted_by || null,
@@ -276,6 +311,13 @@ function ledgerRow(entry: CashbackLedgerEntry): SupabaseCashbackLedgerRow {
     platform_fee_lamports: entry.platformFeeLamports.toString(),
     cashback_lamports: entry.cashbackLamports.toString(),
     cashback_fee_share_bps: entry.cashbackFeeShareBps ?? null,
+    platform_fee_bps: entry.platformFeeBps ?? null,
+    platform_fee_treasury: entry.platformFeeTreasury || null,
+    platform_fee_collection_status: entry.platformFeeCollectionStatus || "not_required",
+    platform_fee_transfer_signature: entry.platformFeeTransferSignature || null,
+    platform_fee_collection_error: entry.platformFeeCollectionError || null,
+    platform_fee_collection_attempts: entry.platformFeeCollectionAttempts ?? 0,
+    platform_fee_collection_updated_at: entry.platformFeeCollectionUpdatedAt || null,
     entry_type: entry.entryType || "trade",
     adjustment_reason: entry.adjustmentReason || null,
     adjusted_by: entry.adjustedBy || null,
@@ -488,6 +530,25 @@ export function buildCashbackAccrual(input: CashbackAccrualInput): CashbackLedge
     adjustmentReason: null,
     adjustedBy: null,
     status: "claimable"
+  };
+}
+
+export function buildPendingPlatformFeeCashbackAccrual(input: CashbackAccrualInput): CashbackLedgerEntry | null {
+  const entry = buildCashbackAccrual(input);
+  if (!entry || !input.platformFee?.enabled) {
+    return null;
+  }
+
+  return {
+    ...entry,
+    status: "pending",
+    platformFeeBps: input.platformFee.bps,
+    platformFeeTreasury: input.platformFee.treasury,
+    platformFeeCollectionStatus: "pending",
+    platformFeeTransferSignature: null,
+    platformFeeCollectionError: null,
+    platformFeeCollectionAttempts: 0,
+    platformFeeCollectionUpdatedAt: new Date().toISOString()
   };
 }
 
@@ -791,6 +852,76 @@ export function createSupabaseCashbackStore({
       }
 
       return ledgerEntryFromRow(data as SupabaseCashbackLedgerRow);
+    },
+    async getLedgerEntryByExecutionKey(executionKey) {
+      const { data, error } = await client
+        .from("telegram_cashback_ledger")
+        .select("*")
+        .eq("execution_key", executionKey)
+        .maybeSingle();
+      const formattedError = formatSupabaseError(error);
+      if (formattedError) {
+        throw formattedError;
+      }
+
+      return data ? ledgerEntryFromRow(data as SupabaseCashbackLedgerRow) : null;
+    },
+    async listPlatformFeeCollections({ statuses, limit = 50 }) {
+      if (statuses.length === 0) {
+        return [];
+      }
+
+      const { data, error } = await client
+        .from("telegram_cashback_ledger")
+        .select("*")
+        .in("platform_fee_collection_status", statuses)
+        .order("platform_fee_collection_updated_at", { ascending: true, nullsFirst: true })
+        .limit(limit);
+      const formattedError = formatSupabaseError(error);
+      if (formattedError) {
+        throw formattedError;
+      }
+
+      return ((data || []) as SupabaseCashbackLedgerRow[]).map(ledgerEntryFromRow);
+    },
+    async updatePlatformFeeCollection({
+      executionKey,
+      collectionStatus,
+      ledgerStatus,
+      transferSignature,
+      errorText,
+      attempts
+    }) {
+      const values: Record<string, unknown> = {
+        platform_fee_collection_status: collectionStatus,
+        platform_fee_collection_updated_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+
+      if (ledgerStatus) {
+        values.status = ledgerStatus;
+      }
+
+      if (transferSignature !== undefined) {
+        values.platform_fee_transfer_signature = transferSignature;
+      }
+
+      if (errorText !== undefined) {
+        values.platform_fee_collection_error = errorText;
+      }
+
+      if (attempts !== undefined) {
+        values.platform_fee_collection_attempts = attempts;
+      }
+
+      const { error } = await client
+        .from("telegram_cashback_ledger")
+        .update(values)
+        .eq("execution_key", executionKey);
+      const formattedError = formatSupabaseError(error);
+      if (formattedError) {
+        throw formattedError;
+      }
     },
     async getSummary({ chatId, tradingWalletPublicKey, payoutWalletPublicKey = null, config }) {
       const normalizedChatId = String(chatId);

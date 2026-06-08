@@ -36,7 +36,6 @@ use std::{
 };
 use tokio::task::JoinSet;
 
-const FIRST_LIVE_MAX_COPY_SOL_CAP: f64 = 0.001;
 pub(crate) const DEFAULT_MIGRATED_AMM_MIN_COPY_SOL: f64 = 0.00099;
 const LAMPORTS_PER_SOL: f64 = 1_000_000_000.0;
 const SIGNATURE_FEE_LAMPORTS_ESTIMATE: u64 = 5_000;
@@ -840,19 +839,13 @@ impl CopyExecutor {
             line.planned_copy_spend_lamports = Some(effective_copy_spend_lamports);
         }
 
-        let Some(max_copy_sol) = self.options.max_copy_sol else {
-            skip_guard!("missing max copy SOL guard");
-        };
-        if !max_copy_sol.is_finite() || max_copy_sol <= 0.0 {
-            skip_guard!("invalid max copy SOL guard");
-        }
-        if max_copy_sol > FIRST_LIVE_MAX_COPY_SOL_CAP {
-            skip_guard!(format!(
-                "max copy SOL guard exceeds first-live cap {FIRST_LIVE_MAX_COPY_SOL_CAP}"
-            ));
-        }
-        if effective_planned_copy_sol_amount > max_copy_sol {
-            skip_guard!("planned copy spend exceeds max copy SOL guard");
+        match max_copy_sol_guard_reason(
+            self.options.max_copy_sol,
+            effective_planned_copy_sol_amount,
+        ) {
+            Ok(Some(reason)) => skip_guard!(reason),
+            Ok(None) => {}
+            Err(reason) => skip_guard!(reason),
         }
 
         let Some(copy_wallet) = copy_wallet_override
@@ -2358,6 +2351,27 @@ fn total_copy_spend_guard_reason(
     }
 }
 
+fn max_copy_sol_guard_reason(
+    max_copy_sol: Option<f64>,
+    planned_copy_sol_amount: f64,
+) -> Result<Option<String>, String> {
+    let Some(max_copy_sol) = max_copy_sol else {
+        return Ok(None);
+    };
+    if !max_copy_sol.is_finite() {
+        return Err("invalid max copy SOL guard".to_string());
+    }
+    if max_copy_sol <= 0.0 {
+        return Ok(None);
+    }
+    if planned_copy_sol_amount > max_copy_sol {
+        return Ok(Some(
+            "planned copy spend exceeds max copy SOL guard".to_string(),
+        ));
+    }
+    Ok(None)
+}
+
 impl CopyExecutionLine {
     pub(crate) fn was_sent(&self) -> bool {
         self.sent && self.decision == "sent"
@@ -2841,10 +2855,18 @@ impl CopyExecutionOptions {
     fn max_total_copy_spend_lamports(&self) -> Result<Option<u64>, String> {
         self.max_total_copy_spend_sol
             .map(|value| {
+                if !value.is_finite() {
+                    return Err("invalid max total copy spend SOL guard".to_string());
+                }
+                if value <= 0.0 {
+                    return Ok(None);
+                }
                 sol_to_lamports(value)
+                    .map(Some)
                     .ok_or_else(|| "invalid max total copy spend SOL guard".to_string())
             })
             .transpose()
+            .map(Option::flatten)
     }
 
     fn tx_fee_config(&self) -> TxFeeConfig {
@@ -3649,8 +3671,9 @@ mod tests {
     }
 
     #[test]
-    fn max_copy_sol_first_live_cap_is_one_milli_sol() {
-        assert_eq!(FIRST_LIVE_MAX_COPY_SOL_CAP, 0.001);
+    fn max_copy_sol_zero_or_missing_is_uncapped() {
+        assert_eq!(max_copy_sol_guard_reason(None, 2.0).unwrap(), None);
+        assert_eq!(max_copy_sol_guard_reason(Some(0.0), 2.0).unwrap(), None);
     }
 
     #[test]
@@ -3769,10 +3792,7 @@ mod tests {
         );
 
         options.max_total_copy_spend_sol = Some(0.0);
-        assert_eq!(
-            options.max_total_copy_spend_lamports().unwrap_err(),
-            "invalid max total copy spend SOL guard"
-        );
+        assert_eq!(options.max_total_copy_spend_lamports().unwrap(), None);
     }
 
     #[test]
@@ -4315,21 +4335,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn max_copy_sol_cap_blocks_unsafe_first_live_value() {
+    async fn max_copy_sol_zero_allows_large_planned_amount_before_keypair() {
         let mut options = disabled_options();
         options.simulate_copy_tx = true;
-        options.max_copy_sol = Some(0.01);
+        options.max_copy_sol = Some(0.0);
         options.copy_wallet = Some(COPY_WALLET.to_string());
+        let mut plan = allowed_plan();
+        plan.spend_sol_amount = Some(1.5);
 
         let line = executor(options)
-            .handle(&allowed_plan(), Action::Buy, Some(0.0005), sample_timings())
+            .handle(&plan, Action::Buy, Some(1.5), sample_timings())
             .await;
 
         assert_eq!(line.decision, "skip");
-        assert_eq!(
-            line.reason.as_deref(),
-            Some("max copy SOL guard exceeds first-live cap 0.001")
-        );
+        assert_eq!(line.reason.as_deref(), Some("missing copy keypair path"));
         assert!(!line.signed);
         assert!(!line.sent);
     }

@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { appendFile, chmod, mkdir, open, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
-import { Connection, PublicKey } from "@solana/web3.js";
+import { Connection, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 import { buildMigrationReplyMarkup, escapeHtml, extractMigrationData, formatMigrationMessage, getEventId } from "./format.js";
 import { createTelegramCommandPoller } from "./commands.js";
 import {
@@ -94,7 +94,11 @@ import {
   createSupabaseCashbackStore,
   parseCashbackConfig
 } from "./cashback.js";
-import type { CashbackConfig, CashbackStore } from "./cashback.js";
+import type { CashbackConfig, CashbackLedgerEntry, CashbackStore } from "./cashback.js";
+import {
+  buildRustAsyncPlatformFeeCashbackAccrual,
+  plannedCopySpendLamportsFromRustExecution
+} from "./rust-async-platform-fee.js";
 import {
   formatTradeExecutionResultLog,
   isDirectTradeExecutionProvider,
@@ -585,6 +589,68 @@ const config: BotConfig = {
     process.env.COPY_TRADE_RUST_EXECUTION_ALERTS_MAX_ROWS,
     50
   ),
+  copyTradeRustAsyncPlatformFeeEnabled:
+    process.env.COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_ENABLED === "true" ||
+    process.env.RUST_ASYNC_PLATFORM_FEE_ENABLED === "true",
+  copyTradeRustAsyncPlatformFeeAllowAllChats:
+    process.env.COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_ALLOW_ALL_CHATS === "true" ||
+    process.env.RUST_ASYNC_PLATFORM_FEE_ALLOW_ALL_CHATS === "true",
+  copyTradeRustAsyncPlatformFeeCanaryChatIds: rawListFromEnv(
+    process.env.COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_CANARY_CHAT_IDS ||
+    process.env.RUST_ASYNC_PLATFORM_FEE_CANARY_CHAT_IDS
+  ),
+  copyTradeRustAsyncPlatformFeeCanaryWallets: rawListFromEnv(
+    process.env.COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_CANARY_WALLETS ||
+    process.env.RUST_ASYNC_PLATFORM_FEE_CANARY_WALLETS
+  ),
+  copyTradeRustAsyncPlatformFeeSource: rustTrailingSellSourceFromEnv(
+    process.env.COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_SOURCE ||
+    process.env.RUST_ASYNC_PLATFORM_FEE_SOURCE ||
+    process.env.COPY_TRADE_RUST_EXECUTION_ALERTS_SOURCE ||
+    process.env.COPY_TRADE_RUST_TRAILING_SELLS_SOURCE
+  ),
+  copyTradeRustAsyncPlatformFeeLocalExecutionsPath:
+    process.env.COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_LOCAL_EXECUTIONS_PATH ||
+    process.env.RUST_ASYNC_PLATFORM_FEE_LOCAL_EXECUTIONS_PATH ||
+    process.env.COPY_TRADE_RUST_EXECUTION_ALERTS_LOCAL_EXECUTIONS_PATH ||
+    process.env.COPY_TRADE_RUST_TRAILING_SELLS_LOCAL_EXECUTIONS_PATH ||
+    process.env.JITO_COPY_EXECUTIONS_PATH ||
+    "/var/log/jito-copy-executions-vps.jsonl",
+  copyTradeRustAsyncPlatformFeePollMs: positiveIntegerFromEnv(
+    process.env.COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_POLL_MS ||
+    process.env.RUST_ASYNC_PLATFORM_FEE_POLL_MS,
+    1000
+  ),
+  copyTradeRustAsyncPlatformFeeLookbackMs: positiveIntegerFromEnv(
+    process.env.COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_LOOKBACK_MS ||
+    process.env.RUST_ASYNC_PLATFORM_FEE_LOOKBACK_MS,
+    60_000
+  ),
+  copyTradeRustAsyncPlatformFeeStartupLookbackMs: nonNegativeIntegerFromEnv(
+    process.env.COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_STARTUP_LOOKBACK_MS ||
+    process.env.RUST_ASYNC_PLATFORM_FEE_STARTUP_LOOKBACK_MS,
+    0
+  ),
+  copyTradeRustAsyncPlatformFeeMaxRows: positiveIntegerFromEnv(
+    process.env.COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_MAX_ROWS ||
+    process.env.RUST_ASYNC_PLATFORM_FEE_MAX_ROWS,
+    50
+  ),
+  copyTradeRustAsyncPlatformFeeMaxAttempts: positiveIntegerFromEnv(
+    process.env.COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_MAX_ATTEMPTS ||
+    process.env.RUST_ASYNC_PLATFORM_FEE_MAX_ATTEMPTS,
+    3
+  ),
+  copyTradeRustAsyncPlatformFeeConfirmationTimeoutMs: positiveIntegerFromEnv(
+    process.env.COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_CONFIRMATION_TIMEOUT_MS ||
+    process.env.RUST_ASYNC_PLATFORM_FEE_CONFIRMATION_TIMEOUT_MS,
+    30_000
+  ),
+  copyTradeRustAsyncPlatformFeeConfirmationPollMs: positiveIntegerFromEnv(
+    process.env.COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_CONFIRMATION_POLL_MS ||
+    process.env.RUST_ASYNC_PLATFORM_FEE_CONFIRMATION_POLL_MS,
+    2000
+  ),
   copyTradeBuyPressureSellEnabled: process.env.COPY_TRADE_BUY_PRESSURE_SELL_ENABLED === "true",
   copyTradeBuyPressureSellPercent: percentFromEnv(process.env.COPY_TRADE_BUY_PRESSURE_SELL_PERCENT, 100),
   copyTradeBuyPressureSellTimeoutMs: positiveIntegerFromEnv(process.env.COPY_TRADE_BUY_PRESSURE_SELL_TIMEOUT_MS, 120_000),
@@ -646,8 +712,10 @@ const activeBuyPressureSellWatchers = new Map<string, CopyTradeBuyPressureSellWa
 const activeBuyPressureSellTriggers = new Set<string>();
 const rustTrailingSellExecutionKeys = new Set<string>();
 const rustCopyBuyAlertExecutionKeys = new Set<string>();
+const rustAsyncPlatformFeeExecutionKeys = new Set<string>();
 const rustTrailingSellPollStartedAtMs = Date.now();
 const rustCopyBuyAlertPollStartedAtMs = Date.now();
+const rustAsyncPlatformFeePollStartedAtMs = Date.now();
 const copyBuySubmissionGuard = createCopyBuySubmissionGuard();
 const copyBuySemanticSubmissionGuard = createCopyBuySubmissionGuard();
 const copyTradeSignalRaceTracker = createCopyTradeSignalRaceTracker();
@@ -732,6 +800,10 @@ let rustTrailingSellLocalFileRemainder = "";
 let rustCopyBuyAlertPollerRunning = false;
 let rustCopyBuyAlertLocalFileOffset: number | null = null;
 let rustCopyBuyAlertLocalFileRemainder = "";
+let rustAsyncPlatformFeePollerTimer: NodeJS.Timeout | null = null;
+let rustAsyncPlatformFeePollerRunning = false;
+let rustAsyncPlatformFeeLocalFileOffset: number | null = null;
+let rustAsyncPlatformFeeLocalFileRemainder = "";
 
 const baseSubscriptionMethods: PumpPortalSubscription[] = ["subscribeNewToken", "subscribeMigration"];
 
@@ -1516,6 +1588,18 @@ function logCopyTradeExecutionState(): void {
       `source=${config.copyTradeRustExecutionAlertsSource}`,
       `pollMs=${config.copyTradeRustExecutionAlertsPollMs}`,
       `maxRows=${config.copyTradeRustExecutionAlertsMaxRows}`
+    ].join(" | ")
+  );
+  console.log(
+    [
+      "Rust async platform fee cashback",
+      `enabled=${config.copyTradeRustAsyncPlatformFeeEnabled ? "true" : "false"}`,
+      `source=${config.copyTradeRustAsyncPlatformFeeSource}`,
+      `pollMs=${config.copyTradeRustAsyncPlatformFeePollMs}`,
+      `maxRows=${config.copyTradeRustAsyncPlatformFeeMaxRows}`,
+      `maxAttempts=${config.copyTradeRustAsyncPlatformFeeMaxAttempts}`,
+      `canaryChats=${config.copyTradeRustAsyncPlatformFeeAllowAllChats ? "all" : config.copyTradeRustAsyncPlatformFeeCanaryChatIds.length}`,
+      `canaryWallets=${config.copyTradeRustAsyncPlatformFeeCanaryWallets.length}`
     ].join(" | ")
   );
 
@@ -4577,7 +4661,8 @@ type SignatureConfirmationResult = {
 async function waitForSignatureConfirmationResult(
   signature: string,
   timeoutMs = 30000,
-  pollMs = 2000
+  pollMs = 2000,
+  delay: (ms: number) => Promise<void> = trackedDelay
 ): Promise<SignatureConfirmationResult> {
   const startedAt = Date.now();
 
@@ -4611,7 +4696,7 @@ async function waitForSignatureConfirmationResult(
       console.warn(`Could not check signature confirmation for ${signature}: ${errorMessage(error)}`);
     }
 
-    await trackedDelay(pollMs);
+    await delay(pollMs);
   }
 
   console.warn(`Timed out waiting for signature confirmation: ${signature}`);
@@ -5418,6 +5503,137 @@ async function pollRustCopyBuyExecutionAlerts(): Promise<void> {
   }
 }
 
+function rustAsyncPlatformFeePollerDisabledReason(): string | null {
+  if (!config.copyTradeRustAsyncPlatformFeeEnabled) {
+    return "COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_ENABLED is not true";
+  }
+
+  if (
+    !config.copyTradeRustAsyncPlatformFeeAllowAllChats &&
+    config.copyTradeRustAsyncPlatformFeeCanaryChatIds.length === 0 &&
+    config.copyTradeRustAsyncPlatformFeeCanaryWallets.length === 0
+  ) {
+    return "Rust async platform fee requires COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_CANARY_CHAT_IDS, COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_CANARY_WALLETS, or COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_ALLOW_ALL_CHATS=true";
+  }
+
+  if (!cashbackStore) {
+    return "missing Supabase cashback store";
+  }
+
+  if (!cashbackConfig.enabled) {
+    return "CASHBACK_ENABLED is not true";
+  }
+
+  const cashbackBlockedReason = cashbackConfigBlockedReason(cashbackConfig);
+  if (cashbackBlockedReason) {
+    return cashbackBlockedReason;
+  }
+
+  if (!config.platformFeeEnabled) {
+    return "PLATFORM_FEE_ENABLED is not true";
+  }
+
+  const platformFeeBlockedReason = platformFeeConfigBlockedReason({
+    enabled: config.platformFeeEnabled,
+    bps: config.platformFeeBps,
+    treasury: config.platformFeeTreasury,
+    validateTreasury: validateSolanaPublicKey
+  });
+  if (platformFeeBlockedReason) {
+    return platformFeeBlockedReason;
+  }
+
+  if (!encryptionSecretReady(config.pumpPortalWalletKeyEncryptionSecret)) {
+    return "PUMPPORTAL_WALLET_KEY_ENCRYPTION_SECRET is not configured";
+  }
+
+  if (
+    config.copyTradeRustAsyncPlatformFeeSource === "supabase" &&
+    (!config.supabaseUrl || !config.supabaseServiceRoleKey)
+  ) {
+    return "missing Supabase config";
+  }
+
+  if (
+    config.copyTradeRustAsyncPlatformFeeSource === "local-jsonl" &&
+    !config.copyTradeRustAsyncPlatformFeeLocalExecutionsPath
+  ) {
+    return "missing COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_LOCAL_EXECUTIONS_PATH";
+  }
+
+  return null;
+}
+
+function startRustAsyncPlatformFeePoller(): void {
+  const disabledReason = rustAsyncPlatformFeePollerDisabledReason();
+  if (disabledReason) {
+    if (config.copyTradeRustAsyncPlatformFeeEnabled) {
+      console.warn(`Rust async platform fee cashback bridge disabled: ${disabledReason}`);
+    }
+    return;
+  }
+
+  console.log(
+    [
+      "Rust async platform fee cashback bridge enabled",
+      `source=${config.copyTradeRustAsyncPlatformFeeSource}`,
+      `pollMs=${config.copyTradeRustAsyncPlatformFeePollMs}`,
+      `lookbackMs=${config.copyTradeRustAsyncPlatformFeeLookbackMs}`,
+      `maxRows=${config.copyTradeRustAsyncPlatformFeeMaxRows}`,
+      `maxAttempts=${config.copyTradeRustAsyncPlatformFeeMaxAttempts}`
+    ].join(" | ")
+  );
+
+  rustAsyncPlatformFeePollerTimer = setInterval(() => {
+    pollRustAsyncPlatformFeeCollections().catch((error) => {
+      console.warn(`Rust async platform fee cashback poll failed: ${errorMessage(error)}`);
+    });
+  }, config.copyTradeRustAsyncPlatformFeePollMs);
+
+  pollRustAsyncPlatformFeeCollections().catch((error) => {
+    console.warn(`Initial Rust async platform fee cashback poll failed: ${errorMessage(error)}`);
+  });
+}
+
+async function pollRustAsyncPlatformFeeCollections(): Promise<void> {
+  const store = cashbackStore;
+  if (!store || rustAsyncPlatformFeePollerRunning || isShuttingDown) {
+    return;
+  }
+
+  rustAsyncPlatformFeePollerRunning = true;
+  try {
+    const treasuryReady = await ensureRustAsyncPlatformFeeTreasuryReady();
+    if (treasuryReady) {
+      const rows = await fetchRecentRustAsyncPlatformFeeRows();
+      for (const row of rows) {
+        await seedRustAsyncPlatformFeeCollection(row, store);
+      }
+    }
+
+    await processRustAsyncPlatformFeeCollectionRows(store);
+  } finally {
+    rustAsyncPlatformFeePollerRunning = false;
+  }
+}
+
+async function ensureRustAsyncPlatformFeeTreasuryReady(): Promise<boolean> {
+  if (!config.platformFeeTreasury) {
+    return false;
+  }
+
+  const reason = await verifyPlatformFeeTreasuryAccount({
+    connection: directSolanaConnection,
+    treasury: config.platformFeeTreasury
+  });
+  if (reason) {
+    console.warn(`Rust async platform fee cashback treasury check failed: ${reason}`);
+    return false;
+  }
+
+  return true;
+}
+
 async function pollRustTrailingSellExecutions(): Promise<void> {
   if (rustTrailingSellPollerRunning || isShuttingDown) {
     return;
@@ -5538,6 +5754,21 @@ async function fetchRecentRustCopyBuyAlertRows(): Promise<RustCopyTradeLocalExec
   });
 }
 
+async function fetchRecentRustAsyncPlatformFeeRows(): Promise<RustCopyTradeLocalExecutionRow[]> {
+  if (config.copyTradeRustAsyncPlatformFeeSource === "local-jsonl") {
+    return fetchNewRustAsyncPlatformFeeRowsFromLocalFile();
+  }
+
+  const sinceMs = Math.max(
+    Date.now() - config.copyTradeRustAsyncPlatformFeeLookbackMs,
+    rustAsyncPlatformFeePollStartedAtMs - config.copyTradeRustAsyncPlatformFeeStartupLookbackMs
+  );
+  return fetchRustCopyBuyExecutionRowsFromSupabase({
+    sinceMs,
+    limit: config.copyTradeRustAsyncPlatformFeeMaxRows
+  });
+}
+
 async function fetchNewRustCopyBuyExecutionRowsFromLocalFile(): Promise<RustCopyTradeLocalExecutionRow[]> {
   const path = config.copyTradeRustTrailingSellsLocalExecutionsPath;
   let currentStat: Awaited<ReturnType<typeof stat>>;
@@ -5630,6 +5861,52 @@ async function fetchNewRustCopyBuyAlertRowsFromLocalFile(): Promise<RustCopyTrad
     .filter((row): row is RustCopyTradeLocalExecutionRow => row !== null);
 }
 
+async function fetchNewRustAsyncPlatformFeeRowsFromLocalFile(): Promise<RustCopyTradeLocalExecutionRow[]> {
+  const path = config.copyTradeRustAsyncPlatformFeeLocalExecutionsPath;
+  let currentStat: Awaited<ReturnType<typeof stat>>;
+  try {
+    currentStat = await stat(path);
+  } catch (error) {
+    console.warn(`Rust async platform fee local source unavailable at ${path}: ${errorMessage(error)}`);
+    return [];
+  }
+
+  if (rustAsyncPlatformFeeLocalFileOffset === null || currentStat.size < rustAsyncPlatformFeeLocalFileOffset) {
+    rustAsyncPlatformFeeLocalFileOffset = currentStat.size;
+    rustAsyncPlatformFeeLocalFileRemainder = "";
+    return [];
+  }
+
+  if (currentStat.size === rustAsyncPlatformFeeLocalFileOffset) {
+    return [];
+  }
+
+  const length = currentStat.size - rustAsyncPlatformFeeLocalFileOffset;
+  const buffer = Buffer.alloc(length);
+  const handle = await open(path, "r");
+  try {
+    await handle.read(buffer, 0, length, rustAsyncPlatformFeeLocalFileOffset);
+  } finally {
+    await handle.close();
+  }
+  rustAsyncPlatformFeeLocalFileOffset = currentStat.size;
+
+  const text = rustAsyncPlatformFeeLocalFileRemainder + buffer.toString("utf8");
+  const lines = text.split(/\r?\n/);
+  rustAsyncPlatformFeeLocalFileRemainder = lines.pop() || "";
+
+  return lines
+    .map((line) => {
+      try {
+        return JSON.parse(line) as unknown;
+      } catch {
+        return null;
+      }
+    })
+    .map(normalizeRustCopyBuyExecutionRow)
+    .filter((row): row is RustCopyTradeLocalExecutionRow => row !== null);
+}
+
 function normalizeRustCopyBuyExecutionRow(value: unknown): RustCopyTradeLocalExecutionRow | null {
   if (!isRecord(value)) {
     return null;
@@ -5692,6 +5969,336 @@ function normalizeRustCopyBuyExecutionRow(value: unknown): RustCopyTradeLocalExe
   };
 }
 
+async function seedRustAsyncPlatformFeeCollection(
+  row: RustCopyTradeLocalExecutionRow,
+  store: CashbackStore
+): Promise<void> {
+  if (row.dry_run) {
+    return;
+  }
+  if (!rustCopyBuyExecutionLanded(row)) {
+    return;
+  }
+
+  const plannedCopySpendLamports = plannedCopySpendLamportsFromRustExecution(row.raw_execution);
+  if (!plannedCopySpendLamports) {
+    console.warn(`Skipping Rust async platform fee cashback for ${row.send_signature}: missing plannedCopySpendLamports`);
+    return;
+  }
+
+  const entries = activeCopyTradeEntriesForTarget(row.observed_wallet)
+    .filter((entry) => entry.subscriber.tradingWallet?.publicKey === row.copy_wallet)
+    .filter((entry) => rustAsyncPlatformFeeCanaryBlockedReason({
+      chatId: String(entry.subscriber.chatId),
+      tradingWalletPublicKey: row.copy_wallet
+    }) === null);
+
+  if (entries.length === 0) {
+    console.warn(
+      `Skipping Rust async platform fee cashback for ${row.observed_wallet}:${row.copy_wallet}:${row.mint}: no active Telegram copy target matched`
+    );
+    return;
+  }
+
+  for (const entry of entries) {
+    const executionKey = buildCashbackExecutionKey({
+      chatId: String(entry.subscriber.chatId),
+      tradingWalletPublicKey: row.copy_wallet,
+      sourceSignature: row.observed_signature,
+      executionSignature: row.send_signature,
+      action: "buy"
+    });
+
+    if (rustAsyncPlatformFeeExecutionKeys.has(executionKey)) {
+      continue;
+    }
+
+    const existing = await store.getLedgerEntryByExecutionKey(executionKey);
+    if (existing) {
+      rememberRustAsyncPlatformFeeExecution(executionKey);
+      continue;
+    }
+
+    let resolvedCashbackConfig = cashbackConfig;
+    try {
+      resolvedCashbackConfig = (await store.getSubscriberConfig({
+        chatId: entry.subscriber.chatId,
+        config: cashbackConfig
+      })).config;
+    } catch (error) {
+      console.warn(`Could not resolve Rust async platform fee cashback config for ${entry.subscriber.chatId}: ${errorMessage(error)}`);
+      continue;
+    }
+
+    const accrual = buildRustAsyncPlatformFeeCashbackAccrual({
+      chatId: String(entry.subscriber.chatId),
+      tradingWalletPublicKey: row.copy_wallet,
+      sourceSignature: row.observed_signature,
+      executionSignature: row.send_signature,
+      plannedCopySpendLamports,
+      platformFeeEnabled: Boolean(
+        config.platformFeeEnabled &&
+        config.platformFeeTreasury &&
+        platformFeeTreasuryVerified === config.platformFeeTreasury &&
+        !platformFeeTreasuryBlockedReason
+      ),
+      platformFeeBps: config.platformFeeBps,
+      platformFeeTreasury: config.platformFeeTreasury,
+      cashbackConfig: resolvedCashbackConfig
+    });
+
+    if (!accrual) {
+      rememberRustAsyncPlatformFeeExecution(executionKey);
+      continue;
+    }
+
+    await store.accrue(accrual);
+    rememberRustAsyncPlatformFeeExecution(executionKey);
+    console.log(
+      [
+        "Rust async platform fee cashback pending",
+        `chatId=${entry.subscriber.chatId}`,
+        `wallet=${row.copy_wallet}`,
+        `sourceSignature=${row.observed_signature}`,
+        `executionSignature=${row.send_signature}`,
+        `platformFeeLamports=${accrual.platformFeeLamports.toString()}`,
+        `cashbackLamports=${accrual.cashbackLamports.toString()}`
+      ].join(" | ")
+    );
+  }
+}
+
+function rustAsyncPlatformFeeCanaryBlockedReason({
+  chatId,
+  tradingWalletPublicKey
+}: {
+  chatId: string;
+  tradingWalletPublicKey: string;
+}): string | null {
+  if (config.copyTradeRustAsyncPlatformFeeAllowAllChats) {
+    return null;
+  }
+
+  const chatIds = config.copyTradeRustAsyncPlatformFeeCanaryChatIds;
+  const wallets = config.copyTradeRustAsyncPlatformFeeCanaryWallets;
+  if (chatIds.length === 0 && wallets.length === 0) {
+    return "missing Rust async platform fee canary allowlist";
+  }
+
+  if (
+    chatIds.length > 0 &&
+    !rawListAllowsAll(chatIds) &&
+    !chatIds.includes(chatId)
+  ) {
+    return `chat ${chatId} is not in COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_CANARY_CHAT_IDS`;
+  }
+
+  if (
+    wallets.length > 0 &&
+    !rawListAllowsAll(wallets) &&
+    !wallets.includes(tradingWalletPublicKey)
+  ) {
+    return `trading wallet ${tradingWalletPublicKey} is not in COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_CANARY_WALLETS`;
+  }
+
+  return null;
+}
+
+async function processRustAsyncPlatformFeeCollectionRows(store: CashbackStore): Promise<void> {
+  const entries = await store.listPlatformFeeCollections({
+    statuses: ["pending", "submitted"],
+    limit: config.copyTradeRustAsyncPlatformFeeMaxRows
+  });
+
+  for (const entry of entries) {
+    try {
+      await processRustAsyncPlatformFeeCollection(entry, store);
+    } catch (error) {
+      console.warn(`Rust async platform fee cashback collection failed for ${entry.executionKey}: ${errorMessage(error)}`);
+    }
+  }
+}
+
+async function processRustAsyncPlatformFeeCollection(
+  entry: CashbackLedgerEntry,
+  store: CashbackStore
+): Promise<void> {
+  const collectionStatus = entry.platformFeeCollectionStatus || "not_required";
+
+  if (collectionStatus === "submitted") {
+    if (!entry.platformFeeTransferSignature) {
+      await store.updatePlatformFeeCollection({
+        executionKey: entry.executionKey,
+        collectionStatus: "failed",
+        ledgerStatus: "voided",
+        errorText: "submitted platform fee collection is missing transfer signature"
+      });
+      return;
+    }
+
+    await confirmRustAsyncPlatformFeeTransfer(entry, store, entry.platformFeeTransferSignature);
+    return;
+  }
+
+  if (collectionStatus !== "pending") {
+    return;
+  }
+
+  const attempts = entry.platformFeeCollectionAttempts ?? 0;
+  if (attempts >= config.copyTradeRustAsyncPlatformFeeMaxAttempts) {
+    await store.updatePlatformFeeCollection({
+      executionKey: entry.executionKey,
+      collectionStatus: "failed",
+      ledgerStatus: "voided",
+      errorText: `platform fee collection exceeded ${config.copyTradeRustAsyncPlatformFeeMaxAttempts} attempts`,
+      attempts
+    });
+    return;
+  }
+
+  const wallet = localSolanaTradingWalletForCashbackEntry(entry);
+  if (!wallet) {
+    await store.updatePlatformFeeCollection({
+      executionKey: entry.executionKey,
+      collectionStatus: "failed",
+      ledgerStatus: "voided",
+      errorText: `local trading wallet ${entry.tradingWalletPublicKey} is not available for async platform fee collection`,
+      attempts
+    });
+    return;
+  }
+
+  const nextAttempts = attempts + 1;
+  try {
+    const signature = await sendRustAsyncPlatformFeeTransfer(entry, wallet);
+    await store.updatePlatformFeeCollection({
+      executionKey: entry.executionKey,
+      collectionStatus: "submitted",
+      transferSignature: signature,
+      errorText: null,
+      attempts: nextAttempts
+    });
+    await confirmRustAsyncPlatformFeeTransfer(entry, store, signature);
+  } catch (error) {
+    const text = errorMessage(error);
+    const terminal = nextAttempts >= config.copyTradeRustAsyncPlatformFeeMaxAttempts ||
+      isTerminalRustAsyncPlatformFeeTransferError(text);
+    await store.updatePlatformFeeCollection({
+      executionKey: entry.executionKey,
+      collectionStatus: terminal ? "failed" : "pending",
+      ledgerStatus: terminal ? "voided" : undefined,
+      errorText: text,
+      attempts: nextAttempts
+    });
+  }
+}
+
+async function sendRustAsyncPlatformFeeTransfer(
+  entry: CashbackLedgerEntry,
+  wallet: TradingWallet
+): Promise<string> {
+  if (!entry.platformFeeTreasury) {
+    throw new Error("platform fee treasury is missing on cashback ledger row");
+  }
+
+  if (entry.platformFeeLamports <= 0n) {
+    throw new Error("platform fee lamports must be positive");
+  }
+
+  if (entry.platformFeeLamports > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("platform fee lamports exceeds safe transfer amount");
+  }
+
+  const signer = cachedLocalSolanaSigner(wallet);
+  if (signer.publicKey.toBase58() !== entry.tradingWalletPublicKey) {
+    throw new Error(`signer mismatch for async platform fee wallet ${entry.tradingWalletPublicKey}`);
+  }
+
+  const treasury = new PublicKey(entry.platformFeeTreasury);
+  const transaction = new Transaction().add(SystemProgram.transfer({
+    fromPubkey: signer.publicKey,
+    toPubkey: treasury,
+    lamports: Number(entry.platformFeeLamports)
+  }));
+
+  return directSolanaConnection.sendTransaction(transaction, [signer], {
+    skipPreflight: false,
+    preflightCommitment: "processed",
+    maxRetries: config.directExecutionMaxRetries
+  });
+}
+
+async function confirmRustAsyncPlatformFeeTransfer(
+  entry: CashbackLedgerEntry,
+  store: CashbackStore,
+  signature: string
+): Promise<void> {
+  const confirmation = await waitForSignatureConfirmationResult(
+    signature,
+    config.copyTradeRustAsyncPlatformFeeConfirmationTimeoutMs,
+    config.copyTradeRustAsyncPlatformFeeConfirmationPollMs,
+    sleep
+  );
+
+  if (confirmation.confirmed) {
+    await store.updatePlatformFeeCollection({
+      executionKey: entry.executionKey,
+      collectionStatus: "confirmed",
+      ledgerStatus: "claimable",
+      transferSignature: signature,
+      errorText: null
+    });
+    return;
+  }
+
+  if (confirmation.timedOut) {
+    await store.updatePlatformFeeCollection({
+      executionKey: entry.executionKey,
+      collectionStatus: "submitted",
+      transferSignature: signature,
+      errorText: confirmation.errorText
+    });
+    return;
+  }
+
+  await store.updatePlatformFeeCollection({
+    executionKey: entry.executionKey,
+    collectionStatus: "failed",
+    ledgerStatus: "voided",
+    transferSignature: signature,
+    errorText: confirmation.errorText || "platform fee transfer failed"
+  });
+}
+
+function localSolanaTradingWalletForCashbackEntry(entry: CashbackLedgerEntry): TradingWallet | null {
+  const subscriber = subscribers
+    .list()
+    .find((candidate) => String(candidate.chatId) === entry.chatId);
+  if (!subscriber) {
+    return null;
+  }
+
+  const wallets = [subscriber.tradingWallet, ...(subscriber.tradingWallets || [])]
+    .filter((wallet): wallet is TradingWallet =>
+      Boolean(wallet?.publicKey) &&
+      wallet?.provider === "local-solana" &&
+      Boolean(wallet?.encryptedSecretKey)
+    );
+
+  return wallets.find((wallet) => wallet.publicKey === entry.tradingWalletPublicKey) || null;
+}
+
+function isTerminalRustAsyncPlatformFeeTransferError(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return normalized.includes("insufficient") ||
+    normalized.includes("insufficient funds") ||
+    normalized.includes("attempt to debit an account") ||
+    normalized.includes("custom program error: 0x1") ||
+    normalized.includes("signer mismatch") ||
+    normalized.includes("wallet") && normalized.includes("not available") ||
+    normalized.includes("invalid public key");
+}
+
 async function notifyRustCopyBuyExecution(row: RustCopyTradeLocalExecutionRow): Promise<void> {
   const key = rustTrailingSellExecutionKey(row);
   if (!rememberRustCopyBuyAlertExecution(key)) {
@@ -5741,6 +6348,12 @@ function rustCopyBuyAlertCopyAmountSol(row: RustCopyTradeLocalExecutionRow, subs
 
 function lamportsToSolNumber(lamports: number | null): number | null {
   return lamports === null ? null : lamports / 1_000_000_000;
+}
+
+function rustCopyBuyExecutionLanded(row: RustCopyTradeLocalExecutionRow): boolean {
+  return stringValue(row.chain_report.status) === "landed" ||
+    stringValue(row.chain_report.buyStatus) === "buyLanded" ||
+    row.copy_slot !== null;
 }
 
 function tradeExecutionResultFromRustCopyBuyExecution(row: RustCopyTradeLocalExecutionRow): TradeExecutionResult {
@@ -5893,6 +6506,21 @@ function rememberRustCopyBuyAlertExecution(key: string): boolean {
     const oldest = rustCopyBuyAlertExecutionKeys.values().next().value;
     if (oldest) {
       rustCopyBuyAlertExecutionKeys.delete(oldest);
+    }
+  }
+  return true;
+}
+
+function rememberRustAsyncPlatformFeeExecution(key: string): boolean {
+  if (rustAsyncPlatformFeeExecutionKeys.has(key)) {
+    return false;
+  }
+
+  rustAsyncPlatformFeeExecutionKeys.add(key);
+  if (rustAsyncPlatformFeeExecutionKeys.size > 5000) {
+    const oldest = rustAsyncPlatformFeeExecutionKeys.values().next().value;
+    if (oldest) {
+      rustAsyncPlatformFeeExecutionKeys.delete(oldest);
     }
   }
   return true;
@@ -6319,6 +6947,10 @@ async function shutdown(): Promise<void> {
     clearInterval(rustTrailingSellPollerTimer);
     rustTrailingSellPollerTimer = null;
   }
+  if (rustAsyncPlatformFeePollerTimer) {
+    clearInterval(rustAsyncPlatformFeePollerTimer);
+    rustAsyncPlatformFeePollerTimer = null;
+  }
   geyserWalletTradeListener.stop();
   for (const timer of trailingSellTimers) {
     clearTimeout(timer);
@@ -6380,6 +7012,7 @@ yellowstoneWalletMonitor.start();
 shredstreamWalletObserver.start();
 startRustCopyBuyAlertPoller();
 startRustTrailingSellPoller();
+startRustAsyncPlatformFeePoller();
 migrationListener.start();
 geyserWalletTradeListener.start();
 await commandPoller.start();

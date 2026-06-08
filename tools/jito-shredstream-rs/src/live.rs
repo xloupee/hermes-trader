@@ -263,11 +263,6 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                 let current_transaction_index = batch_transaction_index;
                 batch_transaction_index += 1;
 
-                let signature = versioned_tx_signature_string(&versioned_tx);
-                if signature.is_empty() || !seen.insert(signature.clone()) {
-                    continue;
-                }
-
                 let tx_parse_started_at = Instant::now();
                 let wallet_match_started_at = tx_parse_started_at;
                 let telegram_runtime_guard = telegram_runtime.load();
@@ -285,6 +280,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                 let wallet_match_finished_at_ms = now_ms();
                 if target_wallet_mention.is_none() {
                     if options.include_rejections {
+                        let signature = versioned_tx_signature_string(&versioned_tx);
                         print_json(&RejectionLine {
                             schema: "copytrade.feed.rejection.v1",
                             observed_at_ms: now_ms(),
@@ -298,6 +294,13 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             account_key_count: static_account_key_count,
                         })?;
                     }
+                    continue;
+                }
+
+                let Some(signature_bytes) = versioned_tx_signature_bytes(&versioned_tx) else {
+                    continue;
+                };
+                if !seen.insert(signature_bytes) {
                     continue;
                 }
 
@@ -321,13 +324,6 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                     Some(parsed) => {
                         let trade_parsed_at = Instant::now();
                         let trade_parsed_at_ms = now_ms();
-                        if parsed.action == Action::Sell {
-                            copy_executor.observe_direct_pump_sell_route_context(
-                                &parsed.target_wallet,
-                                &parsed.mint,
-                                parsed.route_context.as_ref(),
-                            );
-                        }
                         let timings = SignalTimings {
                             grpc_message_received_at_ms,
                             entries_deserialized_at_ms,
@@ -363,6 +359,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 .duration_since(route_parse_started_at)
                                 .as_micros(),
                         };
+                        let signature = versioned_tx_signature_string(&versioned_tx);
                         let shadow_signal = shadow_signal_line(
                             trade_parsed_at_ms,
                             options.endpoint.clone(),
@@ -371,9 +368,20 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             account_keys.len(),
                             &parsed,
                         );
+                        if parsed.action == Action::Sell {
+                            copy_executor.observe_direct_pump_sell_route_context(
+                                &shadow_signal.target_wallet,
+                                &shadow_signal.mint,
+                                parsed.route_context.as_ref(),
+                            );
+                        }
                         let telegram_target_configs = telegram_runtime_guard
                             .as_ref()
-                            .map(|runtime| runtime.snapshot.target_configs(&parsed.target_wallet))
+                            .map(|runtime| {
+                                runtime
+                                    .snapshot
+                                    .target_configs(&shadow_signal.target_wallet)
+                            })
                             .unwrap_or(&[]);
                         if telegram_target_configs.is_empty() {
                             let execution_plan = execution_plan_line(
@@ -464,6 +472,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                         }
                     }
                     None if options.include_rejections => {
+                        let signature = versioned_tx_signature_string(&versioned_tx);
                         print_json(&RejectionLine {
                             schema: "copytrade.feed.rejection.v1",
                             observed_at_ms: now_ms(),
@@ -482,6 +491,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                         if let Some(target_wallet) = target_wallet_mention {
                             let classification =
                                 classify_wallet_mention(&versioned_tx, &account_keys);
+                            let signature = versioned_tx_signature_string(&versioned_tx);
                             print_json(&WalletMentionLine {
                                 schema: wallet_mention_schema(classification.kind),
                                 observed_at_ms: now_ms(),
@@ -517,8 +527,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
 
 struct SeenSignatures {
     capacity: usize,
-    set: HashSet<String>,
-    order: VecDeque<String>,
+    set: HashSet<[u8; 64]>,
+    order: VecDeque<[u8; 64]>,
 }
 
 struct ShadowSignalWriter {
@@ -1082,7 +1092,7 @@ impl SeenSignatures {
         }
     }
 
-    fn insert(&mut self, signature: String) -> bool {
+    fn insert(&mut self, signature: [u8; 64]) -> bool {
         if self.capacity == 0 {
             return true;
         }
@@ -1099,7 +1109,7 @@ impl SeenSignatures {
             }
         }
 
-        self.set.insert(signature.clone());
+        self.set.insert(signature);
         self.order.push_back(signature);
         true
     }
@@ -1148,6 +1158,15 @@ fn mentioned_static_target_wallet_in_set(
         .map(ToString::to_string)
 }
 
+fn versioned_tx_signature_bytes(
+    versioned_tx: &solana_transaction::versioned::VersionedTransaction,
+) -> Option<[u8; 64]> {
+    versioned_tx
+        .signatures
+        .first()
+        .and_then(|signature| signature.as_ref().try_into().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{mentioned_static_target_wallet_in_set, write_json_line, SeenSignatures};
@@ -1165,14 +1184,14 @@ mod tests {
     fn seen_signatures_evicts_oldest_when_capacity_is_reached() {
         let mut seen = SeenSignatures::new(2);
 
-        assert!(seen.insert("a".to_string()));
-        assert!(seen.insert("b".to_string()));
-        assert!(!seen.insert("a".to_string()));
+        assert!(seen.insert(signature_key(1)));
+        assert!(seen.insert(signature_key(2)));
+        assert!(!seen.insert(signature_key(1)));
         assert_eq!(seen.len(), 2);
 
-        assert!(seen.insert("c".to_string()));
+        assert!(seen.insert(signature_key(3)));
         assert_eq!(seen.len(), 2);
-        assert!(seen.insert("a".to_string()));
+        assert!(seen.insert(signature_key(1)));
         assert_eq!(seen.len(), 2);
     }
 
@@ -1180,9 +1199,13 @@ mod tests {
     fn seen_signatures_capacity_zero_disables_dedupe() {
         let mut seen = SeenSignatures::new(0);
 
-        assert!(seen.insert("a".to_string()));
-        assert!(seen.insert("a".to_string()));
+        assert!(seen.insert(signature_key(1)));
+        assert!(seen.insert(signature_key(1)));
         assert_eq!(seen.len(), 0);
+    }
+
+    fn signature_key(value: u8) -> [u8; 64] {
+        [value; 64]
     }
 
     #[test]

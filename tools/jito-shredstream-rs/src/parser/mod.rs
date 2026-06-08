@@ -37,9 +37,9 @@ pub(crate) enum Action {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ParsedTrade {
-    pub(crate) target_wallet: String,
+    pub(crate) target_wallet: Pubkey,
     pub(crate) action: Action,
-    pub(crate) mint: String,
+    pub(crate) mint: Pubkey,
     pub(crate) route: Route,
     pub(crate) sol_amount: Option<f64>,
     pub(crate) token_amount: Option<f64>,
@@ -553,6 +553,11 @@ pub(crate) fn compute_budget_program_id() -> &'static Pubkey {
 pub(crate) fn token_program_id() -> &'static Pubkey {
     static ID: OnceLock<Pubkey> = OnceLock::new();
     ID.get_or_init(|| Pubkey::from_str(TOKEN_PROGRAM_ID).expect("token program id is valid"))
+}
+
+pub(crate) fn sol_mint() -> &'static Pubkey {
+    static ID: OnceLock<Pubkey> = OnceLock::new();
+    ID.get_or_init(|| Pubkey::from_str(SOL_MINT).expect("SOL mint is valid"))
 }
 
 pub(crate) fn token_2022_program_id() -> &'static Pubkey {

@@ -3637,10 +3637,11 @@ mod tests {
         let mut options = disabled_options();
         options.auto_sell_after_buy = true;
         let executor = executor(options);
+        let dummy: Pubkey = COPY_WALLET.parse().unwrap();
         let parsed = crate::parser::ParsedTrade {
-            target_wallet: "target".to_string(),
+            target_wallet: dummy,
             action: Action::Sell,
-            mint: "abcPumpIsNotLowerpump".to_string(),
+            mint: dummy,
             route: Route::FlashxPump,
             sol_amount: None,
             token_amount: Some(42.0),

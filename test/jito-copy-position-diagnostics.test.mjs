@@ -5,7 +5,11 @@ import {
   autoSellStatus,
   blockPositionDiagnostics,
   buyStatus,
-  syncLimitForCycle
+  dedupeRows,
+  displayTxDelta,
+  executionKey,
+  syncLimitForCycle,
+  unknownChainReport
 } from "../tools/jito-shredstream-rs/sync-local-copy-executions-to-supabase.mjs";
 
 const baseRow = {
@@ -80,6 +84,43 @@ test("block position diagnostics report later-slot position summary", async () =
   });
 });
 
+test("dashboard tx delta falls back to cross-slot transaction distance", () => {
+  assert.equal(displayTxDelta({ sameSlotTxDelta: 2 }), 2);
+  assert.equal(
+    displayTxDelta({
+      sameSlotTxDelta: null,
+      crossSlotPositionSummary: { crossSlotTxDelta: 5620 }
+    }),
+    5620
+  );
+  assert.equal(displayTxDelta({ sameSlotTxDelta: null }, 7), 7);
+});
+
+test("local execution dedupe keeps separate copy wallets for same observed trade", () => {
+  const baseExecution = {
+    provider: "shredstream",
+    observedSignature: "observed-sig",
+    observedWallet: "target-wallet",
+    observedAction: "buy",
+    mint: "mint"
+  };
+  const walletA = { ...baseExecution, copyWallet: "copy-wallet-a", sendSignature: "copy-a" };
+  const walletB = { ...baseExecution, copyWallet: "copy-wallet-b", sendSignature: "copy-b" };
+
+  assert.notEqual(executionKey(walletA), executionKey(walletB));
+  const deduped = dedupeRows([walletA, walletB, { ...walletA, sendSignature: "copy-a-newer" }]);
+
+  assert.equal(deduped.length, 2);
+  assert.deepEqual(
+    deduped.map((row) => row.copyWallet).sort(),
+    ["copy-wallet-a", "copy-wallet-b"]
+  );
+  assert.equal(
+    deduped.find((row) => row.copyWallet === "copy-wallet-a")?.sendSignature,
+    "copy-a-newer"
+  );
+});
+
 test("block position diagnostics fail quietly when confirmed block is unavailable", async () => {
   const diagnostics = await blockPositionDiagnostics(
     baseRow,
@@ -139,6 +180,18 @@ test("copy buy status distinguishes submitted, landed, and failed-on-chain", () 
     buyStatus({ sendSignature: "copy-sig", sent: true, decision: "sent" }, { slot: 123, err: { InstructionError: [1, { Custom: 6024 }] } }),
     "buyFailedOnChain"
   );
+});
+
+test("missing landed copy transaction keeps submitted buy status", () => {
+  const report = unknownChainReport(
+    { ...baseRow, sent: true, decision: "sent" },
+    "copy transaction not found at confirmed commitment"
+  );
+
+  assert.equal(report.status, "submitted");
+  assert.equal(report.buyStatus, "buySubmitted");
+  assert.equal(report.positionUnavailableReason, "copy transaction not found at confirmed commitment");
+  assert.equal(report.slotDelta, null);
 });
 
 test("auto-sell status distinguishes submitted, landed, and failed-on-chain", () => {

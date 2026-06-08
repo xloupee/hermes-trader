@@ -4,6 +4,7 @@ import {
   buildCashbackManualAdjustment,
   buildCashbackAccrual,
   buildCashbackExecutionKey,
+  buildPendingPlatformFeeCashbackAccrual,
   cashbackSummaryReplyMarkup,
   calculateCashbackLamports,
   claimCashback,
@@ -53,6 +54,55 @@ class MemoryCashbackStore {
       return;
     }
     this.entries.push({ id: this.entries.length + 1, ...entry });
+  }
+
+  async getSubscriberConfig({ chatId, config: cashbackConfig }) {
+    return {
+      chatId: String(chatId),
+      config: cashbackConfig,
+      enabledSource: "global",
+      feeShareBpsSource: "global",
+      override: null
+    };
+  }
+
+  async getLedgerEntryByExecutionKey(executionKey) {
+    return this.entries.find((entry) => entry.executionKey === executionKey) || null;
+  }
+
+  async listPlatformFeeCollections({ statuses, limit = 50 }) {
+    return this.entries
+      .filter((entry) => statuses.includes(entry.platformFeeCollectionStatus || "not_required"))
+      .slice(0, limit);
+  }
+
+  async updatePlatformFeeCollection({
+    executionKey,
+    collectionStatus,
+    ledgerStatus,
+    transferSignature,
+    errorText,
+    attempts
+  }) {
+    const entry = this.entries.find((candidate) => candidate.executionKey === executionKey);
+    if (!entry) {
+      return;
+    }
+
+    entry.platformFeeCollectionStatus = collectionStatus;
+    entry.platformFeeCollectionUpdatedAt = new Date().toISOString();
+    if (ledgerStatus) {
+      entry.status = ledgerStatus;
+    }
+    if (transferSignature !== undefined) {
+      entry.platformFeeTransferSignature = transferSignature;
+    }
+    if (errorText !== undefined) {
+      entry.platformFeeCollectionError = errorText;
+    }
+    if (attempts !== undefined) {
+      entry.platformFeeCollectionAttempts = attempts;
+    }
   }
 
   async getSummary({ chatId, tradingWalletPublicKey, payoutWalletPublicKey = null, config: cashbackConfig }) {
@@ -255,6 +305,78 @@ test("cashback accrual is direct-only, successful, and idempotent by execution k
   await store.accrue(entry);
   await store.accrue(entry);
   assert.equal(store.entries.length, 1);
+});
+
+test("async platform fee cashback starts pending until collection confirms", async () => {
+  const entry = buildPendingPlatformFeeCashbackAccrual({
+    chatId: "chat-1",
+    tradingWalletPublicKey: "Wallet111",
+    executionKey: "rust-buy",
+    sourceSignature: "source-sig",
+    executionSignature: "copy-sig",
+    action: "buy",
+    status: "submitted",
+    provider: "direct-auto",
+    platformFee: platformFee(),
+    config: config()
+  });
+  const store = new MemoryCashbackStore();
+
+  await store.accrue(entry);
+
+  assert.equal(store.entries[0].status, "pending");
+  assert.equal(store.entries[0].platformFeeCollectionStatus, "pending");
+  assert.equal((await store.listClaimableEntries({ chatId: "chat-1", tradingWalletPublicKey: "Wallet111" })).length, 0);
+
+  await store.updatePlatformFeeCollection({
+    executionKey: "rust-buy",
+    collectionStatus: "confirmed",
+    ledgerStatus: "claimable",
+    transferSignature: "fee-transfer-sig",
+    errorText: null,
+    attempts: 1
+  });
+
+  assert.equal(store.entries[0].status, "claimable");
+  assert.equal(store.entries[0].platformFeeCollectionStatus, "confirmed");
+  assert.equal(store.entries[0].platformFeeTransferSignature, "fee-transfer-sig");
+  assert.equal((await store.listClaimableEntries({ chatId: "chat-1", tradingWalletPublicKey: "Wallet111" })).length, 1);
+});
+
+test("failed async platform fee collection does not become claimable", async () => {
+  const entry = buildPendingPlatformFeeCashbackAccrual({
+    chatId: "chat-1",
+    tradingWalletPublicKey: "Wallet111",
+    executionKey: "rust-buy-failed-fee",
+    sourceSignature: "source-sig",
+    executionSignature: "copy-sig",
+    action: "buy",
+    status: "submitted",
+    provider: "direct-auto",
+    platformFee: platformFee(),
+    config: config()
+  });
+  const store = new MemoryCashbackStore([entry]);
+
+  await store.updatePlatformFeeCollection({
+    executionKey: "rust-buy-failed-fee",
+    collectionStatus: "failed",
+    ledgerStatus: "voided",
+    errorText: "insufficient funds",
+    attempts: 1
+  });
+
+  const summary = await store.getSummary({
+    chatId: "chat-1",
+    tradingWalletPublicKey: "Wallet111",
+    payoutWalletPublicKey: payoutWallet,
+    config: config()
+  });
+
+  assert.equal(store.entries[0].status, "voided");
+  assert.equal(store.entries[0].platformFeeCollectionStatus, "failed");
+  assert.equal(summary.claimableLamports, 0n);
+  assert.equal(summary.pendingLamports, 0n);
 });
 
 test("cashback accrual uses subscriber override rate at accrual time only", async () => {

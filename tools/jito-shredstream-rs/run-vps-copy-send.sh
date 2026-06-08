@@ -46,8 +46,8 @@ if [[ -n "${JITO_TELEGRAM_SNAPSHOT_PATH:-}" ]]; then
 fi
 export JITO_COPY_WALLET="${JITO_COPY_WALLET:-FqhpPL63symHForRGfxPbGi4wDpe5jQqAVjntbbBqA5W}"
 export JITO_COPY_KEYPAIR_PATH="${JITO_COPY_KEYPAIR_PATH:-/etc/jito-copy-keypair.json}"
-export JITO_MAX_COPY_SOL="${JITO_MAX_COPY_SOL:-0.001}"
-export JITO_MAX_TOTAL_COPY_SPEND_SOL="${JITO_MAX_TOTAL_COPY_SPEND_SOL:-0.0035}"
+export JITO_MAX_COPY_SOL="${JITO_MAX_COPY_SOL:-0}"
+export JITO_MAX_TOTAL_COPY_SPEND_SOL="${JITO_MAX_TOTAL_COPY_SPEND_SOL:-0}"
 export JITO_MIGRATED_AMM_MIN_COPY_SOL="${JITO_MIGRATED_AMM_MIN_COPY_SOL:-0.00099}"
 export JITO_MIGRATED_AMM_SMALL_COPY_MODE="${JITO_MIGRATED_AMM_SMALL_COPY_MODE:-skip}"
 export JITO_FAST_COPY_SEND="${JITO_FAST_COPY_SEND:-YES}"
@@ -117,15 +117,6 @@ validate_capped_int() {
   fi
 }
 
-case "$JITO_MAX_COPY_SOL" in
-  0.001|0.000[0-9]*)
-    ;;
-  *)
-    echo "JITO_MAX_COPY_SOL must be 0.001 or lower for first VPS live send; got $JITO_MAX_COPY_SOL" >&2
-    exit 1
-    ;;
-esac
-
 if [[ ! -x "$WORKER_BIN" ]]; then
   echo "jito-feed-probe binary not found or not executable: $WORKER_BIN" >&2
   exit 1
@@ -161,7 +152,19 @@ validate_positive_sol() {
   fi
 }
 
-validate_positive_sol JITO_MAX_TOTAL_COPY_SPEND_SOL "$JITO_MAX_TOTAL_COPY_SPEND_SOL"
+validate_nonnegative_sol() {
+  local name="$1"
+  local value="${2:-}"
+
+  [[ -z "$value" ]] && return 0
+  if ! awk -v value="$value" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value + 0 >= 0) }'; then
+    echo "$name must be a nonnegative SOL amount; got $value" >&2
+    exit 1
+  fi
+}
+
+validate_nonnegative_sol JITO_MAX_COPY_SOL "$JITO_MAX_COPY_SOL"
+validate_nonnegative_sol JITO_MAX_TOTAL_COPY_SPEND_SOL "$JITO_MAX_TOTAL_COPY_SPEND_SOL"
 validate_positive_sol JITO_MIGRATED_AMM_MIN_COPY_SOL "$JITO_MIGRATED_AMM_MIN_COPY_SOL"
 case "$JITO_MIGRATED_AMM_SMALL_COPY_MODE" in
   skip|floor)

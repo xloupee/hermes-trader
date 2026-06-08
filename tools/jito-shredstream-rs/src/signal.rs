@@ -382,6 +382,11 @@ fn route_string(route: Route) -> Result<String> {
 mod tests {
     use super::*;
     use crate::{event::normalized_event, parser::ParsedTrade};
+    use solana_pubkey::Pubkey;
+    use std::str::FromStr;
+
+    const TARGET_WALLET: &str = "CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o";
+    const MINT: &str = "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump";
 
     #[test]
     fn signal_observation_computes_blocktime_lag() {
@@ -392,9 +397,9 @@ mod tests {
             423_928_888,
             15,
             ParsedTrade {
-                target_wallet: "wallet".to_string(),
+                target_wallet: pubkey(TARGET_WALLET),
                 action: Action::Buy,
-                mint: "mintpump".to_string(),
+                mint: pubkey(MINT),
                 route: Route::FlashxPump,
                 sol_amount: Some(0.00099),
                 token_amount: None,
@@ -457,5 +462,9 @@ mod tests {
         assert_eq!(cache.get(1), None);
         assert_eq!(cache.get(2), Some(None));
         assert_eq!(cache.get(3), Some(Some(3000)));
+    }
+
+    fn pubkey(value: &str) -> Pubkey {
+        Pubkey::from_str(value).expect("fixture pubkey is valid")
     }
 }

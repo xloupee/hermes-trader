@@ -324,13 +324,6 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                     Some(parsed) => {
                         let trade_parsed_at = Instant::now();
                         let trade_parsed_at_ms = now_ms();
-                        if parsed.action == Action::Sell {
-                            copy_executor.observe_direct_pump_sell_route_context(
-                                &parsed.target_wallet,
-                                &parsed.mint,
-                                parsed.route_context.as_ref(),
-                            );
-                        }
                         let timings = SignalTimings {
                             grpc_message_received_at_ms,
                             entries_deserialized_at_ms,
@@ -375,9 +368,20 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             account_keys.len(),
                             &parsed,
                         );
+                        if parsed.action == Action::Sell {
+                            copy_executor.observe_direct_pump_sell_route_context(
+                                &shadow_signal.target_wallet,
+                                &shadow_signal.mint,
+                                parsed.route_context.as_ref(),
+                            );
+                        }
                         let telegram_target_configs = telegram_runtime_guard
                             .as_ref()
-                            .map(|runtime| runtime.snapshot.target_configs(&parsed.target_wallet))
+                            .map(|runtime| {
+                                runtime
+                                    .snapshot
+                                    .target_configs(&shadow_signal.target_wallet)
+                            })
                             .unwrap_or(&[]);
                         if telegram_target_configs.is_empty() {
                             let execution_plan = execution_plan_line(

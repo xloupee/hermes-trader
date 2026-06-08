@@ -1227,7 +1227,7 @@ mod tests {
         let build = build_copy_unsigned_flashx_pump(
             parsed.route_context.as_ref(),
             COPY_WALLET,
-            &parsed.mint,
+            &parsed.mint.to_string(),
         )
         .expect("direct Pump copy route should build unsigned instruction");
 
@@ -1277,7 +1277,7 @@ mod tests {
             .accounts
             .iter()
             .any(|account| account.pubkey.to_string() == TARGET_WALLET));
-        assert_eq!(parsed.mint, LIVE_DIRECT_PUMP_MINT);
+        assert_eq!(parsed.mint, pubkey(LIVE_DIRECT_PUMP_MINT));
     }
 
     #[test]
@@ -1303,12 +1303,12 @@ mod tests {
         let build = build_copy_unsigned_flashx_pump(
             parsed.route_context.as_ref(),
             COPY_WALLET,
-            &parsed.mint,
+            &parsed.mint.to_string(),
         )
         .expect("migrated AMM copy route should build unsigned instructions");
 
         assert_eq!(build.route_layout, "migrated-amm");
-        assert_eq!(parsed.mint, LIVE_MIGRATED_MINT);
+        assert_eq!(parsed.mint, pubkey(LIVE_MIGRATED_MINT));
         assert_eq!(build.instructions.len(), 2);
         assert_eq!(
             build.copy_wallet_token_account.to_string(),
@@ -1358,7 +1358,7 @@ mod tests {
         let override_build = build_copy_unsigned_flashx_pump_with_cache_and_spend(
             parsed.route_context.as_ref(),
             COPY_WALLET,
-            &parsed.mint,
+            &parsed.mint.to_string(),
             None,
             Some(777_000),
         )
@@ -1412,7 +1412,7 @@ mod tests {
             .as_ref()
             .expect("AaJ8 cashback migrated FLASHX route context should parse");
 
-        assert_eq!(parsed.mint, AA_J8_CASHBACK_MIGRATED_MINT);
+        assert_eq!(parsed.mint, pubkey(AA_J8_CASHBACK_MIGRATED_MINT));
         assert_eq!(context.layout, FlashxPumpLayout::MigratedAmm);
         assert_eq!(
             resolved_account_for_test(context, "userVolumeAccumulatorQuoteTokenAccount"),
@@ -1423,7 +1423,7 @@ mod tests {
         let build = build_copy_unsigned_flashx_pump(
             parsed.route_context.as_ref(),
             LIVE_COPY_WALLET,
-            &parsed.mint,
+            &parsed.mint.to_string(),
         )
         .expect("cashback migrated AMM copy route should build unsigned instructions");
 
@@ -1468,7 +1468,7 @@ mod tests {
         let build = build_full_copy_unsigned_flashx_pump(
             parsed.route_context.as_ref(),
             COPY_WALLET,
-            &parsed.mint,
+            &parsed.mint.to_string(),
         )
         .expect("full copy transaction shell should build");
 
@@ -1514,7 +1514,7 @@ mod tests {
         let build = build_full_copy_unsigned_flashx_pump_with_fees_and_cache_and_spend(
             parsed.route_context.as_ref(),
             COPY_WALLET,
-            &parsed.mint,
+            &parsed.mint.to_string(),
             &TxFeeConfig::default(),
             None,
             Some(777_000),
@@ -1542,7 +1542,7 @@ mod tests {
         let build = build_full_copy_unsigned_flashx_pump_with_fees(
             parsed.route_context.as_ref(),
             COPY_WALLET,
-            &parsed.mint,
+            &parsed.mint.to_string(),
             &fee_config,
         )
         .expect("full copy transaction shell should build with fee config");
@@ -1607,7 +1607,7 @@ mod tests {
         let error = build_full_copy_unsigned_flashx_pump_with_fees(
             parsed.route_context.as_ref(),
             COPY_WALLET,
-            &parsed.mint,
+            &parsed.mint.to_string(),
             &fee_config,
         )
         .expect_err("tip account is required when tip lamports are configured");
@@ -1631,7 +1631,7 @@ mod tests {
         let build = build_full_copy_unsigned_flashx_pump(
             parsed.route_context.as_ref(),
             COPY_WALLET,
-            &parsed.mint,
+            &parsed.mint.to_string(),
         )
         .expect("full migrated AMM copy transaction shell should build");
 
@@ -1675,7 +1675,7 @@ mod tests {
         let build = build_auto_sell_unsigned_flashx_pump_with_cache(
             parsed.route_context.as_ref(),
             COPY_WALLET,
-            &parsed.mint,
+            &parsed.mint.to_string(),
             123_456,
             None,
         )
@@ -1713,7 +1713,7 @@ mod tests {
         let build = build_trailing_sell_unsigned_flashx_pump_with_fees_and_cache(
             parsed.route_context.as_ref(),
             COPY_WALLET,
-            &parsed.mint,
+            &parsed.mint.to_string(),
             123_456,
             &TxFeeConfig::default(),
             None,
@@ -1800,7 +1800,7 @@ mod tests {
         let build = build_auto_sell_unsigned_flashx_pump_with_cache(
             parsed.route_context.as_ref(),
             COPY_WALLET,
-            &parsed.mint,
+            &parsed.mint.to_string(),
             123_456,
             None,
         )
@@ -1910,12 +1910,12 @@ mod tests {
         let account_keys = failed_auto_sell_migrated_buy_hydrated_account_keys(&transaction);
         let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
             .expect("failed live migrated FLASHX buy should parse");
-        assert_eq!(parsed.mint, FAILED_AUTO_SELL_MIGRATED_MINT);
+        assert_eq!(parsed.mint, pubkey(FAILED_AUTO_SELL_MIGRATED_MINT));
 
         let build = build_auto_sell_unsigned_flashx_pump_with_cache(
             parsed.route_context.as_ref(),
             COPY_WALLET,
-            &parsed.mint,
+            &parsed.mint.to_string(),
             32_212_701_563,
             None,
         )

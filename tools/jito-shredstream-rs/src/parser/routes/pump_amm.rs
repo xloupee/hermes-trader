@@ -1,6 +1,6 @@
 use crate::parser::{
-    parse_action, read_u64_le, ParsedTrade, Route, LAMPORTS_PER_SOL, PUMP_FUN_TOKEN_DECIMALS,
-    SOL_MINT,
+    parse_action, read_u64_le, sol_mint, ParsedTrade, Route, LAMPORTS_PER_SOL,
+    PUMP_FUN_TOKEN_DECIMALS,
 };
 use solana_message::compiled_instruction::CompiledInstruction;
 use solana_pubkey::Pubkey;
@@ -18,16 +18,16 @@ pub(crate) fn parse(
     }
     let mint = account_key_at(&instruction.accounts, account_keys, 3)?;
     let quote_mint = account_key_at(&instruction.accounts, account_keys, 4)?;
-    if quote_mint.to_string() != SOL_MINT {
+    if quote_mint != sol_mint() {
         return None;
     }
     let token_amount = read_u64_le(&instruction.data, 8)? as f64 / PUMP_FUN_TOKEN_DECIMALS;
     let sol_amount = read_u64_le(&instruction.data, 16)? as f64 / LAMPORTS_PER_SOL;
 
     Some(ParsedTrade {
-        target_wallet: user.to_string(),
+        target_wallet: *user,
         action,
-        mint: mint.to_string(),
+        mint: *mint,
         route: Route::PumpAmm,
         sol_amount: Some(sol_amount),
         token_amount: Some(token_amount),
@@ -48,7 +48,9 @@ mod tests {
     use super::*;
     use crate::{
         event::normalized_event,
-        parser::{static_account_keys, Action, PUMP_AMM_PROGRAM_ID, PUMP_FUN_SELL_DISCRIMINATOR},
+        parser::{
+            static_account_keys, Action, PUMP_AMM_PROGRAM_ID, PUMP_FUN_SELL_DISCRIMINATOR, SOL_MINT,
+        },
     };
     use solana_hash::Hash;
     use solana_message::{legacy::Message, MessageHeader, VersionedMessage};

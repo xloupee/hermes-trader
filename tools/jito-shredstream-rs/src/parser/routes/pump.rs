@@ -20,9 +20,9 @@ pub(crate) fn parse(
     let sol_amount = read_u64_le(&instruction.data, 16)? as f64 / LAMPORTS_PER_SOL;
 
     Some(ParsedTrade {
-        target_wallet: user.to_string(),
+        target_wallet: *user,
         action,
-        mint: mint.to_string(),
+        mint: *mint,
         route: Route::Pump,
         sol_amount: Some(sol_amount),
         token_amount: Some(token_amount),

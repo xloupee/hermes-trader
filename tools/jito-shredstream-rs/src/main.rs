@@ -177,6 +177,35 @@ pub(crate) struct LiveOptions {
     #[arg(long, env = "JITO_BLOCK_ENGINE_AUTH_UUID", hide_env_values = true)]
     pub(crate) jito_auth_uuid: Option<String>,
 
+    #[arg(
+        long,
+        env = "JITO_HELIUS_SENDER_ENABLED",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) helius_sender_enabled: bool,
+
+    #[arg(
+        long = "helius-sender-url",
+        env = "JITO_HELIUS_SENDER_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) helius_sender_urls: Vec<String>,
+
+    #[arg(
+        long,
+        env = "JITO_HELIUS_SENDER_SWQOS_ONLY",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) helius_sender_swqos_only: bool,
+
+    #[arg(long, env = "JITO_HELIUS_SENDER_TIP_LAMPORTS")]
+    pub(crate) helius_sender_tip_lamports: Option<u64>,
+
+    #[arg(long, env = "JITO_HELIUS_SENDER_TIP_ACCOUNT")]
+    pub(crate) helius_sender_tip_account: Option<String>,
+
     #[arg(long, env = "JITO_ONE_SHOT_COPY_SEND", default_value_t = false)]
     pub(crate) one_shot_copy_send: bool,
 

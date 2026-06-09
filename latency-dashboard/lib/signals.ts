@@ -87,7 +87,45 @@ interface RawSignalObservation {
   raw_event: unknown;
 }
 
-const SIGNAL_SELECT = "id,created_at,provider,source,endpoint,target_wallet,signature,slot,action,mint,route,observed_at_ms,grpc_message_received_at_ms,entries_deserialized_at_ms,trade_parsed_at_ms,block_time_ms,observed_minus_block_time_ms,grpc_received_minus_block_time_ms,deserialize_ms,parse_ms,local_detect_ms,deserialize_us,parse_us,local_detect_us,batch_transaction_count,matched_transaction_index,batch_scan_us,tx_parse_us,account_expand_us,wallet_match_us,route_parse_us,sol_amount,token_amount,copyable,raw_event";
+const SIGNAL_BASE_COLUMNS = [
+  "id",
+  "created_at",
+  "provider",
+  "source",
+  "endpoint",
+  "target_wallet",
+  "signature",
+  "slot",
+  "action",
+  "mint",
+  "route",
+  "observed_at_ms",
+  "grpc_message_received_at_ms",
+  "entries_deserialized_at_ms",
+  "trade_parsed_at_ms",
+  "block_time_ms",
+  "observed_minus_block_time_ms",
+  "grpc_received_minus_block_time_ms",
+  "deserialize_ms",
+  "parse_ms",
+  "local_detect_ms",
+  "deserialize_us",
+  "parse_us",
+  "local_detect_us",
+  "batch_transaction_count",
+  "matched_transaction_index",
+  "batch_scan_us",
+  "tx_parse_us",
+  "account_expand_us",
+  "wallet_match_us",
+  "route_parse_us",
+  "sol_amount",
+  "token_amount",
+  "copyable"
+];
+
+const SIGNAL_SELECT = SIGNAL_BASE_COLUMNS.join(",");
+const SIGNAL_DETAIL_SELECT = [...SIGNAL_BASE_COLUMNS, "raw_event"].join(",");
 
 function coerceDate(value: string): string {
   const match = value.match(/^(\d+)(h|d|m)$/);
@@ -207,9 +245,23 @@ export async function listSignals(filters: SignalFilters): Promise<SignalObserva
     throw error;
   }
 
-  return ((data as RawSignalObservation[] | null) || [])
+  return (((data as unknown) as RawSignalObservation[] | null) || [])
     .map(normalizeSignal)
     .filter((row) => matchesPostFilters(row, filters));
+}
+
+export async function getSignalObservation(id: number): Promise<SignalObservation | null> {
+  const { data, error } = await createAdminClient()
+    .from("copytrade_signal_observations")
+    .select(SIGNAL_DETAIL_SELECT)
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data ? normalizeSignal(data as unknown as RawSignalObservation) : null;
 }
 
 function percentile(values: number[], p: number): number | null {

@@ -1,6 +1,6 @@
 import { executionLocalDetectUs, firstNumber, subtractMs } from "@/lib/benchmark-position";
-import { listLocalExecutions, summarizeLocalExecutions, type LocalExecutionReport } from "@/lib/local-executions";
-import { listSignals, type SignalFilters, type SignalObservation } from "@/lib/signals";
+import { getLocalExecution, listLocalExecutions, summarizeLocalExecutions, type LocalExecutionReport } from "@/lib/local-executions";
+import { getSignalObservation, listSignals, type SignalFilters, type SignalObservation } from "@/lib/signals";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export interface BenchmarkLatencyCells {
@@ -70,6 +70,38 @@ export async function listBenchmarkRows(filters: SignalFilters) {
     summary: summarizeLocalExecutions(executions),
     filters
   };
+}
+
+export async function getBenchmarkRowDetail(rowId: string, signalObservationId?: number | null): Promise<BenchmarkRow | null> {
+  const [kind, idText] = rowId.split(":");
+  const id = Number(idText);
+  if (!Number.isInteger(id) || id <= 0) {
+    return null;
+  }
+
+  if (kind === "signal") {
+    const signal = await getSignalObservation(id);
+    return signal ? benchmarkRowFromSignal(signal) : null;
+  }
+
+  if (kind !== "execution") {
+    return null;
+  }
+
+  const [execution, signal] = await Promise.all([
+    getLocalExecution(id),
+    signalObservationId ? getSignalObservation(signalObservationId) : Promise.resolve(null)
+  ]);
+  if (!execution) {
+    return null;
+  }
+
+  const subscriberByCopyWallet = await listTelegramSubscribersByCopyWallet([execution]);
+  return benchmarkRowFromExecution(
+    execution,
+    signal ?? undefined,
+    execution.copyWallet ? subscriberByCopyWallet.get(execution.copyWallet) ?? null : null
+  );
 }
 
 async function listTelegramSubscribersByCopyWallet(executions: LocalExecutionReport[]): Promise<Map<string, string>> {

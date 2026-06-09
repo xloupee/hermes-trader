@@ -1809,6 +1809,30 @@ mod tests {
             &build.instructions[1].data[8..16],
             &123_456u64.to_le_bytes()
         );
+        let RouteContext::FlashxPump(context) = parsed
+            .route_context
+            .as_ref()
+            .expect("direct Pump route context");
+        assert_eq!(
+            build.instructions[1].accounts[12].pubkey,
+            context.resolved_pubkey("feeConfig").expect("fee config")
+        );
+        assert_eq!(
+            build.instructions[1].accounts[13].pubkey,
+            context.resolved_pubkey("feeProgram").expect("fee program")
+        );
+        assert_eq!(
+            build.instructions[1].accounts[14].pubkey,
+            context
+                .resolved_pubkey("bondingCurveV2")
+                .expect("bonding curve v2")
+        );
+        assert_eq!(
+            build.instructions[1].accounts[15].pubkey,
+            context
+                .resolved_pubkey("buybackFeeRecipient")
+                .expect("buyback fee recipient")
+        );
         assert!(build.instructions[1]
             .accounts
             .iter()

@@ -58,10 +58,10 @@ function readJsonl(path, { recentLimit = 0 } = {}) {
   if (!existsSync(path)) {
     return [];
   }
-  const lines = readFileSync(path, "utf8")
+  const rows = readFileSync(path, "utf8")
     .split(/\r?\n/)
     .filter((line) => line.trim().length > 0);
-  const rows = lines
+  const parsedRows = rows
     .map((line, index) => {
       try {
         return JSON.parse(line);
@@ -69,8 +69,36 @@ function readJsonl(path, { recentLimit = 0 } = {}) {
         throw new Error(`invalid JSONL at ${path}:${index + 1}: ${error.message}`);
       }
     })
-    .filter((row) => row.schema === "copytrade.localExecution.v1");
-  return recentLimit > 0 ? rows.slice(-recentLimit) : rows;
+    .filter((row) => row.schema === "copytrade.localExecution.v1" || row.schema === "copytrade.sendLaneAttribution.v1");
+  const scopedRows = recentLimit > 0 ? parsedRows.slice(-recentLimit) : parsedRows;
+  return mergeSendLaneAttributions(scopedRows);
+}
+
+function sendLaneAttributionKey(row) {
+  return [
+    row.provider,
+    row.observedSignature,
+    row.copyWallet,
+    row.mint,
+    row.sendSignature
+  ].join("\u0000");
+}
+
+function mergeSendLaneAttributions(rows) {
+  const attributionsByKey = new Map();
+  for (const row of rows) {
+    if (row.schema !== "copytrade.sendLaneAttribution.v1") {
+      continue;
+    }
+    attributionsByKey.set(sendLaneAttributionKey(row), row);
+  }
+
+  return rows
+    .filter((row) => row.schema === "copytrade.localExecution.v1")
+    .map((row) => {
+      const attribution = attributionsByKey.get(sendLaneAttributionKey(row));
+      return attribution ? { ...row, sendLaneAttribution: attribution } : row;
+    });
 }
 
 function sqlString(value) {
@@ -1128,6 +1156,7 @@ export {
   executionKey,
   fetchBlockSignatures,
   displayTxDelta,
+  mergeSendLaneAttributions,
   readJsonl,
   syncLimitForCycle,
   unknownChainReport,

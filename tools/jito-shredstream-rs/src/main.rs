@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 mod address_lookup;
+mod balance_cache;
 mod blockhash;
 mod event;
 mod executor;
@@ -111,6 +112,28 @@ pub(crate) struct LiveOptions {
 
     #[arg(long, env = "JITO_COPY_WALLET")]
     pub(crate) copy_wallet: Option<String>,
+
+    #[arg(
+        long,
+        env = "JITO_COPY_WALLET_BALANCE_GUARD",
+        default_value_t = true,
+        value_parser = parse_boolish
+    )]
+    pub(crate) copy_wallet_balance_guard: bool,
+
+    #[arg(
+        long,
+        env = "JITO_COPY_WALLET_BALANCE_REFRESH_MS",
+        default_value_t = 1_000
+    )]
+    pub(crate) copy_wallet_balance_refresh_ms: u64,
+
+    #[arg(
+        long,
+        env = "JITO_COPY_WALLET_BALANCE_STALE_MS",
+        default_value_t = 5_000
+    )]
+    pub(crate) copy_wallet_balance_stale_ms: u128,
 
     #[arg(long, env = "JITO_BLOCKHASH_REFRESH_MS", default_value_t = 500)]
     pub(crate) blockhash_refresh_ms: u64,
@@ -255,6 +278,15 @@ pub(crate) struct LiveOptions {
 
     #[arg(long, env = "JITO_TIP_ACCOUNT")]
     pub(crate) jito_tip_account: Option<String>,
+
+    #[arg(long, env = "JITO_SELL_PRIORITY_FEE_MICRO_LAMPORTS")]
+    pub(crate) sell_priority_fee_micro_lamports: Option<u64>,
+
+    #[arg(long, env = "JITO_SELL_TIP_LAMPORTS")]
+    pub(crate) sell_jito_tip_lamports: Option<u64>,
+
+    #[arg(long, env = "JITO_SELL_TIP_ACCOUNT")]
+    pub(crate) sell_jito_tip_account: Option<String>,
 
     #[arg(
         long,

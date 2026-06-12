@@ -191,7 +191,7 @@ interface RawLocalExecutionReport {
   chain_report: unknown;
 }
 
-const LOCAL_EXECUTION_SELECT = [
+const LOCAL_EXECUTION_BASE_COLUMNS = [
   "id",
   "created_at",
   "observed_at_ms",
@@ -264,7 +264,12 @@ const LOCAL_EXECUTION_SELECT = [
   "auto_sell_token_amount_raw",
   "auto_sell_send_signature",
   "buy_signature_to_auto_sell_submitted_ms",
-  "buy_signature_to_auto_sell_signature_returned_ms",
+  "buy_signature_to_auto_sell_signature_returned_ms"
+];
+
+const LOCAL_EXECUTION_SELECT = LOCAL_EXECUTION_BASE_COLUMNS.join(",");
+const LOCAL_EXECUTION_DETAIL_SELECT = [
+  ...LOCAL_EXECUTION_BASE_COLUMNS,
   "raw_execution",
   "chain_report"
 ].join(",");
@@ -314,7 +319,7 @@ function buyStatus(row: RawLocalExecutionReport): string | null {
   if (report?.err) {
     return "buyFailedOnChain";
   }
-  if (numberValue(report?.slot) !== null) {
+  if (numberValue(report?.slot) !== null || Number.isFinite(row.copy_slot)) {
     return "buyLanded";
   }
   return submittedBuyStatus(row);
@@ -497,6 +502,23 @@ export async function listLocalExecutions(filters: SignalFilters): Promise<Local
   }
 
   return (((data as unknown) as RawLocalExecutionReport[] | null) || []).map(normalizeReport);
+}
+
+export async function getLocalExecution(id: number): Promise<LocalExecutionReport | null> {
+  const { data, error } = await createAdminClient()
+    .from("copytrade_local_executions")
+    .select(LOCAL_EXECUTION_DETAIL_SELECT)
+    .eq("id", id)
+    .maybeSingle();
+
+  if (missingTableError(error)) {
+    return null;
+  }
+  if (error) {
+    throw error;
+  }
+
+  return data ? normalizeReport(data as unknown as RawLocalExecutionReport) : null;
 }
 
 export function summarizeLocalExecutions(rows: LocalExecutionReport[]) {

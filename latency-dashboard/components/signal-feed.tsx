@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Activity, CirclePause, CirclePlay, Filter, LogOut, RefreshCcw, Search, TimerReset } from "lucide-react";
 import { DetailList, MetricGrid, MetricStrip } from "@/components/benchmark-primitives";
 import { amount, duration, ms, queryString, short, sol, us } from "@/lib/benchmark-format";
@@ -45,8 +45,14 @@ interface BenchmarkRowsResponse {
   summary: ExecutionSummary;
 }
 
+interface BenchmarkRowDetailResponse {
+  row: BenchmarkRow;
+}
+
 export function SignalFeed({ adminEmail }: { adminEmail: string | null }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedDetail, setSelectedDetail] = useState<BenchmarkRow | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [filters, setFilters] = useState({
     since: "24h",
     targetWallet: "",
@@ -57,19 +63,22 @@ export function SignalFeed({ adminEmail }: { adminEmail: string | null }) {
     maxLagMs: ""
   });
 
-  const params = useMemo(() => queryString({ ...filters, limit: "200" }), [filters]);
+  const params = useMemo(() => queryString({ ...filters, limit: "50" }), [filters]);
   const fetcher = useCallback(async (): Promise<BenchmarkRowsResponse> => {
-    const response = await fetch(`/api/signals/benchmark-rows?${params}`, { cache: "no-store" });
+    const response = await fetch(`/api/signals/benchmark-rows?${params}`);
     if (!response.ok) {
       throw new Error("Could not load benchmark rows");
     }
     return await response.json() as BenchmarkRowsResponse;
   }, [params]);
 
-  const { data, loading, error, paused, setPaused, lastUpdated, refresh } = useAutoRefreshQuery(fetcher);
+  const { data, loading, error, paused, setPaused, lastUpdated, refresh } = useAutoRefreshQuery(fetcher, { intervalMs: 10000 });
   const rows = data?.rows ?? [];
   const executionSummary = data?.summary ?? null;
-  const selected = rows.find((row) => row.id === selectedId) ?? rows[0] ?? null;
+  const selectedBase = rows.find((row) => row.id === selectedId) ?? rows[0] ?? null;
+  const selectedBaseId = selectedBase?.id ?? null;
+  const selectedBaseSignalId = selectedBase?.signalObservationId ?? null;
+  const selected = selectedDetail?.id === selectedBase?.id ? selectedDetail : selectedBase;
   const selectedExecution = selected?.execution ?? null;
   const selectedSignal = selected?.signal ?? null;
   const executions = useMemo(
@@ -83,6 +92,43 @@ export function SignalFeed({ adminEmail }: { adminEmail: string | null }) {
     submit: metricStats(executions.map((row) => row.observedToSendSubmittedMs)),
     ack: metricStats(executions.map(copyAckMs))
   }), [executions]);
+
+  useEffect(() => {
+    if (!selectedBaseId) {
+      setSelectedDetail(null);
+      setDetailError(null);
+      return;
+    }
+
+    let cancelled = false;
+    const detailParams = queryString({
+      rowId: selectedBaseId,
+      signalId: selectedBaseSignalId ? String(selectedBaseSignalId) : ""
+    });
+    setDetailError(null);
+    fetch(`/api/signals/benchmark-rows/detail?${detailParams}`)
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error("Could not load row diagnostics");
+        }
+        return await response.json() as BenchmarkRowDetailResponse;
+      })
+      .then((detail) => {
+        if (!cancelled) {
+          setSelectedDetail(detail.row);
+        }
+      })
+      .catch((detailLoadError) => {
+        if (!cancelled) {
+          setSelectedDetail(null);
+          setDetailError(detailLoadError instanceof Error ? detailLoadError.message : String(detailLoadError));
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [lastUpdated, selectedBaseId, selectedBaseSignalId]);
 
   async function signOut() {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -206,6 +252,7 @@ export function SignalFeed({ adminEmail }: { adminEmail: string | null }) {
                 <Activity size={16} />
                 <span>{short(selected.mint, 8)}</span>
               </div>
+              {detailError ? <div className="error-row">{detailError}</div> : null}
               <MetricGrid items={[
                 { label: "Parsed - blockTime", value: ms(firstNumber(selectedSignal?.observedMinusBlockTimeMs, subtractMs(selectedExecution?.matchedAtMs, selectedExecution?.targetBlockTimeMs))) },
                 { label: "Local detect", value: durationWithFallback(selectedSignal?.localDetectMs, selectedSignal?.localDetectUs, executionLocalDetectUs(selectedExecution)) },

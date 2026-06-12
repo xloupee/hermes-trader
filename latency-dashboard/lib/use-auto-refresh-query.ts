@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 export function useAutoRefreshQuery<T>(fetcher: () => Promise<T>, options?: { intervalMs?: number }) {
-  const intervalMs = options?.intervalMs ?? 1000;
+  const intervalMs = options?.intervalMs ?? 5000;
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

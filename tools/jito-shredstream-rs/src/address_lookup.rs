@@ -4,7 +4,7 @@ use solana_address_lookup_table_interface::state::AddressLookupTable;
 use solana_message::AddressLookupTableAccount;
 use solana_pubkey::Pubkey;
 use solana_transaction::versioned::VersionedTransaction;
-use std::{collections::HashMap, str::FromStr};
+use std::{borrow::Cow, collections::HashMap, str::FromStr};
 
 const FLASHX_LOOKUP_TABLE: &str = "4vX5U9XsiY11infmC13d6VFPjvUqtuRw744r4o94dyow";
 
@@ -53,31 +53,33 @@ impl AddressLookupTableCache {
         })
     }
 
-    pub(crate) fn expanded_account_keys(
+    pub(crate) fn expanded_account_keys<'a>(
         &self,
-        versioned_tx: &VersionedTransaction,
-    ) -> ExpandedAccountKeys {
-        let mut keys = versioned_tx
-            .message
-            .static_account_keys()
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
+        versioned_tx: &'a VersionedTransaction,
+    ) -> ExpandedAccountKeys<'a> {
+        let static_account_keys = versioned_tx.message.static_account_keys();
 
         let Some(address_table_lookups) = versioned_tx.message.address_table_lookups() else {
             return ExpandedAccountKeys {
-                keys,
+                keys: Cow::Borrowed(static_account_keys),
                 missing_lookup_table: None,
             };
         };
+        if address_table_lookups.is_empty() {
+            return ExpandedAccountKeys {
+                keys: Cow::Borrowed(static_account_keys),
+                missing_lookup_table: None,
+            };
+        }
 
+        let mut keys = static_account_keys.to_vec();
         let mut writable = Vec::new();
         let mut readonly = Vec::new();
 
         for lookup in address_table_lookups {
             let Some(addresses) = self.tables.get(&lookup.account_key) else {
                 return ExpandedAccountKeys {
-                    keys,
+                    keys: Cow::Owned(keys),
                     missing_lookup_table: Some(lookup.account_key),
                 };
             };
@@ -85,7 +87,7 @@ impl AddressLookupTableCache {
             for index in &lookup.writable_indexes {
                 let Some(address) = addresses.get(*index as usize) else {
                     return ExpandedAccountKeys {
-                        keys,
+                        keys: Cow::Owned(keys),
                         missing_lookup_table: Some(lookup.account_key),
                     };
                 };
@@ -95,7 +97,7 @@ impl AddressLookupTableCache {
             for index in &lookup.readonly_indexes {
                 let Some(address) = addresses.get(*index as usize) else {
                     return ExpandedAccountKeys {
-                        keys,
+                        keys: Cow::Owned(keys),
                         missing_lookup_table: Some(lookup.account_key),
                     };
                 };
@@ -106,7 +108,7 @@ impl AddressLookupTableCache {
         keys.extend(writable);
         keys.extend(readonly);
         ExpandedAccountKeys {
-            keys,
+            keys: Cow::Owned(keys),
             missing_lookup_table: None,
         }
     }
@@ -117,9 +119,15 @@ impl AddressLookupTableCache {
 }
 
 #[derive(Debug)]
-pub(crate) struct ExpandedAccountKeys {
-    pub(crate) keys: Vec<Pubkey>,
+pub(crate) struct ExpandedAccountKeys<'a> {
+    keys: Cow<'a, [Pubkey]>,
     pub(crate) missing_lookup_table: Option<Pubkey>,
+}
+
+impl ExpandedAccountKeys<'_> {
+    pub(crate) fn as_slice(&self) -> &[Pubkey] {
+        self.keys.as_ref()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -267,8 +275,34 @@ fn flashx_lookup_table_addresses() -> Vec<Pubkey> {
 mod tests {
     use super::*;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use solana_hash::Hash;
+    use solana_message::{legacy::Message, v0, MessageHeader, VersionedMessage};
 
     const MIGRATED_BUY_LOOKUP_TABLE: &str = "4vX5U9XsiY11infmC13d6VFPjvUqtuRw744r4o94dyow";
+
+    #[test]
+    fn borrows_static_account_keys_for_legacy_transaction_without_lookups() {
+        let transaction = legacy_transaction_without_lookups();
+        let static_account_keys = transaction.message.static_account_keys();
+
+        let expanded = AddressLookupTableCache::default().expanded_account_keys(&transaction);
+
+        assert_eq!(expanded.missing_lookup_table, None);
+        assert_eq!(expanded.as_slice(), static_account_keys);
+        assert_eq!(expanded.as_slice().as_ptr(), static_account_keys.as_ptr());
+    }
+
+    #[test]
+    fn borrows_static_account_keys_for_v0_transaction_without_lookup_entries() {
+        let transaction = v0_transaction_without_lookup_entries();
+        let static_account_keys = transaction.message.static_account_keys();
+
+        let expanded = AddressLookupTableCache::default().expanded_account_keys(&transaction);
+
+        assert_eq!(expanded.missing_lookup_table, None);
+        assert_eq!(expanded.as_slice(), static_account_keys);
+        assert_eq!(expanded.as_slice().as_ptr(), static_account_keys.as_ptr());
+    }
 
     #[test]
     fn expands_v0_transaction_with_cached_lookup_table() {
@@ -280,15 +314,25 @@ mod tests {
         let tables = HashMap::from([(table_pubkey, migrated_buy_lookup_table_addresses())]);
         let cache = AddressLookupTableCache {
             table_accounts: build_table_accounts(&tables).unwrap(),
-            tables,
+            tables: tables.clone(),
         };
 
         let expanded = cache.expanded_account_keys(&transaction);
 
         assert_eq!(expanded.missing_lookup_table, None);
-        assert_eq!(expanded.keys.len(), 35);
+        let static_account_keys = transaction.message.static_account_keys();
         assert_eq!(
-            expanded.keys.get(28).map(ToString::to_string).as_deref(),
+            &expanded.as_slice()[..static_account_keys.len()],
+            static_account_keys
+        );
+        assert_lookup_order(&transaction, &tables, expanded.as_slice());
+        assert_eq!(expanded.as_slice().len(), 35);
+        assert_eq!(
+            expanded
+                .as_slice()
+                .get(28)
+                .map(ToString::to_string)
+                .as_deref(),
             Some("ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw")
         );
     }
@@ -304,6 +348,10 @@ mod tests {
         assert_eq!(
             expanded.missing_lookup_table,
             Some(Pubkey::from_str(MIGRATED_BUY_LOOKUP_TABLE).unwrap())
+        );
+        assert_eq!(
+            expanded.as_slice(),
+            transaction.message.static_account_keys()
         );
     }
 
@@ -323,10 +371,98 @@ mod tests {
         let expanded = cache.expanded_account_keys(&transaction);
 
         assert_eq!(expanded.missing_lookup_table, None);
-        assert_eq!(expanded.keys.len(), 26);
+        assert_eq!(expanded.as_slice().len(), 26);
         assert_eq!(
-            expanded.keys.get(21).map(ToString::to_string).as_deref(),
+            expanded
+                .as_slice()
+                .get(21)
+                .map(ToString::to_string)
+                .as_deref(),
             Some("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
+        );
+    }
+
+    fn legacy_transaction_without_lookups() -> VersionedTransaction {
+        VersionedTransaction {
+            signatures: vec![],
+            message: VersionedMessage::Legacy(Message {
+                header: MessageHeader {
+                    num_required_signatures: 0,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                account_keys: vec![
+                    Pubkey::from_str("CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o").unwrap(),
+                    Pubkey::from_str("11111111111111111111111111111111").unwrap(),
+                ],
+                recent_blockhash: Hash::default(),
+                instructions: vec![],
+            }),
+        }
+    }
+
+    fn v0_transaction_without_lookup_entries() -> VersionedTransaction {
+        VersionedTransaction {
+            signatures: vec![],
+            message: VersionedMessage::V0(v0::Message {
+                header: MessageHeader {
+                    num_required_signatures: 0,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 0,
+                },
+                account_keys: vec![
+                    Pubkey::from_str("CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o").unwrap(),
+                    Pubkey::from_str("11111111111111111111111111111111").unwrap(),
+                ],
+                recent_blockhash: Hash::default(),
+                instructions: vec![],
+                address_table_lookups: vec![],
+            }),
+        }
+    }
+
+    fn assert_lookup_order(
+        transaction: &VersionedTransaction,
+        tables: &HashMap<Pubkey, Vec<Pubkey>>,
+        expanded_account_keys: &[Pubkey],
+    ) {
+        let static_len = transaction.message.static_account_keys().len();
+        let lookups = transaction
+            .message
+            .address_table_lookups()
+            .expect("fixture uses address table lookups");
+        let writable = lookups
+            .iter()
+            .flat_map(|lookup| {
+                let addresses = tables
+                    .get(&lookup.account_key)
+                    .expect("fixture lookup table is cached");
+                lookup
+                    .writable_indexes
+                    .iter()
+                    .map(|index| addresses[*index as usize])
+            })
+            .collect::<Vec<_>>();
+        let readonly = lookups
+            .iter()
+            .flat_map(|lookup| {
+                let addresses = tables
+                    .get(&lookup.account_key)
+                    .expect("fixture lookup table is cached");
+                lookup
+                    .readonly_indexes
+                    .iter()
+                    .map(|index| addresses[*index as usize])
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            &expanded_account_keys[static_len..static_len + writable.len()],
+            writable.as_slice()
+        );
+        assert_eq!(
+            &expanded_account_keys[static_len + writable.len()..],
+            readonly.as_slice()
         );
     }
 

@@ -1,16 +1,40 @@
 use crate::{
     event::ShadowSignalLine,
-    parser::{Action, ResolvedRouteAccountJson, Route, RouteContext},
+    parser::{
+        signature_bytes_to_string, signature_string_to_bytes, Action, ParsedTrade,
+        ResolvedRouteAccountJson, Route, RouteContext,
+    },
     tx_builder::{
         build_copy_unsigned_flashx_pump, build_full_copy_unsigned_flashx_pump,
         build_unsigned_flashx_pump, TxBuildError,
     },
 };
 use serde::Serialize;
+use solana_pubkey::Pubkey;
+use std::str::FromStr;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PlannerOptions {
     pub(crate) copy_sol_amount: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CopyRuntimeRequest {
+    pub(crate) observed_at_ms: u128,
+    pub(crate) planned_at_ms: u128,
+    pub(crate) target_wallet: Pubkey,
+    pub(crate) signature: [u8; 64],
+    pub(crate) slot: u64,
+    pub(crate) route: Route,
+    pub(crate) mint: Pubkey,
+    pub(crate) observed_action: Action,
+    pub(crate) observed_sol_amount: Option<f64>,
+    pub(crate) token_amount: Option<f64>,
+    pub(crate) account_key_count: usize,
+    pub(crate) planned_copy_sol_amount: Option<f64>,
+    pub(crate) allowed: bool,
+    pub(crate) reason: Option<&'static str>,
+    pub(crate) route_context: Option<RouteContext>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -186,6 +210,140 @@ pub(crate) fn execution_plan_line(
     }
 }
 
+impl CopyRuntimeRequest {
+    pub(crate) fn from_parsed_trade(
+        observed_at_ms: u128,
+        planned_at_ms: u128,
+        signature: [u8; 64],
+        slot: u64,
+        account_key_count: usize,
+        parsed: ParsedTrade,
+        options: PlannerOptions,
+    ) -> Self {
+        let ParsedTrade {
+            target_wallet,
+            action,
+            mint,
+            route,
+            sol_amount,
+            token_amount,
+            route_context,
+        } = parsed;
+        let decision = copy_runtime_decision(action, route, sol_amount, options);
+        Self {
+            observed_at_ms,
+            planned_at_ms,
+            target_wallet,
+            signature,
+            slot,
+            route,
+            mint,
+            observed_action: action,
+            observed_sol_amount: sol_amount,
+            token_amount,
+            account_key_count,
+            planned_copy_sol_amount: decision.spend_sol_amount,
+            allowed: decision.allowed,
+            reason: decision.reason,
+            route_context,
+        }
+    }
+
+    pub(crate) fn from_execution_plan(
+        execution_plan: &ExecutionPlanLine,
+        observed_action: Action,
+        observed_sol_amount: Option<f64>,
+    ) -> Self {
+        Self {
+            observed_at_ms: execution_plan.observed_at_ms,
+            planned_at_ms: execution_plan.planned_at_ms,
+            target_wallet: Pubkey::from_str(&execution_plan.target_wallet).unwrap_or_default(),
+            signature: signature_string_to_bytes(&execution_plan.signature),
+            slot: execution_plan.slot,
+            route: execution_plan.route,
+            mint: Pubkey::from_str(&execution_plan.mint).unwrap_or_default(),
+            observed_action,
+            observed_sol_amount,
+            token_amount: None,
+            account_key_count: 0,
+            planned_copy_sol_amount: execution_plan.spend_sol_amount,
+            allowed: execution_plan.allowed,
+            reason: execution_plan.reason,
+            route_context: execution_plan.route_context.clone(),
+        }
+    }
+
+    pub(crate) fn shadow_decision(&self) -> &'static str {
+        if self.observed_action == Action::Buy {
+            "wouldCopy"
+        } else {
+            "skip"
+        }
+    }
+
+    pub(crate) fn shadow_reason(&self) -> Option<&'static str> {
+        if self.observed_action == Action::Buy {
+            None
+        } else {
+            Some("shadow mode only copies buy actions")
+        }
+    }
+
+    pub(crate) fn execution_decision(&self) -> &'static str {
+        if self.allowed {
+            "wouldBuy"
+        } else {
+            "skip"
+        }
+    }
+
+    pub(crate) fn to_shadow_signal_line(&self, endpoint: String) -> ShadowSignalLine {
+        ShadowSignalLine {
+            schema: "copytrade.shadowSignal.v1",
+            observed_at_ms: self.observed_at_ms,
+            provider: "shredstream",
+            source: "jito-proxy",
+            endpoint,
+            target_wallet: self.target_wallet.to_string(),
+            action: self.observed_action,
+            mint: self.mint.to_string(),
+            signature: signature_bytes_to_string(self.signature),
+            slot: self.slot,
+            route: self.route,
+            sol_amount: self.observed_sol_amount,
+            token_amount: self.token_amount,
+            copyable: self.observed_action == Action::Buy,
+            decision: self.shadow_decision(),
+            reason: self.shadow_reason(),
+            account_key_count: self.account_key_count,
+            route_context: self.route_context.clone(),
+        }
+    }
+
+    pub(crate) fn to_execution_plan_line(&self, endpoint: String) -> ExecutionPlanLine {
+        ExecutionPlanLine {
+            schema: "copytrade.executionPlan.v1",
+            observed_at_ms: self.observed_at_ms,
+            planned_at_ms: self.planned_at_ms,
+            provider: "shredstream",
+            source: "jito-proxy",
+            endpoint,
+            target_wallet: self.target_wallet.to_string(),
+            signature: signature_bytes_to_string(self.signature),
+            slot: self.slot,
+            route: self.route,
+            mint: self.mint.to_string(),
+            shadow_action: self.observed_action,
+            shadow_decision: self.shadow_decision().to_string(),
+            allowed: self.allowed,
+            decision: self.execution_decision(),
+            spend_sol_amount: self.planned_copy_sol_amount,
+            reason: self.reason,
+            route_context: self.route_context.clone(),
+        }
+    }
+}
+
 struct PlanDecision {
     allowed: bool,
     spend_sol_amount: Option<f64>,
@@ -210,6 +368,32 @@ fn plan_decision(signal: &ShadowSignalLine, options: PlannerOptions) -> PlanDeci
     }
 
     let spend_sol_amount = options.copy_sol_amount.or(signal.sol_amount);
+    if !spend_sol_amount.is_some_and(|amount| amount.is_finite() && amount > 0.0) {
+        return skipped("missing positive SOL spend amount");
+    }
+
+    PlanDecision {
+        allowed: true,
+        spend_sol_amount,
+        reason: None,
+    }
+}
+
+fn copy_runtime_decision(
+    observed_action: Action,
+    route: Route,
+    observed_sol_amount: Option<f64>,
+    options: PlannerOptions,
+) -> PlanDecision {
+    if observed_action != Action::Buy {
+        return skipped("shadow signal is not copyable");
+    }
+
+    if route != Route::FlashxPump {
+        return skipped("route is not allowed for execution planning");
+    }
+
+    let spend_sol_amount = options.copy_sol_amount.or(observed_sol_amount);
     if !spend_sol_amount.is_some_and(|amount| amount.is_finite() && amount > 0.0) {
         return skipped("missing positive SOL spend amount");
     }
@@ -655,7 +839,10 @@ mod tests {
     use super::*;
     use crate::{
         event::shadow_signal_line,
-        parser::{parse_trade, static_account_keys, versioned_tx_signature_string},
+        parser::{
+            parse_trade, signature_string_to_bytes, static_account_keys,
+            versioned_tx_signature_string,
+        },
     };
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use solana_pubkey::Pubkey;
@@ -716,6 +903,18 @@ mod tests {
         )
     }
 
+    fn parsed_trade(action: Action) -> ParsedTrade {
+        ParsedTrade {
+            target_wallet: Pubkey::from_str(TARGET_WALLET).unwrap(),
+            action,
+            mint: Pubkey::from_str(LIVE_DIRECT_PUMP_MINT).unwrap(),
+            route: Route::FlashxPump,
+            sol_amount: (action == Action::Buy).then_some(0.00099),
+            token_amount: (action == Action::Sell).then_some(42.0),
+            route_context: None,
+        }
+    }
+
     #[test]
     fn buy_shadow_signal_becomes_allowed_execution_plan() {
         let plan = execution_plan_line(
@@ -738,6 +937,42 @@ mod tests {
     }
 
     #[test]
+    fn runtime_request_recreates_buy_reporting_lines() {
+        let parsed = parsed_trade(Action::Buy);
+        let endpoint = "http://127.0.0.1:9999".to_string();
+        let options = PlannerOptions {
+            copy_sol_amount: Some(0.0015),
+        };
+        let shadow_signal = shadow_signal_line(
+            123,
+            endpoint.clone(),
+            LIVE_DIRECT_PUMP_BUY_SIGNATURE.to_string(),
+            456,
+            14,
+            &parsed,
+        );
+        let execution_plan = execution_plan_line(&shadow_signal, 234, options);
+        let runtime_request = CopyRuntimeRequest::from_parsed_trade(
+            123,
+            234,
+            signature_string_to_bytes(LIVE_DIRECT_PUMP_BUY_SIGNATURE),
+            456,
+            14,
+            parsed,
+            options,
+        );
+
+        assert_eq!(
+            serde_json::to_value(runtime_request.to_shadow_signal_line(endpoint.clone())).unwrap(),
+            serde_json::to_value(shadow_signal).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(runtime_request.to_execution_plan_line(endpoint)).unwrap(),
+            serde_json::to_value(execution_plan).unwrap()
+        );
+    }
+
+    #[test]
     fn sell_shadow_signal_becomes_skipped_execution_plan() {
         let plan = execution_plan_line(
             &signal(Action::Sell, "abcPumpIsNotLowerpump", false),
@@ -754,6 +989,42 @@ mod tests {
         assert_eq!(value["shadowAction"], "sell");
         assert_eq!(value["reason"], "shadow signal is not copyable");
         assert!(value.get("spendSolAmount").is_none());
+    }
+
+    #[test]
+    fn runtime_request_recreates_sell_skip_reporting_lines() {
+        let parsed = parsed_trade(Action::Sell);
+        let endpoint = "http://127.0.0.1:9999".to_string();
+        let options = PlannerOptions {
+            copy_sol_amount: None,
+        };
+        let shadow_signal = shadow_signal_line(
+            123,
+            endpoint.clone(),
+            LIVE_DIRECT_PUMP_BUY_SIGNATURE.to_string(),
+            456,
+            14,
+            &parsed,
+        );
+        let execution_plan = execution_plan_line(&shadow_signal, 234, options);
+        let runtime_request = CopyRuntimeRequest::from_parsed_trade(
+            123,
+            234,
+            signature_string_to_bytes(LIVE_DIRECT_PUMP_BUY_SIGNATURE),
+            456,
+            14,
+            parsed,
+            options,
+        );
+
+        assert_eq!(
+            serde_json::to_value(runtime_request.to_shadow_signal_line(endpoint.clone())).unwrap(),
+            serde_json::to_value(shadow_signal).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(runtime_request.to_execution_plan_line(endpoint)).unwrap(),
+            serde_json::to_value(execution_plan).unwrap()
+        );
     }
 
     #[test]

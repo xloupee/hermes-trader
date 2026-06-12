@@ -160,6 +160,20 @@ pub(crate) struct ResolvedRouteAccountJson {
 }
 
 impl FlashxPumpRouteContext {
+    pub(crate) fn direct_pump_accounts(&self) -> Option<&DirectPumpAccounts> {
+        match &self.resolved_accounts {
+            FlashxPumpResolvedAccounts::DirectPump(accounts) => Some(accounts),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn migrated_amm_accounts(&self) -> Option<&MigratedAmmAccounts> {
+        match &self.resolved_accounts {
+            FlashxPumpResolvedAccounts::MigratedAmm(accounts) => Some(accounts),
+            _ => None,
+        }
+    }
+
     pub(crate) fn resolved_pubkey(&self, role: &'static str) -> Option<Pubkey> {
         self.resolved_accounts.resolved_pubkey(role)
     }
@@ -512,11 +526,31 @@ pub(crate) fn static_account_keys(versioned_tx: &VersionedTransaction) -> Vec<Pu
 }
 
 pub(crate) fn versioned_tx_signature_string(versioned_tx: &VersionedTransaction) -> String {
+    signature_bytes_to_string(versioned_tx_signature_bytes(versioned_tx))
+}
+
+pub(crate) fn versioned_tx_signature_bytes(versioned_tx: &VersionedTransaction) -> [u8; 64] {
     versioned_tx
         .signatures
         .first()
-        .map(ToString::to_string)
-        .unwrap_or_default()
+        .copied()
+        .map(<[u8; 64]>::from)
+        .unwrap_or([0u8; 64])
+}
+
+pub(crate) fn signature_bytes_to_string(signature: [u8; 64]) -> String {
+    bs58::encode(signature).into_string()
+}
+
+pub(crate) fn signature_string_to_bytes(signature: &str) -> [u8; 64] {
+    let mut bytes = [0u8; 64];
+    let Ok(decoded) = bs58::decode(signature).into_vec() else {
+        return bytes;
+    };
+    if decoded.len() == bytes.len() {
+        bytes.copy_from_slice(&decoded);
+    }
+    bytes
 }
 
 pub(crate) fn parse_action(data: &[u8]) -> Option<Action> {

@@ -1,13 +1,15 @@
 use crate::event::now_ms;
 use serde::Deserialize;
+use solana_hash::Hash;
 use std::{
+    str::FromStr,
     sync::{Arc, RwLock},
     time::Duration,
 };
 
 #[derive(Clone, Debug)]
 pub(crate) struct CachedBlockhash {
-    pub(crate) blockhash: String,
+    pub(crate) hash: Hash,
     pub(crate) last_valid_block_height: u64,
     pub(crate) fetched_at_ms: u128,
 }
@@ -35,7 +37,7 @@ pub(crate) fn spawn_blockhash_cache(
                     if stats {
                         eprintln!(
                             "refreshed blockhash {}; lastValidBlockHeight={}; fetchedAtMs={}",
-                            blockhash.blockhash,
+                            blockhash.hash,
                             blockhash.last_valid_block_height,
                             blockhash.fetched_at_ms
                         );
@@ -95,10 +97,19 @@ async fn fetch_latest_blockhash(
         .map(|result| result.value)
         .ok_or_else(|| "getLatestBlockhash result missing".to_string())?;
 
+    cached_blockhash_from_rpc(value, now_ms())
+}
+
+fn cached_blockhash_from_rpc(
+    value: RpcBlockhashValue,
+    fetched_at_ms: u128,
+) -> Result<CachedBlockhash, String> {
+    let hash = Hash::from_str(&value.blockhash)
+        .map_err(|error| format!("parse getLatestBlockhash blockhash: {error}"))?;
     Ok(CachedBlockhash {
-        blockhash: value.blockhash,
+        hash,
         last_valid_block_height: value.last_valid_block_height,
-        fetched_at_ms: now_ms(),
+        fetched_at_ms,
     })
 }
 
@@ -131,14 +142,46 @@ mod tests {
 
     #[test]
     fn cached_blockhash_records_warm_state_fields() {
+        let hash = Hash::default();
         let blockhash = CachedBlockhash {
-            blockhash: "abc".to_string(),
+            hash,
             last_valid_block_height: 123,
             fetched_at_ms: 456,
         };
 
-        assert_eq!(blockhash.blockhash, "abc");
+        assert_eq!(blockhash.hash, hash);
         assert_eq!(blockhash.last_valid_block_height, 123);
         assert_eq!(blockhash.fetched_at_ms, 456);
+    }
+
+    #[test]
+    fn rpc_blockhash_is_parsed_when_cache_refresh_builds_entry() {
+        let hash = Hash::default();
+        let blockhash = cached_blockhash_from_rpc(
+            RpcBlockhashValue {
+                blockhash: hash.to_string(),
+                last_valid_block_height: 123,
+            },
+            456,
+        )
+        .expect("valid RPC blockhash should refresh cache entry");
+
+        assert_eq!(blockhash.hash, hash);
+        assert_eq!(blockhash.last_valid_block_height, 123);
+        assert_eq!(blockhash.fetched_at_ms, 456);
+    }
+
+    #[test]
+    fn invalid_rpc_blockhash_fails_cache_refresh() {
+        let error = cached_blockhash_from_rpc(
+            RpcBlockhashValue {
+                blockhash: "not-a-blockhash".to_string(),
+                last_valid_block_height: 123,
+            },
+            456,
+        )
+        .expect_err("invalid RPC blockhash should not enter cache");
+
+        assert!(error.starts_with("parse getLatestBlockhash blockhash:"));
     }
 }

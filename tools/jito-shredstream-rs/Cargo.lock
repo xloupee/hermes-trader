@@ -1845,6 +1845,7 @@ dependencies = [
  "arc-swap",
  "base64 0.22.1",
  "bincode",
+ "bs58",
  "clap",
  "prost",
  "prost-types",

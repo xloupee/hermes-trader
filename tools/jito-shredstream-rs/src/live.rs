@@ -3,16 +3,16 @@ use crate::{
     balance_cache::WalletBalanceCache,
     blockhash::spawn_blockhash_cache,
     event::{
-        normalized_event, now_ms, print_json, shadow_signal_line, wallet_mention_schema,
+        normalized_event_from_raw, now_ms, print_json, wallet_mention_schema,
         NormalizedCopyTradeEvent, RejectionLine, ShadowSignalLine, WalletMentionLine,
     },
     executor::{CopyExecutionOutput, CopyExecutor, TrailingSellPlan},
     parser::{
-        classify_wallet_mention, parse_trade_for_mentioned_targets, versioned_tx_signature_string,
-        Action,
+        classify_wallet_mention, parse_trade_for_mentioned_targets, signature_bytes_to_string,
+        versioned_tx_signature_bytes, versioned_tx_signature_string, Action,
     },
     planner::{
-        copy_tx_plan_line, execution_plan_line, tx_build_plan_line, unsigned_tx_plan_line,
+        copy_tx_plan_line, tx_build_plan_line, unsigned_tx_plan_line, CopyRuntimeRequest,
         CopyTxPlanLine, CopyTxPlannerOptions, ExecutionPlanLine, PlannerOptions, TxBuildPlanLine,
         TxBuildPlannerOptions, UnsignedTxPlanLine, UnsignedTxPlannerOptions,
     },
@@ -36,7 +36,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, Mutex};
 
 struct TelegramRuntimeConfig {
     snapshot: TelegramSnapshotConfig,
@@ -199,7 +199,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
     let (copy_execution_tx, mut copy_execution_rx) = mpsc::unbounded_channel();
     let (copy_execution_request_tx, copy_execution_request_rx) =
         mpsc::channel(nonzero_capacity(options.copy_execution_queue_capacity));
-    spawn_copy_execution_worker(
+    spawn_copy_execution_workers(
         Arc::clone(&copy_executor),
         copy_execution_request_rx,
         copy_execution_tx.clone(),
@@ -316,9 +316,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                     continue;
                 }
 
-                let Some(signature_bytes) = versioned_tx_signature_bytes(&versioned_tx) else {
-                    continue;
-                };
+                let signature_bytes = versioned_tx_signature_bytes(&versioned_tx);
                 if !seen.insert(signature_bytes) {
                     continue;
                 }
@@ -332,7 +330,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                         eprintln!("missing address lookup table {missing_lookup_table}");
                     }
                 }
-                let account_keys = expanded_account_keys.keys;
+                let account_keys = expanded_account_keys.as_slice();
 
                 let route_parse_started_at = account_expand_finished_at;
                 match parse_trade_for_mentioned_targets(
@@ -378,48 +376,61 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 .duration_since(route_parse_started_at)
                                 .as_micros(),
                         };
-                        let signature = versioned_tx_signature_string(&versioned_tx);
-                        let shadow_signal = shadow_signal_line(
-                            trade_parsed_at_ms,
-                            options.endpoint.clone(),
-                            signature.clone(),
-                            slot_entry.slot,
-                            account_keys.len(),
-                            &parsed,
-                        );
+                        let signature = versioned_tx_signature_bytes(&versioned_tx);
+                        let target_wallet = parsed.target_wallet;
+                        let mint = parsed.mint;
+                        let observed_action = parsed.action;
+                        let observed_sol_amount = parsed.sol_amount;
+                        let token_amount = parsed.token_amount;
+                        let route = parsed.route;
                         if parsed.action == Action::Sell {
                             copy_executor.observe_direct_pump_sell_route_context(
-                                &shadow_signal.target_wallet,
-                                &shadow_signal.mint,
+                                &target_wallet.to_string(),
+                                &mint.to_string(),
                                 parsed.route_context.as_ref(),
                             );
                         }
                         let telegram_target_configs = telegram_runtime_guard
                             .as_ref()
                             .map(|runtime| {
-                                runtime
-                                    .snapshot
-                                    .target_configs(&shadow_signal.target_wallet)
+                                runtime.snapshot.target_configs_for_pubkey(&target_wallet)
                             })
                             .unwrap_or(&[]);
+                        let mut parsed_for_runtime = Some(parsed);
                         if telegram_target_configs.is_empty() {
-                            let execution_plan = execution_plan_line(
-                                &shadow_signal,
+                            let runtime_request = CopyRuntimeRequest::from_parsed_trade(
+                                trade_parsed_at_ms,
                                 now_ms(),
+                                signature,
+                                slot_entry.slot,
+                                account_keys.len(),
+                                parsed_for_runtime
+                                    .take()
+                                    .expect("parsed trade available for runtime request"),
                                 PlannerOptions {
                                     copy_sol_amount: options.copy_plan_sol_amount,
                                 },
                             );
-                            enqueue_copy_execution(
-                                &copy_execution_request_tx,
-                                execution_plan.clone(),
-                                parsed.action,
-                                parsed.sol_amount,
-                                timings,
-                                None,
-                                None,
-                            );
-                            if !options.fast_copy_send {
+                            if options.fast_copy_send {
+                                enqueue_copy_execution(
+                                    &copy_execution_request_tx,
+                                    runtime_request,
+                                    timings,
+                                    None,
+                                    None,
+                                );
+                            } else {
+                                let shadow_signal =
+                                    runtime_request.to_shadow_signal_line(options.endpoint.clone());
+                                let execution_plan = runtime_request
+                                    .to_execution_plan_line(options.endpoint.clone());
+                                enqueue_copy_execution(
+                                    &copy_execution_request_tx,
+                                    runtime_request,
+                                    timings,
+                                    None,
+                                    None,
+                                );
                                 write_plan_outputs(
                                     &mut shadow_signals,
                                     &mut execution_plans,
@@ -432,26 +443,54 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 )?;
                             }
                         } else {
-                            for telegram_target_config in telegram_target_configs {
-                                let execution_plan = execution_plan_line(
-                                    &shadow_signal,
+                            let telegram_target_config_count = telegram_target_configs.len();
+                            for (index, telegram_target_config) in
+                                telegram_target_configs.iter().enumerate()
+                            {
+                                let parsed_for_request =
+                                    if index + 1 == telegram_target_config_count {
+                                        parsed_for_runtime.take().expect(
+                                            "parsed trade available for final runtime request",
+                                        )
+                                    } else {
+                                        parsed_for_runtime
+                                            .as_ref()
+                                            .expect("parsed trade available for runtime request")
+                                            .clone()
+                                    };
+                                let runtime_request = CopyRuntimeRequest::from_parsed_trade(
+                                    trade_parsed_at_ms,
                                     now_ms(),
+                                    signature,
+                                    slot_entry.slot,
+                                    account_keys.len(),
+                                    parsed_for_request,
                                     PlannerOptions {
                                         copy_sol_amount: Some(
                                             telegram_target_config.copy_amount_sol,
                                         ),
                                     },
                                 );
-                                enqueue_copy_execution(
-                                    &copy_execution_request_tx,
-                                    execution_plan.clone(),
-                                    parsed.action,
-                                    parsed.sol_amount,
-                                    timings,
-                                    Some(telegram_target_config.copy_wallet.clone()),
-                                    telegram_target_config.trailing_sell.clone(),
-                                );
-                                if !options.fast_copy_send {
+                                if options.fast_copy_send {
+                                    enqueue_copy_execution(
+                                        &copy_execution_request_tx,
+                                        runtime_request,
+                                        timings,
+                                        Some(telegram_target_config.copy_wallet.clone()),
+                                        telegram_target_config.trailing_sell.clone(),
+                                    );
+                                } else {
+                                    let shadow_signal = runtime_request
+                                        .to_shadow_signal_line(options.endpoint.clone());
+                                    let execution_plan = runtime_request
+                                        .to_execution_plan_line(options.endpoint.clone());
+                                    enqueue_copy_execution(
+                                        &copy_execution_request_tx,
+                                        runtime_request,
+                                        timings,
+                                        Some(telegram_target_config.copy_wallet.clone()),
+                                        telegram_target_config.trailing_sell.clone(),
+                                    );
                                     write_plan_outputs(
                                         &mut shadow_signals,
                                         &mut execution_plans,
@@ -466,13 +505,18 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             }
                         }
 
-                        let event = normalized_event(
+                        let event = normalized_event_from_raw(
                             trade_parsed_at_ms,
                             options.endpoint.clone(),
-                            signature,
+                            signature_bytes_to_string(signature),
                             slot_entry.slot,
                             account_keys.len(),
-                            parsed,
+                            target_wallet,
+                            observed_action,
+                            mint,
+                            route,
+                            observed_sol_amount,
+                            token_amount,
                         );
                         enqueue_signal_side_effect(&signal_side_effect_tx, event, timings);
                         emitted += 1;
@@ -575,35 +619,43 @@ struct CopyExecutionWriter {
 }
 
 struct CopyExecutionRequest {
-    execution_plan: ExecutionPlanLine,
-    observed_action: crate::parser::Action,
-    observed_sol_amount: Option<f64>,
+    runtime_request: CopyRuntimeRequest,
     timings: SignalTimings,
     executor_enqueued_at: Instant,
     copy_wallet: Option<String>,
     trailing_sell_plan: Option<TrailingSellPlan>,
 }
 
-fn spawn_copy_execution_worker(
+fn spawn_copy_execution_workers(
     copy_executor: Arc<CopyExecutor>,
-    mut copy_execution_request_rx: mpsc::Receiver<CopyExecutionRequest>,
+    copy_execution_request_rx: mpsc::Receiver<CopyExecutionRequest>,
     copy_execution_tx: mpsc::UnboundedSender<CopyExecutionOutput>,
     concurrency: usize,
 ) {
-    tokio::spawn(async move {
-        let permits = Arc::new(Semaphore::new(nonzero_capacity(concurrency)));
-        while let Some(request) = copy_execution_request_rx.recv().await {
-            let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
-                break;
-            };
-            let copy_executor = Arc::clone(&copy_executor);
-            let copy_execution_tx = copy_execution_tx.clone();
-            tokio::spawn(async move {
-                let _permit = permit;
-                handle_copy_execution_request(copy_executor, request, copy_execution_tx).await;
-            });
-        }
-    });
+    let worker_count = nonzero_capacity(concurrency);
+    let copy_execution_request_rx = Arc::new(Mutex::new(copy_execution_request_rx));
+    for _ in 0..worker_count {
+        let copy_executor = Arc::clone(&copy_executor);
+        let copy_execution_request_rx = Arc::clone(&copy_execution_request_rx);
+        let copy_execution_tx = copy_execution_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                let request = {
+                    let mut copy_execution_request_rx = copy_execution_request_rx.lock().await;
+                    copy_execution_request_rx.recv().await
+                };
+                let Some(request) = request else {
+                    break;
+                };
+                handle_copy_execution_request(
+                    Arc::clone(&copy_executor),
+                    request,
+                    copy_execution_tx.clone(),
+                )
+                .await;
+            }
+        });
+    }
 }
 
 async fn handle_copy_execution_request(
@@ -613,9 +665,7 @@ async fn handle_copy_execution_request(
 ) {
     let copy_execution = copy_executor
         .handle_with_executor_enqueued_at(
-            &request.execution_plan,
-            request.observed_action,
-            request.observed_sol_amount,
+            &request.runtime_request,
             request.timings,
             request.executor_enqueued_at,
             request.copy_wallet,
@@ -629,8 +679,16 @@ async fn handle_copy_execution_request(
         && copy_executor.should_spawn_auto_sell_after_buy(&copy_execution))
     .then(|| copy_execution.clone());
     let target_sell_auto_sell_line = copy_executor
-        .should_spawn_auto_sell_on_target_sell(&request.execution_plan, request.observed_action)
+        .should_spawn_auto_sell_on_target_sell(&request.runtime_request)
         .then(|| copy_execution.clone());
+    let execution_plan = (rust_trailing_sell_line.is_some()
+        || auto_sell_line.is_some()
+        || target_sell_auto_sell_line.is_some())
+    .then(|| {
+        request
+            .runtime_request
+            .to_execution_plan_line(copy_executor.endpoint().to_string())
+    });
     if copy_execution_tx
         .send(CopyExecutionOutput::Copy(copy_execution))
         .is_err()
@@ -643,7 +701,10 @@ async fn handle_copy_execution_request(
     {
         let trailing_sell_executor = Arc::clone(&copy_executor);
         let trailing_sell_tx = copy_execution_tx.clone();
-        let execution_plan = request.execution_plan.clone();
+        let execution_plan = execution_plan
+            .as_ref()
+            .expect("execution plan exists for trailing sell")
+            .clone();
         tokio::spawn(async move {
             trailing_sell_executor
                 .handle_trailing_sell_results(
@@ -658,7 +719,10 @@ async fn handle_copy_execution_request(
     if let Some(auto_sell_line) = auto_sell_line {
         let auto_sell_executor = Arc::clone(&copy_executor);
         let auto_sell_tx = copy_execution_tx.clone();
-        let execution_plan = request.execution_plan.clone();
+        let execution_plan = execution_plan
+            .as_ref()
+            .expect("execution plan exists for auto-sell")
+            .clone();
         tokio::spawn(async move {
             let auto_sell_result = auto_sell_executor
                 .handle_auto_sell_result(auto_sell_line, &execution_plan)
@@ -674,7 +738,7 @@ async fn handle_copy_execution_request(
     if let Some(auto_sell_line) = target_sell_auto_sell_line {
         let auto_sell_executor = Arc::clone(&copy_executor);
         let auto_sell_tx = copy_execution_tx.clone();
-        let execution_plan = request.execution_plan;
+        let execution_plan = execution_plan.expect("execution plan exists for target auto-sell");
         tokio::spawn(async move {
             let auto_sell_result = auto_sell_executor
                 .handle_target_sell_auto_sell_result(auto_sell_line, &execution_plan)
@@ -691,26 +755,25 @@ async fn handle_copy_execution_request(
 
 fn enqueue_copy_execution(
     copy_execution_request_tx: &mpsc::Sender<CopyExecutionRequest>,
-    execution_plan: ExecutionPlanLine,
-    observed_action: crate::parser::Action,
-    observed_sol_amount: Option<f64>,
+    runtime_request: CopyRuntimeRequest,
     timings: SignalTimings,
     copy_wallet: Option<String>,
     trailing_sell_plan: Option<TrailingSellPlan>,
-) {
+) -> bool {
     if copy_execution_request_tx
         .try_send(CopyExecutionRequest {
-            execution_plan,
-            observed_action,
-            observed_sol_amount,
+            runtime_request,
             timings,
             executor_enqueued_at: Instant::now(),
             copy_wallet,
             trailing_sell_plan,
         })
-        .is_err()
+        .is_ok()
     {
+        true
+    } else {
         eprintln!("copy execution request dropped; worker closed or queue full");
+        false
     }
 }
 
@@ -1226,18 +1289,17 @@ fn mentioned_static_target_wallet_in_set(
         .map(ToString::to_string)
 }
 
-fn versioned_tx_signature_bytes(
-    versioned_tx: &solana_transaction::versioned::VersionedTransaction,
-) -> Option<[u8; 64]> {
-    versioned_tx
-        .signatures
-        .first()
-        .and_then(|signature| signature.as_ref().try_into().ok())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{mentioned_static_target_wallet_in_set, write_json_line, SeenSignatures};
+    use super::{
+        enqueue_copy_execution, mentioned_static_target_wallet_in_set, write_json_line,
+        SeenSignatures,
+    };
+    use crate::{
+        parser::{Action, Route},
+        planner::CopyRuntimeRequest,
+        signal::SignalTimings,
+    };
     use serde::Serialize;
     use solana_pubkey::Pubkey;
     use std::{
@@ -1247,6 +1309,7 @@ mod tests {
         path::PathBuf,
         str::FromStr,
     };
+    use tokio::sync::mpsc;
 
     #[test]
     fn seen_signatures_evicts_oldest_when_capacity_is_reached() {
@@ -1307,6 +1370,26 @@ mod tests {
     }
 
     #[test]
+    fn copy_execution_enqueue_drops_when_bounded_lane_is_full() {
+        let (tx, _rx) = mpsc::channel(1);
+
+        assert!(enqueue_copy_execution(
+            &tx,
+            sample_runtime_request(1),
+            sample_timings(),
+            None,
+            None,
+        ));
+        assert!(!enqueue_copy_execution(
+            &tx,
+            sample_runtime_request(2),
+            sample_timings(),
+            None,
+            None,
+        ));
+    }
+
+    #[test]
     fn static_target_wallet_match_uses_pubkeys_without_stringifying_all_accounts() {
         let target = Pubkey::from_str("CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o")
             .expect("valid target wallet");
@@ -1322,6 +1405,47 @@ mod tests {
             mentioned_static_target_wallet_in_set(&[other], &target_wallets),
             None
         );
+    }
+
+    fn sample_runtime_request(slot: u64) -> CopyRuntimeRequest {
+        CopyRuntimeRequest {
+            observed_at_ms: slot as u128,
+            planned_at_ms: slot as u128,
+            target_wallet: Pubkey::from_str("CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o")
+                .unwrap(),
+            signature: [slot as u8; 64],
+            slot,
+            route: Route::Pump,
+            mint: Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap(),
+            observed_action: Action::Buy,
+            observed_sol_amount: Some(0.001),
+            token_amount: None,
+            account_key_count: 1,
+            planned_copy_sol_amount: Some(0.001),
+            allowed: true,
+            reason: None,
+            route_context: None,
+        }
+    }
+
+    fn sample_timings() -> SignalTimings {
+        SignalTimings {
+            grpc_message_received_at_ms: 0,
+            entries_deserialized_at_ms: 0,
+            wallet_match_finished_at_ms: 0,
+            trade_parsed_at_ms: 0,
+            deserialize_us: 0,
+            wallet_match_finished_at_us: 0,
+            parse_us: 0,
+            local_detect_us: 0,
+            batch_transaction_count: 1,
+            matched_transaction_index: 0,
+            batch_scan_us: 0,
+            tx_parse_us: 0,
+            account_expand_us: 0,
+            wallet_match_us: 0,
+            route_parse_us: 0,
+        }
     }
 
     fn temp_path(file_name: &str) -> PathBuf {

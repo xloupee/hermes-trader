@@ -1,6 +1,7 @@
 use crate::parser::{Action, ParsedTrade, RouteContext, WalletMentionKind, SOL_MINT};
 use anyhow::Result;
 use serde::Serialize;
+use solana_pubkey::Pubkey;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Serialize)]
@@ -101,27 +102,55 @@ pub(crate) fn normalized_event(
     account_key_count: usize,
     parsed: ParsedTrade,
 ) -> NormalizedCopyTradeEvent {
-    let target_wallet = parsed.target_wallet.to_string();
-    let mint = parsed.mint.to_string();
-    let (input, output) = match parsed.action {
+    normalized_event_from_raw(
+        observed_at_ms,
+        endpoint,
+        signature,
+        slot,
+        account_key_count,
+        parsed.target_wallet,
+        parsed.action,
+        parsed.mint,
+        parsed.route,
+        parsed.sol_amount,
+        parsed.token_amount,
+    )
+}
+
+pub(crate) fn normalized_event_from_raw(
+    observed_at_ms: u128,
+    endpoint: String,
+    signature: String,
+    slot: u64,
+    account_key_count: usize,
+    target_wallet: Pubkey,
+    action: Action,
+    mint: Pubkey,
+    route: crate::parser::Route,
+    sol_amount: Option<f64>,
+    token_amount: Option<f64>,
+) -> NormalizedCopyTradeEvent {
+    let target_wallet = target_wallet.to_string();
+    let mint = mint.to_string();
+    let (input, output) = match action {
         Action::Buy => (
             NormalizedAsset {
                 mint: SOL_MINT.to_string(),
-                amount: parsed.sol_amount,
+                amount: sol_amount,
             },
             NormalizedAsset {
                 mint: mint.clone(),
-                amount: parsed.token_amount,
+                amount: token_amount,
             },
         ),
         Action::Sell => (
             NormalizedAsset {
                 mint: mint.clone(),
-                amount: parsed.token_amount,
+                amount: token_amount,
             },
             NormalizedAsset {
                 mint: SOL_MINT.to_string(),
-                amount: parsed.sol_amount,
+                amount: sol_amount,
             },
         ),
     };
@@ -133,16 +162,16 @@ pub(crate) fn normalized_event(
         source: "jito-proxy",
         endpoint,
         target_wallet,
-        action: parsed.action,
+        action,
         mint,
         signature,
         slot,
-        route: parsed.route,
-        sol_amount: parsed.sol_amount,
-        token_amount: parsed.token_amount,
+        route,
+        sol_amount,
+        token_amount,
         input,
         output,
-        copyable: matches!(parsed.action, Action::Buy),
+        copyable: matches!(action, Action::Buy),
         filters: vec!["jito-entry".to_string()],
         account_key_count,
     }

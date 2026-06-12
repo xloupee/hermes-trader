@@ -15,7 +15,7 @@ use std::{
 pub(crate) struct TelegramSnapshotConfig {
     sequence: u64,
     checksum: String,
-    targets: HashMap<String, Vec<TelegramTargetConfig>>,
+    targets: HashMap<Pubkey, Vec<TelegramTargetConfig>>,
 }
 
 #[derive(Clone, Debug)]
@@ -130,7 +130,7 @@ impl TelegramSnapshotConfig {
                 .map(str::trim)
                 .is_some_and(|value| !value.is_empty())
         });
-        let mut targets: HashMap<String, Vec<TelegramTargetConfig>> = HashMap::new();
+        let mut targets: HashMap<Pubkey, Vec<TelegramTargetConfig>> = HashMap::new();
         if !snapshot.routing.emergency_stopped {
             for subscriber in snapshot.subscribers {
                 if !has_snapshot_signer_refs {
@@ -173,9 +173,9 @@ impl TelegramSnapshotConfig {
                     .filter(|value| value.is_finite() && *value >= 0.0);
 
                 for wallet in subscriber.wallets {
-                    if Pubkey::from_str(&wallet.address).is_err() {
+                    let Ok(target_wallet) = Pubkey::from_str(&wallet.address) else {
                         continue;
-                    }
+                    };
                     let trailing_sell = wallet
                         .trailing_sell
                         .as_ref()
@@ -191,7 +191,7 @@ impl TelegramSnapshotConfig {
                             )
                         });
                     targets
-                        .entry(wallet.address)
+                        .entry(target_wallet)
                         .or_default()
                         .push(TelegramTargetConfig {
                             chat_id: chat_id.clone(),
@@ -220,12 +220,26 @@ impl TelegramSnapshotConfig {
     }
 
     pub(crate) fn target_wallets(&self) -> Vec<String> {
-        let mut wallets = self.targets.keys().cloned().collect::<Vec<_>>();
+        let mut wallets = self
+            .targets
+            .keys()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
         wallets.sort();
         wallets
     }
 
     pub(crate) fn target_configs(&self, target_wallet: &str) -> &[TelegramTargetConfig] {
+        let Ok(target_wallet) = Pubkey::from_str(target_wallet) else {
+            return &[];
+        };
+        self.target_configs_for_pubkey(&target_wallet)
+    }
+
+    pub(crate) fn target_configs_for_pubkey(
+        &self,
+        target_wallet: &Pubkey,
+    ) -> &[TelegramTargetConfig] {
         self.targets
             .get(target_wallet)
             .map(Vec::as_slice)

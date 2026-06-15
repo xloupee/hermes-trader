@@ -143,6 +143,7 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) isolate_buy_latency_test: bool,
     pub(crate) send_max_retries: u64,
     pub(crate) send_http_timeout_ms: u64,
+    pub(crate) send_lane_logging: bool,
     pub(crate) priority_fee_micro_lamports: Option<u64>,
     pub(crate) jito_tip_lamports: Option<u64>,
     pub(crate) jito_tip_account: Option<String>,
@@ -623,6 +624,7 @@ struct SendConfig {
     fast_copy_send: bool,
     max_retries: u64,
     http_timeout_ms: u64,
+    log_lanes: bool,
 }
 
 fn sign_copy_transaction(
@@ -788,6 +790,7 @@ impl CopyExecutor {
             isolate_buy_latency_test: options.isolate_buy_latency_test,
             send_max_retries: options.send_max_retries,
             send_http_timeout_ms: options.send_http_timeout_ms,
+            send_lane_logging: options.stats,
             priority_fee_micro_lamports: positive_u64(options.priority_fee_micro_lamports),
             jito_tip_lamports: positive_u64(options.jito_tip_lamports),
             jito_tip_account: options
@@ -3302,6 +3305,7 @@ impl CopyExecutionOutput {
     pub(crate) fn write_json_line(
         &self,
         writer: Option<&mut std::io::BufWriter<std::fs::File>>,
+        flush: bool,
     ) -> Result<()> {
         let Some(writer) = writer else {
             return Ok(());
@@ -3320,7 +3324,9 @@ impl CopyExecutionOutput {
             }
         }
         writer.write_all(b"\n")?;
-        writer.flush()?;
+        if flush {
+            writer.flush()?;
+        }
         Ok(())
     }
 }
@@ -3679,6 +3685,7 @@ impl CopyExecutionOptions {
             fast_copy_send: self.fast_copy_send,
             max_retries: self.send_max_retries,
             http_timeout_ms: self.send_http_timeout_ms,
+            log_lanes: self.send_lane_logging,
         }
     }
 
@@ -3995,10 +4002,12 @@ async fn send_transaction_attempt(
                 signature: Some(signature.clone()),
                 error: None,
             };
-            eprintln!(
-                "sendTransaction lane submitted: label={} kind={} durationMs={}",
-                attempt.label, attempt.kind, attempt.duration_ms
-            );
+            if config.log_lanes {
+                eprintln!(
+                    "sendTransaction lane submitted: label={} kind={} durationMs={}",
+                    attempt.label, attempt.kind, attempt.duration_ms
+                );
+            }
             SendAttemptOutcome {
                 attempt,
                 finished_at_ms: now_ms(),
@@ -4017,10 +4026,12 @@ async fn send_transaction_attempt(
                 signature: None,
                 error: Some(sanitized.clone()),
             };
-            eprintln!(
-                "sendTransaction lane failed: label={} kind={} durationMs={} error={}",
-                attempt.label, attempt.kind, attempt.duration_ms, sanitized
-            );
+            if config.log_lanes {
+                eprintln!(
+                    "sendTransaction lane failed: label={} kind={} durationMs={} error={}",
+                    attempt.label, attempt.kind, attempt.duration_ms, sanitized
+                );
+            }
             SendAttemptOutcome {
                 attempt,
                 finished_at_ms: now_ms(),
@@ -4255,6 +4266,7 @@ mod tests {
             isolate_buy_latency_test: false,
             send_max_retries: 3,
             send_http_timeout_ms: 0,
+            send_lane_logging: false,
             priority_fee_micro_lamports: None,
             jito_tip_lamports: None,
             jito_tip_account: None,
@@ -5835,8 +5847,68 @@ mod tests {
 
     #[test]
     fn send_lane_attribution_line_serializes_ack_attempts_without_causality_claim() {
+        let line = sample_send_lane_attribution_line();
+
+        let json = serde_json::to_value(&line).expect("attribution line serializes");
+
+        assert_eq!(
+            json.get("schema").and_then(serde_json::Value::as_str),
+            Some("copytrade.sendLaneAttribution.v1")
+        );
+        assert_eq!(
+            json.get("submissionGroupId")
+                .and_then(serde_json::Value::as_str),
+            Some("signed-tx-signature")
+        );
+        assert_eq!(
+            json.get("firstAckLane").and_then(serde_json::Value::as_str),
+            Some("rpc-primary:example.com")
+        );
+        assert!(json.get("landingLane").is_none());
+        assert_eq!(
+            json.pointer("/allAttempts/0/ackAt")
+                .and_then(serde_json::Value::as_u64),
+            Some(112)
+        );
+    }
+
+    #[test]
+    fn copy_execution_output_write_json_line_flushes_by_default() {
+        let path = temp_path("jito-copy-execution-flush-default.jsonl");
+        let file = std::fs::File::create(&path).expect("temp file creates");
+        let mut writer = std::io::BufWriter::new(file);
+        let line = CopyExecutionOutput::SendLaneAttribution(sample_send_lane_attribution_line());
+
+        line.write_json_line(Some(&mut writer), true)
+            .expect("line writes");
+
+        let contents = std::fs::read_to_string(&path).expect("flushed temp file reads");
+        std::fs::remove_file(&path).ok();
+        assert!(contents.contains("\"schema\":\"copytrade.sendLaneAttribution.v1\""));
+    }
+
+    #[test]
+    fn copy_execution_output_write_json_line_can_defer_flush() {
+        let path = temp_path("jito-copy-execution-flush-deferred.jsonl");
+        let file = std::fs::File::create(&path).expect("temp file creates");
+        let mut writer = std::io::BufWriter::new(file);
+        let line = CopyExecutionOutput::SendLaneAttribution(sample_send_lane_attribution_line());
+
+        line.write_json_line(Some(&mut writer), false)
+            .expect("line writes");
+
+        let contents_before_drop =
+            std::fs::read_to_string(&path).expect("unflushed temp file reads");
+        assert_eq!(contents_before_drop, "");
+        drop(writer);
+        let contents_after_drop = std::fs::read_to_string(&path).expect("dropped writer flushes");
+        std::fs::remove_file(&path).ok();
+        assert!(contents_after_drop.contains("\"schema\":\"copytrade.sendLaneAttribution.v1\""));
+    }
+
+    fn sample_send_lane_attribution_line() -> SendLaneAttributionLine {
         let plan = allowed_plan();
-        let line = SendLaneAttributionLine {
+        SendLaneAttributionLine {
             schema: "copytrade.sendLaneAttribution.v1",
             observed_at_ms: 100,
             attribution_at_ms: 125,
@@ -5861,28 +5933,16 @@ mod tests {
                 ack_at: Some(112),
                 error: None,
             }],
-        };
+        }
+    }
 
-        let json = serde_json::to_value(&line).expect("attribution line serializes");
-
-        assert_eq!(
-            json.get("schema").and_then(serde_json::Value::as_str),
-            Some("copytrade.sendLaneAttribution.v1")
-        );
-        assert_eq!(
-            json.get("submissionGroupId")
-                .and_then(serde_json::Value::as_str),
-            Some("signed-tx-signature")
-        );
-        assert_eq!(
-            json.get("firstAckLane").and_then(serde_json::Value::as_str),
-            Some("rpc-primary:example.com")
-        );
-        assert!(json.get("landingLane").is_none());
-        assert_eq!(
-            json.pointer("/allAttempts/0/ackAt")
-                .and_then(serde_json::Value::as_u64),
-            Some(112)
-        );
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "{}-{name}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ))
     }
 }

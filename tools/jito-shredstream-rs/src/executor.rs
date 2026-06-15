@@ -88,7 +88,7 @@ pub(crate) struct TrailingSellStep {
 pub(crate) struct CopyExecutor {
     options: CopyExecutionOptions,
     keypair: Option<Arc<Keypair>>,
-    keypairs: ArcSwap<HashMap<String, Arc<Keypair>>>,
+    keypairs: ArcSwap<HashMap<Pubkey, Arc<Keypair>>>,
     client: reqwest::Client,
     send_endpoints: Arc<Vec<SendEndpoint>>,
     blockhash_cache: Option<BlockhashCache>,
@@ -100,8 +100,8 @@ pub(crate) struct CopyExecutor {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct DirectPumpSellContextKey {
-    target_wallet: String,
-    mint: String,
+    target_wallet: Pubkey,
+    mint: Pubkey,
 }
 
 #[derive(Debug)]
@@ -740,7 +740,7 @@ impl CopyExecutor {
         blockhash_cache: Option<BlockhashCache>,
         address_lookup_tables: AddressLookupTableCache,
         wallet_balance_cache: Option<WalletBalanceCache>,
-        snapshot_keypair_paths: Vec<(String, PathBuf)>,
+        snapshot_keypair_paths: Vec<(Pubkey, PathBuf)>,
     ) -> Result<Self> {
         let execution_options = CopyExecutionOptions {
             endpoint: options.endpoint.clone(),
@@ -903,8 +903,8 @@ impl CopyExecutor {
     }
 
     pub(crate) fn load_snapshot_keypairs(
-        snapshot_keypair_paths: Vec<(String, PathBuf)>,
-    ) -> HashMap<String, Arc<Keypair>> {
+        snapshot_keypair_paths: Vec<(Pubkey, PathBuf)>,
+    ) -> HashMap<Pubkey, Arc<Keypair>> {
         let mut keypairs = HashMap::new();
         for (copy_wallet, path) in snapshot_keypair_paths {
             let keypair = match read_keypair_file(&path) {
@@ -919,7 +919,7 @@ impl CopyExecutor {
                     continue;
                 }
             };
-            if keypair.pubkey().to_string() != copy_wallet {
+            if keypair.pubkey() != copy_wallet {
                 eprintln!(
                     "snapshot copy keypair skipped for {} at {}: pubkey mismatch {}",
                     copy_wallet,
@@ -933,15 +933,20 @@ impl CopyExecutor {
         keypairs
     }
 
-    pub(crate) fn replace_snapshot_keypairs(&self, keypairs: HashMap<String, Arc<Keypair>>) {
+    pub(crate) fn replace_snapshot_keypairs(&self, keypairs: HashMap<Pubkey, Arc<Keypair>>) {
         self.keypairs.store(Arc::new(keypairs));
     }
 
     fn keypair_for_wallet(&self, copy_wallet: &str) -> Option<Arc<Keypair>> {
+        let copy_wallet = Pubkey::from_str(copy_wallet).ok()?;
+        self.keypair_for_pubkey(&copy_wallet)
+    }
+
+    fn keypair_for_pubkey(&self, copy_wallet: &Pubkey) -> Option<Arc<Keypair>> {
         self.keypairs.load().get(copy_wallet).cloned().or_else(|| {
             self.keypair
                 .as_ref()
-                .filter(|keypair| keypair.pubkey().to_string() == copy_wallet)
+                .filter(|keypair| keypair.pubkey() == *copy_wallet)
                 .cloned()
         })
     }
@@ -967,7 +972,7 @@ impl CopyExecutor {
         request: &CopyRuntimeRequest,
         timings: SignalTimings,
         executor_enqueued_at: Instant,
-        copy_wallet: Option<String>,
+        copy_wallet: Option<Pubkey>,
         send_lane_attribution_tx: Option<mpsc::UnboundedSender<CopyExecutionOutput>>,
     ) -> CopyExecutionLine {
         self.handle_inner(
@@ -985,13 +990,13 @@ impl CopyExecutor {
         request: &CopyRuntimeRequest,
         timings: SignalTimings,
         executor_enqueued_at: Option<Instant>,
-        copy_wallet_override: Option<String>,
+        copy_wallet_override: Option<Pubkey>,
         send_lane_attribution_tx: Option<mpsc::UnboundedSender<CopyExecutionOutput>>,
     ) -> CopyExecutionLine {
         let executor_started_at = Instant::now();
         let mut line = CopyExecutionLine::new(request, &self.options, timings);
         if let Some(copy_wallet) = copy_wallet_override.as_ref() {
-            line.copy_wallet = Some(copy_wallet.clone());
+            line.copy_wallet = Some(copy_wallet.to_string());
         }
         if let Some(executor_enqueued_at) = executor_enqueued_at {
             line.executor_queue_us = Some(
@@ -1062,13 +1067,21 @@ impl CopyExecutor {
             Err(reason) => skip_guard!(reason),
         }
 
-        let Some(copy_wallet) = copy_wallet_override
-            .as_deref()
-            .or(self.options.copy_wallet.as_deref())
-        else {
-            skip_guard!("missing copy wallet");
+        let copy_wallet_string;
+        let (copy_wallet, keypair) = if let Some(copy_wallet_pubkey) = copy_wallet_override.as_ref()
+        {
+            copy_wallet_string = copy_wallet_pubkey.to_string();
+            (
+                copy_wallet_string.as_str(),
+                self.keypair_for_pubkey(copy_wallet_pubkey),
+            )
+        } else {
+            let Some(copy_wallet) = self.options.copy_wallet.as_deref() else {
+                skip_guard!("missing copy wallet");
+            };
+            (copy_wallet, self.keypair_for_wallet(copy_wallet))
         };
-        let Some(keypair) = self.keypair_for_wallet(copy_wallet) else {
+        let Some(keypair) = keypair else {
             if self.keypair.is_none() && self.keypairs.load().is_empty() {
                 skip_guard!("missing copy keypair path");
             }
@@ -1298,8 +1311,8 @@ impl CopyExecutor {
 
     pub(crate) fn observe_direct_pump_sell_route_context(
         &self,
-        target_wallet: &str,
-        mint: &str,
+        target_wallet: &Pubkey,
+        mint: &Pubkey,
         route_context: Option<&RouteContext>,
     ) {
         if !self.options.auto_sell_after_buy_enabled()
@@ -2598,10 +2611,10 @@ impl DirectPumpSellContextCache {
         }
     }
 
-    fn insert(&mut self, target_wallet: &str, mint: &str, route_context: RouteContext) {
+    fn insert(&mut self, target_wallet: &Pubkey, mint: &Pubkey, route_context: RouteContext) {
         let key = DirectPumpSellContextKey {
-            target_wallet: target_wallet.to_string(),
-            mint: mint.to_string(),
+            target_wallet: *target_wallet,
+            mint: *mint,
         };
         if !self.entries.contains_key(&key) {
             self.order.push_back(key.clone());
@@ -2615,12 +2628,18 @@ impl DirectPumpSellContextCache {
         }
     }
 
-    fn get(&self, target_wallet: &str, mint: &str) -> Option<RouteContext> {
+    fn get(&self, target_wallet: &Pubkey, mint: &Pubkey) -> Option<RouteContext> {
         let key = DirectPumpSellContextKey {
-            target_wallet: target_wallet.to_string(),
-            mint: mint.to_string(),
+            target_wallet: *target_wallet,
+            mint: *mint,
         };
         self.entries.get(&key).cloned()
+    }
+
+    fn get_str(&self, target_wallet: &str, mint: &str) -> Option<RouteContext> {
+        let target_wallet = Pubkey::from_str(target_wallet).ok()?;
+        let mint = Pubkey::from_str(mint).ok()?;
+        self.get(&target_wallet, &mint)
     }
 }
 
@@ -2644,7 +2663,7 @@ fn auto_sell_route_context_for_plan(
         return Err("direct-pump sell-side route context cache unavailable");
     };
     cache
-        .get(&execution_plan.target_wallet, &execution_plan.mint)
+        .get_str(&execution_plan.target_wallet, &execution_plan.mint)
         .filter(is_direct_pump_sell_route_context)
         .ok_or("missing direct-pump sell-side route context")
 }
@@ -2696,7 +2715,7 @@ fn trailing_sell_route_context_for_plan(
         .direct_pump_sell_contexts
         .lock()
         .ok()
-        .and_then(|cache| cache.get(copy_wallet, &execution_plan.mint))
+        .and_then(|cache| cache.get_str(copy_wallet, &execution_plan.mint))
         .filter(is_direct_pump_sell_route_context);
 
     if let Some(route_context) = cached_sell_context {
@@ -4505,6 +4524,17 @@ mod tests {
         }
     }
 
+    fn write_temp_keypair_file(label: &str, keypair: &Keypair) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "jito-copy-keypair-{label}-{}-{}.json",
+            std::process::id(),
+            now_ms()
+        ));
+        let file = std::fs::File::create(&path).expect("create temp keypair");
+        serde_json::to_writer(file, &keypair.to_bytes().to_vec()).expect("write temp keypair");
+        path
+    }
+
     #[tokio::test]
     async fn cashback_sell_guard_detects_migrated_amm_cashback_from_route_context() {
         let executor = executor(disabled_options());
@@ -4742,6 +4772,27 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_keypairs_are_loaded_by_pubkey() {
+        let matching_keypair = Keypair::new();
+        let mismatched_keypair = Keypair::new();
+        let matching_path = write_temp_keypair_file("matching", &matching_keypair);
+        let mismatched_path = write_temp_keypair_file("mismatched", &mismatched_keypair);
+        let missing_wallet = Pubkey::new_unique();
+
+        let keypairs = CopyExecutor::load_snapshot_keypairs(vec![
+            (matching_keypair.pubkey(), matching_path.clone()),
+            (missing_wallet, mismatched_path.clone()),
+        ]);
+
+        assert_eq!(keypairs.len(), 1);
+        assert!(keypairs.contains_key(&matching_keypair.pubkey()));
+        assert!(!keypairs.contains_key(&missing_wallet));
+
+        let _ = std::fs::remove_file(matching_path);
+        let _ = std::fs::remove_file(mismatched_path);
+    }
+
+    #[test]
     fn direct_pump_auto_sell_uses_cached_sell_side_context() {
         let mut options = disabled_options();
         options.auto_sell_after_buy = true;
@@ -4755,11 +4806,9 @@ mod tests {
         );
 
         let sell_context = flashx_direct_sell_context();
-        executor.observe_direct_pump_sell_route_context(
-            &plan.target_wallet,
-            &plan.mint,
-            Some(&sell_context),
-        );
+        let target_wallet = Pubkey::from_str(&plan.target_wallet).unwrap();
+        let mint = Pubkey::from_str(&plan.mint).unwrap();
+        executor.observe_direct_pump_sell_route_context(&target_wallet, &mint, Some(&sell_context));
         let route_context =
             auto_sell_route_context_for_plan(&executor, &plan).expect("sell context should cache");
 
@@ -4804,11 +4853,9 @@ mod tests {
         );
 
         let sell_context = flashx_direct_sell_context();
-        executor.observe_direct_pump_sell_route_context(
-            &plan.target_wallet,
-            &plan.mint,
-            Some(&sell_context),
-        );
+        let target_wallet = Pubkey::from_str(&plan.target_wallet).unwrap();
+        let mint = Pubkey::from_str(&plan.mint).unwrap();
+        executor.observe_direct_pump_sell_route_context(&target_wallet, &mint, Some(&sell_context));
         assert_eq!(
             trailing_sell_route_context_for_plan(&executor, &plan, COPY_WALLET).unwrap_err(),
             MissingTrailingSellRouteContext {
@@ -4827,16 +4874,34 @@ mod tests {
         plan.route_context = Some(flashx_direct_sell_context());
 
         let sell_context = flashx_direct_sell_context();
-        executor.observe_direct_pump_sell_route_context(
-            COPY_WALLET,
-            &plan.mint,
-            Some(&sell_context),
-        );
+        let copy_wallet = Pubkey::from_str(COPY_WALLET).unwrap();
+        let mint = Pubkey::from_str(&plan.mint).unwrap();
+        executor.observe_direct_pump_sell_route_context(&copy_wallet, &mint, Some(&sell_context));
         let resolution = trailing_sell_route_context_for_plan(&executor, &plan, COPY_WALLET)
             .expect("rust trailing sell should use copy-wallet sell-side context");
 
         assert!(is_direct_pump_sell_route_context(&resolution.route_context));
         assert_eq!(resolution.source, "cached_copy_wallet");
+    }
+
+    #[test]
+    fn direct_pump_sell_context_cache_uses_pubkey_keys() {
+        let mut cache = DirectPumpSellContextCache::new(2);
+        let target_wallet = Pubkey::from_str(COPY_WALLET).unwrap();
+        let mint = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
+        let other_mint = Pubkey::new_unique();
+        let sell_context = flashx_direct_sell_context();
+
+        cache.insert(&target_wallet, &mint, sell_context.clone());
+
+        assert!(is_direct_pump_sell_route_context(
+            &cache.get(&target_wallet, &mint).expect("typed cache hit")
+        ));
+        assert!(cache.get(&target_wallet, &other_mint).is_none());
+        assert!(cache
+            .get_str(COPY_WALLET, "So11111111111111111111111111111111111111112")
+            .is_some());
+        assert!(cache.get_str("not-a-pubkey", &mint.to_string()).is_none());
     }
 
     #[test]

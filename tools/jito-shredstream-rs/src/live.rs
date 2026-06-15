@@ -385,8 +385,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                         let route = parsed.route;
                         if parsed.action == Action::Sell {
                             copy_executor.observe_direct_pump_sell_route_context(
-                                &target_wallet.to_string(),
-                                &mint.to_string(),
+                                &target_wallet,
+                                &mint,
                                 parsed.route_context.as_ref(),
                             );
                         }
@@ -476,7 +476,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                         &copy_execution_request_tx,
                                         runtime_request,
                                         timings,
-                                        Some(telegram_target_config.copy_wallet.clone()),
+                                        Some(telegram_target_config.copy_wallet),
                                         telegram_target_config.trailing_sell.clone(),
                                     );
                                 } else {
@@ -488,7 +488,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                         &copy_execution_request_tx,
                                         runtime_request,
                                         timings,
-                                        Some(telegram_target_config.copy_wallet.clone()),
+                                        Some(telegram_target_config.copy_wallet),
                                         telegram_target_config.trailing_sell.clone(),
                                     );
                                     write_plan_outputs(
@@ -622,7 +622,7 @@ struct CopyExecutionRequest {
     runtime_request: CopyRuntimeRequest,
     timings: SignalTimings,
     executor_enqueued_at: Instant,
-    copy_wallet: Option<String>,
+    copy_wallet: Option<Pubkey>,
     trailing_sell_plan: Option<TrailingSellPlan>,
 }
 
@@ -757,7 +757,7 @@ fn enqueue_copy_execution(
     copy_execution_request_tx: &mpsc::Sender<CopyExecutionRequest>,
     runtime_request: CopyRuntimeRequest,
     timings: SignalTimings,
-    copy_wallet: Option<String>,
+    copy_wallet: Option<Pubkey>,
     trailing_sell_plan: Option<TrailingSellPlan>,
 ) -> bool {
     if copy_execution_request_tx

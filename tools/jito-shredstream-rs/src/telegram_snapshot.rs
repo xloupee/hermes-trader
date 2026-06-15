@@ -21,7 +21,7 @@ pub(crate) struct TelegramSnapshotConfig {
 #[derive(Clone, Debug)]
 pub(crate) struct TelegramTargetConfig {
     pub(crate) chat_id: String,
-    pub(crate) copy_wallet: String,
+    pub(crate) copy_wallet: Pubkey,
     pub(crate) signer_keypair_path: Option<PathBuf>,
     pub(crate) copy_amount_sol: f64,
     pub(crate) trailing_sell: Option<TrailingSellPlan>,
@@ -143,10 +143,10 @@ impl TelegramSnapshotConfig {
                 if !subscriber.copy_amount_sol.is_finite() || subscriber.copy_amount_sol <= 0.0 {
                     continue;
                 }
-                let copy_wallet = subscriber.trading_wallet_public_key.trim().to_string();
-                if Pubkey::from_str(&copy_wallet).is_err() {
+                let copy_wallet = subscriber.trading_wallet_public_key.trim();
+                let Ok(copy_wallet_pubkey) = Pubkey::from_str(copy_wallet) else {
                     continue;
-                }
+                };
                 let signer_keypair_path = subscriber
                     .signer_keypair_path
                     .as_deref()
@@ -195,7 +195,7 @@ impl TelegramSnapshotConfig {
                         .or_default()
                         .push(TelegramTargetConfig {
                             chat_id: chat_id.clone(),
-                            copy_wallet: copy_wallet.clone(),
+                            copy_wallet: copy_wallet_pubkey,
                             signer_keypair_path: signer_keypair_path.clone(),
                             copy_amount_sol: subscriber.copy_amount_sol,
                             trailing_sell,
@@ -250,12 +250,12 @@ impl TelegramSnapshotConfig {
         self.targets.values().map(Vec::len).sum()
     }
 
-    pub(crate) fn signer_keypair_paths(&self) -> Vec<(String, PathBuf)> {
+    pub(crate) fn signer_keypair_paths(&self) -> Vec<(Pubkey, PathBuf)> {
         let mut paths = Vec::new();
         for configs in self.targets.values() {
             for config in configs {
                 if let Some(path) = &config.signer_keypair_path {
-                    paths.push((config.copy_wallet.clone(), path.clone()));
+                    paths.push((config.copy_wallet, path.clone()));
                 }
             }
         }
@@ -268,7 +268,7 @@ impl TelegramSnapshotConfig {
         let mut wallets = Vec::new();
         for configs in self.targets.values() {
             for config in configs {
-                wallets.push(config.copy_wallet.clone());
+                wallets.push(config.copy_wallet.to_string());
             }
         }
         wallets.sort();
@@ -480,21 +480,27 @@ mod tests {
         let configs = snapshot.target_configs(TARGET_A);
         assert_eq!(configs.len(), 2);
         assert_eq!(configs[0].chat_id, "chat-1");
-        assert_eq!(configs[0].copy_wallet, COPY_WALLET);
+        assert_eq!(
+            configs[0].copy_wallet,
+            Pubkey::from_str(COPY_WALLET).unwrap()
+        );
         assert_eq!(configs[0].copy_amount_sol, 0.0007);
         assert_eq!(configs[1].chat_id, "chat-2");
-        assert_eq!(configs[1].copy_wallet, OTHER_WALLET);
+        assert_eq!(
+            configs[1].copy_wallet,
+            Pubkey::from_str(OTHER_WALLET).unwrap()
+        );
         assert_eq!(configs[1].copy_amount_sol, 0.0009);
         assert_eq!(snapshot.active_profile_count(), 2);
         assert_eq!(
             snapshot.signer_keypair_paths(),
             vec![
                 (
-                    OTHER_WALLET.to_string(),
+                    Pubkey::from_str(OTHER_WALLET).unwrap(),
                     std::path::PathBuf::from(format!("/etc/jito-copy-wallets/{OTHER_WALLET}.json"))
                 ),
                 (
-                    COPY_WALLET.to_string(),
+                    Pubkey::from_str(COPY_WALLET).unwrap(),
                     std::path::PathBuf::from(format!("/etc/jito-copy-wallets/{COPY_WALLET}.json"))
                 )
             ]

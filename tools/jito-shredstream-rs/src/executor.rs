@@ -596,10 +596,17 @@ struct CashbackSellGuard {
     source: &'static str,
 }
 
+#[derive(Debug)]
 struct SignedCopyTransaction {
     transaction: VersionedTransaction,
     signature: String,
     tx_version: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TxVersionPreference {
+    PreferLegacyWhenSafe,
+    PreferV0WhenLookupsLoaded,
 }
 
 #[derive(Clone, Debug)]
@@ -623,26 +630,55 @@ fn sign_copy_transaction(
     keypair: &Keypair,
     blockhash: Hash,
     address_lookup_tables: &AddressLookupTableCache,
+    tx_version_preference: TxVersionPreference,
 ) -> std::result::Result<SignedCopyTransaction, String> {
     let table_accounts = address_lookup_tables.table_accounts();
-    if !table_accounts.is_empty() {
-        let message =
-            v0::Message::try_compile(&keypair.pubkey(), instructions, &table_accounts, blockhash)
-                .map_err(|error| format!("compile v0 message: {error}"))?;
-        let transaction = VersionedTransaction::try_new(VersionedMessage::V0(message), &[keypair])
-            .map_err(|error| format!("sign v0 transaction: {error}"))?;
-        let signature = transaction
-            .signatures
-            .first()
-            .map(ToString::to_string)
-            .ok_or_else(|| "missing v0 signature".to_string())?;
-        return Ok(SignedCopyTransaction {
-            transaction,
-            signature,
-            tx_version: "v0",
-        });
+    if tx_version_preference == TxVersionPreference::PreferLegacyWhenSafe {
+        match sign_legacy_copy_transaction(instructions, keypair, blockhash) {
+            Ok(transaction) => return Ok(transaction),
+            Err(error) if table_accounts.is_empty() => return Err(error),
+            Err(_) => {}
+        }
     }
 
+    if !table_accounts.is_empty() {
+        return sign_v0_copy_transaction(instructions, keypair, blockhash, table_accounts);
+    }
+
+    sign_legacy_copy_transaction(instructions, keypair, blockhash)
+}
+
+fn sign_v0_copy_transaction(
+    instructions: &[solana_instruction::Instruction],
+    keypair: &Keypair,
+    blockhash: Hash,
+    table_accounts: &[solana_message::AddressLookupTableAccount],
+) -> std::result::Result<SignedCopyTransaction, String> {
+    let message =
+        v0::Message::try_compile(&keypair.pubkey(), instructions, table_accounts, blockhash)
+            .map_err(|error| format!("compile v0 message: {error}"))?;
+    let transaction = VersionedTransaction::try_new(VersionedMessage::V0(message), &[keypair])
+        .map_err(|error| format!("sign v0 transaction: {error}"))?;
+    let signature = transaction
+        .signatures
+        .first()
+        .map(ToString::to_string)
+        .ok_or_else(|| "missing v0 signature".to_string())?;
+    Ok(SignedCopyTransaction {
+        transaction,
+        signature,
+        tx_version: "v0",
+    })
+}
+
+fn sign_legacy_copy_transaction(
+    instructions: &[solana_instruction::Instruction],
+    keypair: &Keypair,
+    blockhash: Hash,
+) -> std::result::Result<SignedCopyTransaction, String> {
+    if !legacy_message_account_count_fits(instructions, &keypair.pubkey()) {
+        return Err("legacy message account count exceeds limit".to_string());
+    }
     let legacy = Transaction::new_signed_with_payer(
         instructions,
         Some(&keypair.pubkey()),
@@ -659,6 +695,36 @@ fn sign_copy_transaction(
         signature,
         tx_version: "legacy",
     })
+}
+
+fn legacy_message_account_count_fits(
+    instructions: &[solana_instruction::Instruction],
+    payer: &Pubkey,
+) -> bool {
+    let mut account_keys = Vec::new();
+    account_keys.push(*payer);
+    for instruction in instructions {
+        if !account_keys.contains(&instruction.program_id) {
+            account_keys.push(instruction.program_id);
+        }
+        for account in &instruction.accounts {
+            if !account_keys.contains(&account.pubkey) {
+                account_keys.push(account.pubkey);
+            }
+        }
+        if account_keys.len() > 256 {
+            return false;
+        }
+    }
+    true
+}
+
+fn tx_version_preference_for_route_layout(route_layout: &str) -> TxVersionPreference {
+    if route_layout == "direct-pump" {
+        TxVersionPreference::PreferLegacyWhenSafe
+    } else {
+        TxVersionPreference::PreferV0WhenLookupsLoaded
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1100,6 +1166,7 @@ impl CopyExecutor {
             &keypair,
             blockhash,
             &self.address_lookup_tables,
+            tx_version_preference_for_route_layout(build.route_layout),
         ) {
             Ok(signed_tx) => signed_tx,
             Err(error) => {
@@ -4128,8 +4195,11 @@ mod tests {
     use super::*;
     use crate::parser::{
         DirectPumpAccounts, FlashxPumpLayout, FlashxPumpResolvedAccounts, MigratedAmmAccounts,
+        RouteInstructionAccount,
     };
     use crate::planner::{execution_plan_line, PlannerOptions};
+    use crate::tx_builder::TxFeeConfig;
+    use solana_message::AddressLookupTableAccount;
     use solana_pubkey::Pubkey;
 
     const COPY_WALLET: &str = "FqhpPL63symHForRGfxPbGi4wDpe5jQqAVjntbbBqA5W";
@@ -4311,13 +4381,61 @@ mod tests {
             }
         };
 
+        let accounts = match &resolved_accounts {
+            FlashxPumpResolvedAccounts::DirectPump(accounts) => {
+                direct_pump_route_accounts(accounts)
+            }
+            FlashxPumpResolvedAccounts::MigratedAmm(_) => Vec::new(),
+        };
+
         RouteContext::FlashxPump(crate::parser::FlashxPumpRouteContext {
             layout,
             program_id: flashx_router_program,
-            accounts: Vec::new(),
+            accounts,
             data,
             resolved_accounts,
         })
+    }
+
+    fn route_account(
+        pubkey: Pubkey,
+        is_writable: bool,
+        is_signer: bool,
+    ) -> RouteInstructionAccount {
+        RouteInstructionAccount {
+            pubkey,
+            is_writable,
+            is_signer,
+        }
+    }
+
+    fn direct_pump_route_accounts(accounts: &DirectPumpAccounts) -> Vec<RouteInstructionAccount> {
+        let readonly = |pubkey| route_account(pubkey, false, false);
+        let writable = |pubkey| route_account(pubkey, true, false);
+        let signer = |pubkey| route_account(pubkey, true, true);
+        let mut route_accounts = vec![
+            writable(accounts.user_token_account),
+            signer(accounts.target_wallet),
+            readonly(accounts.mint),
+            writable(accounts.fee_recipient),
+            readonly(accounts.flashx_router_program),
+            readonly(accounts.pump_program),
+            readonly(accounts.global_config),
+            writable(accounts.bonding_curve),
+            writable(accounts.associated_bonding_curve),
+            readonly(accounts.system_program),
+            readonly(accounts.token_program),
+            writable(accounts.creator_vault),
+            readonly(accounts.event_authority),
+            readonly(accounts.fee_config),
+            readonly(accounts.fee_program),
+            readonly(accounts.bonding_curve_v2),
+            writable(accounts.buyback_fee_recipient),
+        ];
+        if let Some(account) = accounts.buyback_fee_recipient_token_account {
+            route_accounts.push(writable(account));
+        }
+        route_accounts
     }
 
     fn flashx_direct_sell_context() -> RouteContext {
@@ -4359,6 +4477,24 @@ mod tests {
             direct_pump_sell_contexts: Mutex::new(DirectPumpSellContextCache::new(
                 DIRECT_PUMP_SELL_CONTEXT_CACHE_CAPACITY,
             )),
+        }
+    }
+
+    fn loaded_lookup_cache() -> AddressLookupTableCache {
+        AddressLookupTableCache::with_table_accounts_for_tests(vec![AddressLookupTableAccount {
+            key: Pubkey::new_unique(),
+            addresses: vec![Pubkey::new_unique(), Pubkey::new_unique()],
+        }])
+    }
+
+    fn sample_transfer_instruction(payer: &Pubkey) -> solana_instruction::Instruction {
+        solana_instruction::Instruction {
+            program_id: *system_program_id(),
+            accounts: vec![
+                solana_instruction::AccountMeta::new(*payer, true),
+                solana_instruction::AccountMeta::new(Pubkey::new_unique(), false),
+            ],
+            data: [2u32.to_le_bytes().to_vec(), 1u64.to_le_bytes().to_vec()].concat(),
         }
     }
 
@@ -4439,12 +4575,137 @@ mod tests {
             &keypair,
             cached_blockhash.hash,
             &AddressLookupTableCache::default(),
+            TxVersionPreference::PreferV0WhenLookupsLoaded,
         )
         .expect("typed cached blockhash should sign transaction");
 
         assert_eq!(signed_tx.tx_version, "legacy");
         assert!(!signed_tx.signature.is_empty());
         assert_eq!(expected_jsonl_blockhash, Hash::default().to_string());
+    }
+
+    #[test]
+    fn direct_pump_preference_signs_legacy_even_when_lookup_tables_are_loaded() {
+        let keypair = Keypair::new();
+        let lookup_cache = loaded_lookup_cache();
+
+        let signed_tx = sign_copy_transaction(
+            &[sample_transfer_instruction(&keypair.pubkey())],
+            &keypair,
+            Hash::default(),
+            &lookup_cache,
+            TxVersionPreference::PreferLegacyWhenSafe,
+        )
+        .expect("direct-pump sized transaction should sign as legacy");
+
+        assert_eq!(signed_tx.tx_version, "legacy");
+        assert!(matches!(
+            signed_tx.transaction.message,
+            VersionedMessage::Legacy(_)
+        ));
+        assert!(!signed_tx.signature.is_empty());
+    }
+
+    #[test]
+    fn migrated_preference_keeps_v0_when_lookup_tables_are_loaded() {
+        let keypair = Keypair::new();
+        let lookup_cache = loaded_lookup_cache();
+
+        let signed_tx = sign_copy_transaction(
+            &[sample_transfer_instruction(&keypair.pubkey())],
+            &keypair,
+            Hash::default(),
+            &lookup_cache,
+            TxVersionPreference::PreferV0WhenLookupsLoaded,
+        )
+        .expect("lookup-backed migrated transaction should sign as v0");
+
+        assert_eq!(signed_tx.tx_version, "v0");
+        assert!(matches!(
+            signed_tx.transaction.message,
+            VersionedMessage::V0(_)
+        ));
+        assert!(!signed_tx.signature.is_empty());
+    }
+
+    #[test]
+    fn direct_pump_full_copy_build_signs_legacy_even_when_lookup_tables_are_loaded() {
+        let keypair = Keypair::new();
+        let copy_wallet = keypair.pubkey().to_string();
+        let route_context = flashx_context(FlashxPumpLayout::DirectPump, 1);
+        let fee_config = TxFeeConfig {
+            compute_unit_price_micro_lamports: Some(250_000),
+            jito_tip_lamports: Some(10_000),
+            jito_tip_account: Some(Pubkey::new_unique().to_string()),
+            helius_sender_tip_lamports: None,
+            helius_sender_tip_account: None,
+        };
+        let build = crate::tx_builder::build_full_copy_unsigned_flashx_pump_with_fees_and_cache(
+            Some(&route_context),
+            &copy_wallet,
+            COPY_WALLET,
+            &fee_config,
+            None,
+        )
+        .expect("direct-Pump full copy build should succeed");
+        assert_eq!(build.route_layout, "direct-pump");
+        assert!(build.instructions.len() > 1);
+
+        let signed_tx = sign_copy_transaction(
+            &build.instructions,
+            &keypair,
+            Hash::default(),
+            &loaded_lookup_cache(),
+            tx_version_preference_for_route_layout(build.route_layout),
+        )
+        .expect("full direct-Pump copy build should sign");
+
+        assert_eq!(signed_tx.tx_version, "legacy");
+        assert!(matches!(
+            signed_tx.transaction.message,
+            VersionedMessage::Legacy(_)
+        ));
+    }
+
+    #[test]
+    fn direct_pump_legacy_preference_fails_safe_when_account_set_is_too_large() {
+        let keypair = Keypair::new();
+        let lookup_cache = loaded_lookup_cache();
+        let mut accounts = Vec::new();
+        for _ in 0..260 {
+            accounts.push(solana_instruction::AccountMeta::new_readonly(
+                Pubkey::new_unique(),
+                false,
+            ));
+        }
+        let instruction = solana_instruction::Instruction {
+            program_id: Pubkey::new_unique(),
+            accounts,
+            data: Vec::new(),
+        };
+
+        let error = sign_copy_transaction(
+            &[instruction],
+            &keypair,
+            Hash::default(),
+            &lookup_cache,
+            TxVersionPreference::PreferLegacyWhenSafe,
+        )
+        .expect_err("oversized account set should fail closed");
+
+        assert!(error.contains("compile v0 message"));
+    }
+
+    #[test]
+    fn route_layout_selects_legacy_preference_only_for_direct_pump() {
+        assert_eq!(
+            tx_version_preference_for_route_layout("direct-pump"),
+            TxVersionPreference::PreferLegacyWhenSafe
+        );
+        assert_eq!(
+            tx_version_preference_for_route_layout("migrated-amm"),
+            TxVersionPreference::PreferV0WhenLookupsLoaded
+        );
     }
 
     #[test]

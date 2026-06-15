@@ -116,6 +116,16 @@ impl AddressLookupTableCache {
     pub(crate) fn table_accounts(&self) -> &[AddressLookupTableAccount] {
         &self.table_accounts
     }
+
+    #[cfg(test)]
+    pub(crate) fn with_table_accounts_for_tests(
+        table_accounts: Vec<AddressLookupTableAccount>,
+    ) -> Self {
+        Self {
+            tables: HashMap::new(),
+            table_accounts,
+        }
+    }
 }
 
 #[derive(Debug)]

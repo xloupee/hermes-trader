@@ -4344,6 +4344,7 @@ mod tests {
                     bonding_curve_v2: dummy,
                     buyback_fee_recipient: dummy,
                     buyback_fee_recipient_token_account: None,
+                    router_amount: Some(990_000),
                 })
             }
             FlashxPumpLayout::MigratedAmm => {
@@ -4391,8 +4392,8 @@ mod tests {
         RouteContext::FlashxPump(crate::parser::FlashxPumpRouteContext {
             layout,
             program_id: flashx_router_program,
-            accounts,
-            data,
+            accounts: accounts.into(),
+            data: data.into(),
             resolved_accounts,
         })
     }
@@ -4445,8 +4446,14 @@ mod tests {
     fn flashx_direct_sell_context_with_amount(amount: u64) -> RouteContext {
         let mut route_context = flashx_context(FlashxPumpLayout::DirectPump, 1);
         let RouteContext::FlashxPump(context) = &mut route_context;
-        context.data[1..9].copy_from_slice(&amount.to_le_bytes());
-        context.data[17] = 1;
+        let data = std::sync::Arc::make_mut(&mut context.data);
+        data[1..9].copy_from_slice(&amount.to_le_bytes());
+        data[17] = 1;
+        let FlashxPumpResolvedAccounts::DirectPump(accounts) = &mut context.resolved_accounts
+        else {
+            panic!("fixture should be direct Pump");
+        };
+        accounts.router_amount = Some(amount);
         route_context
     }
 

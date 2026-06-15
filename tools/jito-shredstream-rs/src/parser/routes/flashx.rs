@@ -166,8 +166,9 @@ pub(crate) fn route_context(
                 return Some(RouteContext::FlashxPump(FlashxPumpRouteContext {
                     layout: FlashxPumpLayout::MigratedAmm,
                     program_id: *flashx_router_program_id(),
-                    accounts: route_instruction_accounts(message, instruction, account_keys)?,
-                    data: instruction.data.clone(),
+                    accounts: route_instruction_accounts(message, instruction, account_keys)?
+                        .into(),
+                    data: instruction.data.as_slice().into(),
                     resolved_accounts: migrated_amm_resolved_accounts(&accounts, account_keys)?,
                 }));
             }
@@ -176,9 +177,14 @@ pub(crate) fn route_context(
                 return Some(RouteContext::FlashxPump(FlashxPumpRouteContext {
                     layout: FlashxPumpLayout::DirectPump,
                     program_id: *flashx_router_program_id(),
-                    accounts: route_instruction_accounts(message, instruction, account_keys)?,
-                    data: instruction.data.clone(),
-                    resolved_accounts: direct_pump_buy_resolved_accounts(&accounts, account_keys)?,
+                    accounts: route_instruction_accounts(message, instruction, account_keys)?
+                        .into(),
+                    data: instruction.data.as_slice().into(),
+                    resolved_accounts: direct_pump_buy_resolved_accounts(
+                        &accounts,
+                        account_keys,
+                        &instruction.data,
+                    )?,
                 }));
             }
         }
@@ -187,9 +193,14 @@ pub(crate) fn route_context(
                 return Some(RouteContext::FlashxPump(FlashxPumpRouteContext {
                     layout: FlashxPumpLayout::DirectPump,
                     program_id: *flashx_router_program_id(),
-                    accounts: route_instruction_accounts(message, instruction, account_keys)?,
-                    data: instruction.data.clone(),
-                    resolved_accounts: direct_pump_sell_resolved_accounts(&accounts, account_keys)?,
+                    accounts: route_instruction_accounts(message, instruction, account_keys)?
+                        .into(),
+                    data: instruction.data.as_slice().into(),
+                    resolved_accounts: direct_pump_sell_resolved_accounts(
+                        &accounts,
+                        account_keys,
+                        &instruction.data,
+                    )?,
                 }));
             }
         }
@@ -382,6 +393,7 @@ fn migrated_amm_suffix_accounts(
 fn direct_pump_buy_resolved_accounts(
     accounts: &[u8],
     account_keys: &[Pubkey],
+    data: &[u8],
 ) -> Option<FlashxPumpResolvedAccounts> {
     Some(FlashxPumpResolvedAccounts::DirectPump(DirectPumpAccounts {
         payer: *account_key_at(accounts, account_keys, 0)?,
@@ -407,12 +419,14 @@ fn direct_pump_buy_resolved_accounts(
         buyback_fee_recipient_token_account: account_key_at(accounts, account_keys, 27)
             .filter(|account| *account != flashx_router_program_id())
             .copied(),
+        router_amount: read_u64_le(data, 1),
     }))
 }
 
 fn direct_pump_sell_resolved_accounts(
     accounts: &[u8],
     account_keys: &[Pubkey],
+    data: &[u8],
 ) -> Option<FlashxPumpResolvedAccounts> {
     Some(FlashxPumpResolvedAccounts::DirectPump(DirectPumpAccounts {
         payer: *account_key_at(accounts, account_keys, 1)?,
@@ -438,6 +452,7 @@ fn direct_pump_sell_resolved_accounts(
         buyback_fee_recipient_token_account: account_key_at(accounts, account_keys, 24)
             .filter(|account| *account != flashx_router_program_id())
             .copied(),
+        router_amount: read_u64_le(data, 1),
     }))
 }
 
@@ -554,6 +569,13 @@ mod tests {
             .as_ref()
             .expect("live direct Pump sell should resolve route context");
         assert_eq!(context.layout, FlashxPumpLayout::DirectPump);
+        assert_eq!(
+            context
+                .direct_pump_accounts()
+                .expect("direct Pump accounts")
+                .router_amount,
+            Some(34_970_684_247)
+        );
         assert_eq!(
             context
                 .resolved_pubkey("mint")

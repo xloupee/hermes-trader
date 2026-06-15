@@ -126,7 +126,7 @@ pub(crate) fn build_unsigned_flashx_pump(
         instructions: vec![Instruction {
             program_id: context.program_id,
             accounts,
-            data: context.data.clone(),
+            data: context.data.to_vec(),
         }],
     })
 }
@@ -306,6 +306,7 @@ fn build_copy_unsigned_flashx_direct_pump(
         user_volume_accumulator_address_cached(pda_cache, &copy_wallet, &pump_program);
 
     let spendable_sol_in = copy_spend_lamports
+        .or(direct_accounts.router_amount)
         .or_else(|| read_u64_le(&context.data, 1))
         .ok_or(TxBuildError::InvalidInstruction(
             "missing flashx SOL amount",
@@ -416,7 +417,7 @@ fn build_copy_unsigned_flashx_migrated_amm(
         data: setup_data,
     };
 
-    let mut route_data = context.data.clone();
+    let mut route_data = context.data.to_vec();
     rewrite_flashx_migrated_amounts(&mut route_data, spendable_sol_in)?;
 
     let route_accounts = context
@@ -1283,6 +1284,30 @@ mod tests {
         let account_keys = live_direct_pump_buy_hydrated_account_keys(&transaction);
         let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
             .expect("live direct Pump FLASHX buy should parse");
+        let cloned_context = parsed
+            .route_context
+            .clone()
+            .expect("direct Pump route context");
+        let RouteContext::FlashxPump(original_context) = parsed
+            .route_context
+            .as_ref()
+            .expect("direct Pump route context");
+        let RouteContext::FlashxPump(cloned_context) = &cloned_context;
+        assert!(std::sync::Arc::ptr_eq(
+            &original_context.accounts,
+            &cloned_context.accounts
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &original_context.data,
+            &cloned_context.data
+        ));
+        assert_eq!(
+            original_context
+                .direct_pump_accounts()
+                .expect("direct Pump accounts")
+                .router_amount,
+            Some(990_000)
+        );
 
         let build = build_copy_unsigned_flashx_pump(
             parsed.route_context.as_ref(),
@@ -2328,8 +2353,9 @@ mod tests {
                 route_account("EYyZtDHLiBnLLw9u4z7uLrUoom3ZkrZugmhmqw48mNh6", false, false),
                 route_account("5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD", true, false),
                 route_account("5eHhjP8JaYkz83CWwvGU2uMUXefd3AazWGx4gpcuEEYD", true, false),
-            ],
-            data,
+            ]
+            .into(),
+            data: data.into(),
             resolved_accounts: crate::parser::FlashxPumpResolvedAccounts::DirectPump(
                 crate::parser::DirectPumpAccounts {
                     payer: pubkey(TARGET_WALLET),
@@ -2357,6 +2383,7 @@ mod tests {
                     buyback_fee_recipient_token_account: Some(pubkey(
                         "5eHhjP8JaYkz83CWwvGU2uMUXefd3AazWGx4gpcuEEYD",
                     )),
+                    router_amount: Some(34_968_346_045),
                 },
             ),
         })

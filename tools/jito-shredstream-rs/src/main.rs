@@ -239,6 +239,14 @@ pub(crate) struct LiveOptions {
     #[arg(long, env = "JITO_COPY_EXECUTIONS_PATH")]
     pub(crate) copy_executions_path: Option<PathBuf>,
 
+    #[arg(
+        long,
+        env = "JITO_COPY_EXECUTIONS_FLUSH_EACH_WRITE",
+        default_value_t = true,
+        value_parser = parse_boolish
+    )]
+    pub(crate) copy_executions_flush_each_write: bool,
+
     #[arg(long, env = "JITO_COPY_EXECUTION_CONCURRENCY", default_value_t = 4)]
     pub(crate) copy_execution_concurrency: usize,
 

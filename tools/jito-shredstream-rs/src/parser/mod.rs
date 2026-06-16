@@ -2,7 +2,11 @@ use serde::Serialize;
 use solana_message::{compiled_instruction::CompiledInstruction, VersionedMessage};
 use solana_pubkey::Pubkey;
 use solana_transaction::versioned::VersionedTransaction;
-use std::{collections::HashSet, str::FromStr, sync::OnceLock};
+use std::{
+    collections::HashSet,
+    str::FromStr,
+    sync::{Arc, OnceLock},
+};
 
 pub(crate) mod routes;
 
@@ -55,8 +59,8 @@ pub(crate) enum RouteContext {
 pub(crate) struct FlashxPumpRouteContext {
     pub(crate) layout: FlashxPumpLayout,
     pub(crate) program_id: Pubkey,
-    pub(crate) accounts: Vec<RouteInstructionAccount>,
-    pub(crate) data: Vec<u8>,
+    pub(crate) accounts: Arc<[RouteInstructionAccount]>,
+    pub(crate) data: Arc<[u8]>,
     pub(crate) resolved_accounts: FlashxPumpResolvedAccounts,
 }
 
@@ -122,6 +126,7 @@ pub(crate) struct DirectPumpAccounts {
     pub(crate) bonding_curve_v2: Pubkey,
     pub(crate) buyback_fee_recipient: Pubkey,
     pub(crate) buyback_fee_recipient_token_account: Option<Pubkey>,
+    pub(crate) router_amount: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

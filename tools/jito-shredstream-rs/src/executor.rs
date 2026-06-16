@@ -88,7 +88,7 @@ pub(crate) struct TrailingSellStep {
 pub(crate) struct CopyExecutor {
     options: CopyExecutionOptions,
     keypair: Option<Arc<Keypair>>,
-    keypairs: ArcSwap<HashMap<String, Arc<Keypair>>>,
+    keypairs: ArcSwap<HashMap<Pubkey, Arc<Keypair>>>,
     client: reqwest::Client,
     send_endpoints: Arc<Vec<SendEndpoint>>,
     blockhash_cache: Option<BlockhashCache>,
@@ -100,8 +100,8 @@ pub(crate) struct CopyExecutor {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct DirectPumpSellContextKey {
-    target_wallet: String,
-    mint: String,
+    target_wallet: Pubkey,
+    mint: Pubkey,
 }
 
 #[derive(Debug)]
@@ -143,6 +143,7 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) isolate_buy_latency_test: bool,
     pub(crate) send_max_retries: u64,
     pub(crate) send_http_timeout_ms: u64,
+    pub(crate) send_lane_logging: bool,
     pub(crate) priority_fee_micro_lamports: Option<u64>,
     pub(crate) jito_tip_lamports: Option<u64>,
     pub(crate) jito_tip_account: Option<String>,
@@ -596,10 +597,17 @@ struct CashbackSellGuard {
     source: &'static str,
 }
 
+#[derive(Debug)]
 struct SignedCopyTransaction {
     transaction: VersionedTransaction,
     signature: String,
     tx_version: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TxVersionPreference {
+    PreferLegacyWhenSafe,
+    PreferV0WhenLookupsLoaded,
 }
 
 #[derive(Clone, Debug)]
@@ -616,6 +624,7 @@ struct SendConfig {
     fast_copy_send: bool,
     max_retries: u64,
     http_timeout_ms: u64,
+    log_lanes: bool,
 }
 
 fn sign_copy_transaction(
@@ -623,26 +632,55 @@ fn sign_copy_transaction(
     keypair: &Keypair,
     blockhash: Hash,
     address_lookup_tables: &AddressLookupTableCache,
+    tx_version_preference: TxVersionPreference,
 ) -> std::result::Result<SignedCopyTransaction, String> {
     let table_accounts = address_lookup_tables.table_accounts();
-    if !table_accounts.is_empty() {
-        let message =
-            v0::Message::try_compile(&keypair.pubkey(), instructions, &table_accounts, blockhash)
-                .map_err(|error| format!("compile v0 message: {error}"))?;
-        let transaction = VersionedTransaction::try_new(VersionedMessage::V0(message), &[keypair])
-            .map_err(|error| format!("sign v0 transaction: {error}"))?;
-        let signature = transaction
-            .signatures
-            .first()
-            .map(ToString::to_string)
-            .ok_or_else(|| "missing v0 signature".to_string())?;
-        return Ok(SignedCopyTransaction {
-            transaction,
-            signature,
-            tx_version: "v0",
-        });
+    if tx_version_preference == TxVersionPreference::PreferLegacyWhenSafe {
+        match sign_legacy_copy_transaction(instructions, keypair, blockhash) {
+            Ok(transaction) => return Ok(transaction),
+            Err(error) if table_accounts.is_empty() => return Err(error),
+            Err(_) => {}
+        }
     }
 
+    if !table_accounts.is_empty() {
+        return sign_v0_copy_transaction(instructions, keypair, blockhash, table_accounts);
+    }
+
+    sign_legacy_copy_transaction(instructions, keypair, blockhash)
+}
+
+fn sign_v0_copy_transaction(
+    instructions: &[solana_instruction::Instruction],
+    keypair: &Keypair,
+    blockhash: Hash,
+    table_accounts: &[solana_message::AddressLookupTableAccount],
+) -> std::result::Result<SignedCopyTransaction, String> {
+    let message =
+        v0::Message::try_compile(&keypair.pubkey(), instructions, table_accounts, blockhash)
+            .map_err(|error| format!("compile v0 message: {error}"))?;
+    let transaction = VersionedTransaction::try_new(VersionedMessage::V0(message), &[keypair])
+        .map_err(|error| format!("sign v0 transaction: {error}"))?;
+    let signature = transaction
+        .signatures
+        .first()
+        .map(ToString::to_string)
+        .ok_or_else(|| "missing v0 signature".to_string())?;
+    Ok(SignedCopyTransaction {
+        transaction,
+        signature,
+        tx_version: "v0",
+    })
+}
+
+fn sign_legacy_copy_transaction(
+    instructions: &[solana_instruction::Instruction],
+    keypair: &Keypair,
+    blockhash: Hash,
+) -> std::result::Result<SignedCopyTransaction, String> {
+    if !legacy_message_account_count_fits(instructions, &keypair.pubkey()) {
+        return Err("legacy message account count exceeds limit".to_string());
+    }
     let legacy = Transaction::new_signed_with_payer(
         instructions,
         Some(&keypair.pubkey()),
@@ -661,6 +699,36 @@ fn sign_copy_transaction(
     })
 }
 
+fn legacy_message_account_count_fits(
+    instructions: &[solana_instruction::Instruction],
+    payer: &Pubkey,
+) -> bool {
+    let mut account_keys = Vec::new();
+    account_keys.push(*payer);
+    for instruction in instructions {
+        if !account_keys.contains(&instruction.program_id) {
+            account_keys.push(instruction.program_id);
+        }
+        for account in &instruction.accounts {
+            if !account_keys.contains(&account.pubkey) {
+                account_keys.push(account.pubkey);
+            }
+        }
+        if account_keys.len() > 256 {
+            return false;
+        }
+    }
+    true
+}
+
+fn tx_version_preference_for_route_layout(route_layout: &str) -> TxVersionPreference {
+    if route_layout == "direct-pump" {
+        TxVersionPreference::PreferLegacyWhenSafe
+    } else {
+        TxVersionPreference::PreferV0WhenLookupsLoaded
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SendEndpointKind {
     Rpc,
@@ -674,7 +742,7 @@ impl CopyExecutor {
         blockhash_cache: Option<BlockhashCache>,
         address_lookup_tables: AddressLookupTableCache,
         wallet_balance_cache: Option<WalletBalanceCache>,
-        snapshot_keypair_paths: Vec<(String, PathBuf)>,
+        snapshot_keypair_paths: Vec<(Pubkey, PathBuf)>,
     ) -> Result<Self> {
         let execution_options = CopyExecutionOptions {
             endpoint: options.endpoint.clone(),
@@ -722,6 +790,7 @@ impl CopyExecutor {
             isolate_buy_latency_test: options.isolate_buy_latency_test,
             send_max_retries: options.send_max_retries,
             send_http_timeout_ms: options.send_http_timeout_ms,
+            send_lane_logging: options.stats,
             priority_fee_micro_lamports: positive_u64(options.priority_fee_micro_lamports),
             jito_tip_lamports: positive_u64(options.jito_tip_lamports),
             jito_tip_account: options
@@ -837,8 +906,8 @@ impl CopyExecutor {
     }
 
     pub(crate) fn load_snapshot_keypairs(
-        snapshot_keypair_paths: Vec<(String, PathBuf)>,
-    ) -> HashMap<String, Arc<Keypair>> {
+        snapshot_keypair_paths: Vec<(Pubkey, PathBuf)>,
+    ) -> HashMap<Pubkey, Arc<Keypair>> {
         let mut keypairs = HashMap::new();
         for (copy_wallet, path) in snapshot_keypair_paths {
             let keypair = match read_keypair_file(&path) {
@@ -853,7 +922,7 @@ impl CopyExecutor {
                     continue;
                 }
             };
-            if keypair.pubkey().to_string() != copy_wallet {
+            if keypair.pubkey() != copy_wallet {
                 eprintln!(
                     "snapshot copy keypair skipped for {} at {}: pubkey mismatch {}",
                     copy_wallet,
@@ -867,15 +936,20 @@ impl CopyExecutor {
         keypairs
     }
 
-    pub(crate) fn replace_snapshot_keypairs(&self, keypairs: HashMap<String, Arc<Keypair>>) {
+    pub(crate) fn replace_snapshot_keypairs(&self, keypairs: HashMap<Pubkey, Arc<Keypair>>) {
         self.keypairs.store(Arc::new(keypairs));
     }
 
     fn keypair_for_wallet(&self, copy_wallet: &str) -> Option<Arc<Keypair>> {
+        let copy_wallet = Pubkey::from_str(copy_wallet).ok()?;
+        self.keypair_for_pubkey(&copy_wallet)
+    }
+
+    fn keypair_for_pubkey(&self, copy_wallet: &Pubkey) -> Option<Arc<Keypair>> {
         self.keypairs.load().get(copy_wallet).cloned().or_else(|| {
             self.keypair
                 .as_ref()
-                .filter(|keypair| keypair.pubkey().to_string() == copy_wallet)
+                .filter(|keypair| keypair.pubkey() == *copy_wallet)
                 .cloned()
         })
     }
@@ -901,7 +975,7 @@ impl CopyExecutor {
         request: &CopyRuntimeRequest,
         timings: SignalTimings,
         executor_enqueued_at: Instant,
-        copy_wallet: Option<String>,
+        copy_wallet: Option<Pubkey>,
         send_lane_attribution_tx: Option<mpsc::UnboundedSender<CopyExecutionOutput>>,
     ) -> CopyExecutionLine {
         self.handle_inner(
@@ -919,13 +993,13 @@ impl CopyExecutor {
         request: &CopyRuntimeRequest,
         timings: SignalTimings,
         executor_enqueued_at: Option<Instant>,
-        copy_wallet_override: Option<String>,
+        copy_wallet_override: Option<Pubkey>,
         send_lane_attribution_tx: Option<mpsc::UnboundedSender<CopyExecutionOutput>>,
     ) -> CopyExecutionLine {
         let executor_started_at = Instant::now();
         let mut line = CopyExecutionLine::new(request, &self.options, timings);
         if let Some(copy_wallet) = copy_wallet_override.as_ref() {
-            line.copy_wallet = Some(copy_wallet.clone());
+            line.copy_wallet = Some(copy_wallet.to_string());
         }
         if let Some(executor_enqueued_at) = executor_enqueued_at {
             line.executor_queue_us = Some(
@@ -996,13 +1070,21 @@ impl CopyExecutor {
             Err(reason) => skip_guard!(reason),
         }
 
-        let Some(copy_wallet) = copy_wallet_override
-            .as_deref()
-            .or(self.options.copy_wallet.as_deref())
-        else {
-            skip_guard!("missing copy wallet");
+        let copy_wallet_string;
+        let (copy_wallet, keypair) = if let Some(copy_wallet_pubkey) = copy_wallet_override.as_ref()
+        {
+            copy_wallet_string = copy_wallet_pubkey.to_string();
+            (
+                copy_wallet_string.as_str(),
+                self.keypair_for_pubkey(copy_wallet_pubkey),
+            )
+        } else {
+            let Some(copy_wallet) = self.options.copy_wallet.as_deref() else {
+                skip_guard!("missing copy wallet");
+            };
+            (copy_wallet, self.keypair_for_wallet(copy_wallet))
         };
-        let Some(keypair) = self.keypair_for_wallet(copy_wallet) else {
+        let Some(keypair) = keypair else {
             if self.keypair.is_none() && self.keypairs.load().is_empty() {
                 skip_guard!("missing copy keypair path");
             }
@@ -1100,6 +1182,7 @@ impl CopyExecutor {
             &keypair,
             blockhash,
             &self.address_lookup_tables,
+            tx_version_preference_for_route_layout(build.route_layout),
         ) {
             Ok(signed_tx) => signed_tx,
             Err(error) => {
@@ -1231,8 +1314,8 @@ impl CopyExecutor {
 
     pub(crate) fn observe_direct_pump_sell_route_context(
         &self,
-        target_wallet: &str,
-        mint: &str,
+        target_wallet: &Pubkey,
+        mint: &Pubkey,
         route_context: Option<&RouteContext>,
     ) {
         if !self.options.auto_sell_after_buy_enabled()
@@ -2531,10 +2614,10 @@ impl DirectPumpSellContextCache {
         }
     }
 
-    fn insert(&mut self, target_wallet: &str, mint: &str, route_context: RouteContext) {
+    fn insert(&mut self, target_wallet: &Pubkey, mint: &Pubkey, route_context: RouteContext) {
         let key = DirectPumpSellContextKey {
-            target_wallet: target_wallet.to_string(),
-            mint: mint.to_string(),
+            target_wallet: *target_wallet,
+            mint: *mint,
         };
         if !self.entries.contains_key(&key) {
             self.order.push_back(key.clone());
@@ -2548,12 +2631,18 @@ impl DirectPumpSellContextCache {
         }
     }
 
-    fn get(&self, target_wallet: &str, mint: &str) -> Option<RouteContext> {
+    fn get(&self, target_wallet: &Pubkey, mint: &Pubkey) -> Option<RouteContext> {
         let key = DirectPumpSellContextKey {
-            target_wallet: target_wallet.to_string(),
-            mint: mint.to_string(),
+            target_wallet: *target_wallet,
+            mint: *mint,
         };
         self.entries.get(&key).cloned()
+    }
+
+    fn get_str(&self, target_wallet: &str, mint: &str) -> Option<RouteContext> {
+        let target_wallet = Pubkey::from_str(target_wallet).ok()?;
+        let mint = Pubkey::from_str(mint).ok()?;
+        self.get(&target_wallet, &mint)
     }
 }
 
@@ -2577,7 +2666,7 @@ fn auto_sell_route_context_for_plan(
         return Err("direct-pump sell-side route context cache unavailable");
     };
     cache
-        .get(&execution_plan.target_wallet, &execution_plan.mint)
+        .get_str(&execution_plan.target_wallet, &execution_plan.mint)
         .filter(is_direct_pump_sell_route_context)
         .ok_or("missing direct-pump sell-side route context")
 }
@@ -2629,7 +2718,7 @@ fn trailing_sell_route_context_for_plan(
         .direct_pump_sell_contexts
         .lock()
         .ok()
-        .and_then(|cache| cache.get(copy_wallet, &execution_plan.mint))
+        .and_then(|cache| cache.get_str(copy_wallet, &execution_plan.mint))
         .filter(is_direct_pump_sell_route_context);
 
     if let Some(route_context) = cached_sell_context {
@@ -3216,6 +3305,7 @@ impl CopyExecutionOutput {
     pub(crate) fn write_json_line(
         &self,
         writer: Option<&mut std::io::BufWriter<std::fs::File>>,
+        flush: bool,
     ) -> Result<()> {
         let Some(writer) = writer else {
             return Ok(());
@@ -3234,7 +3324,9 @@ impl CopyExecutionOutput {
             }
         }
         writer.write_all(b"\n")?;
-        writer.flush()?;
+        if flush {
+            writer.flush()?;
+        }
         Ok(())
     }
 }
@@ -3593,6 +3685,7 @@ impl CopyExecutionOptions {
             fast_copy_send: self.fast_copy_send,
             max_retries: self.send_max_retries,
             http_timeout_ms: self.send_http_timeout_ms,
+            log_lanes: self.send_lane_logging,
         }
     }
 
@@ -3909,10 +4002,12 @@ async fn send_transaction_attempt(
                 signature: Some(signature.clone()),
                 error: None,
             };
-            eprintln!(
-                "sendTransaction lane submitted: label={} kind={} durationMs={}",
-                attempt.label, attempt.kind, attempt.duration_ms
-            );
+            if config.log_lanes {
+                eprintln!(
+                    "sendTransaction lane submitted: label={} kind={} durationMs={}",
+                    attempt.label, attempt.kind, attempt.duration_ms
+                );
+            }
             SendAttemptOutcome {
                 attempt,
                 finished_at_ms: now_ms(),
@@ -3931,10 +4026,12 @@ async fn send_transaction_attempt(
                 signature: None,
                 error: Some(sanitized.clone()),
             };
-            eprintln!(
-                "sendTransaction lane failed: label={} kind={} durationMs={} error={}",
-                attempt.label, attempt.kind, attempt.duration_ms, sanitized
-            );
+            if config.log_lanes {
+                eprintln!(
+                    "sendTransaction lane failed: label={} kind={} durationMs={} error={}",
+                    attempt.label, attempt.kind, attempt.duration_ms, sanitized
+                );
+            }
             SendAttemptOutcome {
                 attempt,
                 finished_at_ms: now_ms(),
@@ -4128,8 +4225,11 @@ mod tests {
     use super::*;
     use crate::parser::{
         DirectPumpAccounts, FlashxPumpLayout, FlashxPumpResolvedAccounts, MigratedAmmAccounts,
+        RouteInstructionAccount,
     };
     use crate::planner::{execution_plan_line, PlannerOptions};
+    use crate::tx_builder::TxFeeConfig;
+    use solana_message::AddressLookupTableAccount;
     use solana_pubkey::Pubkey;
 
     const COPY_WALLET: &str = "FqhpPL63symHForRGfxPbGi4wDpe5jQqAVjntbbBqA5W";
@@ -4166,6 +4266,7 @@ mod tests {
             isolate_buy_latency_test: false,
             send_max_retries: 3,
             send_http_timeout_ms: 0,
+            send_lane_logging: false,
             priority_fee_micro_lamports: None,
             jito_tip_lamports: None,
             jito_tip_account: None,
@@ -4274,6 +4375,7 @@ mod tests {
                     bonding_curve_v2: dummy,
                     buyback_fee_recipient: dummy,
                     buyback_fee_recipient_token_account: None,
+                    router_amount: Some(990_000),
                 })
             }
             FlashxPumpLayout::MigratedAmm => {
@@ -4311,13 +4413,61 @@ mod tests {
             }
         };
 
+        let accounts = match &resolved_accounts {
+            FlashxPumpResolvedAccounts::DirectPump(accounts) => {
+                direct_pump_route_accounts(accounts)
+            }
+            FlashxPumpResolvedAccounts::MigratedAmm(_) => Vec::new(),
+        };
+
         RouteContext::FlashxPump(crate::parser::FlashxPumpRouteContext {
             layout,
             program_id: flashx_router_program,
-            accounts: Vec::new(),
-            data,
+            accounts: accounts.into(),
+            data: data.into(),
             resolved_accounts,
         })
+    }
+
+    fn route_account(
+        pubkey: Pubkey,
+        is_writable: bool,
+        is_signer: bool,
+    ) -> RouteInstructionAccount {
+        RouteInstructionAccount {
+            pubkey,
+            is_writable,
+            is_signer,
+        }
+    }
+
+    fn direct_pump_route_accounts(accounts: &DirectPumpAccounts) -> Vec<RouteInstructionAccount> {
+        let readonly = |pubkey| route_account(pubkey, false, false);
+        let writable = |pubkey| route_account(pubkey, true, false);
+        let signer = |pubkey| route_account(pubkey, true, true);
+        let mut route_accounts = vec![
+            writable(accounts.user_token_account),
+            signer(accounts.target_wallet),
+            readonly(accounts.mint),
+            writable(accounts.fee_recipient),
+            readonly(accounts.flashx_router_program),
+            readonly(accounts.pump_program),
+            readonly(accounts.global_config),
+            writable(accounts.bonding_curve),
+            writable(accounts.associated_bonding_curve),
+            readonly(accounts.system_program),
+            readonly(accounts.token_program),
+            writable(accounts.creator_vault),
+            readonly(accounts.event_authority),
+            readonly(accounts.fee_config),
+            readonly(accounts.fee_program),
+            readonly(accounts.bonding_curve_v2),
+            writable(accounts.buyback_fee_recipient),
+        ];
+        if let Some(account) = accounts.buyback_fee_recipient_token_account {
+            route_accounts.push(writable(account));
+        }
+        route_accounts
     }
 
     fn flashx_direct_sell_context() -> RouteContext {
@@ -4327,8 +4477,14 @@ mod tests {
     fn flashx_direct_sell_context_with_amount(amount: u64) -> RouteContext {
         let mut route_context = flashx_context(FlashxPumpLayout::DirectPump, 1);
         let RouteContext::FlashxPump(context) = &mut route_context;
-        context.data[1..9].copy_from_slice(&amount.to_le_bytes());
-        context.data[17] = 1;
+        let data = std::sync::Arc::make_mut(&mut context.data);
+        data[1..9].copy_from_slice(&amount.to_le_bytes());
+        data[17] = 1;
+        let FlashxPumpResolvedAccounts::DirectPump(accounts) = &mut context.resolved_accounts
+        else {
+            panic!("fixture should be direct Pump");
+        };
+        accounts.router_amount = Some(amount);
         route_context
     }
 
@@ -4360,6 +4516,35 @@ mod tests {
                 DIRECT_PUMP_SELL_CONTEXT_CACHE_CAPACITY,
             )),
         }
+    }
+
+    fn loaded_lookup_cache() -> AddressLookupTableCache {
+        AddressLookupTableCache::with_table_accounts_for_tests(vec![AddressLookupTableAccount {
+            key: Pubkey::new_unique(),
+            addresses: vec![Pubkey::new_unique(), Pubkey::new_unique()],
+        }])
+    }
+
+    fn sample_transfer_instruction(payer: &Pubkey) -> solana_instruction::Instruction {
+        solana_instruction::Instruction {
+            program_id: *system_program_id(),
+            accounts: vec![
+                solana_instruction::AccountMeta::new(*payer, true),
+                solana_instruction::AccountMeta::new(Pubkey::new_unique(), false),
+            ],
+            data: [2u32.to_le_bytes().to_vec(), 1u64.to_le_bytes().to_vec()].concat(),
+        }
+    }
+
+    fn write_temp_keypair_file(label: &str, keypair: &Keypair) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "jito-copy-keypair-{label}-{}-{}.json",
+            std::process::id(),
+            now_ms()
+        ));
+        let file = std::fs::File::create(&path).expect("create temp keypair");
+        serde_json::to_writer(file, &keypair.to_bytes().to_vec()).expect("write temp keypair");
+        path
     }
 
     #[tokio::test]
@@ -4439,12 +4624,137 @@ mod tests {
             &keypair,
             cached_blockhash.hash,
             &AddressLookupTableCache::default(),
+            TxVersionPreference::PreferV0WhenLookupsLoaded,
         )
         .expect("typed cached blockhash should sign transaction");
 
         assert_eq!(signed_tx.tx_version, "legacy");
         assert!(!signed_tx.signature.is_empty());
         assert_eq!(expected_jsonl_blockhash, Hash::default().to_string());
+    }
+
+    #[test]
+    fn direct_pump_preference_signs_legacy_even_when_lookup_tables_are_loaded() {
+        let keypair = Keypair::new();
+        let lookup_cache = loaded_lookup_cache();
+
+        let signed_tx = sign_copy_transaction(
+            &[sample_transfer_instruction(&keypair.pubkey())],
+            &keypair,
+            Hash::default(),
+            &lookup_cache,
+            TxVersionPreference::PreferLegacyWhenSafe,
+        )
+        .expect("direct-pump sized transaction should sign as legacy");
+
+        assert_eq!(signed_tx.tx_version, "legacy");
+        assert!(matches!(
+            signed_tx.transaction.message,
+            VersionedMessage::Legacy(_)
+        ));
+        assert!(!signed_tx.signature.is_empty());
+    }
+
+    #[test]
+    fn migrated_preference_keeps_v0_when_lookup_tables_are_loaded() {
+        let keypair = Keypair::new();
+        let lookup_cache = loaded_lookup_cache();
+
+        let signed_tx = sign_copy_transaction(
+            &[sample_transfer_instruction(&keypair.pubkey())],
+            &keypair,
+            Hash::default(),
+            &lookup_cache,
+            TxVersionPreference::PreferV0WhenLookupsLoaded,
+        )
+        .expect("lookup-backed migrated transaction should sign as v0");
+
+        assert_eq!(signed_tx.tx_version, "v0");
+        assert!(matches!(
+            signed_tx.transaction.message,
+            VersionedMessage::V0(_)
+        ));
+        assert!(!signed_tx.signature.is_empty());
+    }
+
+    #[test]
+    fn direct_pump_full_copy_build_signs_legacy_even_when_lookup_tables_are_loaded() {
+        let keypair = Keypair::new();
+        let copy_wallet = keypair.pubkey().to_string();
+        let route_context = flashx_context(FlashxPumpLayout::DirectPump, 1);
+        let fee_config = TxFeeConfig {
+            compute_unit_price_micro_lamports: Some(250_000),
+            jito_tip_lamports: Some(10_000),
+            jito_tip_account: Some(Pubkey::new_unique().to_string()),
+            helius_sender_tip_lamports: None,
+            helius_sender_tip_account: None,
+        };
+        let build = crate::tx_builder::build_full_copy_unsigned_flashx_pump_with_fees_and_cache(
+            Some(&route_context),
+            &copy_wallet,
+            COPY_WALLET,
+            &fee_config,
+            None,
+        )
+        .expect("direct-Pump full copy build should succeed");
+        assert_eq!(build.route_layout, "direct-pump");
+        assert!(build.instructions.len() > 1);
+
+        let signed_tx = sign_copy_transaction(
+            &build.instructions,
+            &keypair,
+            Hash::default(),
+            &loaded_lookup_cache(),
+            tx_version_preference_for_route_layout(build.route_layout),
+        )
+        .expect("full direct-Pump copy build should sign");
+
+        assert_eq!(signed_tx.tx_version, "legacy");
+        assert!(matches!(
+            signed_tx.transaction.message,
+            VersionedMessage::Legacy(_)
+        ));
+    }
+
+    #[test]
+    fn direct_pump_legacy_preference_fails_safe_when_account_set_is_too_large() {
+        let keypair = Keypair::new();
+        let lookup_cache = loaded_lookup_cache();
+        let mut accounts = Vec::new();
+        for _ in 0..260 {
+            accounts.push(solana_instruction::AccountMeta::new_readonly(
+                Pubkey::new_unique(),
+                false,
+            ));
+        }
+        let instruction = solana_instruction::Instruction {
+            program_id: Pubkey::new_unique(),
+            accounts,
+            data: Vec::new(),
+        };
+
+        let error = sign_copy_transaction(
+            &[instruction],
+            &keypair,
+            Hash::default(),
+            &lookup_cache,
+            TxVersionPreference::PreferLegacyWhenSafe,
+        )
+        .expect_err("oversized account set should fail closed");
+
+        assert!(error.contains("compile v0 message"));
+    }
+
+    #[test]
+    fn route_layout_selects_legacy_preference_only_for_direct_pump() {
+        assert_eq!(
+            tx_version_preference_for_route_layout("direct-pump"),
+            TxVersionPreference::PreferLegacyWhenSafe
+        );
+        assert_eq!(
+            tx_version_preference_for_route_layout("migrated-amm"),
+            TxVersionPreference::PreferV0WhenLookupsLoaded
+        );
     }
 
     #[test]
@@ -4474,6 +4784,27 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_keypairs_are_loaded_by_pubkey() {
+        let matching_keypair = Keypair::new();
+        let mismatched_keypair = Keypair::new();
+        let matching_path = write_temp_keypair_file("matching", &matching_keypair);
+        let mismatched_path = write_temp_keypair_file("mismatched", &mismatched_keypair);
+        let missing_wallet = Pubkey::new_unique();
+
+        let keypairs = CopyExecutor::load_snapshot_keypairs(vec![
+            (matching_keypair.pubkey(), matching_path.clone()),
+            (missing_wallet, mismatched_path.clone()),
+        ]);
+
+        assert_eq!(keypairs.len(), 1);
+        assert!(keypairs.contains_key(&matching_keypair.pubkey()));
+        assert!(!keypairs.contains_key(&missing_wallet));
+
+        let _ = std::fs::remove_file(matching_path);
+        let _ = std::fs::remove_file(mismatched_path);
+    }
+
+    #[test]
     fn direct_pump_auto_sell_uses_cached_sell_side_context() {
         let mut options = disabled_options();
         options.auto_sell_after_buy = true;
@@ -4487,11 +4818,9 @@ mod tests {
         );
 
         let sell_context = flashx_direct_sell_context();
-        executor.observe_direct_pump_sell_route_context(
-            &plan.target_wallet,
-            &plan.mint,
-            Some(&sell_context),
-        );
+        let target_wallet = Pubkey::from_str(&plan.target_wallet).unwrap();
+        let mint = Pubkey::from_str(&plan.mint).unwrap();
+        executor.observe_direct_pump_sell_route_context(&target_wallet, &mint, Some(&sell_context));
         let route_context =
             auto_sell_route_context_for_plan(&executor, &plan).expect("sell context should cache");
 
@@ -4536,11 +4865,9 @@ mod tests {
         );
 
         let sell_context = flashx_direct_sell_context();
-        executor.observe_direct_pump_sell_route_context(
-            &plan.target_wallet,
-            &plan.mint,
-            Some(&sell_context),
-        );
+        let target_wallet = Pubkey::from_str(&plan.target_wallet).unwrap();
+        let mint = Pubkey::from_str(&plan.mint).unwrap();
+        executor.observe_direct_pump_sell_route_context(&target_wallet, &mint, Some(&sell_context));
         assert_eq!(
             trailing_sell_route_context_for_plan(&executor, &plan, COPY_WALLET).unwrap_err(),
             MissingTrailingSellRouteContext {
@@ -4559,16 +4886,34 @@ mod tests {
         plan.route_context = Some(flashx_direct_sell_context());
 
         let sell_context = flashx_direct_sell_context();
-        executor.observe_direct_pump_sell_route_context(
-            COPY_WALLET,
-            &plan.mint,
-            Some(&sell_context),
-        );
+        let copy_wallet = Pubkey::from_str(COPY_WALLET).unwrap();
+        let mint = Pubkey::from_str(&plan.mint).unwrap();
+        executor.observe_direct_pump_sell_route_context(&copy_wallet, &mint, Some(&sell_context));
         let resolution = trailing_sell_route_context_for_plan(&executor, &plan, COPY_WALLET)
             .expect("rust trailing sell should use copy-wallet sell-side context");
 
         assert!(is_direct_pump_sell_route_context(&resolution.route_context));
         assert_eq!(resolution.source, "cached_copy_wallet");
+    }
+
+    #[test]
+    fn direct_pump_sell_context_cache_uses_pubkey_keys() {
+        let mut cache = DirectPumpSellContextCache::new(2);
+        let target_wallet = Pubkey::from_str(COPY_WALLET).unwrap();
+        let mint = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
+        let other_mint = Pubkey::new_unique();
+        let sell_context = flashx_direct_sell_context();
+
+        cache.insert(&target_wallet, &mint, sell_context.clone());
+
+        assert!(is_direct_pump_sell_route_context(
+            &cache.get(&target_wallet, &mint).expect("typed cache hit")
+        ));
+        assert!(cache.get(&target_wallet, &other_mint).is_none());
+        assert!(cache
+            .get_str(COPY_WALLET, "So11111111111111111111111111111111111111112")
+            .is_some());
+        assert!(cache.get_str("not-a-pubkey", &mint.to_string()).is_none());
     }
 
     #[test]
@@ -5502,8 +5847,68 @@ mod tests {
 
     #[test]
     fn send_lane_attribution_line_serializes_ack_attempts_without_causality_claim() {
+        let line = sample_send_lane_attribution_line();
+
+        let json = serde_json::to_value(&line).expect("attribution line serializes");
+
+        assert_eq!(
+            json.get("schema").and_then(serde_json::Value::as_str),
+            Some("copytrade.sendLaneAttribution.v1")
+        );
+        assert_eq!(
+            json.get("submissionGroupId")
+                .and_then(serde_json::Value::as_str),
+            Some("signed-tx-signature")
+        );
+        assert_eq!(
+            json.get("firstAckLane").and_then(serde_json::Value::as_str),
+            Some("rpc-primary:example.com")
+        );
+        assert!(json.get("landingLane").is_none());
+        assert_eq!(
+            json.pointer("/allAttempts/0/ackAt")
+                .and_then(serde_json::Value::as_u64),
+            Some(112)
+        );
+    }
+
+    #[test]
+    fn copy_execution_output_write_json_line_flushes_by_default() {
+        let path = temp_path("jito-copy-execution-flush-default.jsonl");
+        let file = std::fs::File::create(&path).expect("temp file creates");
+        let mut writer = std::io::BufWriter::new(file);
+        let line = CopyExecutionOutput::SendLaneAttribution(sample_send_lane_attribution_line());
+
+        line.write_json_line(Some(&mut writer), true)
+            .expect("line writes");
+
+        let contents = std::fs::read_to_string(&path).expect("flushed temp file reads");
+        std::fs::remove_file(&path).ok();
+        assert!(contents.contains("\"schema\":\"copytrade.sendLaneAttribution.v1\""));
+    }
+
+    #[test]
+    fn copy_execution_output_write_json_line_can_defer_flush() {
+        let path = temp_path("jito-copy-execution-flush-deferred.jsonl");
+        let file = std::fs::File::create(&path).expect("temp file creates");
+        let mut writer = std::io::BufWriter::new(file);
+        let line = CopyExecutionOutput::SendLaneAttribution(sample_send_lane_attribution_line());
+
+        line.write_json_line(Some(&mut writer), false)
+            .expect("line writes");
+
+        let contents_before_drop =
+            std::fs::read_to_string(&path).expect("unflushed temp file reads");
+        assert_eq!(contents_before_drop, "");
+        drop(writer);
+        let contents_after_drop = std::fs::read_to_string(&path).expect("dropped writer flushes");
+        std::fs::remove_file(&path).ok();
+        assert!(contents_after_drop.contains("\"schema\":\"copytrade.sendLaneAttribution.v1\""));
+    }
+
+    fn sample_send_lane_attribution_line() -> SendLaneAttributionLine {
         let plan = allowed_plan();
-        let line = SendLaneAttributionLine {
+        SendLaneAttributionLine {
             schema: "copytrade.sendLaneAttribution.v1",
             observed_at_ms: 100,
             attribution_at_ms: 125,
@@ -5528,28 +5933,16 @@ mod tests {
                 ack_at: Some(112),
                 error: None,
             }],
-        };
+        }
+    }
 
-        let json = serde_json::to_value(&line).expect("attribution line serializes");
-
-        assert_eq!(
-            json.get("schema").and_then(serde_json::Value::as_str),
-            Some("copytrade.sendLaneAttribution.v1")
-        );
-        assert_eq!(
-            json.get("submissionGroupId")
-                .and_then(serde_json::Value::as_str),
-            Some("signed-tx-signature")
-        );
-        assert_eq!(
-            json.get("firstAckLane").and_then(serde_json::Value::as_str),
-            Some("rpc-primary:example.com")
-        );
-        assert!(json.get("landingLane").is_none());
-        assert_eq!(
-            json.pointer("/allAttempts/0/ackAt")
-                .and_then(serde_json::Value::as_u64),
-            Some(112)
-        );
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "{}-{name}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time moves forward")
+                .as_nanos()
+        ))
     }
 }

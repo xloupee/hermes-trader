@@ -185,17 +185,20 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                 .unwrap_or_else(|| "(disabled)".to_string())
         )
     })?;
-    let mut copy_executions = CopyExecutionWriter::new(options.copy_executions_path.as_deref())
-        .with_context(|| {
-            format!(
-                "open copy executions path {}",
-                options
-                    .copy_executions_path
-                    .as_deref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "(disabled)".to_string())
-            )
-        })?;
+    let mut copy_executions = CopyExecutionWriter::new(
+        options.copy_executions_path.as_deref(),
+        options.copy_executions_flush_each_write,
+    )
+    .with_context(|| {
+        format!(
+            "open copy executions path {}",
+            options
+                .copy_executions_path
+                .as_deref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "(disabled)".to_string())
+        )
+    })?;
     let (copy_execution_tx, mut copy_execution_rx) = mpsc::unbounded_channel();
     let (copy_execution_request_tx, copy_execution_request_rx) =
         mpsc::channel(nonzero_capacity(options.copy_execution_queue_capacity));
@@ -385,8 +388,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                         let route = parsed.route;
                         if parsed.action == Action::Sell {
                             copy_executor.observe_direct_pump_sell_route_context(
-                                &target_wallet.to_string(),
-                                &mint.to_string(),
+                                &target_wallet,
+                                &mint,
                                 parsed.route_context.as_ref(),
                             );
                         }
@@ -476,7 +479,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                         &copy_execution_request_tx,
                                         runtime_request,
                                         timings,
-                                        Some(telegram_target_config.copy_wallet.clone()),
+                                        Some(telegram_target_config.copy_wallet),
                                         telegram_target_config.trailing_sell.clone(),
                                     );
                                 } else {
@@ -488,7 +491,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                         &copy_execution_request_tx,
                                         runtime_request,
                                         timings,
-                                        Some(telegram_target_config.copy_wallet.clone()),
+                                        Some(telegram_target_config.copy_wallet),
                                         telegram_target_config.trailing_sell.clone(),
                                     );
                                     write_plan_outputs(
@@ -616,13 +619,14 @@ struct UnsignedTxPlanWriter {
 
 struct CopyExecutionWriter {
     file: Option<BufWriter<File>>,
+    flush_each_write: bool,
 }
 
 struct CopyExecutionRequest {
     runtime_request: CopyRuntimeRequest,
     timings: SignalTimings,
     executor_enqueued_at: Instant,
-    copy_wallet: Option<String>,
+    copy_wallet: Option<Pubkey>,
     trailing_sell_plan: Option<TrailingSellPlan>,
 }
 
@@ -757,7 +761,7 @@ fn enqueue_copy_execution(
     copy_execution_request_tx: &mpsc::Sender<CopyExecutionRequest>,
     runtime_request: CopyRuntimeRequest,
     timings: SignalTimings,
-    copy_wallet: Option<String>,
+    copy_wallet: Option<Pubkey>,
     trailing_sell_plan: Option<TrailingSellPlan>,
 ) -> bool {
     if copy_execution_request_tx
@@ -1183,7 +1187,7 @@ fn write_plan_outputs(
 }
 
 impl CopyExecutionWriter {
-    fn new(path: Option<&Path>) -> Result<Self> {
+    fn new(path: Option<&Path>, flush_each_write: bool) -> Result<Self> {
         let file = match path {
             Some(path) => Some(BufWriter::new(
                 OpenOptions::new()
@@ -1195,11 +1199,14 @@ impl CopyExecutionWriter {
             None => None,
         };
 
-        Ok(Self { file })
+        Ok(Self {
+            file,
+            flush_each_write,
+        })
     }
 
     fn write(&mut self, line: &CopyExecutionOutput) -> Result<()> {
-        line.write_json_line(self.file.as_mut())
+        line.write_json_line(self.file.as_mut(), self.flush_each_write)
     }
 }
 

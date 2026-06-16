@@ -3,9 +3,11 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 test("Rust copy buy executions are bridged into confirmation-gated trailing sells", async () => {
-  const [indexSource, typesSource] = await Promise.all([
+  const [indexSource, typesSource, envExample, readme] = await Promise.all([
     readFile("src/index.ts", "utf8"),
-    readFile("src/types.ts", "utf8")
+    readFile("src/types.ts", "utf8"),
+    readFile(".env.example", "utf8"),
+    readFile("README.md", "utf8")
   ]);
 
   assert.match(typesSource, /copyTradeRustTrailingSellsEnabled: boolean;/);
@@ -16,6 +18,9 @@ test("Rust copy buy executions are bridged into confirmation-gated trailing sell
   assert.match(indexSource, /COPY_TRADE_RUST_TRAILING_SELLS_SOURCE/);
   assert.match(indexSource, /COPY_TRADE_RUST_TRAILING_SELLS_LOCAL_EXECUTIONS_PATH/);
   assert.match(indexSource, /COPY_TRADE_RUST_TRAILING_SELLS_CONFIRMATION_POLL_MS/);
+  assert.match(envExample, /COPY_TRADE_RUST_EXECUTION_ALERTS_SOURCE=local-jsonl/);
+  assert.match(envExample, /COPY_TRADE_RUST_EXECUTION_ALERTS_LOCAL_EXECUTIONS_PATH=\/var\/log\/jito-copy-executions-vps\.jsonl/);
+  assert.match(readme, /COPY_TRADE_RUST_EXECUTION_ALERTS_SOURCE=local-jsonl/);
 
   assert.match(
     indexSource,

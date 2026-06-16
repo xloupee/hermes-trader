@@ -58,8 +58,12 @@ test("Rust async platform fee bridge is default-off and post-submit only", async
   assert.match(indexSource, /COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_CANARY_WALLETS/);
   assert.match(envExample, /COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_ENABLED=false/);
   assert.match(envExample, /COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_CANARY_WALLETS=/);
+  assert.match(envExample, /COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_SOURCE=local-jsonl/);
+  assert.match(envExample, /COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_LOCAL_EXECUTIONS_PATH=\/var\/log\/jito-copy-executions-vps\.jsonl/);
   assert.match(readme, /Rust still sends the buy unchanged/);
   assert.match(readme, /tiny-wallet rollout/);
+  assert.match(readme, /COPY_TRADE_RUST_ASYNC_PLATFORM_FEE_SOURCE=local-jsonl/);
+  assert.match(readme, /does not change the Rust hot path/);
 
   assert.match(
     indexSource,

@@ -72,7 +72,7 @@ export function SignalFeed({ adminEmail }: { adminEmail: string | null }) {
     return await response.json() as BenchmarkRowsResponse;
   }, [params]);
 
-  const { data, loading, error, paused, setPaused, lastUpdated, refresh } = useAutoRefreshQuery(fetcher, { intervalMs: 10000 });
+  const { data, loading, error, paused, autoPaused, setPaused, lastUpdated, refresh } = useAutoRefreshQuery(fetcher, { intervalMs: 10000 });
   const rows = data?.rows ?? [];
   const executionSummary = data?.summary ?? null;
   const selectedBase = rows.find((row) => row.id === selectedId) ?? rows[0] ?? null;
@@ -147,8 +147,8 @@ export function SignalFeed({ adminEmail }: { adminEmail: string | null }) {
           <button className="icon-button" onClick={() => refresh()} title="Refresh" type="button">
             <RefreshCcw size={17} />
           </button>
-          <button className="icon-button" onClick={() => setPaused((value) => !value)} title={paused ? "Resume auto-refresh" : "Pause auto-refresh"} type="button">
-            {paused ? <CirclePlay size={17} /> : <CirclePause size={17} />}
+          <button className="icon-button" onClick={() => setPaused((value) => !value)} title={paused || autoPaused ? "Resume auto-refresh" : "Pause auto-refresh"} type="button">
+            {paused || autoPaused ? <CirclePlay size={17} /> : <CirclePause size={17} />}
           </button>
           <button className="icon-button" onClick={signOut} title="Sign out" type="button">
             <LogOut size={17} />

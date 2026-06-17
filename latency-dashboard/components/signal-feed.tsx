@@ -331,6 +331,7 @@ function ExecutionReport({ selectedExecution }: { selectedExecution: LocalExecut
         { label: "Copy slot", value: selectedExecution.blockPositionDiagnostics?.copySlot === null || selectedExecution.blockPositionDiagnostics?.copySlot === undefined ? "n/a" : String(selectedExecution.blockPositionDiagnostics.copySlot) },
         { label: "Target tx index", value: selectedExecution.blockPositionDiagnostics?.targetTxIndex === null || selectedExecution.blockPositionDiagnostics?.targetTxIndex === undefined ? "n/a" : String(selectedExecution.blockPositionDiagnostics.targetTxIndex) },
         { label: "Copy tx index", value: selectedExecution.blockPositionDiagnostics?.copyTxIndex === null || selectedExecution.blockPositionDiagnostics?.copyTxIndex === undefined ? "n/a" : String(selectedExecution.blockPositionDiagnostics.copyTxIndex) },
+        { label: "Tx delta", value: selectedExecution.blockPositionDiagnostics?.txDelta === null || selectedExecution.blockPositionDiagnostics?.txDelta === undefined ? "n/a" : String(selectedExecution.blockPositionDiagnostics.txDelta) },
         { label: "Position status", value: selectedExecution.blockPositionDiagnostics?.status || "n/a" },
         { label: "Position reason", value: selectedExecution.blockPositionDiagnostics?.unavailableReason || "n/a" },
         { label: "Route layout", value: selectedExecution.routeLayout || "n/a" },

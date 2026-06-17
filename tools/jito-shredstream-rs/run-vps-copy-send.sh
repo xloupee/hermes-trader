@@ -52,6 +52,7 @@ export JITO_MIGRATED_AMM_MIN_COPY_SOL="${JITO_MIGRATED_AMM_MIN_COPY_SOL:-0.00099
 export JITO_MIGRATED_AMM_SMALL_COPY_MODE="${JITO_MIGRATED_AMM_SMALL_COPY_MODE:-skip}"
 export JITO_FAST_COPY_SEND="${JITO_FAST_COPY_SEND:-YES}"
 export JITO_SEND_FANOUT="${JITO_SEND_FANOUT:-false}"
+export JITO_SEND_LANE_MODE="${JITO_SEND_LANE_MODE:-mixed}"
 export JITO_SEND_RPC_URLS="${JITO_SEND_RPC_URLS:-${DIRECT_EXECUTION_SEND_RPC_URLS:-$SOLANA_RPC_URL}}"
 export JITO_BLOCK_ENGINE_SEND_URLS="${JITO_BLOCK_ENGINE_SEND_URLS:-${DIRECT_EXECUTION_JITO_SEND_URLS:-}}"
 export JITO_BLOCK_ENGINE_AUTH_UUID="${JITO_BLOCK_ENGINE_AUTH_UUID:-${DIRECT_EXECUTION_JITO_AUTH_UUID:-}}"
@@ -190,14 +191,52 @@ case "$JITO_MIGRATED_AMM_SMALL_COPY_MODE" in
     ;;
 esac
 
-if [[ -n "$JITO_TIP_LAMPORTS" && "$JITO_TIP_LAMPORTS" != "0" && -z "$JITO_TIP_ACCOUNT" ]]; then
-  echo "JITO_TIP_ACCOUNT must be set when JITO_TIP_LAMPORTS is positive" >&2
-  exit 1
-fi
-if [[ -n "$JITO_SELL_TIP_LAMPORTS" && "$JITO_SELL_TIP_LAMPORTS" != "0" && -z "$JITO_SELL_TIP_ACCOUNT" ]]; then
-  echo "JITO_SELL_TIP_ACCOUNT must be set when JITO_SELL_TIP_LAMPORTS is positive" >&2
-  exit 1
-fi
+SEND_LANE_MODE_NORMALIZED="$(printf '%s' "$JITO_SEND_LANE_MODE" | tr '[:upper:]' '[:lower:]')"
+case "$SEND_LANE_MODE_NORMALIZED" in
+  mixed|rpc_only|jito_only|helius_sender_only)
+    export JITO_SEND_LANE_MODE="$SEND_LANE_MODE_NORMALIZED"
+    ;;
+  *)
+    echo "JITO_SEND_LANE_MODE must be mixed, rpc_only, jito_only, or helius_sender_only; got $JITO_SEND_LANE_MODE" >&2
+    exit 1
+    ;;
+esac
+case "$SEND_LANE_MODE_NORMALIZED" in
+  mixed|jito_only)
+    if [[ -n "$JITO_TIP_LAMPORTS" && "$JITO_TIP_LAMPORTS" != "0" && -z "$JITO_TIP_ACCOUNT" ]]; then
+      echo "JITO_TIP_ACCOUNT must be set when JITO_TIP_LAMPORTS is positive" >&2
+      exit 1
+    fi
+    if [[ -n "$JITO_SELL_TIP_LAMPORTS" && "$JITO_SELL_TIP_LAMPORTS" != "0" && -z "$JITO_SELL_TIP_ACCOUNT" ]]; then
+      echo "JITO_SELL_TIP_ACCOUNT must be set when JITO_SELL_TIP_LAMPORTS is positive" >&2
+      exit 1
+    fi
+    ;;
+esac
+case "$SEND_LANE_MODE_NORMALIZED" in
+  rpc_only)
+    if [[ -z "$JITO_SEND_RPC_URLS" ]]; then
+      echo "JITO_SEND_LANE_MODE=rpc_only requires SOLANA_RPC_URL or JITO_SEND_RPC_URLS" >&2
+      exit 1
+    fi
+    ;;
+  jito_only)
+    case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=jito_only requires JITO_SEND_FANOUT=YES" >&2; exit 1 ;;
+    esac
+    if [[ -z "$JITO_BLOCK_ENGINE_SEND_URLS" ]]; then
+      echo "JITO_SEND_LANE_MODE=jito_only requires JITO_BLOCK_ENGINE_SEND_URLS" >&2
+      exit 1
+    fi
+    ;;
+  helius_sender_only)
+    case "$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_sender_only requires JITO_HELIUS_SENDER_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    ;;
+esac
 HELIUS_SENDER_ENABLED_NORMALIZED="$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')"
 HELIUS_SENDER_SWQOS_NORMALIZED="$(printf '%s' "$JITO_HELIUS_SENDER_SWQOS_ONLY" | tr '[:upper:]' '[:lower:]')"
 case "$HELIUS_SENDER_ENABLED_NORMALIZED" in
@@ -250,6 +289,7 @@ echo "  copy execution concurrency: $JITO_COPY_EXECUTION_CONCURRENCY"
 echo "  copy execution queue capacity: $JITO_COPY_EXECUTION_QUEUE_CAPACITY"
 echo "  fast copy send: $JITO_FAST_COPY_SEND"
 echo "  send fanout: $JITO_SEND_FANOUT"
+echo "  send lane mode: $JITO_SEND_LANE_MODE"
 echo "  send rpc urls: $(printf '%s' "$JITO_SEND_RPC_URLS" | awk -F, '{print NF}') configured"
 if [[ -n "$JITO_BLOCK_ENGINE_SEND_URLS" ]]; then
   echo "  jito send urls: $(printf '%s' "$JITO_BLOCK_ENGINE_SEND_URLS" | awk -F, '{print NF}') configured"

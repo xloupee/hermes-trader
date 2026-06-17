@@ -12,6 +12,7 @@ export interface BlockPositionDiagnostics {
   targetTxIndex: number | null;
   copyTxIndex: number | null;
   sameSlotTxDelta: number | null;
+  txDelta: number | null;
   crossSlotPositionSummary: CrossSlotPositionSummary | null;
   unavailableReason: string | null;
 }
@@ -363,6 +364,7 @@ function normalizeBlockPositionDiagnostics(chainReport: unknown): BlockPositionD
     targetTxIndex: numberValue(diagnostic.targetTxIndex),
     copyTxIndex: numberValue(diagnostic.copyTxIndex),
     sameSlotTxDelta: numberValue(diagnostic.sameSlotTxDelta),
+    txDelta: numberValue(diagnostic.txDelta),
     crossSlotPositionSummary: objectValue(diagnostic.crossSlotPositionSummary),
     unavailableReason: stringValue(diagnostic.unavailableReason)
   };

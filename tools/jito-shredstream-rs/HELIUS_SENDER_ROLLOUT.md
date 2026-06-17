@@ -29,6 +29,7 @@ JITO_HELIUS_SENDER_URLS=
 JITO_HELIUS_SENDER_SWQOS_ONLY=false
 JITO_HELIUS_SENDER_TIP_LAMPORTS=
 JITO_HELIUS_SENDER_TIP_ACCOUNT=
+JITO_SEND_LANE_MODE=mixed
 ```
 
 When `JITO_HELIUS_SENDER_ENABLED` is true, startup fails closed unless:
@@ -51,10 +52,16 @@ Tip minimums:
 2. If Sender is disabled, endpoint selection remains the existing Jito/RPC fanout.
 3. If Sender is enabled, endpoint selection adds `helius_sender` lanes with explicit labels like `helius-sender-1-fast:sender.helius-rpc.com` or `helius-sender-1-swqos:sender.helius-rpc.com`.
 4. On a watched-wallet buy, Rust decodes, matches, classifies, plans, builds, signs, serializes, and submits without Telegram, Supabase, filesystem, dashboard, or config network calls before submit.
-5. The transaction builder emits one compatible transaction containing the configured compute-unit price, existing Jito tip, and Sender tip. If Jito and Sender use the same tip account, the transfer is merged to the larger lamport value.
-6. The same serialized transaction is fanned out to RPC, Jito, and Sender lanes.
-7. First ACK behavior is preserved, while slower lanes continue so attribution can record every attempt.
-8. Post-submit workers handle confirmation, slot diagnostics, dashboard sync, Telegram, Supabase, and trailing sells.
+5. `JITO_SEND_LANE_MODE` selects fee transfers and endpoint families from warm startup config:
+   - `mixed`: configured Jito and Sender tips, all enabled lane families.
+   - `rpc_only`: priority fee only, RPC endpoints.
+   - `jito_only`: Jito tip only, Jito block-engine endpoints.
+   - `helius_sender_only`: Sender tip only, Helius Sender endpoints.
+6. The transaction builder emits one compatible transaction for the selected mode. If Jito and Sender are both active in `mixed` and use the same tip account, the transfer is merged to the larger lamport value.
+7. The same serialized transaction is fanned out to the selected lanes.
+8. Do not race lane-specific signed variants: different fee/tip instructions produce different signatures, and first ACK cannot retract already-submitted variants.
+9. First ACK behavior is preserved, while slower lanes continue so attribution can record every attempt.
+10. Post-submit workers handle confirmation, slot diagnostics, dashboard sync, Telegram, Supabase, and trailing sells.
 
 ## Attribution
 

@@ -160,6 +160,9 @@ pub(crate) struct LiveOptions {
     )]
     pub(crate) send_fanout: bool,
 
+    #[arg(long, env = "JITO_SEND_LANE_MODE", default_value = "mixed", value_enum)]
+    pub(crate) send_lane_mode: executor::SendLaneMode,
+
     #[arg(
         long = "send-rpc-url",
         env = "JITO_SEND_RPC_URLS",

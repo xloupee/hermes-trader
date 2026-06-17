@@ -119,6 +119,7 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) simulate_copy_tx: bool,
     pub(crate) fast_copy_send: bool,
     pub(crate) send_fanout: bool,
+    pub(crate) send_lane_mode: SendLaneMode,
     pub(crate) send_rpc_urls: Vec<String>,
     pub(crate) jito_send_urls: Vec<String>,
     pub(crate) jito_auth_uuid: Option<String>,
@@ -159,6 +160,45 @@ pub(crate) struct CopyExecutionOptions {
 pub(crate) enum MigratedAmmSmallCopyMode {
     Skip,
     Floor,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum SendLaneMode {
+    Mixed,
+    RpcOnly,
+    JitoOnly,
+    HeliusSenderOnly,
+}
+
+impl SendLaneMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mixed => "mixed",
+            Self::RpcOnly => "rpc_only",
+            Self::JitoOnly => "jito_only",
+            Self::HeliusSenderOnly => "helius_sender_only",
+        }
+    }
+
+    fn uses_rpc_lanes(self) -> bool {
+        matches!(self, Self::Mixed | Self::RpcOnly)
+    }
+
+    fn uses_jito_lanes(self) -> bool {
+        matches!(self, Self::Mixed | Self::JitoOnly)
+    }
+
+    fn uses_helius_sender_lanes(self) -> bool {
+        matches!(self, Self::Mixed | Self::HeliusSenderOnly)
+    }
+
+    fn uses_jito_tip(self) -> bool {
+        matches!(self, Self::Mixed | Self::JitoOnly)
+    }
+
+    fn uses_helius_sender_tip(self) -> bool {
+        matches!(self, Self::Mixed | Self::HeliusSenderOnly)
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -285,6 +325,7 @@ pub(crate) struct CopyExecutionLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     send_signature: Option<String>,
     send_rpc_url_count: usize,
+    send_lane_mode: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     send_rpc_winner: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -331,6 +372,7 @@ pub(crate) struct CopyExecutionLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_sell_send_signature: Option<String>,
     auto_sell_send_rpc_url_count: usize,
+    auto_sell_send_lane_mode: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_sell_send_rpc_winner: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -370,6 +412,7 @@ pub(crate) struct SendLaneAttributionLine {
     submission_group_id: String,
     observed_signature: String,
     send_signature: String,
+    send_lane_mode: &'static str,
     first_ack_lane: String,
     first_ack_at_ms: u128,
     all_attempts: Vec<SendLaneAttemptAttribution>,
@@ -540,6 +583,7 @@ pub(crate) struct RustTrailingSellLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     send_signature: Option<String>,
     send_rpc_url_count: usize,
+    send_lane_mode: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     send_rpc_winner: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -598,6 +642,7 @@ struct SendLaneAttributionContext {
     transaction_role: &'static str,
     submission_group_id: String,
     observed_signature: [u8; 64],
+    send_lane_mode: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -759,6 +804,7 @@ impl CopyExecutor {
             simulate_copy_tx: options.simulate_copy_tx && !options.fast_copy_send,
             fast_copy_send: options.fast_copy_send,
             send_fanout: options.send_fanout,
+            send_lane_mode: options.send_lane_mode,
             send_rpc_urls: normalized_send_rpc_urls(
                 &options.send_rpc_urls,
                 options.solana_rpc_url.as_deref(),
@@ -833,6 +879,9 @@ impl CopyExecutor {
         };
         execution_options
             .validate_helius_sender()
+            .map_err(anyhow::Error::msg)?;
+        execution_options
+            .validate_send_lane_mode()
             .map_err(anyhow::Error::msg)?;
 
         let keypair = match execution_options.copy_keypair_path.as_ref() {
@@ -1255,6 +1304,7 @@ impl CopyExecutor {
                 transaction_role: "copy_buy",
                 submission_group_id: signed_tx.signature.clone(),
                 observed_signature: line.observed_signature,
+                send_lane_mode: self.options.send_lane_mode.as_str(),
             };
             match self
                 .send_transaction(
@@ -2497,23 +2547,33 @@ impl CopyExecutor {
             compute_unit_price_micro_lamports: plan
                 .priority_fee_micro_lamports
                 .or(self.options.sell_priority_fee_micro_lamports),
-            jito_tip_lamports: plan
-                .jito_tip_lamports
-                .or(self.options.sell_jito_tip_lamports),
-            jito_tip_account: plan
-                .jito_tip_account
-                .clone()
-                .or_else(|| self.options.sell_jito_tip_account.clone()),
-            helius_sender_tip_lamports: self
+            jito_tip_lamports: self
                 .options
-                .helius_sender_enabled
-                .then_some(self.options.helius_sender_tip_lamports)
+                .send_lane_mode
+                .uses_jito_tip()
+                .then_some(
+                    plan.jito_tip_lamports
+                        .or(self.options.sell_jito_tip_lamports),
+                )
                 .flatten(),
-            helius_sender_tip_account: self
+            jito_tip_account: self
                 .options
-                .helius_sender_enabled
-                .then(|| self.options.helius_sender_tip_account.clone())
+                .send_lane_mode
+                .uses_jito_tip()
+                .then(|| {
+                    plan.jito_tip_account
+                        .clone()
+                        .or_else(|| self.options.sell_jito_tip_account.clone())
+                })
                 .flatten(),
+            helius_sender_tip_lamports: (self.options.helius_sender_enabled
+                && self.options.send_lane_mode.uses_helius_sender_tip())
+            .then_some(self.options.helius_sender_tip_lamports)
+            .flatten(),
+            helius_sender_tip_account: (self.options.helius_sender_enabled
+                && self.options.send_lane_mode.uses_helius_sender_tip())
+            .then(|| self.options.helius_sender_tip_account.clone())
+            .flatten(),
         }
     }
 }
@@ -2584,6 +2644,7 @@ fn spawn_send_lane_attribution_collector(
             submission_group_id: context.submission_group_id,
             observed_signature: signature_bytes_to_string(context.observed_signature),
             send_signature,
+            send_lane_mode: context.send_lane_mode,
             first_ack_lane,
             first_ack_at_ms,
             all_attempts,
@@ -3080,6 +3141,7 @@ impl CopyExecutionLine {
         options: &CopyExecutionOptions,
         timings: SignalTimings,
     ) -> Self {
+        let tx_fee_config = options.tx_fee_config();
         Self {
             schema: "copytrade.localExecution.v1",
             observed_at_ms: request.observed_at_ms,
@@ -3163,6 +3225,7 @@ impl CopyExecutionLine {
             simulation_logs: Vec::new(),
             send_signature: None,
             send_rpc_url_count: options.selected_send_rpc_url_count(),
+            send_lane_mode: options.send_lane_mode.as_str(),
             send_rpc_winner: None,
             send_rpc_attempts: Vec::new(),
             send_rpc_errors: Vec::new(),
@@ -3171,17 +3234,11 @@ impl CopyExecutionLine {
             auto_sell_delay_ms: options.auto_sell_delay_ms,
             auto_sell_simulation_requested: options.simulate_auto_sell_enabled(),
             buy_latency_test_isolated: options.isolate_buy_latency_test,
-            priority_fee_micro_lamports: options.priority_fee_micro_lamports,
-            jito_tip_lamports: options.jito_tip_lamports,
-            jito_tip_account: options.jito_tip_account.clone(),
-            helius_sender_tip_lamports: options
-                .helius_sender_enabled
-                .then_some(options.helius_sender_tip_lamports)
-                .flatten(),
-            helius_sender_tip_account: options
-                .helius_sender_enabled
-                .then(|| options.helius_sender_tip_account.clone())
-                .flatten(),
+            priority_fee_micro_lamports: tx_fee_config.compute_unit_price_micro_lamports,
+            jito_tip_lamports: tx_fee_config.jito_tip_lamports,
+            jito_tip_account: tx_fee_config.jito_tip_account,
+            helius_sender_tip_lamports: tx_fee_config.helius_sender_tip_lamports,
+            helius_sender_tip_account: tx_fee_config.helius_sender_tip_account,
             auto_sell_attempted: false,
             auto_sell_signed: false,
             auto_sell_simulated: false,
@@ -3196,6 +3253,7 @@ impl CopyExecutionLine {
             auto_sell_copy_signature: None,
             auto_sell_send_signature: None,
             auto_sell_send_rpc_url_count: options.selected_send_rpc_url_count(),
+            auto_sell_send_lane_mode: options.send_lane_mode.as_str(),
             auto_sell_send_rpc_winner: None,
             auto_sell_send_rpc_attempts: Vec::new(),
             auto_sell_send_rpc_errors: Vec::new(),
@@ -3574,6 +3632,28 @@ impl RustTrailingSellLine {
     ) -> Self {
         let step_started_at_ms = now_ms();
         let due_at_ms = anchor_at_ms.saturating_add(u128::from(step.delay_ms));
+        let jito_tip_lamports = options
+            .send_lane_mode
+            .uses_jito_tip()
+            .then_some(plan.jito_tip_lamports.or(options.sell_jito_tip_lamports))
+            .flatten();
+        let jito_tip_account = options
+            .send_lane_mode
+            .uses_jito_tip()
+            .then(|| {
+                plan.jito_tip_account
+                    .clone()
+                    .or_else(|| options.sell_jito_tip_account.clone())
+            })
+            .flatten();
+        let helius_sender_tip_lamports = (options.helius_sender_enabled
+            && options.send_lane_mode.uses_helius_sender_tip())
+        .then_some(options.helius_sender_tip_lamports)
+        .flatten();
+        let helius_sender_tip_account = (options.helius_sender_enabled
+            && options.send_lane_mode.uses_helius_sender_tip())
+        .then(|| options.helius_sender_tip_account.clone())
+        .flatten();
         Self {
             schema: "copytrade.rustTrailingSell.v1",
             observed_at_ms: buy_line.observed_at_ms,
@@ -3604,19 +3684,10 @@ impl RustTrailingSellLine {
             priority_fee_micro_lamports: plan
                 .priority_fee_micro_lamports
                 .or(options.sell_priority_fee_micro_lamports),
-            jito_tip_lamports: plan.jito_tip_lamports.or(options.sell_jito_tip_lamports),
-            jito_tip_account: plan
-                .jito_tip_account
-                .clone()
-                .or_else(|| options.sell_jito_tip_account.clone()),
-            helius_sender_tip_lamports: options
-                .helius_sender_enabled
-                .then_some(options.helius_sender_tip_lamports)
-                .flatten(),
-            helius_sender_tip_account: options
-                .helius_sender_enabled
-                .then(|| options.helius_sender_tip_account.clone())
-                .flatten(),
+            jito_tip_lamports,
+            jito_tip_account,
+            helius_sender_tip_lamports,
+            helius_sender_tip_account,
             confirmation_checked: false,
             confirmation_ok: false,
             confirmation_slot: None,
@@ -3643,6 +3714,7 @@ impl RustTrailingSellLine {
             copy_signature: None,
             send_signature: None,
             send_rpc_url_count: options.selected_send_rpc_url_count(),
+            send_lane_mode: options.send_lane_mode.as_str(),
             send_rpc_winner: None,
             send_rpc_attempts: Vec::new(),
             send_rpc_errors: Vec::new(),
@@ -3703,32 +3775,48 @@ impl CopyExecutionOptions {
     fn tx_fee_config(&self) -> TxFeeConfig {
         TxFeeConfig {
             compute_unit_price_micro_lamports: self.priority_fee_micro_lamports,
-            jito_tip_lamports: self.jito_tip_lamports,
-            jito_tip_account: self.jito_tip_account.clone(),
-            helius_sender_tip_lamports: self
-                .helius_sender_enabled
-                .then_some(self.helius_sender_tip_lamports)
+            jito_tip_lamports: self
+                .send_lane_mode
+                .uses_jito_tip()
+                .then_some(self.jito_tip_lamports)
                 .flatten(),
-            helius_sender_tip_account: self
-                .helius_sender_enabled
-                .then(|| self.helius_sender_tip_account.clone())
+            jito_tip_account: self
+                .send_lane_mode
+                .uses_jito_tip()
+                .then(|| self.jito_tip_account.clone())
                 .flatten(),
+            helius_sender_tip_lamports: (self.helius_sender_enabled
+                && self.send_lane_mode.uses_helius_sender_tip())
+            .then_some(self.helius_sender_tip_lamports)
+            .flatten(),
+            helius_sender_tip_account: (self.helius_sender_enabled
+                && self.send_lane_mode.uses_helius_sender_tip())
+            .then(|| self.helius_sender_tip_account.clone())
+            .flatten(),
         }
     }
 
     fn sell_tx_fee_config(&self) -> TxFeeConfig {
         TxFeeConfig {
             compute_unit_price_micro_lamports: self.sell_priority_fee_micro_lamports,
-            jito_tip_lamports: self.sell_jito_tip_lamports,
-            jito_tip_account: self.sell_jito_tip_account.clone(),
-            helius_sender_tip_lamports: self
-                .helius_sender_enabled
-                .then_some(self.helius_sender_tip_lamports)
+            jito_tip_lamports: self
+                .send_lane_mode
+                .uses_jito_tip()
+                .then_some(self.sell_jito_tip_lamports)
                 .flatten(),
-            helius_sender_tip_account: self
-                .helius_sender_enabled
-                .then(|| self.helius_sender_tip_account.clone())
+            jito_tip_account: self
+                .send_lane_mode
+                .uses_jito_tip()
+                .then(|| self.sell_jito_tip_account.clone())
                 .flatten(),
+            helius_sender_tip_lamports: (self.helius_sender_enabled
+                && self.send_lane_mode.uses_helius_sender_tip())
+            .then_some(self.helius_sender_tip_lamports)
+            .flatten(),
+            helius_sender_tip_account: (self.helius_sender_enabled
+                && self.send_lane_mode.uses_helius_sender_tip())
+            .then(|| self.helius_sender_tip_account.clone())
+            .flatten(),
         }
     }
 
@@ -3780,6 +3868,62 @@ impl CopyExecutionOptions {
         Ok(())
     }
 
+    fn validate_send_lane_mode(&self) -> std::result::Result<(), String> {
+        if self.send_lane_mode.uses_jito_tip()
+            && self.jito_tip_lamports.unwrap_or(0) > 0
+            && self.jito_tip_account.is_none()
+        {
+            return Err(
+                "JITO_TIP_ACCOUNT must be set when JITO_TIP_LAMPORTS is positive".to_string(),
+            );
+        }
+        if self.send_lane_mode.uses_jito_tip()
+            && self.sell_jito_tip_lamports.unwrap_or(0) > 0
+            && self.sell_jito_tip_account.is_none()
+        {
+            return Err(
+                "JITO_SELL_TIP_ACCOUNT must be set when JITO_SELL_TIP_LAMPORTS is positive"
+                    .to_string(),
+            );
+        }
+
+        match self.send_lane_mode {
+            SendLaneMode::Mixed => Ok(()),
+            SendLaneMode::RpcOnly => {
+                if self.selected_send_rpc_urls().is_empty() {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=rpc_only requires SOLANA_RPC_URL or JITO_SEND_RPC_URLS"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::JitoOnly => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=jito_only requires JITO_SEND_FANOUT=YES".to_string(),
+                    );
+                }
+                if self.jito_send_urls.is_empty() {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=jito_only requires JITO_BLOCK_ENGINE_SEND_URLS"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::HeliusSenderOnly => {
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_sender_only requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
+
     fn auto_sell_after_buy_enabled(&self) -> bool {
         self.auto_sell_after_buy && !self.isolate_buy_latency_test
     }
@@ -3806,35 +3950,40 @@ impl CopyExecutionOptions {
     }
 
     fn selected_send_endpoints(&self) -> Vec<SendEndpoint> {
-        let mut endpoints = self
-            .selected_send_rpc_urls()
-            .into_iter()
-            .enumerate()
-            .map(|(index, url)| SendEndpoint {
-                label: if index == 0 {
-                    format!("rpc-primary:{}", rpc_url_label(&url))
-                } else {
-                    format!("rpc-fanout-{}:{}", index, rpc_url_label(&url))
-                },
-                url,
-                kind: SendEndpointKind::Rpc,
-                auth_uuid: None,
-                sender_mode: None,
-            })
-            .collect::<Vec<_>>();
+        let mut endpoints = if self.send_lane_mode.uses_rpc_lanes() {
+            self.selected_send_rpc_urls()
+                .into_iter()
+                .enumerate()
+                .map(|(index, url)| SendEndpoint {
+                    label: if index == 0 {
+                        format!("rpc-primary:{}", rpc_url_label(&url))
+                    } else {
+                        format!("rpc-fanout-{}:{}", index, rpc_url_label(&url))
+                    },
+                    url,
+                    kind: SendEndpointKind::Rpc,
+                    auth_uuid: None,
+                    sender_mode: None,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
 
         if self.send_fanout {
-            endpoints.extend(self.jito_send_urls.iter().enumerate().map(|(index, url)| {
-                let url = jito_transaction_url(url);
-                SendEndpoint {
-                    label: format!("jito-{}:{}", index + 1, rpc_url_label(&url)),
-                    url,
-                    kind: SendEndpointKind::Jito,
-                    auth_uuid: self.jito_auth_uuid.clone(),
-                    sender_mode: None,
-                }
-            }));
-            if self.helius_sender_enabled {
+            if self.send_lane_mode.uses_jito_lanes() {
+                endpoints.extend(self.jito_send_urls.iter().enumerate().map(|(index, url)| {
+                    let url = jito_transaction_url(url);
+                    SendEndpoint {
+                        label: format!("jito-{}:{}", index + 1, rpc_url_label(&url)),
+                        url,
+                        kind: SendEndpointKind::Jito,
+                        auth_uuid: self.jito_auth_uuid.clone(),
+                        sender_mode: None,
+                    }
+                }));
+            }
+            if self.helius_sender_enabled && self.send_lane_mode.uses_helius_sender_lanes() {
                 endpoints.extend(
                     self.helius_sender_urls
                         .iter()
@@ -4294,6 +4443,7 @@ mod tests {
             simulate_copy_tx: false,
             fast_copy_send: false,
             send_fanout: false,
+            send_lane_mode: SendLaneMode::Mixed,
             send_rpc_urls: Vec::new(),
             jito_send_urls: Vec::new(),
             jito_auth_uuid: None,
@@ -5745,6 +5895,114 @@ mod tests {
     }
 
     #[test]
+    fn send_lane_mode_filters_fee_tips_without_changing_priority_fee() {
+        let mut options = configured_multi_lane_options();
+
+        options.send_lane_mode = SendLaneMode::Mixed;
+        let fee_config = options.tx_fee_config();
+        assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
+        assert_eq!(fee_config.jito_tip_lamports, Some(10_000));
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+        );
+
+        options.send_lane_mode = SendLaneMode::RpcOnly;
+        let fee_config = options.tx_fee_config();
+        assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
+        assert_eq!(fee_config.jito_tip_lamports, None);
+        assert_eq!(fee_config.jito_tip_account, None);
+        assert_eq!(fee_config.helius_sender_tip_lamports, None);
+        assert_eq!(fee_config.helius_sender_tip_account, None);
+
+        options.send_lane_mode = SendLaneMode::JitoOnly;
+        let fee_config = options.tx_fee_config();
+        assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
+        assert_eq!(fee_config.jito_tip_lamports, Some(10_000));
+        assert_eq!(fee_config.jito_tip_account.as_deref(), Some(COPY_WALLET));
+        assert_eq!(fee_config.helius_sender_tip_lamports, None);
+        assert_eq!(fee_config.helius_sender_tip_account, None);
+
+        options.send_lane_mode = SendLaneMode::HeliusSenderOnly;
+        let fee_config = options.tx_fee_config();
+        assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
+        assert_eq!(fee_config.jito_tip_lamports, None);
+        assert_eq!(fee_config.jito_tip_account, None);
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+        );
+        assert_eq!(
+            fee_config.helius_sender_tip_account.as_deref(),
+            Some(COPY_WALLET)
+        );
+    }
+
+    #[test]
+    fn send_lane_mode_filters_endpoint_families() {
+        let mut options = configured_multi_lane_options();
+
+        options.send_lane_mode = SendLaneMode::Mixed;
+        let endpoints = options.selected_send_endpoints();
+        assert_eq!(
+            endpoint_kinds(&endpoints),
+            vec!["rpc", "jito", "helius_sender"]
+        );
+
+        options.send_lane_mode = SendLaneMode::RpcOnly;
+        let endpoints = options.selected_send_endpoints();
+        assert_eq!(endpoint_kinds(&endpoints), vec!["rpc"]);
+        assert_eq!(endpoints[0].label, "rpc-primary:primary.example.com");
+
+        options.send_lane_mode = SendLaneMode::JitoOnly;
+        let endpoints = options.selected_send_endpoints();
+        assert_eq!(endpoint_kinds(&endpoints), vec!["jito"]);
+        assert_eq!(
+            endpoints[0].url,
+            "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/transactions"
+        );
+
+        options.send_lane_mode = SendLaneMode::HeliusSenderOnly;
+        let endpoints = options.selected_send_endpoints();
+        assert_eq!(endpoint_kinds(&endpoints), vec!["helius_sender"]);
+        assert_eq!(endpoints[0].url, "https://sender.helius-rpc.com/fast");
+    }
+
+    #[test]
+    fn send_lane_mode_validation_fails_closed_for_missing_mode_config() {
+        let mut options = disabled_options();
+        options.send_lane_mode = SendLaneMode::RpcOnly;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=rpc_only requires SOLANA_RPC_URL or JITO_SEND_RPC_URLS"
+        );
+
+        options.solana_rpc_url = Some("https://primary.example.com".to_string());
+        options.send_lane_mode = SendLaneMode::JitoOnly;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=jito_only requires JITO_SEND_FANOUT=YES"
+        );
+
+        options.send_fanout = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=jito_only requires JITO_BLOCK_ENGINE_SEND_URLS"
+        );
+
+        options.send_lane_mode = SendLaneMode::HeliusSenderOnly;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_sender_only requires JITO_HELIUS_SENDER_ENABLED=YES"
+        );
+
+        options.send_lane_mode = SendLaneMode::RpcOnly;
+        options.jito_tip_lamports = Some(10_000);
+        options.jito_tip_account = None;
+        assert!(options.validate_send_lane_mode().is_ok());
+    }
+
+    #[test]
     fn helius_sender_validation_fails_closed() {
         let mut options = disabled_options();
         options.helius_sender_enabled = true;
@@ -5956,8 +6214,17 @@ mod tests {
             Some("signed-tx-signature")
         );
         assert_eq!(
+            json.get("sendSignature")
+                .and_then(serde_json::Value::as_str),
+            Some("signed-tx-signature")
+        );
+        assert_eq!(
             json.get("firstAckLane").and_then(serde_json::Value::as_str),
             Some("rpc-primary:example.com")
+        );
+        assert_eq!(
+            json.get("sendLaneMode").and_then(serde_json::Value::as_str),
+            Some("mixed")
         );
         assert!(json.get("landingLane").is_none());
         assert_eq!(
@@ -6016,7 +6283,8 @@ mod tests {
             transaction_role: "copy_buy",
             submission_group_id: "signed-tx-signature".to_string(),
             observed_signature: "observed-signature".to_string(),
-            send_signature: "send-signature".to_string(),
+            send_signature: "signed-tx-signature".to_string(),
+            send_lane_mode: "mixed",
             first_ack_lane: "rpc-primary:example.com".to_string(),
             first_ack_at_ms: 112,
             all_attempts: vec![SendLaneAttemptAttribution {
@@ -6029,6 +6297,27 @@ mod tests {
                 error: None,
             }],
         }
+    }
+
+    fn configured_multi_lane_options() -> CopyExecutionOptions {
+        let mut options = disabled_options();
+        options.send_fanout = true;
+        options.fast_copy_send = true;
+        options.solana_rpc_url = Some("https://primary.example.com".to_string());
+        options.jito_send_urls =
+            vec!["https://frankfurt.mainnet.block-engine.jito.wtf".to_string()];
+        options.jito_tip_lamports = Some(10_000);
+        options.jito_tip_account = Some(COPY_WALLET.to_string());
+        options.helius_sender_enabled = true;
+        options.helius_sender_urls = vec!["https://sender.helius-rpc.com".to_string()];
+        options.helius_sender_tip_lamports = Some(HELIUS_SENDER_MIN_TIP_LAMPORTS);
+        options.helius_sender_tip_account = Some(COPY_WALLET.to_string());
+        options.priority_fee_micro_lamports = Some(500_000);
+        options
+    }
+
+    fn endpoint_kinds(endpoints: &[SendEndpoint]) -> Vec<&'static str> {
+        endpoints.iter().map(send_endpoint_kind).collect()
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {

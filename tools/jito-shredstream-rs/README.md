@@ -188,6 +188,7 @@ Send fanout is default-off:
 
 ```bash
 JITO_SEND_FANOUT=YES
+JITO_SEND_LANE_MODE=mixed
 JITO_SEND_RPC_URLS=https://rpc-a.example,https://rpc-b.example
 JITO_BLOCK_ENGINE_SEND_URLS=https://frankfurt.mainnet.block-engine.jito.wtf,https://london.mainnet.block-engine.jito.wtf
 ```
@@ -202,6 +203,22 @@ sanitized host label, not query strings or API keys. If
 `DIRECT_EXECUTION_JITO_SEND_URLS` and posts to Jito
 `/api/v1/transactions`, with `JITO_BLOCK_ENGINE_AUTH_UUID` inherited from
 `DIRECT_EXECUTION_JITO_AUTH_UUID` when present.
+
+`JITO_SEND_LANE_MODE` is resolved at startup and never from per-signal IO:
+
+- `mixed`: current behavior. Build/sign one transaction with configured Jito and
+  Helius Sender tips, then fan out the same signed bytes to all enabled lane
+  families.
+- `rpc_only`: use RPC endpoints and priority fee only.
+- `jito_only`: use Jito block-engine endpoints and Jito tip only. Requires
+  `JITO_SEND_FANOUT=YES` and `JITO_BLOCK_ENGINE_SEND_URLS`.
+- `helius_sender_only`: use Helius Sender endpoints and Sender tip only.
+  Requires `JITO_HELIUS_SENDER_ENABLED=YES`.
+
+Do not race lane-specific signed variants. Different fee/tip instructions
+produce different messages and signatures, so multiple variants can land as
+duplicate buys. The safe invariant is still one message, one signature, one
+serialized payload, then fanout of the identical bytes selected by the mode.
 
 Priority fee and Jito tip are explicit, capped runtime knobs:
 

@@ -45,6 +45,7 @@ test("block position diagnostics report same-slot transaction delta", async () =
   assert.equal(diagnostics.targetTxIndex, 1);
   assert.equal(diagnostics.copyTxIndex, 3);
   assert.equal(diagnostics.sameSlotTxDelta, 2);
+  assert.equal(diagnostics.txDelta, 2);
   assert.equal(diagnostics.crossSlotPositionSummary, null);
   assert.equal(diagnostics.unavailableReason, null);
 });
@@ -65,6 +66,7 @@ test("block position diagnostics report later-slot position summary", async () =
   assert.equal(diagnostics.targetTxIndex, 1);
   assert.equal(diagnostics.copyTxIndex, 1);
   assert.equal(diagnostics.sameSlotTxDelta, null);
+  assert.equal(diagnostics.txDelta, 5);
   assert.deepEqual(diagnostics.crossSlotPositionSummary, {
     targetSlotTransactionCount: 3,
     copySlotTransactionCount: 4,
@@ -85,6 +87,7 @@ test("block position diagnostics report later-slot position summary", async () =
 });
 
 test("dashboard tx delta falls back to cross-slot transaction distance", () => {
+  assert.equal(displayTxDelta({ txDelta: 3, sameSlotTxDelta: 2 }), 3);
   assert.equal(displayTxDelta({ sameSlotTxDelta: 2 }), 2);
   assert.equal(
     displayTxDelta({

@@ -243,6 +243,7 @@ function baseBlockPositionDiagnostics(row, copyTransaction) {
     targetTxIndex: null,
     copyTxIndex: null,
     sameSlotTxDelta: null,
+    txDelta: null,
     crossSlotPositionSummary: null,
     unavailableReason: null
   };
@@ -292,6 +293,7 @@ async function blockPositionDiagnostics(row, copyTransaction, rpcFn = rpc) {
   diagnostics.status = "found";
   if (diagnostics.slotDelta === 0) {
     diagnostics.sameSlotTxDelta = diagnostics.copyTxIndex - diagnostics.targetTxIndex;
+    diagnostics.txDelta = diagnostics.sameSlotTxDelta;
   } else if (diagnostics.slotDelta > 0) {
     let intermediateSlotTransactionCount = 0;
     const intermediateSlots = [];
@@ -326,6 +328,7 @@ async function blockPositionDiagnostics(row, copyTransaction, rpcFn = rpc) {
       copySlotTransactionsThroughCopy,
       crossSlotTxDelta
     };
+    diagnostics.txDelta = crossSlotTxDelta;
   }
 
   return diagnostics;
@@ -346,6 +349,7 @@ function unknownChainReport(row, unavailableReason) {
     targetTxIndex: diagnostics.targetTxIndex,
     copyTxIndex: diagnostics.copyTxIndex,
     sameSlotTxDelta: diagnostics.sameSlotTxDelta,
+    txDelta: diagnostics.txDelta,
     crossSlotPositionSummary: diagnostics.crossSlotPositionSummary,
     positionUnavailableReason: diagnostics.unavailableReason,
     fillTokenDelta: null,
@@ -364,6 +368,11 @@ function unknownChainReport(row, unavailableReason) {
 }
 
 function displayTxDelta(report, fallback = null) {
+  const txDelta = report?.txDelta ?? report?.blockPositionDiagnostics?.txDelta;
+  if (Number.isFinite(txDelta)) {
+    return txDelta;
+  }
+
   const sameSlotTxDelta = report?.sameSlotTxDelta;
   if (Number.isFinite(sameSlotTxDelta)) {
     return sameSlotTxDelta;
@@ -563,6 +572,7 @@ async function chainReport(row) {
     targetTxIndex: positionDiagnostics.targetTxIndex,
     copyTxIndex: positionDiagnostics.copyTxIndex,
     sameSlotTxDelta: positionDiagnostics.sameSlotTxDelta,
+    txDelta: positionDiagnostics.txDelta,
     crossSlotPositionSummary: positionDiagnostics.crossSlotPositionSummary,
     positionUnavailableReason: positionDiagnostics.unavailableReason,
     fillTokenDelta: tokenDelta(transaction, row.copyWallet, row.mint),

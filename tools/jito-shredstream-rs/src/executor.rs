@@ -437,7 +437,15 @@ pub(crate) struct TransactionConfirmationLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     observed_tx_index: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    target_tx_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_tx_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     txs_after_observed: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    same_slot_tx_delta: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tx_delta: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     block_position_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3341,6 +3349,20 @@ fn slot_delta(observed_slot: u64, confirmation_slot: Option<u64>) -> Option<i64>
     confirmation_slot.map(|slot| slot as i64 - observed_slot as i64)
 }
 
+fn same_slot_tx_delta(
+    observed_slot: u64,
+    confirmation_slot: Option<u64>,
+    confirmation: &SignatureConfirmation,
+) -> Option<i64> {
+    if confirmation_slot != Some(observed_slot) {
+        return None;
+    }
+    confirmation
+        .block_position
+        .as_ref()
+        .and_then(|position| position.txs_after_observed)
+}
+
 impl TransactionConfirmationLine {
     fn from_copy_execution(line: &CopyExecutionLine, confirmation: SignatureConfirmation) -> Self {
         Self {
@@ -3382,10 +3404,20 @@ impl TransactionConfirmationLine {
                 .block_position
                 .as_ref()
                 .and_then(|position| position.observed_tx_index),
+            target_tx_index: confirmation
+                .block_position
+                .as_ref()
+                .and_then(|position| position.observed_tx_index),
+            copy_tx_index: confirmation
+                .block_position
+                .as_ref()
+                .and_then(|position| position.landed_tx_index),
             txs_after_observed: confirmation
                 .block_position
                 .as_ref()
                 .and_then(|position| position.txs_after_observed),
+            same_slot_tx_delta: same_slot_tx_delta(line.slot, confirmation.slot, &confirmation),
+            tx_delta: same_slot_tx_delta(line.slot, confirmation.slot, &confirmation),
             block_position_error: confirmation.block_position_error,
             confirmation_status: confirmation.confirmation_status,
             err: confirmation.err,
@@ -3436,10 +3468,20 @@ impl TransactionConfirmationLine {
                 .block_position
                 .as_ref()
                 .and_then(|position| position.observed_tx_index),
+            target_tx_index: confirmation
+                .block_position
+                .as_ref()
+                .and_then(|position| position.observed_tx_index),
+            copy_tx_index: confirmation
+                .block_position
+                .as_ref()
+                .and_then(|position| position.landed_tx_index),
             txs_after_observed: confirmation
                 .block_position
                 .as_ref()
                 .and_then(|position| position.txs_after_observed),
+            same_slot_tx_delta: same_slot_tx_delta(line.slot, confirmation.slot, &confirmation),
+            tx_delta: same_slot_tx_delta(line.slot, confirmation.slot, &confirmation),
             block_position_error: confirmation.block_position_error,
             confirmation_status: confirmation.confirmation_status,
             err: confirmation.err,
@@ -3494,10 +3536,20 @@ impl TransactionConfirmationLine {
                 .block_position
                 .as_ref()
                 .and_then(|position| position.observed_tx_index),
+            target_tx_index: confirmation
+                .block_position
+                .as_ref()
+                .and_then(|position| position.observed_tx_index),
+            copy_tx_index: confirmation
+                .block_position
+                .as_ref()
+                .and_then(|position| position.landed_tx_index),
             txs_after_observed: confirmation
                 .block_position
                 .as_ref()
                 .and_then(|position| position.txs_after_observed),
+            same_slot_tx_delta: same_slot_tx_delta(line.slot, confirmation.slot, &confirmation),
+            tx_delta: same_slot_tx_delta(line.slot, confirmation.slot, &confirmation),
             block_position_error: confirmation.block_position_error,
             confirmation_status: confirmation.confirmation_status,
             err: confirmation.err,
@@ -5308,8 +5360,13 @@ mod tests {
             checked: true,
             status: "failed",
             ok: false,
-            slot: Some(42),
-            block_position: None,
+            slot: Some(2),
+            block_position: Some(BlockPosition {
+                tx_count: 10,
+                landed_tx_index: Some(7),
+                observed_tx_index: Some(3),
+                txs_after_observed: Some(4),
+            }),
             block_position_error: None,
             confirmation_status: Some("confirmed".to_string()),
             err: Some(serde_json::json!({
@@ -5350,7 +5407,45 @@ mod tests {
         assert_eq!(
             json.get("confirmationSlot")
                 .and_then(serde_json::Value::as_u64),
-            Some(42)
+            Some(2)
+        );
+        assert_eq!(
+            json.get("landedBlockTxCount")
+                .and_then(serde_json::Value::as_u64),
+            Some(10)
+        );
+        assert_eq!(
+            json.get("observedTxIndex")
+                .and_then(serde_json::Value::as_u64),
+            Some(3)
+        );
+        assert_eq!(
+            json.get("landedTxIndex")
+                .and_then(serde_json::Value::as_u64),
+            Some(7)
+        );
+        assert_eq!(
+            json.get("targetTxIndex")
+                .and_then(serde_json::Value::as_u64),
+            Some(3)
+        );
+        assert_eq!(
+            json.get("copyTxIndex").and_then(serde_json::Value::as_u64),
+            Some(7)
+        );
+        assert_eq!(
+            json.get("txsAfterObserved")
+                .and_then(serde_json::Value::as_i64),
+            Some(4)
+        );
+        assert_eq!(
+            json.get("sameSlotTxDelta")
+                .and_then(serde_json::Value::as_i64),
+            Some(4)
+        );
+        assert_eq!(
+            json.get("txDelta").and_then(serde_json::Value::as_i64),
+            Some(4)
         );
         assert!(json.get("err").is_some());
     }

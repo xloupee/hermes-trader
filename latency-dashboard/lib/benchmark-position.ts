@@ -77,6 +77,9 @@ export function txsAfterWallet(report: LocalExecutionReport | null | undefined):
   if (diagnostics.status !== "found") {
     return diagnostics.unavailableReason ? "unknown" : "n/a";
   }
+  if (typeof diagnostics.txDelta === "number" && Number.isFinite(diagnostics.txDelta)) {
+    return `+${diagnostics.txDelta}`;
+  }
   if (diagnostics.slotDelta !== 0) {
     const crossSlotTxDelta = diagnostics.crossSlotPositionSummary?.crossSlotTxDelta;
     if (typeof crossSlotTxDelta === "number" && Number.isFinite(crossSlotTxDelta)) {
@@ -96,7 +99,8 @@ export function positionSummary(report: LocalExecutionReport | null | undefined)
     return diagnostics.unavailableReason ? "unknown" : "n/a";
   }
   if (diagnostics.slotDelta === 0) {
-    return typeof diagnostics.sameSlotTxDelta === "number" ? `+${diagnostics.sameSlotTxDelta} tx` : "same slot";
+    const sameSlotDelta = diagnostics.txDelta ?? diagnostics.sameSlotTxDelta;
+    return typeof sameSlotDelta === "number" ? `+${sameSlotDelta} tx` : "same slot";
   }
   return typeof diagnostics.slotDelta === "number" ? `+${diagnostics.slotDelta} slot` : "n/a";
 }
@@ -139,7 +143,8 @@ export function positionTone(report: LocalExecutionReport | null | undefined): T
   if (!diagnostics || diagnostics.status !== "found") {
     return "muted";
   }
-  if (diagnostics.slotDelta === 0 && typeof diagnostics.sameSlotTxDelta === "number" && diagnostics.sameSlotTxDelta >= 0) {
+  const txDelta = diagnostics.txDelta ?? diagnostics.sameSlotTxDelta;
+  if (diagnostics.slotDelta === 0 && typeof txDelta === "number" && txDelta >= 0) {
     return "good";
   }
   return diagnostics.slotDelta !== null && diagnostics.slotDelta > 0 ? "bad" : "muted";

@@ -5,6 +5,7 @@ import {
   autoSellStatus,
   blockPositionDiagnostics,
   buyStatus,
+  chainReportFromRustConfirmation,
   dedupeRows,
   displayTxDelta,
   executionKey,
@@ -97,6 +98,71 @@ test("dashboard tx delta falls back to cross-slot transaction distance", () => {
     5620
   );
   assert.equal(displayTxDelta({ sameSlotTxDelta: null }, 7), 7);
+});
+
+test("rust confirmation report carries block position indexes into dashboard fields", async () => {
+  const report = await chainReportFromRustConfirmation(
+    {
+      ...baseRow,
+      observedAction: "buy",
+      observedSignature: "target-sig",
+      sendSignature: "copy-sig",
+      sent: true,
+      decision: "sent"
+    },
+    {
+      status: "landed",
+      ok: true,
+      confirmationSlot: 100,
+      targetTxIndex: 11,
+      copyTxIndex: 15,
+      sameSlotTxDelta: 4,
+      txDelta: 4,
+      blockPositionError: null
+    }
+  );
+
+  assert.equal(report.status, "landed");
+  assert.equal(report.buyStatus, "buyLanded");
+  assert.equal(report.targetTxIndex, 11);
+  assert.equal(report.copyTxIndex, 15);
+  assert.equal(report.sameSlotTxDelta, 4);
+  assert.equal(report.txDelta, 4);
+  assert.equal(report.positionUnavailableReason, null);
+  assert.equal(report.blockPositionDiagnostics.status, "found");
+  assert.equal(report.blockPositionDiagnostics.targetTxIndex, 11);
+  assert.equal(report.blockPositionDiagnostics.copyTxIndex, 15);
+  assert.equal(report.blockPositionDiagnostics.txDelta, 4);
+});
+
+test("rust confirmation report can hydrate missing block position from sync RPC", async () => {
+  const report = await chainReportFromRustConfirmation(
+    {
+      ...baseRow,
+      observedAction: "buy",
+      observedSignature: "target-sig",
+      sendSignature: "copy-sig",
+      sent: true,
+      decision: "sent"
+    },
+    {
+      status: "landed",
+      ok: true,
+      confirmationSlot: 100,
+      blockPositionError: "rust getBlock failed"
+    },
+    rpcWithBlocks(new Map([
+      [100, { signatures: ["before", "target-sig", "middle", "copy-sig", "after"] }]
+    ]))
+  );
+
+  assert.equal(report.status, "landed");
+  assert.equal(report.targetTxIndex, 1);
+  assert.equal(report.copyTxIndex, 3);
+  assert.equal(report.sameSlotTxDelta, 2);
+  assert.equal(report.txDelta, 2);
+  assert.equal(report.positionUnavailableReason, null);
+  assert.equal(report.blockPositionDiagnostics.status, "found");
 });
 
 test("local execution dedupe keeps separate copy wallets for same observed trade", () => {

@@ -138,6 +138,9 @@ pub(crate) struct LiveOptions {
     #[arg(long, env = "JITO_BLOCKHASH_REFRESH_MS", default_value_t = 500)]
     pub(crate) blockhash_refresh_ms: u64,
 
+    #[arg(long, env = "JITO_BLOCKHASH_STALE_MS", default_value_t = 5_000)]
+    pub(crate) blockhash_stale_ms: u128,
+
     #[arg(long, env = "JITO_SIMULATE_COPY_TX", default_value_t = false)]
     pub(crate) simulate_copy_tx: bool,
 
@@ -375,6 +378,13 @@ pub(crate) struct LiveOptions {
     pub(crate) solana_rpc_url: Option<String>,
 
     #[arg(
+        long = "state-rpc-url",
+        env = "JITO_STATE_RPC_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) state_rpc_urls: Vec<String>,
+
+    #[arg(
         long = "address-lookup-table",
         env = "JITO_ADDRESS_LOOKUP_TABLES",
         value_delimiter = ','
@@ -388,6 +398,27 @@ fn parse_boolish(value: &str) -> std::result::Result<bool, String> {
         "0" | "false" | "no" | "n" | "off" => Ok(false),
         _ => Err("expected one of true/false/yes/no/1/0/on/off".to_string()),
     }
+}
+
+impl LiveOptions {
+    pub(crate) fn normalized_state_rpc_urls(&self) -> Vec<String> {
+        normalized_rpc_urls(&self.state_rpc_urls, self.solana_rpc_url.as_deref())
+    }
+}
+
+pub(crate) fn normalized_rpc_urls(urls: &[String], fallback: Option<&str>) -> Vec<String> {
+    let mut normalized = urls
+        .iter()
+        .map(|url| url.trim())
+        .filter(|url| !url.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if normalized.is_empty() {
+        if let Some(fallback) = fallback.map(str::trim).filter(|url| !url.is_empty()) {
+            normalized.push(fallback.to_string());
+        }
+    }
+    normalized
 }
 
 #[tokio::main]

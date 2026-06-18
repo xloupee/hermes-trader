@@ -69,9 +69,27 @@ function readJsonl(path, { recentLimit = 0 } = {}) {
         throw new Error(`invalid JSONL at ${path}:${index + 1}: ${error.message}`);
       }
     })
-    .filter((row) => row.schema === "copytrade.localExecution.v1" || row.schema === "copytrade.sendLaneAttribution.v1");
-  const scopedRows = recentLimit > 0 ? parsedRows.slice(-recentLimit) : parsedRows;
-  return mergeSendLaneAttributions(scopedRows);
+    .filter((row) =>
+      row.schema === "copytrade.localExecution.v1" ||
+      row.schema === "copytrade.sendLaneAttribution.v1" ||
+      row.schema === "copytrade.transactionConfirmation.v1"
+    );
+  const scopedRows = scopeRowsForRecentLocalExecutions(parsedRows, recentLimit);
+  return mergeSidecarRows(scopedRows);
+}
+
+function scopeRowsForRecentLocalExecutions(rows, recentLimit) {
+  if (recentLimit <= 0) {
+    return rows;
+  }
+  const localRows = rows.filter((row) => row.schema === "copytrade.localExecution.v1");
+  const selectedLocalRows = localRows.slice(-recentLimit);
+  const firstSelected = selectedLocalRows[0];
+  if (!firstSelected) {
+    return [];
+  }
+  const firstSelectedIndex = rows.findIndex((row) => row === firstSelected);
+  return firstSelectedIndex >= 0 ? rows.slice(firstSelectedIndex) : [];
 }
 
 function sendLaneAttributionKey(row) {
@@ -84,20 +102,40 @@ function sendLaneAttributionKey(row) {
   ].join("\u0000");
 }
 
-function mergeSendLaneAttributions(rows) {
+function transactionConfirmationKey(row) {
+  return [
+    row.provider,
+    row.observedSignature,
+    row.copyWallet,
+    row.mint,
+    row.signature || row.sendSignature
+  ].join("\u0000");
+}
+
+function mergeSidecarRows(rows) {
   const attributionsByKey = new Map();
+  const confirmationsByKey = new Map();
   for (const row of rows) {
-    if (row.schema !== "copytrade.sendLaneAttribution.v1") {
-      continue;
+    if (row.schema === "copytrade.sendLaneAttribution.v1") {
+      attributionsByKey.set(sendLaneAttributionKey(row), row);
+    } else if (
+      row.schema === "copytrade.transactionConfirmation.v1" &&
+      row.transactionRole === "copy_buy"
+    ) {
+      confirmationsByKey.set(transactionConfirmationKey(row), row);
     }
-    attributionsByKey.set(sendLaneAttributionKey(row), row);
   }
 
   return rows
     .filter((row) => row.schema === "copytrade.localExecution.v1")
     .map((row) => {
       const attribution = attributionsByKey.get(sendLaneAttributionKey(row));
-      return attribution ? { ...row, sendLaneAttribution: attribution } : row;
+      const confirmation = confirmationsByKey.get(transactionConfirmationKey(row));
+      return {
+        ...row,
+        ...(attribution ? { sendLaneAttribution: attribution } : {}),
+        ...(confirmation ? { rustTransactionConfirmation: confirmation } : {})
+      };
     });
 }
 
@@ -128,14 +166,18 @@ function timestampFromMs(value) {
 }
 
 async function rpc(method, params) {
-  if (!process.env.SOLANA_RPC_URL) {
+  const rpcUrl =
+    process.env.JITO_SYNC_RPC_URL ||
+    process.env.JITO_BLOCK_POSITION_RPC_URL ||
+    process.env.SOLANA_RPC_URL;
+  if (!rpcUrl) {
     return null;
   }
   const timeoutMs = positiveInteger(process.env.JITO_SYNC_RPC_TIMEOUT_MS, DEFAULT_RPC_TIMEOUT_MS);
   const abort = new AbortController();
   const timeout = setTimeout(() => abort.abort(), timeoutMs);
   try {
-    const response = await fetch(process.env.SOLANA_RPC_URL, {
+    const response = await fetch(rpcUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
@@ -386,6 +428,10 @@ function displayTxDelta(report, fallback = null) {
   return fallback ?? null;
 }
 
+function finiteNumberOrNull(value) {
+  return Number.isFinite(value) ? value : null;
+}
+
 function submittedChainReport(signature, unavailableReason) {
   return {
     status: "submitted",
@@ -530,6 +576,11 @@ async function chainReport(row) {
       : null;
     return report;
   }
+  if (row.rustTransactionConfirmation) {
+    const report = await chainReportFromRustConfirmation(row, row.rustTransactionConfirmation);
+    report.targetBlockTime = targetTransaction?.blockTime ?? null;
+    return report;
+  }
   let transaction;
   try {
     transaction = await confirmedTransaction(row.sendSignature);
@@ -597,6 +648,85 @@ async function chainReport(row) {
   };
   report.buyStatus = buyStatus(row, report);
   report.autoSellStatus = autoSellStatus(row, autoSellReport);
+  return report;
+}
+
+function applyPositionDiagnostics(report, positionDiagnostics) {
+  report.blockPositionDiagnostics = positionDiagnostics;
+  report.targetSlot = positionDiagnostics.targetSlot;
+  report.copySlot = positionDiagnostics.copySlot;
+  report.slotDelta = positionDiagnostics.slotDelta;
+  report.targetTxIndex = positionDiagnostics.targetTxIndex;
+  report.copyTxIndex = positionDiagnostics.copyTxIndex;
+  report.sameSlotTxDelta = positionDiagnostics.sameSlotTxDelta;
+  report.txDelta = positionDiagnostics.txDelta;
+  report.crossSlotPositionSummary = positionDiagnostics.crossSlotPositionSummary;
+  report.positionUnavailableReason = positionDiagnostics.unavailableReason;
+}
+
+async function chainReportFromRustConfirmation(row, confirmation, rpcFn = rpc) {
+  const slot = Number.isFinite(confirmation.confirmationSlot)
+    ? confirmation.confirmationSlot
+    : null;
+  const slotDeltaFromObserved =
+    Number.isFinite(slot) && Number.isFinite(row.slot) ? slot - row.slot : null;
+  const positionDiagnostics = baseBlockPositionDiagnostics(
+    row,
+    slot === null ? null : { slot }
+  );
+  positionDiagnostics.targetTxIndex = finiteNumberOrNull(confirmation.targetTxIndex);
+  positionDiagnostics.copyTxIndex = finiteNumberOrNull(confirmation.copyTxIndex);
+  positionDiagnostics.sameSlotTxDelta = finiteNumberOrNull(
+    confirmation.sameSlotTxDelta ?? confirmation.txsAfterObserved
+  );
+  positionDiagnostics.txDelta = finiteNumberOrNull(
+    confirmation.txDelta ?? confirmation.sameSlotTxDelta ?? confirmation.txsAfterObserved
+  );
+  positionDiagnostics.status =
+    Number.isFinite(positionDiagnostics.targetTxIndex) &&
+    Number.isFinite(positionDiagnostics.copyTxIndex) &&
+    Number.isFinite(positionDiagnostics.txDelta)
+      ? "found"
+      : "unknown";
+  positionDiagnostics.unavailableReason =
+    positionDiagnostics.status === "found"
+      ? null
+      : confirmation.blockPositionError ||
+        "block position not fetched by dashboard sync";
+
+  const report = {
+    status: confirmation.ok === false ? "failedOnChain" : confirmation.status || "submitted",
+    slot,
+    slotDeltaFromObserved,
+    blockPositionDiagnostics: positionDiagnostics,
+    targetSlot: positionDiagnostics.targetSlot,
+    copySlot: positionDiagnostics.copySlot,
+    slotDelta: positionDiagnostics.slotDelta,
+    targetTxIndex: positionDiagnostics.targetTxIndex,
+    copyTxIndex: positionDiagnostics.copyTxIndex,
+    sameSlotTxDelta: positionDiagnostics.sameSlotTxDelta,
+    txDelta: positionDiagnostics.txDelta,
+    crossSlotPositionSummary: positionDiagnostics.crossSlotPositionSummary,
+    positionUnavailableReason: positionDiagnostics.unavailableReason,
+    fillTokenDelta: null,
+    copyWalletSolDelta: null,
+    grossCopySpendSol: null,
+    networkFeeSol: null,
+    extraSpendBeyondObservedSol: null,
+    extraSpendBeyondObservedAndNetworkFeeSol: null,
+    err: confirmation.err ?? null,
+    targetBlockTime: null,
+    blockTime: null,
+    autoSell: null
+  };
+  if (positionDiagnostics.status !== "found" && slot !== null) {
+    const refreshedPositionDiagnostics = await blockPositionDiagnostics(row, { slot }, rpcFn);
+    if (refreshedPositionDiagnostics.status === "found") {
+      applyPositionDiagnostics(report, refreshedPositionDiagnostics);
+    }
+  }
+  report.buyStatus = buyStatus(row, report);
+  report.autoSellStatus = autoSellStatus(row, null);
   return report;
 }
 
@@ -1162,11 +1292,12 @@ export {
   blockPositionDiagnostics,
   blockSignatures,
   buyStatus,
+  chainReportFromRustConfirmation,
   dedupeRows,
   executionKey,
   fetchBlockSignatures,
   displayTxDelta,
-  mergeSendLaneAttributions,
+  mergeSidecarRows,
   readJsonl,
   syncLimitForCycle,
   unknownChainReport,

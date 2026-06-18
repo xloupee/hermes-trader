@@ -31,7 +31,10 @@ if [[ -f "$WORKER_ENV_FILE" ]]; then
   load_env_file "$WORKER_ENV_FILE"
 fi
 
-: "${SOLANA_RPC_URL:?SOLANA_RPC_URL must be set in $APP_ENV_FILE or $WORKER_ENV_FILE}"
+if [[ -z "${JITO_STATE_RPC_URLS:-}" && -z "${SOLANA_RPC_URL:-}" ]]; then
+  echo "JITO_STATE_RPC_URLS or SOLANA_RPC_URL must be set in $APP_ENV_FILE or $WORKER_ENV_FILE" >&2
+  exit 1
+fi
 : "${JITO_ARM_LIVE_COPY_SEND:?set JITO_ARM_LIVE_COPY_SEND=YES to allow live copy send}"
 
 if [[ "$JITO_ARM_LIVE_COPY_SEND" != "YES" ]]; then
@@ -53,7 +56,9 @@ export JITO_MIGRATED_AMM_SMALL_COPY_MODE="${JITO_MIGRATED_AMM_SMALL_COPY_MODE:-s
 export JITO_FAST_COPY_SEND="${JITO_FAST_COPY_SEND:-YES}"
 export JITO_SEND_FANOUT="${JITO_SEND_FANOUT:-false}"
 export JITO_SEND_LANE_MODE="${JITO_SEND_LANE_MODE:-mixed}"
-export JITO_SEND_RPC_URLS="${JITO_SEND_RPC_URLS:-${DIRECT_EXECUTION_SEND_RPC_URLS:-$SOLANA_RPC_URL}}"
+if [[ -z "${JITO_SEND_RPC_URLS:-}" ]]; then
+  export JITO_SEND_RPC_URLS="${DIRECT_EXECUTION_SEND_RPC_URLS:-${SOLANA_RPC_URL:-}}"
+fi
 export JITO_BLOCK_ENGINE_SEND_URLS="${JITO_BLOCK_ENGINE_SEND_URLS:-${DIRECT_EXECUTION_JITO_SEND_URLS:-}}"
 export JITO_BLOCK_ENGINE_AUTH_UUID="${JITO_BLOCK_ENGINE_AUTH_UUID:-${DIRECT_EXECUTION_JITO_AUTH_UUID:-}}"
 export JITO_HELIUS_SENDER_ENABLED="${JITO_HELIUS_SENDER_ENABLED:-false}"
@@ -290,7 +295,8 @@ echo "  copy execution queue capacity: $JITO_COPY_EXECUTION_QUEUE_CAPACITY"
 echo "  fast copy send: $JITO_FAST_COPY_SEND"
 echo "  send fanout: $JITO_SEND_FANOUT"
 echo "  send lane mode: $JITO_SEND_LANE_MODE"
-echo "  send rpc urls: $(printf '%s' "$JITO_SEND_RPC_URLS" | awk -F, '{print NF}') configured"
+echo "  state rpc urls: $(if [[ -n "${JITO_STATE_RPC_URLS:-}" ]]; then printf '%s' "$JITO_STATE_RPC_URLS" | awk -F, '{print NF}'; elif [[ -n "${SOLANA_RPC_URL:-}" ]]; then printf '1'; else printf '0'; fi) configured"
+echo "  send rpc urls: $(if [[ -n "${JITO_SEND_RPC_URLS:-}" ]]; then printf '%s' "$JITO_SEND_RPC_URLS" | awk -F, '{print NF}'; else printf '0'; fi) configured"
 if [[ -n "$JITO_BLOCK_ENGINE_SEND_URLS" ]]; then
   echo "  jito send urls: $(printf '%s' "$JITO_BLOCK_ENGINE_SEND_URLS" | awk -F, '{print NF}') configured"
 else

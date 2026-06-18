@@ -184,6 +184,20 @@ latency tests against a live env that has auto-sell enabled, set
 `JITO_ISOLATE_BUY_LATENCY_TEST=true`. Dashboard/report syncing should run as a
 separate post-submit service.
 
+State RPC is separate from send lanes:
+
+```bash
+JITO_STATE_RPC_URLS=https://state-rpc-a.example,https://state-rpc-b.example
+JITO_BLOCKHASH_STALE_MS=5000
+```
+
+The state RPC pool is used for warm blockhash refreshes, copy-wallet balance
+refreshes, address lookup table preload, simulation, token/account reads, and
+post-submit confirmation checks. The buy hot path reads these warm caches in
+memory and fails closed if the blockhash or balance state is stale. If
+`JITO_STATE_RPC_URLS` is unset, the worker falls back to `SOLANA_RPC_URL` for
+backward compatibility.
+
 Send fanout is default-off:
 
 ```bash
@@ -198,7 +212,9 @@ concurrently, records the first successful ACK as `sendRpcWinner`, and lets the
 remaining send tasks keep running instead of cancelling them. It stores only a
 sanitized host label, not query strings or API keys. If
 `JITO_SEND_RPC_URLS` is unset, the VPS launcher falls back to
-`DIRECT_EXECUTION_SEND_RPC_URLS`, then `SOLANA_RPC_URL`. If
+`DIRECT_EXECUTION_SEND_RPC_URLS`, then `SOLANA_RPC_URL` when present. This is
+separate from `JITO_STATE_RPC_URLS`, so a read RPC does not automatically become
+a send lane. If
 `JITO_BLOCK_ENGINE_SEND_URLS` is unset, it falls back to
 `DIRECT_EXECUTION_JITO_SEND_URLS` and posts to Jito
 `/api/v1/transactions`, with `JITO_BLOCK_ENGINE_AUTH_UUID` inherited from

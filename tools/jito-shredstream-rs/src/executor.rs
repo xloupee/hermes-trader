@@ -135,6 +135,8 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) copy_wallet: Option<String>,
     pub(crate) copy_keypair_path: Option<PathBuf>,
     pub(crate) solana_rpc_url: Option<String>,
+    pub(crate) state_rpc_urls: Vec<String>,
+    pub(crate) blockhash_stale_ms: u128,
     pub(crate) auto_sell_after_buy: bool,
     pub(crate) auto_sell_delay_ms: u64,
     pub(crate) rust_trailing_sells_enabled: bool,
@@ -833,6 +835,8 @@ impl CopyExecutor {
             copy_wallet: options.copy_wallet.clone(),
             copy_keypair_path: options.copy_keypair_path.clone(),
             solana_rpc_url: options.solana_rpc_url.clone(),
+            state_rpc_urls: options.normalized_state_rpc_urls(),
+            blockhash_stale_ms: options.blockhash_stale_ms,
             auto_sell_after_buy: options.auto_sell_after_buy,
             auto_sell_delay_ms: options.auto_sell_delay_ms,
             rust_trailing_sells_enabled: options.rust_trailing_sells_enabled,
@@ -1148,7 +1152,10 @@ impl CopyExecutor {
             skip_guard!("missing copy keypair for copy wallet");
         };
 
-        let Some(cached_blockhash) = cached_blockhash(self.blockhash_cache.as_ref()) else {
+        let Some(cached_blockhash) = cached_blockhash(
+            self.blockhash_cache.as_ref(),
+            self.options.blockhash_stale_ms,
+        ) else {
             skip_guard!("missing warm blockhash");
         };
 
@@ -1538,9 +1545,8 @@ impl CopyExecutor {
     async fn simulate_transaction(&self, encoded_tx: &str) -> Result<SimulationValue, String> {
         let rpc_url = self
             .options
-            .solana_rpc_url
-            .as_deref()
-            .ok_or_else(|| "missing SOLANA_RPC_URL".to_string())?;
+            .primary_state_rpc_url()
+            .ok_or_else(|| "missing JITO_STATE_RPC_URLS or SOLANA_RPC_URL".to_string())?;
         let response = self
             .client
             .post(rpc_url)
@@ -1761,7 +1767,10 @@ impl CopyExecutor {
             auto_sell_token_amount_raw(Some(&auto_sell_route_context), token_balance_raw);
         line.auto_sell_token_amount_raw = Some(token_amount_raw);
 
-        let Some(cached_blockhash) = cached_blockhash(self.blockhash_cache.as_ref()) else {
+        let Some(cached_blockhash) = cached_blockhash(
+            self.blockhash_cache.as_ref(),
+            self.options.blockhash_stale_ms,
+        ) else {
             line.skip_auto_sell("missing warm blockhash for auto-sell");
             return;
         };
@@ -1940,7 +1949,10 @@ impl CopyExecutor {
         }
         line.token_amount_raw = Some(token_amount_raw);
 
-        let Some(cached_blockhash) = cached_blockhash(self.blockhash_cache.as_ref()) else {
+        let Some(cached_blockhash) = cached_blockhash(
+            self.blockhash_cache.as_ref(),
+            self.options.blockhash_stale_ms,
+        ) else {
             line.skip("missing warm blockhash for rust trailing sell");
             return;
         };
@@ -2044,9 +2056,8 @@ impl CopyExecutor {
     async fn token_account_balance_raw(&self, token_account: &str) -> Result<u64, String> {
         let rpc_url = self
             .options
-            .solana_rpc_url
-            .as_deref()
-            .ok_or_else(|| "missing SOLANA_RPC_URL".to_string())?;
+            .primary_state_rpc_url()
+            .ok_or_else(|| "missing JITO_STATE_RPC_URLS or SOLANA_RPC_URL".to_string())?;
         let fetch_balance = async {
             self.client
                 .post(rpc_url)
@@ -2141,11 +2152,9 @@ impl CopyExecutor {
         &self,
         bonding_curve: &Pubkey,
     ) -> Result<bool, String> {
-        let rpc_url = self
-            .options
-            .solana_rpc_url
-            .as_deref()
-            .ok_or_else(|| "cashback detection failed: missing SOLANA_RPC_URL".to_string())?;
+        let rpc_url = self.options.primary_state_rpc_url().ok_or_else(|| {
+            "cashback detection failed: missing JITO_STATE_RPC_URLS or SOLANA_RPC_URL".to_string()
+        })?;
         let request = async {
             self.client
                 .post(rpc_url)
@@ -2238,7 +2247,7 @@ impl CopyExecutor {
                 reason: Some(format!("missing {transaction_label} signature")),
             };
         };
-        let Some(rpc_url) = self.options.solana_rpc_url.as_deref() else {
+        let Some(rpc_url) = self.options.primary_state_rpc_url() else {
             return SignatureConfirmation {
                 checked: false,
                 status: "error",
@@ -2248,7 +2257,7 @@ impl CopyExecutor {
                 block_position_error: None,
                 confirmation_status: None,
                 err: None,
-                reason: Some("missing SOLANA_RPC_URL".to_string()),
+                reason: Some("missing JITO_STATE_RPC_URLS or SOLANA_RPC_URL".to_string()),
             };
         };
 
@@ -3936,6 +3945,13 @@ impl CopyExecutionOptions {
         self.rust_trailing_sells_enabled && !self.isolate_buy_latency_test
     }
 
+    fn primary_state_rpc_url(&self) -> Option<&str> {
+        self.state_rpc_urls
+            .first()
+            .map(String::as_str)
+            .or(self.solana_rpc_url.as_deref())
+    }
+
     fn selected_send_rpc_urls(&self) -> Vec<String> {
         let mut urls =
             normalized_send_rpc_urls(&self.send_rpc_urls, self.solana_rpc_url.as_deref());
@@ -4459,6 +4475,8 @@ mod tests {
             copy_wallet: None,
             copy_keypair_path: None,
             solana_rpc_url: None,
+            state_rpc_urls: Vec::new(),
+            blockhash_stale_ms: 5_000,
             auto_sell_after_buy: false,
             auto_sell_delay_ms: 1_000,
             rust_trailing_sells_enabled: false,
@@ -4788,7 +4806,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(error, "cashback detection failed: missing SOLANA_RPC_URL");
+        assert_eq!(
+            error,
+            "cashback detection failed: missing JITO_STATE_RPC_URLS or SOLANA_RPC_URL"
+        );
     }
 
     #[test]
@@ -5750,6 +5771,24 @@ mod tests {
             vec!["https://primary.example.com/?api-key=secret".to_string()]
         );
         assert_eq!(options.selected_send_rpc_url_count(), 1);
+    }
+
+    #[test]
+    fn state_rpc_urls_are_read_pool_not_implicit_send_pool() {
+        let options = CopyExecutionOptions {
+            solana_rpc_url: Some("https://legacy.example.com".to_string()),
+            state_rpc_urls: vec!["https://state.example.com".to_string()],
+            ..disabled_options()
+        };
+
+        assert_eq!(
+            options.primary_state_rpc_url(),
+            Some("https://state.example.com")
+        );
+        assert_eq!(
+            options.selected_send_rpc_urls(),
+            vec!["https://legacy.example.com".to_string()]
+        );
     }
 
     #[test]

@@ -58,14 +58,13 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
         .map(|runtime| runtime.target_wallet_pubkey_set.len())
         .unwrap_or(fallback_target_wallet_pubkey_set.len());
     let telegram_runtime = Arc::new(ArcSwapOption::from(telegram_runtime.map(Arc::new)));
-    let address_lookup_tables = AddressLookupTableCache::load(
-        options.solana_rpc_url.as_deref(),
-        &options.address_lookup_tables,
-    )
-    .await
-    .context("preload address lookup tables")?;
+    let state_rpc_urls = options.normalized_state_rpc_urls();
+    let address_lookup_tables =
+        AddressLookupTableCache::load(&state_rpc_urls, &options.address_lookup_tables)
+            .await
+            .context("preload address lookup tables")?;
     let blockhash_cache = spawn_blockhash_cache(
-        options.solana_rpc_url.clone(),
+        state_rpc_urls.clone(),
         options.blockhash_refresh_ms,
         options.stats,
     );
@@ -863,12 +862,12 @@ fn wallet_balance_cache_from_options(
     if !options.copy_wallet_balance_guard {
         return None;
     }
-    let rpc_url = options.solana_rpc_url.as_ref()?.trim();
-    if rpc_url.is_empty() {
+    let rpc_urls = options.normalized_state_rpc_urls();
+    if rpc_urls.is_empty() {
         return None;
     }
     Some(WalletBalanceCache::new(
-        rpc_url.to_string(),
+        rpc_urls,
         options.copy_wallet_balance_refresh_ms,
         options.copy_wallet_balance_stale_ms,
         options.send_http_timeout_ms,

@@ -15,32 +15,36 @@ pub(crate) struct AddressLookupTableCache {
 }
 
 impl AddressLookupTableCache {
-    pub(crate) async fn load(rpc_url: Option<&str>, table_keys: &[String]) -> Result<Self> {
+    pub(crate) async fn load(rpc_urls: &[String], table_keys: &[String]) -> Result<Self> {
         if table_keys.is_empty() {
             return Ok(Self::default());
         }
 
-        let rpc_url =
-            rpc_url.context("SOLANA_RPC_URL is required to preload address lookup tables")?;
+        if rpc_urls.is_empty() {
+            return Err(anyhow!(
+                "JITO_STATE_RPC_URLS or SOLANA_RPC_URL is required to preload address lookup tables"
+            ));
+        }
         let client = reqwest::Client::new();
         let mut tables = HashMap::with_capacity(table_keys.len());
 
         for table_key in table_keys {
             let table_pubkey = Pubkey::from_str(table_key)
                 .with_context(|| format!("parse address lookup table {table_key}"))?;
-            let addresses = match fetch_lookup_table_addresses(&client, rpc_url, table_key).await {
-                Ok(addresses) => addresses,
-                Err(error) if table_key == FLASHX_LOOKUP_TABLE => {
-                    eprintln!(
-                        "using cached FLASHX lookup table after RPC preload failed: {error:#}"
-                    );
-                    flashx_lookup_table_addresses()
-                }
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("load address lookup table {table_key}"));
-                }
-            };
+            let addresses =
+                match fetch_lookup_table_addresses_any(&client, rpc_urls, table_key).await {
+                    Ok(addresses) => addresses,
+                    Err(error) if table_key == FLASHX_LOOKUP_TABLE => {
+                        eprintln!(
+                            "using cached FLASHX lookup table after RPC preload failed: {error:#}"
+                        );
+                        flashx_lookup_table_addresses()
+                    }
+                    Err(error) => {
+                        return Err(error)
+                            .with_context(|| format!("load address lookup table {table_key}"));
+                    }
+                };
             tables.insert(table_pubkey, addresses);
         }
 
@@ -126,6 +130,24 @@ impl AddressLookupTableCache {
             table_accounts,
         }
     }
+}
+
+async fn fetch_lookup_table_addresses_any(
+    client: &reqwest::Client,
+    rpc_urls: &[String],
+    table_key: &str,
+) -> Result<Vec<Pubkey>> {
+    let mut errors = Vec::new();
+    for rpc_url in rpc_urls {
+        match fetch_lookup_table_addresses(client, rpc_url, table_key).await {
+            Ok(addresses) => return Ok(addresses),
+            Err(error) => errors.push(format!("{}: {error:#}", rpc_url_label(rpc_url))),
+        }
+    }
+    Err(anyhow!(
+        "all getAccountInfo RPCs failed for lookup table {table_key}: {}",
+        errors.join("; ")
+    ))
 }
 
 #[derive(Debug)]
@@ -225,6 +247,16 @@ fn base64_decode(value: &str) -> Result<Vec<u8>> {
     base64::engine::general_purpose::STANDARD
         .decode(value)
         .context("base64 decode")
+}
+
+fn rpc_url_label(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or(url)
+        .to_string()
 }
 
 fn build_table_accounts(

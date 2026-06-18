@@ -12,7 +12,7 @@ pub(crate) struct WalletBalanceCache {
 #[derive(Debug)]
 struct WalletBalanceCacheInner {
     client: Client,
-    rpc_url: String,
+    rpc_urls: Vec<String>,
     refresh_ms: u64,
     stale_after_ms: u128,
     http_timeout_ms: u64,
@@ -59,7 +59,7 @@ struct RpcAccount {
 
 impl WalletBalanceCache {
     pub(crate) fn new(
-        rpc_url: String,
+        rpc_urls: Vec<String>,
         refresh_ms: u64,
         stale_after_ms: u128,
         http_timeout_ms: u64,
@@ -68,7 +68,7 @@ impl WalletBalanceCache {
         Self {
             inner: Arc::new(WalletBalanceCacheInner {
                 client: Client::new(),
-                rpc_url,
+                rpc_urls,
                 refresh_ms,
                 stale_after_ms,
                 http_timeout_ms,
@@ -166,9 +166,32 @@ impl WalletBalanceCacheInner {
             return Ok(0);
         }
 
+        let mut errors = Vec::new();
+        for rpc_url in &self.rpc_urls {
+            match self.refresh_once_from_rpc(rpc_url, wallets.as_ref()).await {
+                Ok(balances) => {
+                    let count = balances.len();
+                    self.balances.store(Arc::new(balances));
+                    return Ok(count);
+                }
+                Err(error) => errors.push(format!("{}: {error}", rpc_url_label(rpc_url))),
+            }
+        }
+
+        Err(format!(
+            "all getMultipleAccounts RPCs failed: {}",
+            errors.join("; ")
+        ))
+    }
+
+    async fn refresh_once_from_rpc(
+        &self,
+        rpc_url: &str,
+        wallets: &[String],
+    ) -> Result<HashMap<String, WalletBalanceEntry>, String> {
         let request = async {
             self.client
-                .post(&self.rpc_url)
+                .post(rpc_url)
                 .json(&serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -223,9 +246,7 @@ impl WalletBalanceCacheInner {
                 },
             );
         }
-        let count = balances.len();
-        self.balances.store(Arc::new(balances));
-        Ok(count)
+        Ok(balances)
     }
 }
 
@@ -240,13 +261,23 @@ fn normalized_wallets(wallets: Vec<String>) -> Vec<String> {
     wallets
 }
 
+fn rpc_url_label(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or(url)
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn cache_with_wallet(wallet: &str, stale_after_ms: u128) -> WalletBalanceCache {
         WalletBalanceCache::new(
-            "http://127.0.0.1:8899".to_string(),
+            vec!["http://127.0.0.1:8899".to_string()],
             1_000,
             stale_after_ms,
             0,

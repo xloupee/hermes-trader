@@ -17,11 +17,13 @@ pub(crate) struct CachedBlockhash {
 pub(crate) type BlockhashCache = Arc<RwLock<Option<CachedBlockhash>>>;
 
 pub(crate) fn spawn_blockhash_cache(
-    rpc_url: Option<String>,
+    rpc_urls: Vec<String>,
     refresh_ms: u64,
     stats: bool,
 ) -> Option<BlockhashCache> {
-    let rpc_url = rpc_url?;
+    if rpc_urls.is_empty() {
+        return None;
+    }
     let refresh_ms = refresh_ms.max(100);
     let cache = Arc::new(RwLock::new(None));
     let task_cache = Arc::clone(&cache);
@@ -32,7 +34,7 @@ pub(crate) fn spawn_blockhash_cache(
 
         loop {
             interval.tick().await;
-            match fetch_latest_blockhash(&client, &rpc_url).await {
+            match fetch_latest_blockhash_any(&client, &rpc_urls).await {
                 Ok(blockhash) => {
                     if stats {
                         eprintln!(
@@ -57,10 +59,31 @@ pub(crate) fn spawn_blockhash_cache(
     Some(cache)
 }
 
-pub(crate) fn cached_blockhash(cache: Option<&BlockhashCache>) -> Option<CachedBlockhash> {
+pub(crate) fn cached_blockhash(
+    cache: Option<&BlockhashCache>,
+    stale_after_ms: u128,
+) -> Option<CachedBlockhash> {
     cache
         .and_then(|cache| cache.read().ok())
         .and_then(|guard| guard.clone())
+        .filter(|blockhash| now_ms().saturating_sub(blockhash.fetched_at_ms) <= stale_after_ms)
+}
+
+async fn fetch_latest_blockhash_any(
+    client: &reqwest::Client,
+    rpc_urls: &[String],
+) -> Result<CachedBlockhash, String> {
+    let mut errors = Vec::new();
+    for rpc_url in rpc_urls {
+        match fetch_latest_blockhash(client, rpc_url).await {
+            Ok(blockhash) => return Ok(blockhash),
+            Err(error) => errors.push(format!("{}: {error}", rpc_url_label(rpc_url))),
+        }
+    }
+    Err(format!(
+        "all getLatestBlockhash RPCs failed: {}",
+        errors.join("; ")
+    ))
 }
 
 async fn fetch_latest_blockhash(
@@ -136,6 +159,16 @@ struct RpcError {
     message: String,
 }
 
+fn rpc_url_label(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or(url)
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +185,17 @@ mod tests {
         assert_eq!(blockhash.hash, hash);
         assert_eq!(blockhash.last_valid_block_height, 123);
         assert_eq!(blockhash.fetched_at_ms, 456);
+    }
+
+    #[test]
+    fn cached_blockhash_filters_stale_entries() {
+        let cache = Arc::new(RwLock::new(Some(CachedBlockhash {
+            hash: Hash::default(),
+            last_valid_block_height: 123,
+            fetched_at_ms: now_ms().saturating_sub(10_000),
+        })));
+
+        assert!(cached_blockhash(Some(&cache), 1_000).is_none());
     }
 
     #[test]

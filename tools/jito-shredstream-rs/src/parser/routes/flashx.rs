@@ -566,7 +566,7 @@ mod tests {
         assert_eq!(parsed.mint, pubkey(LIVE_DIRECT_PUMP_SELL_MINT));
         let RouteContext::FlashxPump(context) = parsed
             .route_context
-            .as_ref()
+            .as_deref()
             .expect("live direct Pump sell should resolve route context");
         assert_eq!(context.layout, FlashxPumpLayout::DirectPump);
         assert_eq!(
@@ -605,7 +605,7 @@ mod tests {
         assert_eq!(parsed.mint, pubkey(NON_SUFFIX_MIGRATED_MINT));
         let RouteContext::FlashxPump(context) = parsed
             .route_context
-            .as_ref()
+            .as_deref()
             .expect("route context should resolve");
         assert_eq!(context.layout, FlashxPumpLayout::MigratedAmm);
         assert_eq!(
@@ -616,7 +616,7 @@ mod tests {
             Some(TOKEN_2022_PROGRAM_ID)
         );
         let copy_build = crate::tx_builder::build_copy_unsigned_flashx_pump(
-            parsed.route_context.as_ref(),
+            parsed.route_context.as_deref(),
             COPY_WALLET,
             &parsed.mint.to_string(),
         )

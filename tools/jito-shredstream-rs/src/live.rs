@@ -6,7 +6,7 @@ use crate::{
         normalized_event_from_raw, now_ms, print_json, wallet_mention_schema,
         NormalizedCopyTradeEvent, RejectionLine, ShadowSignalLine, WalletMentionLine,
     },
-    executor::{CopyExecutionOutput, CopyExecutor, TrailingSellPlan},
+    executor::{CopyExecutionOutput, CopyExecutor, CopyExecutorQueueContext, TrailingSellPlan},
     parser::{
         classify_wallet_mention, parse_trade_for_mentioned_targets, signature_bytes_to_string,
         versioned_tx_signature_bytes, versioned_tx_signature_string, Action,
@@ -33,10 +33,10 @@ use std::{
     io::{BufWriter, Write},
     path::Path,
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Notify};
 
 struct TelegramRuntimeConfig {
     snapshot: TelegramSnapshotConfig,
@@ -184,13 +184,15 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                 .unwrap_or_else(|| "(disabled)".to_string())
         )
     })?;
-    let mut copy_executions = CopyExecutionWriter::new(
+    let copy_execution_writer_tx = spawn_copy_execution_writer(
         options.copy_executions_path.as_deref(),
         options.copy_executions_flush_each_write,
+        options.copy_executions_write_queue_capacity,
+        options.copy_executions_flush_interval_ms,
     )
     .with_context(|| {
         format!(
-            "open copy executions path {}",
+            "open copy execution writer path {}",
             options
                 .copy_executions_path
                 .as_deref()
@@ -199,11 +201,12 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
         )
     })?;
     let (copy_execution_tx, mut copy_execution_rx) = mpsc::unbounded_channel();
-    let (copy_execution_request_tx, copy_execution_request_rx) =
-        mpsc::channel(nonzero_capacity(options.copy_execution_queue_capacity));
+    let copy_execution_request_queue = Arc::new(CopyExecutionRequestQueue::new(
+        options.copy_execution_queue_capacity,
+    ));
     spawn_copy_execution_workers(
         Arc::clone(&copy_executor),
-        copy_execution_request_rx,
+        Arc::clone(&copy_execution_request_queue),
         copy_execution_tx.clone(),
         options.copy_execution_concurrency,
     );
@@ -219,7 +222,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
             copy_execution = copy_execution_rx.recv() => {
                 if let Some(copy_execution) = copy_execution {
                     if handle_copy_execution_result(
-                        &mut copy_executions,
+                        &copy_execution_writer_tx,
                         copy_execution,
                         &copy_executor,
                         &copy_execution_tx,
@@ -398,7 +401,6 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 runtime.snapshot.target_configs_for_pubkey(&target_wallet)
                             })
                             .unwrap_or(&[]);
-                        let mut parsed_for_runtime = Some(parsed);
                         if telegram_target_configs.is_empty() {
                             let runtime_request = CopyRuntimeRequest::from_parsed_trade(
                                 trade_parsed_at_ms,
@@ -406,16 +408,16 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 signature,
                                 slot_entry.slot,
                                 account_keys.len(),
-                                parsed_for_runtime
-                                    .take()
-                                    .expect("parsed trade available for runtime request"),
+                                parsed,
                                 PlannerOptions {
                                     copy_sol_amount: options.copy_plan_sol_amount,
                                 },
                             );
                             if options.fast_copy_send {
-                                enqueue_copy_execution(
-                                    &copy_execution_request_tx,
+                                enqueue_or_write_copy_execution(
+                                    &copy_execution_request_queue,
+                                    &copy_execution_writer_tx,
+                                    &copy_executor,
                                     runtime_request,
                                     timings,
                                     None,
@@ -426,8 +428,10 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                     runtime_request.to_shadow_signal_line(options.endpoint.clone());
                                 let execution_plan = runtime_request
                                     .to_execution_plan_line(options.endpoint.clone());
-                                enqueue_copy_execution(
-                                    &copy_execution_request_tx,
+                                enqueue_or_write_copy_execution(
+                                    &copy_execution_request_queue,
+                                    &copy_execution_writer_tx,
+                                    &copy_executor,
                                     runtime_request,
                                     timings,
                                     None,
@@ -444,7 +448,56 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                     &options,
                                 )?;
                             }
+                        } else if telegram_target_configs.len() == 1 {
+                            let telegram_target_config = &telegram_target_configs[0];
+                            let runtime_request = CopyRuntimeRequest::from_parsed_trade(
+                                trade_parsed_at_ms,
+                                now_ms(),
+                                signature,
+                                slot_entry.slot,
+                                account_keys.len(),
+                                parsed,
+                                PlannerOptions {
+                                    copy_sol_amount: Some(telegram_target_config.copy_amount_sol),
+                                },
+                            );
+                            if options.fast_copy_send {
+                                enqueue_or_write_copy_execution(
+                                    &copy_execution_request_queue,
+                                    &copy_execution_writer_tx,
+                                    &copy_executor,
+                                    runtime_request,
+                                    timings,
+                                    Some(telegram_target_config.copy_wallet),
+                                    telegram_target_config.trailing_sell.clone(),
+                                );
+                            } else {
+                                let shadow_signal =
+                                    runtime_request.to_shadow_signal_line(options.endpoint.clone());
+                                let execution_plan = runtime_request
+                                    .to_execution_plan_line(options.endpoint.clone());
+                                enqueue_or_write_copy_execution(
+                                    &copy_execution_request_queue,
+                                    &copy_execution_writer_tx,
+                                    &copy_executor,
+                                    runtime_request,
+                                    timings,
+                                    Some(telegram_target_config.copy_wallet),
+                                    telegram_target_config.trailing_sell.clone(),
+                                );
+                                write_plan_outputs(
+                                    &mut shadow_signals,
+                                    &mut execution_plans,
+                                    &mut tx_build_plans,
+                                    &mut copy_tx_plans,
+                                    &mut unsigned_tx_plans,
+                                    &shadow_signal,
+                                    &execution_plan,
+                                    &options,
+                                )?;
+                            }
                         } else {
+                            let mut parsed_for_runtime = Some(parsed);
                             let telegram_target_config_count = telegram_target_configs.len();
                             for (index, telegram_target_config) in
                                 telegram_target_configs.iter().enumerate()
@@ -474,8 +527,10 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                     },
                                 );
                                 if options.fast_copy_send {
-                                    enqueue_copy_execution(
-                                        &copy_execution_request_tx,
+                                    enqueue_or_write_copy_execution(
+                                        &copy_execution_request_queue,
+                                        &copy_execution_writer_tx,
+                                        &copy_executor,
                                         runtime_request,
                                         timings,
                                         Some(telegram_target_config.copy_wallet),
@@ -486,8 +541,10 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                         .to_shadow_signal_line(options.endpoint.clone());
                                     let execution_plan = runtime_request
                                         .to_execution_plan_line(options.endpoint.clone());
-                                    enqueue_copy_execution(
-                                        &copy_execution_request_tx,
+                                    enqueue_or_write_copy_execution(
+                                        &copy_execution_request_queue,
+                                        &copy_execution_writer_tx,
+                                        &copy_executor,
                                         runtime_request,
                                         timings,
                                         Some(telegram_target_config.copy_wallet),
@@ -527,7 +584,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                         }
                         if drain_copy_execution_results(
                             &mut copy_execution_rx,
-                            &mut copy_executions,
+                            &copy_execution_writer_tx,
                             &copy_executor,
                             &copy_execution_tx,
                             options.one_shot_copy_send,
@@ -577,7 +634,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
         }
         if drain_copy_execution_results(
             &mut copy_execution_rx,
-            &mut copy_executions,
+            &copy_execution_writer_tx,
             &copy_executor,
             &copy_execution_tx,
             options.one_shot_copy_send,
@@ -621,41 +678,170 @@ struct CopyExecutionWriter {
     flush_each_write: bool,
 }
 
+fn spawn_copy_execution_writer(
+    path: Option<&Path>,
+    flush_each_write: bool,
+    queue_capacity: usize,
+    flush_interval_ms: u64,
+) -> Result<Option<mpsc::Sender<CopyExecutionOutput>>> {
+    if path.is_none() {
+        return Ok(None);
+    }
+
+    let mut writer = CopyExecutionWriter::new(path, flush_each_write)?;
+    let (tx, mut rx) = mpsc::channel::<CopyExecutionOutput>(nonzero_capacity(queue_capacity));
+    tokio::spawn(async move {
+        let mut flush_interval =
+            tokio::time::interval(Duration::from_millis(flush_interval_ms.max(1)));
+        loop {
+            tokio::select! {
+                output = rx.recv() => {
+                    let Some(output) = output else {
+                        if let Err(error) = writer.flush() {
+                            eprintln!("copy execution final flush failed: {error:#}");
+                        }
+                        break;
+                    };
+                    if let Err(error) = writer.write(&output) {
+                        eprintln!("copy execution write failed: {error:#}");
+                    }
+                }
+                _ = flush_interval.tick(), if !flush_each_write => {
+                    if let Err(error) = writer.flush() {
+                        eprintln!("copy execution periodic flush failed: {error:#}");
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(Some(tx))
+}
+
 struct CopyExecutionRequest {
     runtime_request: CopyRuntimeRequest,
     timings: SignalTimings,
     executor_enqueued_at: Instant,
+    queue_context: CopyExecutorQueueContext,
     copy_wallet: Option<Pubkey>,
     trailing_sell_plan: Option<TrailingSellPlan>,
 }
 
+struct CopyExecutionRequestQueue {
+    state: Mutex<CopyExecutionQueueState>,
+    notify: Notify,
+    capacity: usize,
+}
+
+struct CopyExecutionQueueState {
+    high_priority: VecDeque<CopyExecutionRequest>,
+    low_priority: VecDeque<CopyExecutionRequest>,
+    busy_workers: usize,
+}
+
+impl CopyExecutionRequestQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            state: Mutex::new(CopyExecutionQueueState {
+                high_priority: VecDeque::new(),
+                low_priority: VecDeque::new(),
+                busy_workers: 0,
+            }),
+            notify: Notify::new(),
+            capacity: nonzero_capacity(capacity),
+        }
+    }
+
+    fn try_enqueue(
+        &self,
+        runtime_request: CopyRuntimeRequest,
+        timings: SignalTimings,
+        copy_wallet: Option<Pubkey>,
+        trailing_sell_plan: Option<TrailingSellPlan>,
+    ) -> bool {
+        let lane = copy_execution_queue_lane(&runtime_request);
+        let Ok(mut state) = self.state.lock() else {
+            eprintln!("copy execution request dropped; queue lock poisoned");
+            return false;
+        };
+        let queued = state.high_priority.len() + state.low_priority.len();
+        if queued >= self.capacity {
+            eprintln!("copy execution request dropped; worker closed or queue full");
+            return false;
+        }
+        let request = CopyExecutionRequest {
+            runtime_request,
+            timings,
+            executor_enqueued_at: Instant::now(),
+            queue_context: CopyExecutorQueueContext {
+                lane,
+                depth_at_enqueue: queued + 1,
+                busy_workers_at_enqueue: state.busy_workers,
+            },
+            copy_wallet,
+            trailing_sell_plan,
+        };
+        if lane == "copy_buy" {
+            state.high_priority.push_back(request);
+        } else {
+            state.low_priority.push_back(request);
+        }
+        drop(state);
+        self.notify.notify_one();
+        true
+    }
+
+    async fn recv(&self) -> CopyExecutionRequest {
+        loop {
+            if let Some(request) = self.pop_ready_request().await {
+                return request;
+            }
+            self.notify.notified().await;
+        }
+    }
+
+    async fn pop_ready_request(&self) -> Option<CopyExecutionRequest> {
+        let Ok(mut state) = self.state.lock() else {
+            return None;
+        };
+        let request = state
+            .high_priority
+            .pop_front()
+            .or_else(|| state.low_priority.pop_front());
+        if request.is_some() {
+            state.busy_workers = state.busy_workers.saturating_add(1);
+        }
+        request
+    }
+
+    async fn finish_worker(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.busy_workers = state.busy_workers.saturating_sub(1);
+        }
+    }
+}
+
 fn spawn_copy_execution_workers(
     copy_executor: Arc<CopyExecutor>,
-    copy_execution_request_rx: mpsc::Receiver<CopyExecutionRequest>,
+    copy_execution_request_queue: Arc<CopyExecutionRequestQueue>,
     copy_execution_tx: mpsc::UnboundedSender<CopyExecutionOutput>,
     concurrency: usize,
 ) {
     let worker_count = nonzero_capacity(concurrency);
-    let copy_execution_request_rx = Arc::new(Mutex::new(copy_execution_request_rx));
     for _ in 0..worker_count {
         let copy_executor = Arc::clone(&copy_executor);
-        let copy_execution_request_rx = Arc::clone(&copy_execution_request_rx);
+        let copy_execution_request_queue = Arc::clone(&copy_execution_request_queue);
         let copy_execution_tx = copy_execution_tx.clone();
         tokio::spawn(async move {
             loop {
-                let request = {
-                    let mut copy_execution_request_rx = copy_execution_request_rx.lock().await;
-                    copy_execution_request_rx.recv().await
-                };
-                let Some(request) = request else {
-                    break;
-                };
+                let request = copy_execution_request_queue.recv().await;
                 handle_copy_execution_request(
                     Arc::clone(&copy_executor),
                     request,
                     copy_execution_tx.clone(),
                 )
                 .await;
+                copy_execution_request_queue.finish_worker().await;
             }
         });
     }
@@ -671,6 +857,7 @@ async fn handle_copy_execution_request(
             &request.runtime_request,
             request.timings,
             request.executor_enqueued_at,
+            request.queue_context,
             request.copy_wallet,
             Some(copy_execution_tx.clone()),
         )
@@ -757,26 +944,65 @@ async fn handle_copy_execution_request(
 }
 
 fn enqueue_copy_execution(
-    copy_execution_request_tx: &mpsc::Sender<CopyExecutionRequest>,
+    copy_execution_request_queue: &Arc<CopyExecutionRequestQueue>,
     runtime_request: CopyRuntimeRequest,
     timings: SignalTimings,
     copy_wallet: Option<Pubkey>,
     trailing_sell_plan: Option<TrailingSellPlan>,
 ) -> bool {
-    if copy_execution_request_tx
-        .try_send(CopyExecutionRequest {
-            runtime_request,
-            timings,
-            executor_enqueued_at: Instant::now(),
-            copy_wallet,
-            trailing_sell_plan,
-        })
-        .is_ok()
-    {
+    copy_execution_request_queue.try_enqueue(
+        runtime_request,
+        timings,
+        copy_wallet,
+        trailing_sell_plan,
+    )
+}
+
+fn enqueue_or_write_copy_execution(
+    copy_execution_request_queue: &Arc<CopyExecutionRequestQueue>,
+    copy_execution_writer_tx: &Option<mpsc::Sender<CopyExecutionOutput>>,
+    copy_executor: &Arc<CopyExecutor>,
+    runtime_request: CopyRuntimeRequest,
+    timings: SignalTimings,
+    copy_wallet: Option<Pubkey>,
+    trailing_sell_plan: Option<TrailingSellPlan>,
+) -> bool {
+    let target_sell_auto_sell_armed =
+        copy_executor.should_spawn_auto_sell_on_target_sell(&runtime_request);
+    if should_write_copy_execution_diagnostic_without_queue(
+        &runtime_request,
+        target_sell_auto_sell_armed,
+    ) {
+        let line =
+            copy_executor.diagnostic_skip_without_executor(&runtime_request, timings, copy_wallet);
+        enqueue_copy_execution_write(copy_execution_writer_tx, &CopyExecutionOutput::Copy(line));
         true
     } else {
-        eprintln!("copy execution request dropped; worker closed or queue full");
-        false
+        enqueue_copy_execution(
+            copy_execution_request_queue,
+            runtime_request,
+            timings,
+            copy_wallet,
+            trailing_sell_plan,
+        )
+    }
+}
+
+fn should_write_copy_execution_diagnostic_without_queue(
+    request: &CopyRuntimeRequest,
+    target_sell_auto_sell_armed: bool,
+) -> bool {
+    request.observed_action == Action::Sell && !target_sell_auto_sell_armed
+}
+
+fn copy_execution_queue_lane(request: &CopyRuntimeRequest) -> &'static str {
+    if request.allowed
+        && request.execution_decision() == "wouldBuy"
+        && request.observed_action == Action::Buy
+    {
+        "copy_buy"
+    } else {
+        "diagnostic"
     }
 }
 
@@ -952,14 +1178,14 @@ fn nonzero_capacity(value: usize) -> usize {
 
 fn drain_copy_execution_results(
     copy_execution_rx: &mut mpsc::UnboundedReceiver<CopyExecutionOutput>,
-    copy_executions: &mut CopyExecutionWriter,
+    copy_execution_writer_tx: &Option<mpsc::Sender<CopyExecutionOutput>>,
     copy_executor: &Arc<CopyExecutor>,
     copy_execution_tx: &mpsc::UnboundedSender<CopyExecutionOutput>,
     one_shot_copy_send: bool,
 ) -> Result<bool> {
     while let Ok(copy_execution) = copy_execution_rx.try_recv() {
         if handle_copy_execution_result(
-            copy_executions,
+            copy_execution_writer_tx,
             copy_execution,
             copy_executor,
             copy_execution_tx,
@@ -972,16 +1198,28 @@ fn drain_copy_execution_results(
 }
 
 fn handle_copy_execution_result(
-    copy_executions: &mut CopyExecutionWriter,
+    copy_execution_writer_tx: &Option<mpsc::Sender<CopyExecutionOutput>>,
     copy_execution: CopyExecutionOutput,
     copy_executor: &Arc<CopyExecutor>,
     copy_execution_tx: &mpsc::UnboundedSender<CopyExecutionOutput>,
     one_shot_copy_send: bool,
 ) -> Result<bool> {
     let one_shot_sent = one_shot_copy_send && copy_execution.was_sent();
-    copy_executions.write(&copy_execution)?;
+    enqueue_copy_execution_write(copy_execution_writer_tx, &copy_execution);
     enqueue_transaction_confirmation(copy_executor, copy_execution_tx, &copy_execution);
     Ok(one_shot_sent)
+}
+
+fn enqueue_copy_execution_write(
+    copy_execution_writer_tx: &Option<mpsc::Sender<CopyExecutionOutput>>,
+    copy_execution: &CopyExecutionOutput,
+) {
+    let Some(tx) = copy_execution_writer_tx else {
+        return;
+    };
+    if tx.try_send(copy_execution.clone()).is_err() {
+        eprintln!("copy execution write request dropped; worker closed or queue full");
+    }
 }
 
 fn enqueue_transaction_confirmation(
@@ -1036,7 +1274,7 @@ fn enqueue_transaction_confirmation(
                 }
             });
         }
-        CopyExecutionOutput::SendLaneAttribution(_) => {}
+        CopyExecutionOutput::CopySendResult(_) | CopyExecutionOutput::SendLaneAttribution(_) => {}
         _ => {}
     }
 }
@@ -1207,6 +1445,13 @@ impl CopyExecutionWriter {
     fn write(&mut self, line: &CopyExecutionOutput) -> Result<()> {
         line.write_json_line(self.file.as_mut(), self.flush_each_write)
     }
+
+    fn flush(&mut self) -> Result<()> {
+        if let Some(file) = self.file.as_mut() {
+            file.flush()?;
+        }
+        Ok(())
+    }
 }
 
 fn write_json_line<T: Serialize>(writer: Option<&mut BufWriter<File>>, value: &T) -> Result<()> {
@@ -1298,10 +1543,12 @@ fn mentioned_static_target_wallet_in_set(
 #[cfg(test)]
 mod tests {
     use super::{
-        enqueue_copy_execution, mentioned_static_target_wallet_in_set, write_json_line,
-        SeenSignatures,
+        copy_execution_queue_lane, enqueue_copy_execution, mentioned_static_target_wallet_in_set,
+        should_write_copy_execution_diagnostic_without_queue, spawn_copy_execution_writer,
+        write_json_line, CopyExecutionRequestQueue, SeenSignatures,
     };
     use crate::{
+        executor::sample_copy_execution_output_for_tests,
         parser::{Action, Route},
         planner::CopyRuntimeRequest,
         signal::SignalTimings,
@@ -1314,8 +1561,9 @@ mod tests {
         io::BufWriter,
         path::PathBuf,
         str::FromStr,
+        sync::Arc,
+        time::Duration,
     };
-    use tokio::sync::mpsc;
 
     #[test]
     fn seen_signatures_evicts_oldest_when_capacity_is_reached() {
@@ -1377,22 +1625,99 @@ mod tests {
 
     #[test]
     fn copy_execution_enqueue_drops_when_bounded_lane_is_full() {
-        let (tx, _rx) = mpsc::channel(1);
+        let queue = Arc::new(CopyExecutionRequestQueue::new(1));
 
         assert!(enqueue_copy_execution(
-            &tx,
+            &queue,
             sample_runtime_request(1),
             sample_timings(),
             None,
             None,
         ));
         assert!(!enqueue_copy_execution(
-            &tx,
+            &queue,
             sample_runtime_request(2),
             sample_timings(),
             None,
             None,
         ));
+    }
+
+    #[tokio::test]
+    async fn copy_execution_queue_prioritizes_copyable_buys_over_diagnostics() {
+        let queue = Arc::new(CopyExecutionRequestQueue::new(4));
+        let mut diagnostic = sample_runtime_request(1);
+        diagnostic.observed_action = Action::Sell;
+        diagnostic.allowed = false;
+        diagnostic.reason = Some("shadow signal is not copyable");
+        let copyable_buy = sample_runtime_request(2);
+
+        assert_eq!(copy_execution_queue_lane(&diagnostic), "diagnostic");
+        assert_eq!(copy_execution_queue_lane(&copyable_buy), "copy_buy");
+        assert!(enqueue_copy_execution(
+            &queue,
+            diagnostic,
+            sample_timings(),
+            None,
+            None
+        ));
+        assert!(enqueue_copy_execution(
+            &queue,
+            copyable_buy,
+            sample_timings(),
+            None,
+            None
+        ));
+
+        let first = queue.recv().await;
+        assert_eq!(first.runtime_request.slot, 2);
+        assert_eq!(first.queue_context.lane, "copy_buy");
+        assert_eq!(first.queue_context.depth_at_enqueue, 2);
+        queue.finish_worker().await;
+
+        let second = queue.recv().await;
+        assert_eq!(second.runtime_request.slot, 1);
+        assert_eq!(second.queue_context.lane, "diagnostic");
+        assert_eq!(second.queue_context.depth_at_enqueue, 1);
+        queue.finish_worker().await;
+    }
+
+    #[test]
+    fn non_copy_sell_bypasses_executor_only_when_target_auto_sell_is_not_armed() {
+        let mut sell_request = sample_runtime_request(1);
+        sell_request.observed_action = Action::Sell;
+        sell_request.allowed = false;
+        sell_request.reason = Some("shadow signal is not copyable");
+        let buy_request = sample_runtime_request(2);
+
+        assert!(should_write_copy_execution_diagnostic_without_queue(
+            &sell_request,
+            false
+        ));
+        assert!(!should_write_copy_execution_diagnostic_without_queue(
+            &sell_request,
+            true
+        ));
+        assert!(!should_write_copy_execution_diagnostic_without_queue(
+            &buy_request,
+            false
+        ));
+    }
+
+    #[tokio::test]
+    async fn copy_execution_writer_task_periodically_flushes_deferred_rows() {
+        let path = temp_path("jito-copy-execution-writer-task.jsonl");
+        let tx = spawn_copy_execution_writer(Some(&path), false, 4, 10)
+            .expect("writer starts")
+            .expect("writer sender exists");
+
+        tx.try_send(sample_copy_execution_output_for_tests())
+            .expect("writer queue accepts row");
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        let contents = std::fs::read_to_string(&path).expect("flushed copy execution reads");
+        remove_file(&path).ok();
+        assert!(contents.contains("\"schema\":\"copytrade.sendLaneAttribution.v1\""));
     }
 
     #[test]

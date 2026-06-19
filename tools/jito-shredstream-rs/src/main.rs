@@ -253,6 +253,20 @@ pub(crate) struct LiveOptions {
     )]
     pub(crate) copy_executions_flush_each_write: bool,
 
+    #[arg(
+        long,
+        env = "JITO_COPY_EXECUTIONS_WRITE_QUEUE_CAPACITY",
+        default_value_t = 1024
+    )]
+    pub(crate) copy_executions_write_queue_capacity: usize,
+
+    #[arg(
+        long,
+        env = "JITO_COPY_EXECUTIONS_FLUSH_INTERVAL_MS",
+        default_value_t = 250
+    )]
+    pub(crate) copy_executions_flush_interval_ms: u64,
+
     #[arg(long, env = "JITO_COPY_EXECUTION_CONCURRENCY", default_value_t = 4)]
     pub(crate) copy_execution_concurrency: usize,
 
@@ -276,6 +290,14 @@ pub(crate) struct LiveOptions {
         value_parser = parse_boolish
     )]
     pub(crate) rust_trailing_sells_enabled: bool,
+
+    #[arg(
+        long,
+        env = "JITO_DIRECT_PUMP_CASHBACK_GUARD_FAIL_OPEN",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) direct_pump_cashback_guard_fail_open: bool,
 
     #[arg(
         long,

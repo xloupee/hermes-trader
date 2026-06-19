@@ -1226,7 +1226,7 @@ mod tests {
         let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
             .expect("migrated FLASHX buy should parse");
 
-        let build = build_unsigned_flashx_pump(parsed.route_context.as_ref())
+        let build = build_unsigned_flashx_pump(parsed.route_context.as_deref())
             .expect("migrated route should build unsigned instruction");
 
         assert_eq!(build.route_layout, "migrated-amm");
@@ -1257,7 +1257,7 @@ mod tests {
         let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
             .expect("live direct Pump FLASHX buy should parse");
 
-        let build = build_unsigned_flashx_pump(parsed.route_context.as_ref())
+        let build = build_unsigned_flashx_pump(parsed.route_context.as_deref())
             .expect("direct Pump route should build unsigned instruction");
 
         assert_eq!(build.route_layout, "direct-pump");
@@ -1290,9 +1290,9 @@ mod tests {
             .expect("direct Pump route context");
         let RouteContext::FlashxPump(original_context) = parsed
             .route_context
-            .as_ref()
+            .as_deref()
             .expect("direct Pump route context");
-        let RouteContext::FlashxPump(cloned_context) = &cloned_context;
+        let RouteContext::FlashxPump(cloned_context) = &*cloned_context;
         assert!(std::sync::Arc::ptr_eq(
             &original_context.accounts,
             &cloned_context.accounts
@@ -1310,7 +1310,7 @@ mod tests {
         );
 
         let build = build_copy_unsigned_flashx_pump(
-            parsed.route_context.as_ref(),
+            parsed.route_context.as_deref(),
             COPY_WALLET,
             &parsed.mint.to_string(),
         )
@@ -1380,13 +1380,13 @@ mod tests {
             .expect("live migrated FLASHX buy should parse");
         let RouteContext::FlashxPump(context) = parsed
             .route_context
-            .as_ref()
+            .as_deref()
             .expect("live migrated FLASHX route context should parse");
         let observed_min_base_amount_out =
             read_u64_le(&context.data, 9).expect("fixture has migrated AMM min base amount");
 
         let build = build_copy_unsigned_flashx_pump(
-            parsed.route_context.as_ref(),
+            parsed.route_context.as_deref(),
             COPY_WALLET,
             &parsed.mint.to_string(),
         )
@@ -1441,7 +1441,7 @@ mod tests {
         }));
 
         let override_build = build_copy_unsigned_flashx_pump_with_cache_and_spend(
-            parsed.route_context.as_ref(),
+            parsed.route_context.as_deref(),
             COPY_WALLET,
             &parsed.mint,
             None,
@@ -1494,7 +1494,7 @@ mod tests {
             .expect("AaJ8 cashback migrated FLASHX buy should parse");
         let RouteContext::FlashxPump(context) = parsed
             .route_context
-            .as_ref()
+            .as_deref()
             .expect("AaJ8 cashback migrated FLASHX route context should parse");
 
         assert_eq!(parsed.mint, pubkey(AA_J8_CASHBACK_MIGRATED_MINT));
@@ -1506,7 +1506,7 @@ mod tests {
         assert_eq!(resolved_account_for_test(context, "poolV2"), AA_J8_POOL_V2);
 
         let build = build_copy_unsigned_flashx_pump(
-            parsed.route_context.as_ref(),
+            parsed.route_context.as_deref(),
             LIVE_COPY_WALLET,
             &parsed.mint.to_string(),
         )
@@ -1551,7 +1551,7 @@ mod tests {
             .expect("live direct Pump FLASHX buy should parse");
 
         let build = build_full_copy_unsigned_flashx_pump(
-            parsed.route_context.as_ref(),
+            parsed.route_context.as_deref(),
             COPY_WALLET,
             &parsed.mint.to_string(),
         )
@@ -1597,7 +1597,7 @@ mod tests {
             .expect("live direct Pump FLASHX buy should parse");
 
         let build = build_full_copy_unsigned_flashx_pump_with_fees_and_cache_and_spend(
-            parsed.route_context.as_ref(),
+            parsed.route_context.as_deref(),
             COPY_WALLET,
             &parsed.mint.to_string(),
             &TxFeeConfig::default(),
@@ -1627,7 +1627,7 @@ mod tests {
         };
 
         let build = build_full_copy_unsigned_flashx_pump_with_fees(
-            parsed.route_context.as_ref(),
+            parsed.route_context.as_deref(),
             COPY_WALLET,
             &parsed.mint.to_string(),
             &fee_config,
@@ -1696,7 +1696,7 @@ mod tests {
         };
 
         let build = build_full_copy_unsigned_flashx_pump_with_fees(
-            parsed.route_context.as_ref(),
+            parsed.route_context.as_deref(),
             COPY_WALLET,
             &parsed.mint.to_string(),
             &fee_config,
@@ -1751,7 +1751,7 @@ mod tests {
         };
 
         let build = build_full_copy_unsigned_flashx_pump_with_fees(
-            parsed.route_context.as_ref(),
+            parsed.route_context.as_deref(),
             COPY_WALLET,
             &parsed.mint.to_string(),
             &fee_config,
@@ -1792,7 +1792,7 @@ mod tests {
         };
 
         let error = build_full_copy_unsigned_flashx_pump_with_fees(
-            parsed.route_context.as_ref(),
+            parsed.route_context.as_deref(),
             COPY_WALLET,
             &parsed.mint.to_string(),
             &fee_config,
@@ -1816,7 +1816,7 @@ mod tests {
             .expect("live migrated FLASHX buy should parse");
 
         let build = build_full_copy_unsigned_flashx_pump(
-            parsed.route_context.as_ref(),
+            parsed.route_context.as_deref(),
             COPY_WALLET,
             &parsed.mint.to_string(),
         )
@@ -1860,7 +1860,7 @@ mod tests {
             .expect("live direct Pump FLASHX buy should parse");
 
         let build = build_auto_sell_unsigned_flashx_pump_with_cache(
-            parsed.route_context.as_ref(),
+            parsed.route_context.as_deref(),
             COPY_WALLET,
             &parsed.mint.to_string(),
             123_456,
@@ -1883,7 +1883,7 @@ mod tests {
         );
         let RouteContext::FlashxPump(context) = parsed
             .route_context
-            .as_ref()
+            .as_deref()
             .expect("direct Pump route context");
         assert_eq!(
             build.instructions[1].accounts[12].pubkey,
@@ -1922,7 +1922,7 @@ mod tests {
             .expect("live direct Pump FLASHX buy should parse");
 
         let build = build_trailing_sell_unsigned_flashx_pump_with_fees_and_cache(
-            parsed.route_context.as_ref(),
+            parsed.route_context.as_deref(),
             COPY_WALLET,
             &parsed.mint.to_string(),
             123_456,
@@ -2009,7 +2009,7 @@ mod tests {
             .expect("live migrated FLASHX buy should parse");
 
         let build = build_auto_sell_unsigned_flashx_pump_with_cache(
-            parsed.route_context.as_ref(),
+            parsed.route_context.as_deref(),
             COPY_WALLET,
             &parsed.mint.to_string(),
             123_456,
@@ -2121,7 +2121,7 @@ mod tests {
         assert_eq!(parsed.mint, pubkey(FAILED_AUTO_SELL_MIGRATED_MINT));
 
         let build = build_auto_sell_unsigned_flashx_pump_with_cache(
-            parsed.route_context.as_ref(),
+            parsed.route_context.as_deref(),
             COPY_WALLET,
             &parsed.mint.to_string(),
             32_212_701_563,

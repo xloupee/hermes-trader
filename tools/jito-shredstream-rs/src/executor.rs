@@ -6,7 +6,7 @@ use crate::{
     parser::{
         associated_token_program_id, compute_budget_program_id, pump_fun_program_id, read_u64_le,
         signature_bytes_to_string, system_program_id, Action, FlashxPumpLayout, Route,
-        RouteContext,
+        RouteContext, SharedRouteContext,
     },
     planner::{CopyRuntimeRequest, ExecutionPlanLine},
     signal::SignalTimings,
@@ -30,6 +30,7 @@ use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction::Transaction;
 use std::{
+    borrow::Cow,
     collections::{HashMap, VecDeque},
     io::Write,
     path::PathBuf,
@@ -107,7 +108,7 @@ struct DirectPumpSellContextKey {
 #[derive(Debug)]
 struct DirectPumpSellContextCache {
     capacity: usize,
-    entries: HashMap<DirectPumpSellContextKey, RouteContext>,
+    entries: HashMap<DirectPumpSellContextKey, SharedRouteContext>,
     order: VecDeque<DirectPumpSellContextKey>,
 }
 
@@ -133,6 +134,7 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) migrated_amm_min_copy_sol: f64,
     pub(crate) migrated_amm_small_copy_mode: MigratedAmmSmallCopyMode,
     pub(crate) copy_wallet: Option<String>,
+    copy_wallet_pubkey: Option<Pubkey>,
     pub(crate) copy_keypair_path: Option<PathBuf>,
     pub(crate) solana_rpc_url: Option<String>,
     pub(crate) state_rpc_urls: Vec<String>,
@@ -140,6 +142,7 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) auto_sell_after_buy: bool,
     pub(crate) auto_sell_delay_ms: u64,
     pub(crate) rust_trailing_sells_enabled: bool,
+    pub(crate) direct_pump_cashback_guard_fail_open: bool,
     pub(crate) rust_trailing_sell_confirmation_timeout_ms: u64,
     pub(crate) rust_trailing_sell_confirmation_poll_ms: u64,
     pub(crate) simulate_auto_sell: bool,
@@ -201,6 +204,13 @@ impl SendLaneMode {
     fn uses_helius_sender_tip(self) -> bool {
         matches!(self, Self::Mixed | Self::HeliusSenderOnly)
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CopyExecutorQueueContext {
+    pub(crate) lane: &'static str,
+    pub(crate) depth_at_enqueue: usize,
+    pub(crate) busy_workers_at_enqueue: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -268,6 +278,12 @@ pub(crate) struct CopyExecutionLine {
     planned_to_built_ms: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
     executor_queue_us: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    executor_queue_lane: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    executor_queue_depth_at_enqueue: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    executor_worker_busy_at_enqueue: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     guards_us: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -392,6 +408,7 @@ pub(crate) struct CopyExecutionLine {
 #[derive(Clone, Debug)]
 pub(crate) enum CopyExecutionOutput {
     Copy(CopyExecutionLine),
+    CopySendResult(CopyExecutionLine),
     SendLaneAttribution(SendLaneAttributionLine),
     RustTrailingSell(RustTrailingSellLine),
     TransactionConfirmation(TransactionConfirmationLine),
@@ -833,6 +850,10 @@ impl CopyExecutor {
             migrated_amm_min_copy_sol: options.migrated_amm_min_copy_sol,
             migrated_amm_small_copy_mode: options.migrated_amm_small_copy_mode,
             copy_wallet: options.copy_wallet.clone(),
+            copy_wallet_pubkey: options
+                .copy_wallet
+                .as_deref()
+                .and_then(|wallet| Pubkey::from_str(wallet).ok()),
             copy_keypair_path: options.copy_keypair_path.clone(),
             solana_rpc_url: options.solana_rpc_url.clone(),
             state_rpc_urls: options.normalized_state_rpc_urls(),
@@ -840,6 +861,7 @@ impl CopyExecutor {
             auto_sell_after_buy: options.auto_sell_after_buy,
             auto_sell_delay_ms: options.auto_sell_delay_ms,
             rust_trailing_sells_enabled: options.rust_trailing_sells_enabled,
+            direct_pump_cashback_guard_fail_open: options.direct_pump_cashback_guard_fail_open,
             rust_trailing_sell_confirmation_timeout_ms: options
                 .rust_trailing_sell_confirmation_timeout_ms,
             rust_trailing_sell_confirmation_poll_ms: options
@@ -1028,7 +1050,8 @@ impl CopyExecutor {
             observed_action,
             observed_sol_amount,
         );
-        self.handle_inner(&request, timings, None, None, None).await
+        self.handle_inner(&request, timings, None, None, None, None)
+            .await
     }
 
     pub(crate) async fn handle_with_executor_enqueued_at(
@@ -1036,6 +1059,7 @@ impl CopyExecutor {
         request: &CopyRuntimeRequest,
         timings: SignalTimings,
         executor_enqueued_at: Instant,
+        queue_context: CopyExecutorQueueContext,
         copy_wallet: Option<Pubkey>,
         send_lane_attribution_tx: Option<mpsc::UnboundedSender<CopyExecutionOutput>>,
     ) -> CopyExecutionLine {
@@ -1043,10 +1067,31 @@ impl CopyExecutor {
             request,
             timings,
             Some(executor_enqueued_at),
+            Some(queue_context),
             copy_wallet,
             send_lane_attribution_tx,
         )
         .await
+    }
+
+    pub(crate) fn diagnostic_skip_without_executor(
+        &self,
+        request: &CopyRuntimeRequest,
+        timings: SignalTimings,
+        copy_wallet_override: Option<Pubkey>,
+    ) -> CopyExecutionLine {
+        let mut line = CopyExecutionLine::new(request, &self.options, timings);
+        if let Some(copy_wallet) = copy_wallet_override.as_ref() {
+            line.copy_wallet = Some(copy_wallet.to_string());
+        }
+        line.record_guards_us(0);
+        if !request.allowed || request.execution_decision() != "wouldBuy" {
+            line.skip("execution plan is not allowed")
+        } else if request.observed_action != Action::Buy {
+            line.skip("copy execution only allows buy signals")
+        } else {
+            line.skip("copy execution bypassed executor")
+        }
     }
 
     async fn handle_inner(
@@ -1054,6 +1099,7 @@ impl CopyExecutor {
         request: &CopyRuntimeRequest,
         timings: SignalTimings,
         executor_enqueued_at: Option<Instant>,
+        queue_context: Option<CopyExecutorQueueContext>,
         copy_wallet_override: Option<Pubkey>,
         send_lane_attribution_tx: Option<mpsc::UnboundedSender<CopyExecutionOutput>>,
     ) -> CopyExecutionLine {
@@ -1068,6 +1114,11 @@ impl CopyExecutor {
                     .duration_since(executor_enqueued_at)
                     .as_micros(),
             );
+        }
+        if let Some(queue_context) = queue_context {
+            line.executor_queue_lane = Some(queue_context.lane);
+            line.executor_queue_depth_at_enqueue = Some(queue_context.depth_at_enqueue);
+            line.executor_worker_busy_at_enqueue = Some(queue_context.busy_workers_at_enqueue);
         }
         let guards_started_at = Instant::now();
         macro_rules! skip_guard {
@@ -1110,7 +1161,7 @@ impl CopyExecutor {
         };
         let effective_copy_spend_lamports = match copy_spend_after_migrated_amm_guard(
             &self.options,
-            request.route_context.as_ref(),
+            request.route_context.as_deref(),
             copy_spend_lamports,
         ) {
             Ok(CopySpendDecision::Use(lamports)) => lamports,
@@ -1131,20 +1182,25 @@ impl CopyExecutor {
             Err(reason) => skip_guard!(reason),
         }
 
-        let copy_wallet_string;
-        let (copy_wallet, keypair) = if let Some(copy_wallet_pubkey) = copy_wallet_override.as_ref()
-        {
-            copy_wallet_string = copy_wallet_pubkey.to_string();
-            (
-                copy_wallet_string.as_str(),
-                self.keypair_for_pubkey(copy_wallet_pubkey),
-            )
-        } else {
-            let Some(copy_wallet) = self.options.copy_wallet.as_deref() else {
-                skip_guard!("missing copy wallet");
+        let (copy_wallet, keypair): (Cow<'_, str>, Option<Arc<Keypair>>) =
+            if let Some(copy_wallet_pubkey) = copy_wallet_override.as_ref() {
+                (
+                    Cow::Owned(copy_wallet_pubkey.to_string()),
+                    self.keypair_for_pubkey(copy_wallet_pubkey),
+                )
+            } else {
+                let Some(copy_wallet) = self.options.copy_wallet.as_deref() else {
+                    skip_guard!("missing copy wallet");
+                };
+                (
+                    Cow::Borrowed(copy_wallet),
+                    self.options
+                        .copy_wallet_pubkey
+                        .as_ref()
+                        .and_then(|copy_wallet| self.keypair_for_pubkey(copy_wallet)),
+                )
             };
-            (copy_wallet, self.keypair_for_wallet(copy_wallet))
-        };
+        let copy_wallet = copy_wallet.as_ref();
         let Some(keypair) = keypair else {
             if self.keypair.is_none() && self.keypairs.load().is_empty() {
                 skip_guard!("missing copy keypair path");
@@ -1163,7 +1219,7 @@ impl CopyExecutor {
         let unsigned_build_started_at = Instant::now();
         let build =
             match build_full_copy_unsigned_flashx_pump_with_fees_and_cache_and_spend_for_mint(
-                request.route_context.as_ref(),
+                request.route_context.as_deref(),
                 copy_wallet,
                 &request.mint,
                 &self.options.tx_fee_config(),
@@ -1185,7 +1241,7 @@ impl CopyExecutor {
 
         let postbuild_guards_started_at = Instant::now();
         let estimated_total_spend_lamports =
-            match estimate_total_copy_spend_lamports(&build, request.route_context.as_ref()) {
+            match estimate_total_copy_spend_lamports(&build, request.route_context.as_deref()) {
                 Ok(lamports) => lamports,
                 Err(reason) => {
                     line.record_guards_us(
@@ -1313,30 +1369,23 @@ impl CopyExecutor {
                 observed_signature: line.observed_signature,
                 send_lane_mode: self.options.send_lane_mode.as_str(),
             };
-            match self
-                .send_transaction(
-                    &encoded_tx,
-                    Some(attribution_context),
-                    send_lane_attribution_tx,
-                )
-                .await
-            {
-                Ok(result) => {
-                    line.sent = true;
-                    line.mark_signature_returned();
-                    if let Some(cache) = &self.wallet_balance_cache {
-                        cache.optimistic_decrement(copy_wallet, estimated_total_spend_lamports);
-                    }
-                    line.send_signature = Some(result.signature);
-                    line.send_rpc_url_count = result.rpc_url_count;
-                    line.send_rpc_winner = Some(result.rpc_winner);
-                    line.send_rpc_attempts = result.rpc_attempts;
-                    line.send_rpc_errors = result.rpc_errors;
-                    line.decision = "sent";
-                    line
-                }
-                Err(error) => line.error(error),
+            line.sent = true;
+            line.send_signature = Some(signed_tx.signature.clone());
+            line.send_rpc_url_count = self.send_endpoints.len();
+            line.decision = "sent";
+            if let Some(cache) = &self.wallet_balance_cache {
+                cache.optimistic_decrement(copy_wallet, estimated_total_spend_lamports);
             }
+            spawn_copy_send_result_task(
+                self.client.clone(),
+                Arc::clone(&self.send_endpoints),
+                Arc::<str>::from(encoded_tx),
+                self.options.send_config(),
+                line.clone(),
+                attribution_context,
+                send_lane_attribution_tx,
+            );
+            line
         } else if self.options.simulate_copy_tx {
             if simulation_ok {
                 line.decision = "simulated";
@@ -1374,14 +1423,14 @@ impl CopyExecutor {
             && request
                 .route_context
                 .as_ref()
-                .is_some_and(is_direct_pump_sell_route_context)
+                .is_some_and(|route_context| is_direct_pump_sell_route_context(route_context))
     }
 
     pub(crate) fn observe_direct_pump_sell_route_context(
         &self,
         target_wallet: &Pubkey,
         mint: &Pubkey,
-        route_context: Option<&RouteContext>,
+        route_context: Option<&SharedRouteContext>,
     ) {
         if !self.options.auto_sell_after_buy_enabled()
             && !self.options.rust_trailing_sells_enabled()
@@ -1397,7 +1446,7 @@ impl CopyExecutor {
         let Ok(mut cache) = self.direct_pump_sell_contexts.lock() else {
             return;
         };
-        cache.insert(target_wallet, mint, route_context.clone());
+        cache.insert(target_wallet, mint, Arc::clone(route_context));
     }
 
     pub(crate) async fn handle_auto_sell_result(
@@ -1589,112 +1638,15 @@ impl CopyExecutor {
         attribution_context: Option<SendLaneAttributionContext>,
         attribution_tx: Option<mpsc::UnboundedSender<CopyExecutionOutput>>,
     ) -> Result<SendTransactionResult, String> {
-        let endpoints = self.send_endpoints.as_ref();
-        if endpoints.is_empty() {
-            return Err(
-                "missing SOLANA_RPC_URL, JITO_SEND_RPC_URLS, or JITO_BLOCK_ENGINE_SEND_URLS"
-                    .to_string(),
-            );
-        }
-
-        if endpoints.len() == 1 {
-            let endpoint = &endpoints[0];
-            let outcome = send_transaction_attempt(
-                &self.client,
-                endpoint,
-                encoded_tx,
-                self.options.send_config(),
-            )
-            .await;
-            let attempts = vec![outcome.attempt];
-            let Some(signature) = outcome.signature else {
-                return Err(outcome
-                    .error
-                    .unwrap_or_else(|| "sendTransaction failed".to_string()));
-            };
-            let first_ack_at_ms = outcome.finished_at_ms;
-            if let (Some(context), Some(tx)) = (attribution_context, attribution_tx) {
-                spawn_send_lane_attribution_collector(
-                    JoinSet::new(),
-                    context,
-                    tx,
-                    signature.clone(),
-                    endpoint.label.clone(),
-                    first_ack_at_ms,
-                    attempts.clone(),
-                    Vec::new(),
-                );
-            }
-            return Ok(SendTransactionResult {
-                signature,
-                rpc_url_count: 1,
-                rpc_winner: endpoint.label.clone(),
-                rpc_attempts: attempts,
-                rpc_errors: Vec::new(),
-            });
-        }
-
-        let encoded_tx = Arc::<str>::from(encoded_tx.to_string());
-        let mut send_set = JoinSet::new();
-        for endpoint in endpoints {
-            let client = self.client.clone();
-            let encoded_tx = encoded_tx.clone();
-            let endpoint = endpoint.clone();
-            let send_config = self.options.send_config();
-            send_set.spawn(async move {
-                send_transaction_attempt(&client, &endpoint, encoded_tx.as_ref(), send_config).await
-            });
-        }
-
-        let mut errors: Vec<String> = Vec::new();
-        let mut attempts = Vec::new();
-        while let Some(result) = send_set.join_next().await {
-            match result {
-                Ok(outcome) => {
-                    let label = outcome.attempt.label.clone();
-                    attempts.push(outcome.attempt);
-                    if let Some(signature) = outcome.signature {
-                        let first_ack_at_ms = outcome.finished_at_ms;
-                        if let (Some(context), Some(tx)) = (attribution_context, attribution_tx) {
-                            spawn_send_lane_attribution_collector(
-                                send_set,
-                                context,
-                                tx,
-                                signature.clone(),
-                                label.clone(),
-                                first_ack_at_ms,
-                                attempts.clone(),
-                                errors
-                                    .iter()
-                                    .filter(|error| error.starts_with("join error:"))
-                                    .cloned()
-                                    .collect(),
-                            );
-                        } else {
-                            // Keep the remaining sends alive. Fast ACK is useful for metrics, but
-                            // aborting slower lanes can prevent a better landing path from submitting.
-                            send_set.detach_all();
-                        }
-                        return Ok(SendTransactionResult {
-                            signature,
-                            rpc_url_count: endpoints.len(),
-                            rpc_winner: label,
-                            rpc_attempts: attempts,
-                            rpc_errors: errors,
-                        });
-                    }
-                    if let Some(error) = outcome.error {
-                        errors.push(error);
-                    }
-                }
-                Err(error) => errors.push(format!("join error: {error}")),
-            }
-        }
-
-        Err(format!(
-            "all sendTransaction fanout attempts failed: {}",
-            errors.join("; ")
-        ))
+        send_transaction_with(
+            self.client.clone(),
+            Arc::clone(&self.send_endpoints),
+            Arc::<str>::from(encoded_tx.to_string()),
+            self.options.send_config(),
+            attribution_context,
+            attribution_tx,
+        )
+        .await
     }
 
     async fn handle_auto_sell(
@@ -1737,7 +1689,7 @@ impl CopyExecutor {
         };
 
         let token_account = match copy_wallet_token_account_for_flashx_pump(
-            Some(&auto_sell_route_context),
+            Some(auto_sell_route_context.as_ref()),
             copy_wallet,
             &execution_plan.mint,
             Some(&self.pda_cache),
@@ -1764,7 +1716,7 @@ impl CopyExecutor {
             }
         };
         let token_amount_raw =
-            auto_sell_token_amount_raw(Some(&auto_sell_route_context), token_balance_raw);
+            auto_sell_token_amount_raw(Some(auto_sell_route_context.as_ref()), token_balance_raw);
         line.auto_sell_token_amount_raw = Some(token_amount_raw);
 
         let Some(cached_blockhash) = cached_blockhash(
@@ -1777,7 +1729,7 @@ impl CopyExecutor {
         let blockhash = cached_blockhash.hash;
 
         let build = match build_auto_sell_unsigned_flashx_pump_with_fees_and_cache(
-            Some(&auto_sell_route_context),
+            Some(auto_sell_route_context.as_ref()),
             copy_wallet,
             &execution_plan.mint,
             token_amount_raw,
@@ -1902,14 +1854,25 @@ impl CopyExecutor {
             }
             Err(reason) => {
                 line.cashback_detection_source = Some("direct-pump-bonding-curve-rpc");
-                line.cashback_sell_path_disabled = Some(true);
-                line.skip(reason);
-                return;
+                if self.options.direct_pump_cashback_guard_fail_open {
+                    line.cashback_detected = Some(false);
+                    line.cashback_sell_path_disabled = Some(false);
+                    line.sell_context_reason = Some(format!(
+                        "{}; cashback guard fail-open enabled",
+                        line.sell_context_reason
+                            .as_deref()
+                            .unwrap_or("direct Pump sell context resolved")
+                    ));
+                } else {
+                    line.cashback_sell_path_disabled = Some(true);
+                    line.skip(reason);
+                    return;
+                }
             }
         }
 
         let token_account = match copy_wallet_token_account_for_flashx_pump(
-            Some(&sell_context.route_context),
+            Some(sell_context.route_context.as_ref()),
             copy_wallet,
             &execution_plan.mint,
             Some(&self.pda_cache),
@@ -1960,7 +1923,7 @@ impl CopyExecutor {
         line.blockhash = Some(blockhash.to_string());
 
         let build = match build_trailing_sell_unsigned_flashx_pump_with_fees_and_cache(
-            Some(&sell_context.route_context),
+            Some(sell_context.route_context.as_ref()),
             copy_wallet,
             &execution_plan.mint,
             token_amount_raw,
@@ -2587,6 +2550,162 @@ impl CopyExecutor {
     }
 }
 
+fn spawn_copy_send_result_task(
+    client: reqwest::Client,
+    endpoints: Arc<Vec<SendEndpoint>>,
+    encoded_tx: Arc<str>,
+    send_config: SendConfig,
+    mut line: CopyExecutionLine,
+    attribution_context: SendLaneAttributionContext,
+    attribution_tx: Option<mpsc::UnboundedSender<CopyExecutionOutput>>,
+) {
+    let output_tx = attribution_tx.clone();
+    tokio::spawn(async move {
+        match send_transaction_with(
+            client,
+            endpoints,
+            encoded_tx,
+            send_config,
+            Some(attribution_context),
+            attribution_tx,
+        )
+        .await
+        {
+            Ok(result) => {
+                line.mark_signature_returned();
+                line.send_signature = Some(result.signature);
+                line.send_rpc_url_count = result.rpc_url_count;
+                line.send_rpc_winner = Some(result.rpc_winner);
+                line.send_rpc_attempts = result.rpc_attempts;
+                line.send_rpc_errors = result.rpc_errors;
+            }
+            Err(error) => {
+                line.sent = false;
+                line.decision = "error";
+                line.reason = Some(error);
+            }
+        }
+        if let Some(output_tx) = output_tx {
+            if output_tx
+                .send(CopyExecutionOutput::CopySendResult(line))
+                .is_err()
+            {
+                eprintln!("copy send result dropped; receiver closed");
+            }
+        }
+    });
+}
+
+async fn send_transaction_with(
+    client: reqwest::Client,
+    endpoints: Arc<Vec<SendEndpoint>>,
+    encoded_tx: Arc<str>,
+    send_config: SendConfig,
+    attribution_context: Option<SendLaneAttributionContext>,
+    attribution_tx: Option<mpsc::UnboundedSender<CopyExecutionOutput>>,
+) -> Result<SendTransactionResult, String> {
+    let endpoints = endpoints.as_ref();
+    if endpoints.is_empty() {
+        return Err(
+            "missing SOLANA_RPC_URL, JITO_SEND_RPC_URLS, or JITO_BLOCK_ENGINE_SEND_URLS"
+                .to_string(),
+        );
+    }
+
+    if endpoints.len() == 1 {
+        let endpoint = &endpoints[0];
+        let outcome =
+            send_transaction_attempt(&client, endpoint, encoded_tx.as_ref(), send_config).await;
+        let attempts = vec![outcome.attempt];
+        let Some(signature) = outcome.signature else {
+            return Err(outcome
+                .error
+                .unwrap_or_else(|| "sendTransaction failed".to_string()));
+        };
+        let first_ack_at_ms = outcome.finished_at_ms;
+        if let (Some(context), Some(tx)) = (attribution_context, attribution_tx) {
+            spawn_send_lane_attribution_collector(
+                JoinSet::new(),
+                context,
+                tx,
+                signature.clone(),
+                endpoint.label.clone(),
+                first_ack_at_ms,
+                attempts.clone(),
+                Vec::new(),
+            );
+        }
+        return Ok(SendTransactionResult {
+            signature,
+            rpc_url_count: 1,
+            rpc_winner: endpoint.label.clone(),
+            rpc_attempts: attempts,
+            rpc_errors: Vec::new(),
+        });
+    }
+
+    let mut send_set = JoinSet::new();
+    for endpoint in endpoints {
+        let client = client.clone();
+        let encoded_tx = encoded_tx.clone();
+        let endpoint = endpoint.clone();
+        let send_config = send_config;
+        send_set.spawn(async move {
+            send_transaction_attempt(&client, &endpoint, encoded_tx.as_ref(), send_config).await
+        });
+    }
+
+    let mut errors: Vec<String> = Vec::new();
+    let mut attempts = Vec::new();
+    while let Some(result) = send_set.join_next().await {
+        match result {
+            Ok(outcome) => {
+                let label = outcome.attempt.label.clone();
+                attempts.push(outcome.attempt);
+                if let Some(signature) = outcome.signature {
+                    let first_ack_at_ms = outcome.finished_at_ms;
+                    if let (Some(context), Some(tx)) = (attribution_context, attribution_tx) {
+                        spawn_send_lane_attribution_collector(
+                            send_set,
+                            context,
+                            tx,
+                            signature.clone(),
+                            label.clone(),
+                            first_ack_at_ms,
+                            attempts.clone(),
+                            errors
+                                .iter()
+                                .filter(|error| error.starts_with("join error:"))
+                                .cloned()
+                                .collect(),
+                        );
+                    } else {
+                        // Keep the remaining sends alive. Fast ACK is useful for metrics, but
+                        // aborting slower lanes can prevent a better landing path from submitting.
+                        send_set.detach_all();
+                    }
+                    return Ok(SendTransactionResult {
+                        signature,
+                        rpc_url_count: endpoints.len(),
+                        rpc_winner: label,
+                        rpc_attempts: attempts,
+                        rpc_errors: errors,
+                    });
+                }
+                if let Some(error) = outcome.error {
+                    errors.push(error);
+                }
+            }
+            Err(error) => errors.push(format!("join error: {error}")),
+        }
+    }
+
+    Err(format!(
+        "all sendTransaction fanout attempts failed: {}",
+        errors.join("; ")
+    ))
+}
+
 fn spawn_send_lane_attribution_collector(
     mut send_set: JoinSet<SendAttemptOutcome>,
     context: SendLaneAttributionContext,
@@ -2692,7 +2811,7 @@ impl DirectPumpSellContextCache {
         }
     }
 
-    fn insert(&mut self, target_wallet: &Pubkey, mint: &Pubkey, route_context: RouteContext) {
+    fn insert(&mut self, target_wallet: &Pubkey, mint: &Pubkey, route_context: SharedRouteContext) {
         let key = DirectPumpSellContextKey {
             target_wallet: *target_wallet,
             mint: *mint,
@@ -2709,7 +2828,7 @@ impl DirectPumpSellContextCache {
         }
     }
 
-    fn get(&self, target_wallet: &Pubkey, mint: &Pubkey) -> Option<RouteContext> {
+    fn get(&self, target_wallet: &Pubkey, mint: &Pubkey) -> Option<SharedRouteContext> {
         let key = DirectPumpSellContextKey {
             target_wallet: *target_wallet,
             mint: *mint,
@@ -2717,7 +2836,7 @@ impl DirectPumpSellContextCache {
         self.entries.get(&key).cloned()
     }
 
-    fn get_str(&self, target_wallet: &str, mint: &str) -> Option<RouteContext> {
+    fn get_str(&self, target_wallet: &str, mint: &str) -> Option<SharedRouteContext> {
         let target_wallet = Pubkey::from_str(target_wallet).ok()?;
         let mint = Pubkey::from_str(mint).ok()?;
         self.get(&target_wallet, &mint)
@@ -2727,7 +2846,7 @@ impl DirectPumpSellContextCache {
 fn auto_sell_route_context_for_plan(
     executor: &CopyExecutor,
     execution_plan: &ExecutionPlanLine,
-) -> Result<RouteContext, &'static str> {
+) -> Result<SharedRouteContext, &'static str> {
     let Some(route_context) = execution_plan.route_context.as_ref() else {
         return Err("missing auto-sell route context");
     };
@@ -2745,13 +2864,13 @@ fn auto_sell_route_context_for_plan(
     };
     cache
         .get_str(&execution_plan.target_wallet, &execution_plan.mint)
-        .filter(is_direct_pump_sell_route_context)
+        .filter(|route_context| is_direct_pump_sell_route_context(route_context))
         .ok_or("missing direct-pump sell-side route context")
 }
 
 #[derive(Clone, Debug)]
 struct TrailingSellRouteContext {
-    route_context: RouteContext,
+    route_context: SharedRouteContext,
     source: &'static str,
     resolved_at_ms: u128,
     reason: &'static str,
@@ -2797,7 +2916,7 @@ fn trailing_sell_route_context_for_plan(
         .lock()
         .ok()
         .and_then(|cache| cache.get_str(copy_wallet, &execution_plan.mint))
-        .filter(is_direct_pump_sell_route_context);
+        .filter(|route_context| is_direct_pump_sell_route_context(route_context));
 
     if let Some(route_context) = cached_sell_context {
         return Ok(TrailingSellRouteContext {
@@ -3196,6 +3315,9 @@ impl CopyExecutionLine {
                 .saturating_sub(timings.wallet_match_finished_at_ms),
             planned_to_built_ms: None,
             executor_queue_us: None,
+            executor_queue_lane: None,
+            executor_queue_depth_at_enqueue: None,
+            executor_worker_busy_at_enqueue: None,
             guards_us: None,
             unsigned_build_us: None,
             sign_us: None,
@@ -3388,6 +3510,7 @@ impl CopyExecutionOutput {
 
         match self {
             CopyExecutionOutput::Copy(line) => serde_json::to_writer(&mut *writer, line)?,
+            CopyExecutionOutput::CopySendResult(line) => serde_json::to_writer(&mut *writer, line)?,
             CopyExecutionOutput::SendLaneAttribution(line) => {
                 serde_json::to_writer(&mut *writer, line)?
             }
@@ -3404,6 +3527,37 @@ impl CopyExecutionOutput {
         }
         Ok(())
     }
+}
+
+#[cfg(test)]
+pub(crate) fn sample_copy_execution_output_for_tests() -> CopyExecutionOutput {
+    CopyExecutionOutput::SendLaneAttribution(SendLaneAttributionLine {
+        schema: "copytrade.sendLaneAttribution.v1",
+        observed_at_ms: 100,
+        attribution_at_ms: 125,
+        provider: "shredstream",
+        source: "jito-proxy",
+        endpoint: "http://127.0.0.1:9999".to_string(),
+        observed_wallet: "target-wallet".to_string(),
+        copy_wallet: Some("copy-wallet".to_string()),
+        mint: "mint".to_string(),
+        transaction_role: "copy_buy",
+        submission_group_id: "signed-tx-signature".to_string(),
+        observed_signature: "observed-signature".to_string(),
+        send_signature: "send-signature".to_string(),
+        send_lane_mode: "mixed",
+        first_ack_lane: "rpc-primary:example.com".to_string(),
+        first_ack_at_ms: 112,
+        all_attempts: vec![SendLaneAttemptAttribution {
+            label: "rpc-primary:example.com".to_string(),
+            kind: "rpc",
+            mode: None,
+            status: "submitted",
+            duration_ms: 7,
+            ack_at: Some(112),
+            error: None,
+        }],
+    })
 }
 
 impl From<CopyExecutionLine> for CopyExecutionOutput {
@@ -4473,6 +4627,7 @@ mod tests {
             migrated_amm_min_copy_sol: DEFAULT_MIGRATED_AMM_MIN_COPY_SOL,
             migrated_amm_small_copy_mode: MigratedAmmSmallCopyMode::Skip,
             copy_wallet: None,
+            copy_wallet_pubkey: None,
             copy_keypair_path: None,
             solana_rpc_url: None,
             state_rpc_urls: Vec::new(),
@@ -4480,6 +4635,7 @@ mod tests {
             auto_sell_after_buy: false,
             auto_sell_delay_ms: 1_000,
             rust_trailing_sells_enabled: false,
+            direct_pump_cashback_guard_fail_open: false,
             rust_trailing_sell_confirmation_timeout_ms: 30_000,
             rust_trailing_sell_confirmation_poll_ms: 100,
             simulate_auto_sell: false,
@@ -5033,7 +5189,7 @@ mod tests {
         options.auto_sell_after_buy = true;
         let executor = executor(options);
         let mut plan = allowed_plan();
-        plan.route_context = Some(flashx_context(FlashxPumpLayout::DirectPump, 1));
+        plan.route_context = Some(flashx_context(FlashxPumpLayout::DirectPump, 1).into());
 
         assert_eq!(
             auto_sell_route_context_for_plan(&executor, &plan).unwrap_err(),
@@ -5043,6 +5199,7 @@ mod tests {
         let sell_context = flashx_direct_sell_context();
         let target_wallet = Pubkey::from_str(&plan.target_wallet).unwrap();
         let mint = Pubkey::from_str(&plan.mint).unwrap();
+        let sell_context = Arc::new(sell_context);
         executor.observe_direct_pump_sell_route_context(&target_wallet, &mint, Some(&sell_context));
         let route_context =
             auto_sell_route_context_for_plan(&executor, &plan).expect("sell context should cache");
@@ -5056,7 +5213,7 @@ mod tests {
         options.rust_trailing_sells_enabled = true;
         let executor = executor(options);
         let mut plan = allowed_plan();
-        plan.route_context = Some(flashx_context(FlashxPumpLayout::DirectPump, 1));
+        plan.route_context = Some(flashx_context(FlashxPumpLayout::DirectPump, 1).into());
 
         let resolution = trailing_sell_route_context_for_plan(&executor, &plan, COPY_WALLET)
             .expect("rust trailing sell should derive from copy-buy route context");
@@ -5077,7 +5234,7 @@ mod tests {
         options.rust_trailing_sells_enabled = true;
         let executor = executor(options);
         let mut plan = allowed_plan();
-        plan.route_context = Some(flashx_direct_sell_context());
+        plan.route_context = Some(flashx_direct_sell_context().into());
 
         assert_eq!(
             trailing_sell_route_context_for_plan(&executor, &plan, COPY_WALLET).unwrap_err(),
@@ -5090,6 +5247,7 @@ mod tests {
         let sell_context = flashx_direct_sell_context();
         let target_wallet = Pubkey::from_str(&plan.target_wallet).unwrap();
         let mint = Pubkey::from_str(&plan.mint).unwrap();
+        let sell_context = Arc::new(sell_context);
         executor.observe_direct_pump_sell_route_context(&target_wallet, &mint, Some(&sell_context));
         assert_eq!(
             trailing_sell_route_context_for_plan(&executor, &plan, COPY_WALLET).unwrap_err(),
@@ -5106,11 +5264,12 @@ mod tests {
         options.rust_trailing_sells_enabled = true;
         let executor = executor(options);
         let mut plan = allowed_plan();
-        plan.route_context = Some(flashx_direct_sell_context());
+        plan.route_context = Some(flashx_direct_sell_context().into());
 
         let sell_context = flashx_direct_sell_context();
         let copy_wallet = Pubkey::from_str(COPY_WALLET).unwrap();
         let mint = Pubkey::from_str(&plan.mint).unwrap();
+        let sell_context = Arc::new(sell_context);
         executor.observe_direct_pump_sell_route_context(&copy_wallet, &mint, Some(&sell_context));
         let resolution = trailing_sell_route_context_for_plan(&executor, &plan, COPY_WALLET)
             .expect("rust trailing sell should use copy-wallet sell-side context");
@@ -5127,7 +5286,7 @@ mod tests {
         let other_mint = Pubkey::new_unique();
         let sell_context = flashx_direct_sell_context();
 
-        cache.insert(&target_wallet, &mint, sell_context.clone());
+        cache.insert(&target_wallet, &mint, sell_context.clone().into());
 
         assert!(is_direct_pump_sell_route_context(
             &cache.get(&target_wallet, &mint).expect("typed cache hit")
@@ -5145,7 +5304,7 @@ mod tests {
         options.auto_sell_after_buy = true;
         let executor = executor(options);
         let mut plan = allowed_plan();
-        plan.route_context = Some(flashx_direct_sell_context());
+        plan.route_context = Some(flashx_direct_sell_context().into());
         let sell_request = CopyRuntimeRequest::from_execution_plan(&plan, Action::Sell, None);
         let buy_request = CopyRuntimeRequest::from_execution_plan(&plan, Action::Buy, Some(0.0005));
 
@@ -5163,7 +5322,7 @@ mod tests {
         options.rust_trailing_sells_enabled = true;
         let executor = executor(options);
         let mut plan = allowed_plan();
-        plan.route_context = Some(flashx_direct_sell_context());
+        plan.route_context = Some(flashx_direct_sell_context().into());
         let sell_request = CopyRuntimeRequest::from_execution_plan(&plan, Action::Sell, None);
         let buy_request = CopyRuntimeRequest::from_execution_plan(&plan, Action::Buy, Some(0.0005));
 
@@ -5184,7 +5343,7 @@ mod tests {
             route: Route::FlashxPump,
             sol_amount: None,
             token_amount: Some(42.0),
-            route_context: Some(flashx_direct_sell_context()),
+            route_context: Some(flashx_direct_sell_context().into()),
         };
         let signal = crate::event::shadow_signal_line(
             1,
@@ -6171,7 +6330,7 @@ mod tests {
         options.copy_wallet = Some(COPY_WALLET.to_string());
         let mut plan = allowed_plan();
         plan.spend_sol_amount = Some(0.0001);
-        plan.route_context = Some(flashx_context(FlashxPumpLayout::MigratedAmm, 1));
+        plan.route_context = Some(flashx_context(FlashxPumpLayout::MigratedAmm, 1).into());
         let min_lamports = options.migrated_amm_min_copy_lamports().unwrap();
 
         let line = executor(options)
@@ -6235,6 +6394,7 @@ mod tests {
 
         line.decision = "sent";
         assert!(line.was_sent());
+        assert!(!CopyExecutionOutput::CopySendResult(line).was_sent());
     }
 
     #[test]

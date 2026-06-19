@@ -142,6 +142,7 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) auto_sell_after_buy: bool,
     pub(crate) auto_sell_delay_ms: u64,
     pub(crate) rust_trailing_sells_enabled: bool,
+    pub(crate) direct_pump_cashback_guard_fail_open: bool,
     pub(crate) rust_trailing_sell_confirmation_timeout_ms: u64,
     pub(crate) rust_trailing_sell_confirmation_poll_ms: u64,
     pub(crate) simulate_auto_sell: bool,
@@ -860,6 +861,7 @@ impl CopyExecutor {
             auto_sell_after_buy: options.auto_sell_after_buy,
             auto_sell_delay_ms: options.auto_sell_delay_ms,
             rust_trailing_sells_enabled: options.rust_trailing_sells_enabled,
+            direct_pump_cashback_guard_fail_open: options.direct_pump_cashback_guard_fail_open,
             rust_trailing_sell_confirmation_timeout_ms: options
                 .rust_trailing_sell_confirmation_timeout_ms,
             rust_trailing_sell_confirmation_poll_ms: options
@@ -1852,9 +1854,20 @@ impl CopyExecutor {
             }
             Err(reason) => {
                 line.cashback_detection_source = Some("direct-pump-bonding-curve-rpc");
-                line.cashback_sell_path_disabled = Some(true);
-                line.skip(reason);
-                return;
+                if self.options.direct_pump_cashback_guard_fail_open {
+                    line.cashback_detected = Some(false);
+                    line.cashback_sell_path_disabled = Some(false);
+                    line.sell_context_reason = Some(format!(
+                        "{}; cashback guard fail-open enabled",
+                        line.sell_context_reason
+                            .as_deref()
+                            .unwrap_or("direct Pump sell context resolved")
+                    ));
+                } else {
+                    line.cashback_sell_path_disabled = Some(true);
+                    line.skip(reason);
+                    return;
+                }
             }
         }
 
@@ -4622,6 +4635,7 @@ mod tests {
             auto_sell_after_buy: false,
             auto_sell_delay_ms: 1_000,
             rust_trailing_sells_enabled: false,
+            direct_pump_cashback_guard_fail_open: false,
             rust_trailing_sell_confirmation_timeout_ms: 30_000,
             rust_trailing_sell_confirmation_poll_ms: 100,
             simulate_auto_sell: false,

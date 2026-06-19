@@ -293,6 +293,14 @@ pub(crate) struct LiveOptions {
 
     #[arg(
         long,
+        env = "JITO_DIRECT_PUMP_CASHBACK_GUARD_FAIL_OPEN",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) direct_pump_cashback_guard_fail_open: bool,
+
+    #[arg(
+        long,
         env = "JITO_RUST_TRAILING_SELL_CONFIRMATION_TIMEOUT_MS",
         default_value_t = 30_000
     )]

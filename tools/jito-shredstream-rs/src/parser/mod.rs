@@ -47,8 +47,10 @@ pub(crate) struct ParsedTrade {
     pub(crate) route: Route,
     pub(crate) sol_amount: Option<f64>,
     pub(crate) token_amount: Option<f64>,
-    pub(crate) route_context: Option<RouteContext>,
+    pub(crate) route_context: Option<SharedRouteContext>,
 }
+
+pub(crate) type SharedRouteContext = Arc<RouteContext>;
 
 #[derive(Clone, Debug)]
 pub(crate) enum RouteContext {
@@ -443,10 +445,10 @@ fn route_context(
     instruction: &CompiledInstruction,
     account_keys: &[Pubkey],
     parsed: &ParsedTrade,
-) -> Option<RouteContext> {
+) -> Option<SharedRouteContext> {
     match parsed.route {
         Route::FlashxPump => {
-            routes::flashx::route_context(message, instruction, account_keys, parsed)
+            routes::flashx::route_context(message, instruction, account_keys, parsed).map(Arc::new)
         }
         Route::Pump | Route::PumpAmm => None,
     }

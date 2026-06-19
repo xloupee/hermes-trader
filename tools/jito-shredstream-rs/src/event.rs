@@ -1,4 +1,4 @@
-use crate::parser::{Action, ParsedTrade, RouteContext, WalletMentionKind, SOL_MINT};
+use crate::parser::{Action, ParsedTrade, SharedRouteContext, WalletMentionKind, SOL_MINT};
 use anyhow::Result;
 use serde::Serialize;
 use solana_pubkey::Pubkey;
@@ -83,7 +83,7 @@ pub(crate) struct ShadowSignalLine {
     pub(crate) reason: Option<&'static str>,
     pub(crate) account_key_count: usize,
     #[serde(skip)]
-    pub(crate) route_context: Option<RouteContext>,
+    pub(crate) route_context: Option<SharedRouteContext>,
 }
 
 #[derive(Debug, Serialize)]

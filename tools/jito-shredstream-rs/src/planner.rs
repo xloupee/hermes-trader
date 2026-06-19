@@ -2,7 +2,7 @@ use crate::{
     event::ShadowSignalLine,
     parser::{
         signature_bytes_to_string, signature_string_to_bytes, Action, ParsedTrade,
-        ResolvedRouteAccountJson, Route, RouteContext,
+        ResolvedRouteAccountJson, Route, SharedRouteContext,
     },
     tx_builder::{
         build_copy_unsigned_flashx_pump, build_full_copy_unsigned_flashx_pump,
@@ -34,7 +34,7 @@ pub(crate) struct CopyRuntimeRequest {
     pub(crate) planned_copy_sol_amount: Option<f64>,
     pub(crate) allowed: bool,
     pub(crate) reason: Option<&'static str>,
-    pub(crate) route_context: Option<RouteContext>,
+    pub(crate) route_context: Option<SharedRouteContext>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -60,7 +60,7 @@ pub(crate) struct ExecutionPlanLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reason: Option<&'static str>,
     #[serde(skip)]
-    pub(crate) route_context: Option<RouteContext>,
+    pub(crate) route_context: Option<SharedRouteContext>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -553,7 +553,7 @@ fn tx_build_decision(
         return tx_build_skipped("missing positive SOL spend amount");
     }
 
-    match build_unsigned_flashx_pump(execution_plan.route_context.as_ref()) {
+    match build_unsigned_flashx_pump(execution_plan.route_context.as_deref()) {
         Ok(build) => TxBuildDecision {
             buildable: true,
             decision: "buildable",
@@ -645,7 +645,7 @@ fn copy_tx_decision(
     };
 
     match build_copy_unsigned_flashx_pump(
-        execution_plan.route_context.as_ref(),
+        execution_plan.route_context.as_deref(),
         copy_wallet,
         &execution_plan.mint,
     ) {
@@ -744,7 +744,7 @@ fn unsigned_tx_decision(
     };
 
     match build_full_copy_unsigned_flashx_pump(
-        execution_plan.route_context.as_ref(),
+        execution_plan.route_context.as_deref(),
         copy_wallet,
         &execution_plan.mint,
     ) {

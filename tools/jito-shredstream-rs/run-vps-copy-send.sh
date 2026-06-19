@@ -198,13 +198,13 @@ case "$JITO_MIGRATED_AMM_SMALL_COPY_MODE" in
     ;;
 esac
 
-SEND_LANE_MODE_NORMALIZED="$(printf '%s' "$JITO_SEND_LANE_MODE" | tr '[:upper:]' '[:lower:]')"
+SEND_LANE_MODE_NORMALIZED="$(printf '%s' "$JITO_SEND_LANE_MODE" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
 case "$SEND_LANE_MODE_NORMALIZED" in
   mixed|rpc_only|jito_only|helius_sender_only)
-    export JITO_SEND_LANE_MODE="$SEND_LANE_MODE_NORMALIZED"
+    export JITO_SEND_LANE_MODE="${SEND_LANE_MODE_NORMALIZED//_/-}"
     ;;
   *)
-    echo "JITO_SEND_LANE_MODE must be mixed, rpc_only, jito_only, or helius_sender_only; got $JITO_SEND_LANE_MODE" >&2
+    echo "JITO_SEND_LANE_MODE must be mixed, rpc_only/rpc-only, jito_only/jito-only, or helius_sender_only/helius-sender-only; got $JITO_SEND_LANE_MODE" >&2
     exit 1
     ;;
 esac

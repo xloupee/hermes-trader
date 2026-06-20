@@ -92,6 +92,7 @@ pub(crate) struct CopyExecutor {
     keypairs: ArcSwap<HashMap<Pubkey, Arc<Keypair>>>,
     client: reqwest::Client,
     send_endpoints: Arc<Vec<SendEndpoint>>,
+    sell_send_endpoints: Arc<Vec<SendEndpoint>>,
     blockhash_cache: Option<BlockhashCache>,
     address_lookup_tables: AddressLookupTableCache,
     wallet_balance_cache: Option<WalletBalanceCache>,
@@ -129,6 +130,8 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) helius_sender_swqos_only: bool,
     pub(crate) helius_sender_tip_lamports: Option<u64>,
     pub(crate) helius_sender_tip_account: Option<String>,
+    pub(crate) sell_helius_sender_tip_lamports: Option<u64>,
+    pub(crate) sell_helius_sender_tip_account: Option<String>,
     pub(crate) max_copy_sol: Option<f64>,
     pub(crate) max_total_copy_spend_sol: Option<f64>,
     pub(crate) migrated_amm_min_copy_sol: f64,
@@ -330,6 +333,8 @@ pub(crate) struct CopyExecutionLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     tx_version: Option<&'static str>,
     instruction_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signed_tx_bytes: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     copy_signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -845,6 +850,24 @@ impl CopyExecutor {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToString::to_string),
+            sell_helius_sender_tip_lamports: configured_u64(
+                options.sell_helius_sender_tip_lamports,
+            )
+            .or_else(|| positive_u64(options.helius_sender_tip_lamports)),
+            sell_helius_sender_tip_account: options
+                .sell_helius_sender_tip_account
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .or_else(|| {
+                    options
+                        .helius_sender_tip_account
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToString::to_string)
+                }),
             max_copy_sol: options.max_copy_sol,
             max_total_copy_spend_sol: options.max_total_copy_spend_sol,
             migrated_amm_min_copy_sol: options.migrated_amm_min_copy_sol,
@@ -879,11 +902,11 @@ impl CopyExecutor {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToString::to_string),
-            sell_priority_fee_micro_lamports: positive_u64(
+            sell_priority_fee_micro_lamports: configured_u64(
                 options.sell_priority_fee_micro_lamports,
             )
             .or_else(|| positive_u64(options.priority_fee_micro_lamports)),
-            sell_jito_tip_lamports: positive_u64(options.sell_jito_tip_lamports)
+            sell_jito_tip_lamports: configured_u64(options.sell_jito_tip_lamports)
                 .or_else(|| positive_u64(options.jito_tip_lamports)),
             sell_jito_tip_account: options
                 .sell_jito_tip_account
@@ -921,6 +944,7 @@ impl CopyExecutor {
         let keypairs = Self::load_snapshot_keypairs(snapshot_keypair_paths);
 
         let send_endpoints = Arc::new(execution_options.selected_send_endpoints());
+        let sell_send_endpoints = Arc::new(execution_options.selected_sell_send_endpoints());
 
         Ok(Self {
             options: execution_options,
@@ -928,6 +952,7 @@ impl CopyExecutor {
             keypairs: ArcSwap::from_pointee(keypairs),
             client: send_http_client(),
             send_endpoints,
+            sell_send_endpoints,
             blockhash_cache,
             address_lookup_tables,
             wallet_balance_cache,
@@ -1319,8 +1344,10 @@ impl CopyExecutor {
                 return line.error(format!("serialize signed transaction: {error}"));
             }
         };
+        let signed_tx_bytes = tx_bytes.len();
         let encoded_tx = STANDARD.encode(tx_bytes);
         line.record_serialize_us(serialize_started_at);
+        line.signed_tx_bytes = Some(signed_tx_bytes);
 
         line.signed = true;
         line.mark_signed();
@@ -1649,6 +1676,21 @@ impl CopyExecutor {
         .await
     }
 
+    async fn send_sell_transaction(
+        &self,
+        encoded_tx: &str,
+    ) -> Result<SendTransactionResult, String> {
+        send_transaction_with(
+            self.client.clone(),
+            Arc::clone(&self.sell_send_endpoints),
+            Arc::<str>::from(encoded_tx.to_string()),
+            self.options.send_config(),
+            None,
+            None,
+        )
+        .await
+    }
+
     async fn handle_auto_sell(
         &self,
         line: &mut CopyExecutionLine,
@@ -1785,7 +1827,7 @@ impl CopyExecutor {
         }
 
         line.mark_auto_sell_submitted();
-        match self.send_transaction(&encoded_tx, None, None).await {
+        match self.send_sell_transaction(&encoded_tx).await {
             Ok(result) => {
                 line.auto_sell_sent = true;
                 line.mark_auto_sell_signature_returned();
@@ -1980,7 +2022,7 @@ impl CopyExecutor {
         }
 
         line.mark_submitted();
-        match self.send_transaction(&encoded_tx, None, None).await {
+        match self.send_sell_transaction(&encoded_tx).await {
             Ok(result) => {
                 line.sent = true;
                 line.mark_signature_returned();
@@ -2540,11 +2582,11 @@ impl CopyExecutor {
                 .flatten(),
             helius_sender_tip_lamports: (self.options.helius_sender_enabled
                 && self.options.send_lane_mode.uses_helius_sender_tip())
-            .then_some(self.options.helius_sender_tip_lamports)
+            .then_some(self.options.sell_helius_sender_tip_lamports)
             .flatten(),
             helius_sender_tip_account: (self.options.helius_sender_enabled
                 && self.options.send_lane_mode.uses_helius_sender_tip())
-            .then(|| self.options.helius_sender_tip_account.clone())
+            .then(|| self.options.sell_helius_sender_tip_account.clone())
             .flatten(),
         }
     }
@@ -3349,6 +3391,7 @@ impl CopyExecutionLine {
             route_layout: None,
             tx_version: None,
             instruction_count: 0,
+            signed_tx_bytes: None,
             copy_signature: None,
             blockhash: None,
             simulation_error: None,
@@ -3811,11 +3854,11 @@ impl RustTrailingSellLine {
             .flatten();
         let helius_sender_tip_lamports = (options.helius_sender_enabled
             && options.send_lane_mode.uses_helius_sender_tip())
-        .then_some(options.helius_sender_tip_lamports)
+        .then_some(options.sell_helius_sender_tip_lamports)
         .flatten();
         let helius_sender_tip_account = (options.helius_sender_enabled
             && options.send_lane_mode.uses_helius_sender_tip())
-        .then(|| options.helius_sender_tip_account.clone())
+        .then(|| options.sell_helius_sender_tip_account.clone())
         .flatten();
         Self {
             schema: "copytrade.rustTrailingSell.v1",
@@ -3974,11 +4017,11 @@ impl CopyExecutionOptions {
                 .flatten(),
             helius_sender_tip_lamports: (self.helius_sender_enabled
                 && self.send_lane_mode.uses_helius_sender_tip())
-            .then_some(self.helius_sender_tip_lamports)
+            .then_some(self.sell_helius_sender_tip_lamports)
             .flatten(),
             helius_sender_tip_account: (self.helius_sender_enabled
                 && self.send_lane_mode.uses_helius_sender_tip())
-            .then(|| self.helius_sender_tip_account.clone())
+            .then(|| self.sell_helius_sender_tip_account.clone())
             .flatten(),
         }
     }
@@ -4119,23 +4162,40 @@ impl CopyExecutionOptions {
         self.selected_send_endpoints().len()
     }
 
+    fn selected_rpc_send_endpoints(&self) -> Vec<SendEndpoint> {
+        self.selected_send_rpc_urls()
+            .into_iter()
+            .enumerate()
+            .map(|(index, url)| SendEndpoint {
+                label: if index == 0 {
+                    format!("rpc-primary:{}", rpc_url_label(&url))
+                } else {
+                    format!("rpc-fanout-{}:{}", index, rpc_url_label(&url))
+                },
+                url,
+                kind: SendEndpointKind::Rpc,
+                auth_uuid: None,
+                sender_mode: None,
+            })
+            .collect()
+    }
+
+    fn selected_sell_send_endpoints(&self) -> Vec<SendEndpoint> {
+        if self.helius_sender_enabled
+            && self.send_lane_mode.uses_helius_sender_lanes()
+            && self.sell_helius_sender_tip_lamports == Some(0)
+        {
+            let endpoints = self.selected_rpc_send_endpoints();
+            if !endpoints.is_empty() {
+                return endpoints;
+            }
+        }
+        self.selected_send_endpoints()
+    }
+
     fn selected_send_endpoints(&self) -> Vec<SendEndpoint> {
         let mut endpoints = if self.send_lane_mode.uses_rpc_lanes() {
-            self.selected_send_rpc_urls()
-                .into_iter()
-                .enumerate()
-                .map(|(index, url)| SendEndpoint {
-                    label: if index == 0 {
-                        format!("rpc-primary:{}", rpc_url_label(&url))
-                    } else {
-                        format!("rpc-fanout-{}:{}", index, rpc_url_label(&url))
-                    },
-                    url,
-                    kind: SendEndpointKind::Rpc,
-                    auth_uuid: None,
-                    sender_mode: None,
-                })
-                .collect::<Vec<_>>()
+            self.selected_rpc_send_endpoints()
         } else {
             Vec::new()
         };
@@ -4200,6 +4260,10 @@ fn helius_sender_mode(swqos_only: bool) -> &'static str {
 
 fn positive_u64(value: Option<u64>) -> Option<u64> {
     value.filter(|value| *value > 0)
+}
+
+fn configured_u64(value: Option<u64>) -> Option<u64> {
+    value
 }
 
 fn normalized_send_rpc_urls(configured: &[String], fallback: Option<&str>) -> Vec<String> {
@@ -4622,6 +4686,8 @@ mod tests {
             helius_sender_swqos_only: false,
             helius_sender_tip_lamports: None,
             helius_sender_tip_account: None,
+            sell_helius_sender_tip_lamports: None,
+            sell_helius_sender_tip_account: None,
             max_copy_sol: None,
             max_total_copy_spend_sol: None,
             migrated_amm_min_copy_sol: DEFAULT_MIGRATED_AMM_MIN_COPY_SOL,
@@ -4878,12 +4944,14 @@ mod tests {
 
     fn executor(options: CopyExecutionOptions) -> CopyExecutor {
         let send_endpoints = Arc::new(options.selected_send_endpoints());
+        let sell_send_endpoints = Arc::new(options.selected_sell_send_endpoints());
         CopyExecutor {
             options,
             keypair: None,
             keypairs: ArcSwap::from_pointee(HashMap::new()),
             client: send_http_client(),
             send_endpoints,
+            sell_send_endpoints,
             blockhash_cache: None,
             address_lookup_tables: AddressLookupTableCache::default(),
             wallet_balance_cache: None,
@@ -6134,6 +6202,26 @@ mod tests {
             fee_config.helius_sender_tip_account.as_deref(),
             Some(COPY_WALLET)
         );
+    }
+
+    #[test]
+    fn explicit_zero_sell_fees_do_not_fall_back_to_buy_fees() {
+        let mut options = configured_multi_lane_options();
+        options.send_lane_mode = SendLaneMode::HeliusSenderOnly;
+        options.sell_priority_fee_micro_lamports = Some(0);
+        options.sell_jito_tip_lamports = Some(0);
+        options.sell_helius_sender_tip_lamports = Some(0);
+
+        let fee_config = options.sell_tx_fee_config();
+        let sell_endpoints = options.selected_sell_send_endpoints();
+
+        assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(0));
+        assert_eq!(fee_config.jito_tip_lamports, None);
+        assert_eq!(fee_config.jito_tip_account, None);
+        assert_eq!(fee_config.helius_sender_tip_lamports, Some(0));
+        assert_eq!(fee_config.helius_sender_tip_account, None);
+        assert_eq!(endpoint_kinds(&sell_endpoints), vec!["rpc"]);
+        assert_eq!(sell_endpoints[0].label, "rpc-primary:primary.example.com");
     }
 
     #[test]

@@ -51,7 +51,7 @@ jobs:
           printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
 
-          host="${VPS_HOST:-root@157.90.240.233}"
+          host="${VPS_HOST:-root@207.154.228.222}"
           host="${host#*@}"
           ssh-keyscan -H "$host" >> ~/.ssh/known_hosts
 

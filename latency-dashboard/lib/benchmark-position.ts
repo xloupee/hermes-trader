@@ -90,6 +90,44 @@ export function txsAfterWallet(report: LocalExecutionReport | null | undefined):
   return typeof diagnostics.sameSlotTxDelta === "number" ? `+${diagnostics.sameSlotTxDelta}` : "same slot";
 }
 
+export function sameSlotTxsAfterWallet(report: LocalExecutionReport | null | undefined): string {
+  const diagnostics = report?.blockPositionDiagnostics;
+  if (!diagnostics) {
+    return "n/a";
+  }
+  if (diagnostics.status !== "found") {
+    return diagnostics.unavailableReason ? "unknown" : "n/a";
+  }
+  if (diagnostics.slotDelta !== 0) {
+    return "cross-slot";
+  }
+  return typeof diagnostics.sameSlotTxDelta === "number" && Number.isFinite(diagnostics.sameSlotTxDelta)
+    ? `+${diagnostics.sameSlotTxDelta}`
+    : "same slot";
+}
+
+export function crossSlotLanding(report: LocalExecutionReport | null | undefined): string {
+  const diagnostics = report?.blockPositionDiagnostics;
+  if (!diagnostics) {
+    return "n/a";
+  }
+  if (diagnostics.status !== "found") {
+    return diagnostics.unavailableReason ? "unknown" : "n/a";
+  }
+  if (diagnostics.slotDelta === 0) {
+    return "same slot";
+  }
+  if (typeof diagnostics.slotDelta !== "number" || !Number.isFinite(diagnostics.slotDelta)) {
+    return "cross-slot";
+  }
+  const crossSlotTxDelta = diagnostics.crossSlotPositionSummary?.crossSlotTxDelta;
+  const txs =
+    typeof crossSlotTxDelta === "number" && Number.isFinite(crossSlotTxDelta)
+      ? `, +${crossSlotTxDelta} tx`
+      : "";
+  return `+${diagnostics.slotDelta} slot${diagnostics.slotDelta === 1 ? "" : "s"}${txs}`;
+}
+
 export function positionSummary(report: LocalExecutionReport | null | undefined): string {
   const diagnostics = report?.blockPositionDiagnostics;
   if (!diagnostics) {

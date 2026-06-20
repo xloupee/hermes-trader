@@ -8,8 +8,11 @@ const DEFAULT_SUPABASE_CWD = `${process.env.HOME || ""}/Documents/pumpfunnoti`;
 const DEFAULT_WATCH_INTERVAL_MS = 1000;
 const DEFAULT_REFRESH_INTERVAL_MS = 5000;
 const DEFAULT_REFRESH_RECENT_LIMIT = 1;
+const DEFAULT_REFRESH_PENDING_LIMIT = 25;
 const DEFAULT_NEW_ROW_BACKFILL = 20;
 const DEFAULT_RPC_TIMEOUT_MS = 5000;
+const DEFAULT_BLOCK_POSITION_RETRY_ATTEMPTS = 3;
+const DEFAULT_BLOCK_POSITION_RETRY_MS = 500;
 const confirmedTransactionCache = new Map();
 const blockSignatureCache = new Map();
 
@@ -54,7 +57,11 @@ function boolish(value, fallback = false) {
   return ["1", "true", "yes", "y", "on"].includes(String(value).trim().toLowerCase());
 }
 
-function readJsonl(path, { recentLimit = 0 } = {}) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function readJsonl(path, { recentLimit = 0, pendingPositionLimit = 0 } = {}) {
   if (!existsSync(path)) {
     return [];
   }
@@ -74,6 +81,10 @@ function readJsonl(path, { recentLimit = 0 } = {}) {
       row.schema === "copytrade.sendLaneAttribution.v1" ||
       row.schema === "copytrade.transactionConfirmation.v1"
     );
+  if (pendingPositionLimit > 0) {
+    return pendingPositionRefreshRows(parsedRows, pendingPositionLimit);
+  }
+
   const scopedRows = scopeRowsForRecentLocalExecutions(parsedRows, recentLimit);
   return mergeSidecarRows(scopedRows);
 }
@@ -137,6 +148,42 @@ function mergeSidecarRows(rows) {
         ...(confirmation ? { rustTransactionConfirmation: confirmation } : {})
       };
     });
+}
+
+function isSubmittedCopyBuy(row) {
+  const action = String(row.observedAction ?? "").toLowerCase();
+  return action === "buy" && Boolean(row.sendSignature || row.sent || row.decision === "sent");
+}
+
+function confirmationTxDelta(confirmation) {
+  return finiteNumberOrNull(
+    confirmation?.txDelta ?? confirmation?.sameSlotTxDelta ?? confirmation?.txsAfterObserved
+  );
+}
+
+function needsBlockPositionRefresh(row) {
+  if (!isSubmittedCopyBuy(row) || !row.sendSignature) {
+    return false;
+  }
+
+  const confirmation = row.rustTransactionConfirmation;
+  if (!confirmation) {
+    return true;
+  }
+
+  const txDelta = confirmationTxDelta(confirmation);
+  const targetTxIndex = finiteNumberOrNull(confirmation.targetTxIndex);
+  const copyTxIndex = finiteNumberOrNull(confirmation.copyTxIndex);
+  return (
+    txDelta === null ||
+    targetTxIndex === null ||
+    copyTxIndex === null ||
+    Boolean(confirmation.blockPositionError)
+  );
+}
+
+function pendingPositionRefreshRows(rows, limit) {
+  return mergeSidecarRows(rows).filter(needsBlockPositionRefresh).slice(-limit);
 }
 
 function sqlString(value) {
@@ -376,6 +423,45 @@ async function blockPositionDiagnostics(row, copyTransaction, rpcFn = rpc) {
   return diagnostics;
 }
 
+function retryableBlockPositionReason(reason) {
+  if (!reason) {
+    return false;
+  }
+  return /block unavailable|getBlock failed|getBlock RPC error|Block not available|timeout/i.test(reason);
+}
+
+async function blockPositionDiagnosticsWithRetry(row, copyTransaction, rpcFn = rpc, options = {}) {
+  const attempts = Math.max(
+    1,
+    positiveInteger(
+      options.attempts ??
+        argValue("block-position-retry-attempts", process.env.JITO_SYNC_BLOCK_POSITION_RETRY_ATTEMPTS),
+      DEFAULT_BLOCK_POSITION_RETRY_ATTEMPTS
+    )
+  );
+  const retryDelayMs = nonNegativeInteger(
+    options.retryDelayMs ??
+      argValue("block-position-retry-ms", process.env.JITO_SYNC_BLOCK_POSITION_RETRY_MS),
+    DEFAULT_BLOCK_POSITION_RETRY_MS
+  );
+
+  let diagnostics = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    diagnostics = await blockPositionDiagnostics(row, copyTransaction, rpcFn);
+    if (
+      diagnostics.status === "found" ||
+      attempt >= attempts ||
+      !retryableBlockPositionReason(diagnostics.unavailableReason)
+    ) {
+      return diagnostics;
+    }
+    if (retryDelayMs > 0) {
+      await sleep(retryDelayMs * attempt);
+    }
+  }
+  return diagnostics;
+}
+
 function unknownChainReport(row, unavailableReason) {
   const diagnostics = baseBlockPositionDiagnostics(row, null);
   diagnostics.unavailableReason = unavailableReason;
@@ -607,7 +693,7 @@ async function chainReport(row) {
     extraSpendBeyondObservedSol !== null && networkFeeSol !== null
       ? positiveOrNull(extraSpendBeyondObservedSol - networkFeeSol)
       : null;
-  const positionDiagnostics = await blockPositionDiagnostics(row, transaction);
+  const positionDiagnostics = await blockPositionDiagnosticsWithRetry(row, transaction);
   const autoSellReport = row.autoSellSendSignature
     ? await transactionChainReport(row.autoSellSendSignature)
     : null;
@@ -720,7 +806,11 @@ async function chainReportFromRustConfirmation(row, confirmation, rpcFn = rpc) {
     autoSell: null
   };
   if (positionDiagnostics.status !== "found" && slot !== null) {
-    const refreshedPositionDiagnostics = await blockPositionDiagnostics(row, { slot }, rpcFn);
+    const refreshedPositionDiagnostics = await blockPositionDiagnosticsWithRetry(
+      row,
+      { slot },
+      rpcFn
+    );
     if (refreshedPositionDiagnostics.status === "found") {
       applyPositionDiagnostics(report, refreshedPositionDiagnostics);
     }
@@ -1180,8 +1270,8 @@ async function buildSql(rows) {
   return `insert into public.copytrade_local_executions (${columns.join(",")}) values ${values.join(",")} on conflict (provider, observed_signature, observed_wallet, copy_wallet, observed_action, mint) do update set ${updates};`;
 }
 
-async function syncOnce(path, { recentLimit = 0 } = {}) {
-  const rawRows = readJsonl(path, { recentLimit });
+async function syncOnce(path, { recentLimit = 0, pendingPositionLimit = 0 } = {}) {
+  const rawRows = readJsonl(path, { recentLimit, pendingPositionLimit });
   const rows = dedupeRows(rawRows);
   if (rows.length === 0) {
     return 0;
@@ -1249,6 +1339,13 @@ async function main() {
     ),
     Math.min(recentLimit, DEFAULT_REFRESH_RECENT_LIMIT)
   );
+  const refreshPendingLimit = positiveInteger(
+    argValue(
+      "refresh-pending-limit",
+      process.env.JITO_SYNC_REFRESH_PENDING_LIMIT || String(DEFAULT_REFRESH_PENDING_LIMIT)
+    ),
+    DEFAULT_REFRESH_PENDING_LIMIT
+  );
   const newRowBackfill = nonNegativeInteger(
     argValue("new-row-backfill", process.env.JITO_SYNC_NEW_ROW_BACKFILL || String(DEFAULT_NEW_ROW_BACKFILL)),
     DEFAULT_NEW_ROW_BACKFILL
@@ -1267,18 +1364,23 @@ async function main() {
     const shouldRefreshRows =
       watch && refreshSentRows && rowCount > 0 && nowMs - lastRefreshAtMs >= refreshIntervalMs;
     if (hasNewRows || shouldRefreshRows) {
-      const syncRecentLimit = syncLimitForCycle({
+      const syncRecentLimit = hasNewRows ? syncLimitForCycle({
         hasNewRows,
         rowCount,
         lastSyncedCount,
         recentLimit,
         refreshRecentLimit,
         newRowBackfill
-      });
-      const synced = await syncOnce(path, { recentLimit: syncRecentLimit });
+      }) : 0;
+      const pendingPositionLimit = hasNewRows ? 0 : refreshPendingLimit;
+      const synced = await syncOnce(path, { recentLimit: syncRecentLimit, pendingPositionLimit });
       lastSyncedCount = rowCount;
       lastRefreshAtMs = Date.now();
-      const scope = syncRecentLimit > 0 ? `last ${syncRecentLimit} rows` : "all rows";
+      const scope = pendingPositionLimit > 0
+        ? `pending position rows up to ${pendingPositionLimit}`
+        : syncRecentLimit > 0
+          ? `last ${syncRecentLimit} rows`
+          : "all rows";
       const reason = hasNewRows ? "new rows" : "refresh";
       console.error(`synced ${synced} unique local copy executions to Supabase (${scope}, ${reason})`);
     }
@@ -1290,14 +1392,18 @@ async function main() {
 
 export {
   blockPositionDiagnostics,
+  blockPositionDiagnosticsWithRetry,
   blockSignatures,
   buyStatus,
+  chainReport,
   chainReportFromRustConfirmation,
   dedupeRows,
   executionKey,
   fetchBlockSignatures,
   displayTxDelta,
   mergeSidecarRows,
+  needsBlockPositionRefresh,
+  pendingPositionRefreshRows,
   readJsonl,
   syncLimitForCycle,
   unknownChainReport,

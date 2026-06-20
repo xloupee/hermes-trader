@@ -212,6 +212,12 @@ pub(crate) struct LiveOptions {
     #[arg(long, env = "JITO_HELIUS_SENDER_TIP_ACCOUNT")]
     pub(crate) helius_sender_tip_account: Option<String>,
 
+    #[arg(long, env = "JITO_SELL_HELIUS_SENDER_TIP_LAMPORTS")]
+    pub(crate) sell_helius_sender_tip_lamports: Option<u64>,
+
+    #[arg(long, env = "JITO_SELL_HELIUS_SENDER_TIP_ACCOUNT")]
+    pub(crate) sell_helius_sender_tip_account: Option<String>,
+
     #[arg(long, env = "JITO_ONE_SHOT_COPY_SEND", default_value_t = false)]
     pub(crate) one_shot_copy_send: bool,
 

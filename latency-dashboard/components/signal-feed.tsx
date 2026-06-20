@@ -10,11 +10,13 @@ import {
   chainError,
   copyAckMs,
   copyStatus,
+  crossSlotLanding,
   decisionTone,
   executionLocalDetectUs,
   firstNumber,
   positionSummary,
   positionTone,
+  sameSlotTxsAfterWallet,
   slotDelta,
   subtractMs,
   txsAfterWallet
@@ -201,7 +203,8 @@ export function SignalFeed({ adminEmail }: { adminEmail: string | null }) {
                   <th>Seen</th>
                   <th>Action</th>
                   <th>Slot Δ</th>
-                  <th>TXs after wallet</th>
+                  <th>Same-slot TXs</th>
+                  <th>Cross-slot</th>
                   <th>Decode/build</th>
                   <th>Scan/submit</th>
                   <th>Parse/ack</th>
@@ -224,7 +227,8 @@ export function SignalFeed({ adminEmail }: { adminEmail: string | null }) {
                       <td>{new Date(row.observedAtMs).toLocaleTimeString()}</td>
                       <td><span className={`status ${actionTone(row.action)}`}>{row.action}</span></td>
                       <td>{slotDelta(row.execution)}</td>
-                      <td><span className={`status ${positionTone(row.execution)}`}>{txsAfterWallet(row.execution)}</span></td>
+                      <td><span className={`status ${positionTone(row.execution)}`}>{sameSlotTxsAfterWallet(row.execution)}</span></td>
+                      <td><span className={`status ${positionTone(row.execution)}`}>{crossSlotLanding(row.execution)}</span></td>
                       <td>{latency.decode}</td>
                       <td>{latency.scan}</td>
                       <td>{latency.txParse}</td>
@@ -315,7 +319,8 @@ function ExecutionReport({ selectedExecution }: { selectedExecution: LocalExecut
         { label: "Sig returned", value: ms(selectedExecution.observedToSignatureReturnedMs) },
         { label: "Slot delta", value: slotDelta(selectedExecution) },
         { label: "Position", value: positionSummary(selectedExecution) },
-        { label: "TXs after wallet", value: txsAfterWallet(selectedExecution) },
+        { label: "Same-slot TXs", value: sameSlotTxsAfterWallet(selectedExecution) },
+        { label: "Cross-slot", value: crossSlotLanding(selectedExecution) },
         { label: "Queue", value: us(selectedExecution.executorQueueUs) },
         { label: "Build/sign", value: `${us(selectedExecution.unsignedBuildUs)} / ${us(selectedExecution.signUs)}` }
       ]} />
@@ -331,7 +336,8 @@ function ExecutionReport({ selectedExecution }: { selectedExecution: LocalExecut
         { label: "Copy slot", value: selectedExecution.blockPositionDiagnostics?.copySlot === null || selectedExecution.blockPositionDiagnostics?.copySlot === undefined ? "n/a" : String(selectedExecution.blockPositionDiagnostics.copySlot) },
         { label: "Target tx index", value: selectedExecution.blockPositionDiagnostics?.targetTxIndex === null || selectedExecution.blockPositionDiagnostics?.targetTxIndex === undefined ? "n/a" : String(selectedExecution.blockPositionDiagnostics.targetTxIndex) },
         { label: "Copy tx index", value: selectedExecution.blockPositionDiagnostics?.copyTxIndex === null || selectedExecution.blockPositionDiagnostics?.copyTxIndex === undefined ? "n/a" : String(selectedExecution.blockPositionDiagnostics.copyTxIndex) },
-        { label: "Tx delta", value: selectedExecution.blockPositionDiagnostics?.txDelta === null || selectedExecution.blockPositionDiagnostics?.txDelta === undefined ? "n/a" : String(selectedExecution.blockPositionDiagnostics.txDelta) },
+        { label: "Raw tx delta", value: selectedExecution.blockPositionDiagnostics?.txDelta === null || selectedExecution.blockPositionDiagnostics?.txDelta === undefined ? "n/a" : String(selectedExecution.blockPositionDiagnostics.txDelta) },
+        { label: "Legacy TXs after wallet", value: txsAfterWallet(selectedExecution) },
         { label: "Position status", value: selectedExecution.blockPositionDiagnostics?.status || "n/a" },
         { label: "Position reason", value: selectedExecution.blockPositionDiagnostics?.unavailableReason || "n/a" },
         { label: "Route layout", value: selectedExecution.routeLayout || "n/a" },

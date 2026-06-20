@@ -15,17 +15,24 @@ use std::{
 pub(crate) struct TelegramSnapshotConfig {
     sequence: u64,
     checksum: String,
-    targets: HashMap<Pubkey, Vec<TelegramTargetConfig>>,
+    targets: HashMap<Pubkey, Vec<CopyExecutionProfile>>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct TelegramTargetConfig {
-    pub(crate) chat_id: String,
+pub(crate) struct CopyExecutionProfile {
     pub(crate) copy_wallet: Pubkey,
     pub(crate) signer_keypair_path: Option<PathBuf>,
-    pub(crate) copy_amount_sol: f64,
+    pub(crate) copy_amount_lamports: u64,
     pub(crate) trailing_sell: Option<TrailingSellPlan>,
 }
+
+impl CopyExecutionProfile {
+    pub(crate) fn copy_amount_sol(&self) -> f64 {
+        self.copy_amount_lamports as f64 / LAMPORTS_PER_SOL
+    }
+}
+
+const LAMPORTS_PER_SOL: f64 = 1_000_000_000.0;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,8 +68,8 @@ struct SnapshotRouting {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SnapshotSubscriber {
-    #[serde(default)]
-    chat_id: Option<String>,
+    #[serde(default, rename = "chatId")]
+    _chat_id: Option<String>,
     trading_wallet_public_key: String,
     #[serde(default)]
     signer_keypair_path: Option<String>,
@@ -130,7 +137,7 @@ impl TelegramSnapshotConfig {
                 .map(str::trim)
                 .is_some_and(|value| !value.is_empty())
         });
-        let mut targets: HashMap<Pubkey, Vec<TelegramTargetConfig>> = HashMap::new();
+        let mut targets: HashMap<Pubkey, Vec<CopyExecutionProfile>> = HashMap::new();
         if !snapshot.routing.emergency_stopped {
             for subscriber in snapshot.subscribers {
                 if !has_snapshot_signer_refs {
@@ -143,6 +150,9 @@ impl TelegramSnapshotConfig {
                 if !subscriber.copy_amount_sol.is_finite() || subscriber.copy_amount_sol <= 0.0 {
                     continue;
                 }
+                let Some(copy_amount_lamports) = sol_to_lamports(subscriber.copy_amount_sol) else {
+                    continue;
+                };
                 let copy_wallet = subscriber.trading_wallet_public_key.trim();
                 let Ok(copy_wallet_pubkey) = Pubkey::from_str(copy_wallet) else {
                     continue;
@@ -153,14 +163,6 @@ impl TelegramSnapshotConfig {
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .map(PathBuf::from);
-                let chat_id = subscriber
-                    .chat_id
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or("unknown")
-                    .to_string();
-
                 let sell_slippage_percent = subscriber
                     .effective_sell_slippage
                     .or(subscriber.sell_slippage)
@@ -193,11 +195,10 @@ impl TelegramSnapshotConfig {
                     targets
                         .entry(target_wallet)
                         .or_default()
-                        .push(TelegramTargetConfig {
-                            chat_id: chat_id.clone(),
+                        .push(CopyExecutionProfile {
                             copy_wallet: copy_wallet_pubkey,
                             signer_keypair_path: signer_keypair_path.clone(),
-                            copy_amount_sol: subscriber.copy_amount_sol,
+                            copy_amount_lamports,
                             trailing_sell,
                         });
                 }
@@ -229,17 +230,17 @@ impl TelegramSnapshotConfig {
         wallets
     }
 
-    pub(crate) fn target_configs(&self, target_wallet: &str) -> &[TelegramTargetConfig] {
+    pub(crate) fn execution_profiles(&self, target_wallet: &str) -> &[CopyExecutionProfile] {
         let Ok(target_wallet) = Pubkey::from_str(target_wallet) else {
             return &[];
         };
-        self.target_configs_for_pubkey(&target_wallet)
+        self.execution_profiles_for_pubkey(&target_wallet)
     }
 
-    pub(crate) fn target_configs_for_pubkey(
+    pub(crate) fn execution_profiles_for_pubkey(
         &self,
         target_wallet: &Pubkey,
-    ) -> &[TelegramTargetConfig] {
+    ) -> &[CopyExecutionProfile] {
         self.targets
             .get(target_wallet)
             .map(Vec::as_slice)
@@ -275,6 +276,17 @@ impl TelegramSnapshotConfig {
         wallets.dedup();
         wallets
     }
+}
+
+fn sol_to_lamports(value: f64) -> Option<u64> {
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    let lamports = (value * LAMPORTS_PER_SOL).round();
+    if !lamports.is_finite() || lamports <= 0.0 || lamports > u64::MAX as f64 {
+        return None;
+    }
+    Some(lamports as u64)
 }
 
 fn trailing_sell_plan_from_snapshot(
@@ -405,9 +417,14 @@ mod tests {
             snapshot.target_wallets(),
             vec![TARGET_B.to_string(), TARGET_A.to_string()]
         );
-        assert_eq!(snapshot.target_configs(TARGET_A)[0].copy_amount_sol, 0.0007);
-        assert!(snapshot.target_configs(TARGET_A)[0].trailing_sell.is_none());
-        let trailing_sell = snapshot.target_configs(TARGET_B)[0]
+        assert_eq!(
+            snapshot.execution_profiles(TARGET_A)[0].copy_amount_lamports,
+            700_000
+        );
+        assert!(snapshot.execution_profiles(TARGET_A)[0]
+            .trailing_sell
+            .is_none());
+        let trailing_sell = snapshot.execution_profiles(TARGET_B)[0]
             .trailing_sell
             .as_ref()
             .expect("target B trailing sell config");
@@ -437,7 +454,7 @@ mod tests {
             trailing_sell.jito_tip_account.as_deref(),
             Some("96gYZGLnUQYgE8MWWpYJw8yRjnvB51rAhbG1SogE3uSG")
         );
-        assert!(snapshot.target_configs(OTHER_WALLET).is_empty());
+        assert!(snapshot.execution_profiles(OTHER_WALLET).is_empty());
         assert_eq!(snapshot.active_profile_count(), 2);
         assert!(snapshot.signer_keypair_paths().is_empty());
     }
@@ -477,20 +494,18 @@ mod tests {
             .expect("snapshot loads")
             .expect("snapshot config");
 
-        let configs = snapshot.target_configs(TARGET_A);
-        assert_eq!(configs.len(), 2);
-        assert_eq!(configs[0].chat_id, "chat-1");
+        let profiles = snapshot.execution_profiles(TARGET_A);
+        assert_eq!(profiles.len(), 2);
         assert_eq!(
-            configs[0].copy_wallet,
+            profiles[0].copy_wallet,
             Pubkey::from_str(COPY_WALLET).unwrap()
         );
-        assert_eq!(configs[0].copy_amount_sol, 0.0007);
-        assert_eq!(configs[1].chat_id, "chat-2");
+        assert_eq!(profiles[0].copy_amount_lamports, 700_000);
         assert_eq!(
-            configs[1].copy_wallet,
+            profiles[1].copy_wallet,
             Pubkey::from_str(OTHER_WALLET).unwrap()
         );
-        assert_eq!(configs[1].copy_amount_sol, 0.0009);
+        assert_eq!(profiles[1].copy_amount_lamports, 900_000);
         assert_eq!(snapshot.active_profile_count(), 2);
         assert_eq!(
             snapshot.signer_keypair_paths(),

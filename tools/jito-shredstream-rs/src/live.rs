@@ -395,13 +395,15 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 parsed.route_context.as_ref(),
                             );
                         }
-                        let telegram_target_configs = telegram_runtime_guard
+                        let execution_profiles = telegram_runtime_guard
                             .as_ref()
                             .map(|runtime| {
-                                runtime.snapshot.target_configs_for_pubkey(&target_wallet)
+                                runtime
+                                    .snapshot
+                                    .execution_profiles_for_pubkey(&target_wallet)
                             })
                             .unwrap_or(&[]);
-                        if telegram_target_configs.is_empty() {
+                        if execution_profiles.is_empty() {
                             let runtime_request = CopyRuntimeRequest::from_parsed_trade(
                                 trade_parsed_at_ms,
                                 now_ms(),
@@ -448,8 +450,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                     &options,
                                 )?;
                             }
-                        } else if telegram_target_configs.len() == 1 {
-                            let telegram_target_config = &telegram_target_configs[0];
+                        } else if execution_profiles.len() == 1 {
+                            let execution_profile = &execution_profiles[0];
                             let runtime_request = CopyRuntimeRequest::from_parsed_trade(
                                 trade_parsed_at_ms,
                                 now_ms(),
@@ -458,7 +460,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 account_keys.len(),
                                 parsed,
                                 PlannerOptions {
-                                    copy_sol_amount: Some(telegram_target_config.copy_amount_sol),
+                                    copy_sol_amount: Some(execution_profile.copy_amount_sol()),
                                 },
                             );
                             if options.fast_copy_send {
@@ -468,8 +470,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                     &copy_executor,
                                     runtime_request,
                                     timings,
-                                    Some(telegram_target_config.copy_wallet),
-                                    telegram_target_config.trailing_sell.clone(),
+                                    Some(execution_profile.copy_wallet),
+                                    execution_profile.trailing_sell.clone(),
                                 );
                             } else {
                                 let shadow_signal =
@@ -482,8 +484,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                     &copy_executor,
                                     runtime_request,
                                     timings,
-                                    Some(telegram_target_config.copy_wallet),
-                                    telegram_target_config.trailing_sell.clone(),
+                                    Some(execution_profile.copy_wallet),
+                                    execution_profile.trailing_sell.clone(),
                                 );
                                 write_plan_outputs(
                                     &mut shadow_signals,
@@ -498,21 +500,19 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             }
                         } else {
                             let mut parsed_for_runtime = Some(parsed);
-                            let telegram_target_config_count = telegram_target_configs.len();
-                            for (index, telegram_target_config) in
-                                telegram_target_configs.iter().enumerate()
+                            let execution_profile_count = execution_profiles.len();
+                            for (index, execution_profile) in execution_profiles.iter().enumerate()
                             {
-                                let parsed_for_request =
-                                    if index + 1 == telegram_target_config_count {
-                                        parsed_for_runtime.take().expect(
-                                            "parsed trade available for final runtime request",
-                                        )
-                                    } else {
-                                        parsed_for_runtime
-                                            .as_ref()
-                                            .expect("parsed trade available for runtime request")
-                                            .clone()
-                                    };
+                                let parsed_for_request = if index + 1 == execution_profile_count {
+                                    parsed_for_runtime
+                                        .take()
+                                        .expect("parsed trade available for final runtime request")
+                                } else {
+                                    parsed_for_runtime
+                                        .as_ref()
+                                        .expect("parsed trade available for runtime request")
+                                        .clone()
+                                };
                                 let runtime_request = CopyRuntimeRequest::from_parsed_trade(
                                     trade_parsed_at_ms,
                                     now_ms(),
@@ -521,9 +521,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                     account_keys.len(),
                                     parsed_for_request,
                                     PlannerOptions {
-                                        copy_sol_amount: Some(
-                                            telegram_target_config.copy_amount_sol,
-                                        ),
+                                        copy_sol_amount: Some(execution_profile.copy_amount_sol()),
                                     },
                                 );
                                 if options.fast_copy_send {
@@ -533,8 +531,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                         &copy_executor,
                                         runtime_request,
                                         timings,
-                                        Some(telegram_target_config.copy_wallet),
-                                        telegram_target_config.trailing_sell.clone(),
+                                        Some(execution_profile.copy_wallet),
+                                        execution_profile.trailing_sell.clone(),
                                     );
                                 } else {
                                     let shadow_signal = runtime_request
@@ -547,8 +545,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                         &copy_executor,
                                         runtime_request,
                                         timings,
-                                        Some(telegram_target_config.copy_wallet),
-                                        telegram_target_config.trailing_sell.clone(),
+                                        Some(execution_profile.copy_wallet),
+                                        execution_profile.trailing_sell.clone(),
                                     );
                                     write_plan_outputs(
                                         &mut shadow_signals,

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VPS_HOST="${VPS_HOST:-root@157.90.240.233}"
+VPS_HOST="${VPS_HOST:-root@207.154.228.222}"
 APP_DIR="${APP_DIR:-/opt/pumpfun-migration-bot}"
 SERVICE_NAME="${SERVICE_NAME:-pumpfun-migration-bot}"
 

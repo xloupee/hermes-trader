@@ -1233,11 +1233,24 @@ fn enqueue_transaction_confirmation(
                 let line = line.clone();
                 tokio::spawn(async move {
                     let confirmation = copy_executor.confirm_copy_transaction(line).await;
+                    let backfill_confirmation = confirmation.clone();
                     if copy_execution_tx
                         .send(CopyExecutionOutput::TransactionConfirmation(confirmation))
                         .is_err()
                     {
                         eprintln!("copy confirmation result dropped; receiver closed");
+                        return;
+                    }
+                    if let Some(confirmation) = copy_executor
+                        .backfill_transaction_confirmation_block_position(backfill_confirmation)
+                        .await
+                    {
+                        if copy_execution_tx
+                            .send(CopyExecutionOutput::TransactionConfirmation(confirmation))
+                            .is_err()
+                        {
+                            eprintln!("copy confirmation backfill result dropped; receiver closed");
+                        }
                     }
                 });
             }
@@ -1247,11 +1260,26 @@ fn enqueue_transaction_confirmation(
                 let line = line.clone();
                 tokio::spawn(async move {
                     let confirmation = copy_executor.confirm_auto_sell_transaction(line).await;
+                    let backfill_confirmation = confirmation.clone();
                     if copy_execution_tx
                         .send(CopyExecutionOutput::TransactionConfirmation(confirmation))
                         .is_err()
                     {
                         eprintln!("auto-sell confirmation result dropped; receiver closed");
+                        return;
+                    }
+                    if let Some(confirmation) = copy_executor
+                        .backfill_transaction_confirmation_block_position(backfill_confirmation)
+                        .await
+                    {
+                        if copy_execution_tx
+                            .send(CopyExecutionOutput::TransactionConfirmation(confirmation))
+                            .is_err()
+                        {
+                            eprintln!(
+                                "auto-sell confirmation backfill result dropped; receiver closed"
+                            );
+                        }
                     }
                 });
             }
@@ -1264,11 +1292,26 @@ fn enqueue_transaction_confirmation(
                 let confirmation = copy_executor
                     .confirm_rust_trailing_sell_transaction(line)
                     .await;
+                let backfill_confirmation = confirmation.clone();
                 if copy_execution_tx
                     .send(CopyExecutionOutput::TransactionConfirmation(confirmation))
                     .is_err()
                 {
                     eprintln!("rust trailing sell confirmation result dropped; receiver closed");
+                    return;
+                }
+                if let Some(confirmation) = copy_executor
+                    .backfill_transaction_confirmation_block_position(backfill_confirmation)
+                    .await
+                {
+                    if copy_execution_tx
+                        .send(CopyExecutionOutput::TransactionConfirmation(confirmation))
+                        .is_err()
+                    {
+                        eprintln!(
+                            "rust trailing sell confirmation backfill result dropped; receiver closed"
+                        );
+                    }
                 }
             });
         }

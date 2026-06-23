@@ -59,6 +59,7 @@ export JITO_SEND_LANE_MODE="${JITO_SEND_LANE_MODE:-mixed}"
 if [[ -z "${JITO_SEND_RPC_URLS:-}" ]]; then
   export JITO_SEND_RPC_URLS="${DIRECT_EXECUTION_SEND_RPC_URLS:-${SOLANA_RPC_URL:-}}"
 fi
+export JITO_SELL_SEND_RPC_URLS="${JITO_SELL_SEND_RPC_URLS:-${DIRECT_EXECUTION_SELL_SEND_RPC_URLS:-}}"
 export JITO_BLOCK_ENGINE_SEND_URLS="${JITO_BLOCK_ENGINE_SEND_URLS:-${DIRECT_EXECUTION_JITO_SEND_URLS:-}}"
 export JITO_BLOCK_ENGINE_AUTH_UUID="${JITO_BLOCK_ENGINE_AUTH_UUID:-${DIRECT_EXECUTION_JITO_AUTH_UUID:-}}"
 export JITO_HELIUS_SENDER_ENABLED="${JITO_HELIUS_SENDER_ENABLED:-false}"
@@ -66,6 +67,17 @@ export JITO_HELIUS_SENDER_URLS="${JITO_HELIUS_SENDER_URLS:-}"
 export JITO_HELIUS_SENDER_SWQOS_ONLY="${JITO_HELIUS_SENDER_SWQOS_ONLY:-false}"
 export JITO_HELIUS_SENDER_TIP_LAMPORTS="${JITO_HELIUS_SENDER_TIP_LAMPORTS:-}"
 export JITO_HELIUS_SENDER_TIP_ACCOUNT="${JITO_HELIUS_SENDER_TIP_ACCOUNT:-}"
+export JITO_TPU_JET_ENABLED="${JITO_TPU_JET_ENABLED:-false}"
+export JITO_TPU_JET_RPC_URL="${JITO_TPU_JET_RPC_URL:-${SOLANA_RPC_URL:-}}"
+export JITO_TPU_JET_WS_URL="${JITO_TPU_JET_WS_URL:-}"
+export JITO_TPU_JET_SIDECAR_URL="${JITO_TPU_JET_SIDECAR_URL:-http://127.0.0.1:8787}"
+export JITO_TPU_JET_FANOUT_SLOTS="${JITO_TPU_JET_FANOUT_SLOTS:-12}"
+export JITO_TPU_JET_TIMEOUT_MS="${JITO_TPU_JET_TIMEOUT_MS:-30}"
+export JITO_TPU_QUIC_ENABLED="${JITO_TPU_QUIC_ENABLED:-false}"
+export JITO_TPU_QUIC_RPC_URL="${JITO_TPU_QUIC_RPC_URL:-${SOLANA_RPC_URL:-}}"
+export JITO_TPU_QUIC_WS_URL="${JITO_TPU_QUIC_WS_URL:-}"
+export JITO_TPU_QUIC_FANOUT_SLOTS="${JITO_TPU_QUIC_FANOUT_SLOTS:-12}"
+export JITO_TPU_QUIC_TIMEOUT_MS="${JITO_TPU_QUIC_TIMEOUT_MS:-30}"
 export JITO_SIMULATE_COPY_TX="${JITO_SIMULATE_COPY_TX:-false}"
 export JITO_ENABLE_COPY_SEND="${JITO_ENABLE_COPY_SEND:-true}"
 export JITO_ONE_SHOT_COPY_SEND="${JITO_ONE_SHOT_COPY_SEND:-false}"
@@ -87,12 +99,17 @@ esac
 export JITO_SEND_MAX_RETRIES="${JITO_SEND_MAX_RETRIES:-3}"
 export JITO_SEND_HTTP_TIMEOUT_MS="${JITO_SEND_HTTP_TIMEOUT_MS:-750}"
 export JITO_PRIORITY_FEE_MICRO_LAMPORTS="${JITO_PRIORITY_FEE_MICRO_LAMPORTS:-${DIRECT_EXECUTION_PRIORITY_FEE_MICRO_LAMPORTS:-}}"
+export JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS="${JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS:-500000}"
+export JITO_DYNAMIC_PRIORITY_FEE_ENABLED="${JITO_DYNAMIC_PRIORITY_FEE_ENABLED:-false}"
+export JITO_DYNAMIC_PRIORITY_FEE_BASELINE_MICRO_LAMPORTS="${JITO_DYNAMIC_PRIORITY_FEE_BASELINE_MICRO_LAMPORTS:-$JITO_PRIORITY_FEE_MICRO_LAMPORTS}"
+export JITO_DYNAMIC_PRIORITY_FEE_AGGRESSIVE_MICRO_LAMPORTS="${JITO_DYNAMIC_PRIORITY_FEE_AGGRESSIVE_MICRO_LAMPORTS:-}"
+export JITO_DYNAMIC_PRIORITY_FEE_PANIC_MICRO_LAMPORTS="${JITO_DYNAMIC_PRIORITY_FEE_PANIC_MICRO_LAMPORTS:-}"
+export JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS="${JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS:-${JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS:-}}"
 export JITO_TIP_LAMPORTS="${JITO_TIP_LAMPORTS:-${DIRECT_EXECUTION_JITO_TIP_LAMPORTS:-}}"
 export JITO_TIP_ACCOUNT="${JITO_TIP_ACCOUNT:-${DIRECT_EXECUTION_JITO_TIP_ACCOUNT:-}}"
 export JITO_SELL_PRIORITY_FEE_MICRO_LAMPORTS="${JITO_SELL_PRIORITY_FEE_MICRO_LAMPORTS:-$JITO_PRIORITY_FEE_MICRO_LAMPORTS}"
 export JITO_SELL_TIP_LAMPORTS="${JITO_SELL_TIP_LAMPORTS:-$JITO_TIP_LAMPORTS}"
 export JITO_SELL_TIP_ACCOUNT="${JITO_SELL_TIP_ACCOUNT:-$JITO_TIP_ACCOUNT}"
-export JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS="${JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS:-500000}"
 export JITO_MAX_TIP_LAMPORTS="${JITO_MAX_TIP_LAMPORTS:-50000}"
 export JITO_COPY_EXECUTIONS_PATH="${JITO_COPY_EXECUTIONS_PATH:-/var/log/jito-copy-executions-vps.jsonl}"
 export JITO_COPY_EXECUTIONS_WRITE_QUEUE_CAPACITY="${JITO_COPY_EXECUTIONS_WRITE_QUEUE_CAPACITY:-1024}"
@@ -148,8 +165,27 @@ validate_capped_int \
   "$JITO_PRIORITY_FEE_MICRO_LAMPORTS" \
   JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS \
   "$JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS"
+validate_capped_int \
+  JITO_DYNAMIC_PRIORITY_FEE_BASELINE_MICRO_LAMPORTS \
+  "$JITO_DYNAMIC_PRIORITY_FEE_BASELINE_MICRO_LAMPORTS" \
+  JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS \
+  "$JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS"
+validate_capped_int \
+  JITO_DYNAMIC_PRIORITY_FEE_AGGRESSIVE_MICRO_LAMPORTS \
+  "$JITO_DYNAMIC_PRIORITY_FEE_AGGRESSIVE_MICRO_LAMPORTS" \
+  JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS \
+  "$JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS"
+validate_capped_int \
+  JITO_DYNAMIC_PRIORITY_FEE_PANIC_MICRO_LAMPORTS \
+  "$JITO_DYNAMIC_PRIORITY_FEE_PANIC_MICRO_LAMPORTS" \
+  JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS \
+  "$JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS"
 validate_capped_int JITO_TIP_LAMPORTS "$JITO_TIP_LAMPORTS" JITO_MAX_TIP_LAMPORTS "$JITO_MAX_TIP_LAMPORTS"
 validate_nonnegative_int JITO_HELIUS_SENDER_TIP_LAMPORTS "$JITO_HELIUS_SENDER_TIP_LAMPORTS"
+validate_nonnegative_int JITO_TPU_JET_FANOUT_SLOTS "$JITO_TPU_JET_FANOUT_SLOTS"
+validate_nonnegative_int JITO_TPU_JET_TIMEOUT_MS "$JITO_TPU_JET_TIMEOUT_MS"
+validate_nonnegative_int JITO_TPU_QUIC_FANOUT_SLOTS "$JITO_TPU_QUIC_FANOUT_SLOTS"
+validate_nonnegative_int JITO_TPU_QUIC_TIMEOUT_MS "$JITO_TPU_QUIC_TIMEOUT_MS"
 validate_capped_int \
   JITO_SELL_PRIORITY_FEE_MICRO_LAMPORTS \
   "$JITO_SELL_PRIORITY_FEE_MICRO_LAMPORTS" \
@@ -200,11 +236,11 @@ esac
 
 SEND_LANE_MODE_NORMALIZED="$(printf '%s' "$JITO_SEND_LANE_MODE" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
 case "$SEND_LANE_MODE_NORMALIZED" in
-  mixed|rpc_only|jito_only|helius_sender_only)
+  mixed|rpc_only|jito_only|helius_sender_only|helius_tpu_jet|helius_tpu_quic|tpu_jet_helius_tip|tpu_quic_helius_tip|tpu_jet_only|tpu_quic_only)
     export JITO_SEND_LANE_MODE="${SEND_LANE_MODE_NORMALIZED//_/-}"
     ;;
   *)
-    echo "JITO_SEND_LANE_MODE must be mixed, rpc_only/rpc-only, jito_only/jito-only, or helius_sender_only/helius-sender-only; got $JITO_SEND_LANE_MODE" >&2
+    echo "JITO_SEND_LANE_MODE must be mixed, rpc_only/rpc-only, jito_only/jito-only, helius_sender_only/helius-sender-only, helius_tpu_jet/helius-tpu-jet, helius_tpu_quic/helius-tpu-quic, tpu_jet_helius_tip/tpu-jet-helius-tip, tpu_quic_helius_tip/tpu-quic-helius-tip, tpu_jet_only/tpu-jet-only, or tpu_quic_only/tpu-quic-only; got $JITO_SEND_LANE_MODE" >&2
     exit 1
     ;;
 esac
@@ -243,9 +279,79 @@ case "$SEND_LANE_MODE_NORMALIZED" in
       *) echo "JITO_SEND_LANE_MODE=helius_sender_only requires JITO_HELIUS_SENDER_ENABLED=YES" >&2; exit 1 ;;
     esac
     ;;
+  helius_tpu_jet)
+    case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_tpu_jet requires JITO_SEND_FANOUT=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_tpu_jet requires JITO_HELIUS_SENDER_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_TPU_JET_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_tpu_jet requires JITO_TPU_JET_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    ;;
+  helius_tpu_quic)
+    case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_tpu_quic requires JITO_SEND_FANOUT=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_tpu_quic requires JITO_HELIUS_SENDER_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_TPU_QUIC_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_tpu_quic requires JITO_TPU_QUIC_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    ;;
+  tpu_jet_helius_tip)
+    case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=tpu_jet_helius_tip requires JITO_SEND_FANOUT=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=tpu_jet_helius_tip requires JITO_HELIUS_SENDER_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_TPU_JET_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=tpu_jet_helius_tip requires JITO_TPU_JET_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    ;;
+  tpu_quic_helius_tip)
+    case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=tpu_quic_helius_tip requires JITO_SEND_FANOUT=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=tpu_quic_helius_tip requires JITO_HELIUS_SENDER_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_TPU_QUIC_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=tpu_quic_helius_tip requires JITO_TPU_QUIC_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    ;;
+  tpu_jet_only)
+    case "$(printf '%s' "$JITO_TPU_JET_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=tpu_jet_only requires JITO_TPU_JET_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    ;;
+  tpu_quic_only)
+    case "$(printf '%s' "$JITO_TPU_QUIC_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=tpu_quic_only requires JITO_TPU_QUIC_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    ;;
 esac
 HELIUS_SENDER_ENABLED_NORMALIZED="$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')"
 HELIUS_SENDER_SWQOS_NORMALIZED="$(printf '%s' "$JITO_HELIUS_SENDER_SWQOS_ONLY" | tr '[:upper:]' '[:lower:]')"
+TPU_JET_ENABLED_NORMALIZED="$(printf '%s' "$JITO_TPU_JET_ENABLED" | tr '[:upper:]' '[:lower:]')"
+TPU_QUIC_ENABLED_NORMALIZED="$(printf '%s' "$JITO_TPU_QUIC_ENABLED" | tr '[:upper:]' '[:lower:]')"
 case "$HELIUS_SENDER_ENABLED_NORMALIZED" in
   yes|true|1|on)
     case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
@@ -282,8 +388,64 @@ case "$HELIUS_SENDER_ENABLED_NORMALIZED" in
     fi
     ;;
 esac
+case "$TPU_JET_ENABLED_NORMALIZED" in
+  yes|true|1|on)
+    if [[ "$SEND_LANE_MODE_NORMALIZED" != "tpu_jet_only" ]]; then
+      case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+        yes|true|1|on) ;;
+        *) echo "JITO_TPU_JET_ENABLED requires JITO_SEND_FANOUT=YES unless JITO_SEND_LANE_MODE=tpu_jet_only" >&2; exit 1 ;;
+      esac
+    fi
+    case "$(printf '%s' "$JITO_FAST_COPY_SEND" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_TPU_JET_ENABLED requires JITO_FAST_COPY_SEND=YES" >&2; exit 1 ;;
+    esac
+    if [[ -z "$JITO_TPU_JET_RPC_URL" ]]; then
+      echo "JITO_TPU_JET_ENABLED requires JITO_TPU_JET_RPC_URL" >&2
+      exit 1
+    fi
+    if [[ -z "$JITO_TPU_JET_WS_URL" ]]; then
+      echo "JITO_TPU_JET_ENABLED requires JITO_TPU_JET_WS_URL" >&2
+      exit 1
+    fi
+    if [[ -z "$JITO_TPU_JET_SIDECAR_URL" ]]; then
+      echo "JITO_TPU_JET_ENABLED requires JITO_TPU_JET_SIDECAR_URL" >&2
+      exit 1
+    fi
+    if [[ "$JITO_TPU_JET_FANOUT_SLOTS" == "0" ]]; then
+      echo "JITO_TPU_JET_FANOUT_SLOTS must be positive" >&2
+      exit 1
+    fi
+    ;;
+esac
+case "$TPU_QUIC_ENABLED_NORMALIZED" in
+  yes|true|1|on)
+    if [[ "$SEND_LANE_MODE_NORMALIZED" != "tpu_quic_only" ]]; then
+      case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+        yes|true|1|on) ;;
+        *) echo "JITO_TPU_QUIC_ENABLED requires JITO_SEND_FANOUT=YES unless JITO_SEND_LANE_MODE=tpu_quic_only" >&2; exit 1 ;;
+      esac
+    fi
+    case "$(printf '%s' "$JITO_FAST_COPY_SEND" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_TPU_QUIC_ENABLED requires JITO_FAST_COPY_SEND=YES" >&2; exit 1 ;;
+    esac
+    if [[ -z "$JITO_TPU_QUIC_RPC_URL" ]]; then
+      echo "JITO_TPU_QUIC_ENABLED requires JITO_TPU_QUIC_RPC_URL" >&2
+      exit 1
+    fi
+    if [[ -z "$JITO_TPU_QUIC_WS_URL" ]]; then
+      echo "JITO_TPU_QUIC_ENABLED requires JITO_TPU_QUIC_WS_URL" >&2
+      exit 1
+    fi
+    if [[ "$JITO_TPU_QUIC_FANOUT_SLOTS" == "0" ]]; then
+      echo "JITO_TPU_QUIC_FANOUT_SLOTS must be positive" >&2
+      exit 1
+    fi
+    ;;
+esac
 
-echo "VPS LIVE COPY SEND IS ARMED"
+echo "DROPLET LIVE COPY SEND IS ARMED"
 echo "  proxy: $JITO_SHREDSTREAM_PROXY_URL"
 echo "  target: $SHREDSTREAM_TARGET_WALLETS"
 echo "  copy wallet: $JITO_COPY_WALLET"
@@ -301,6 +463,7 @@ echo "  send fanout: $JITO_SEND_FANOUT"
 echo "  send lane mode: $JITO_SEND_LANE_MODE"
 echo "  state rpc urls: $(if [[ -n "${JITO_STATE_RPC_URLS:-}" ]]; then printf '%s' "$JITO_STATE_RPC_URLS" | awk -F, '{print NF}'; elif [[ -n "${SOLANA_RPC_URL:-}" ]]; then printf '1'; else printf '0'; fi) configured"
 echo "  send rpc urls: $(if [[ -n "${JITO_SEND_RPC_URLS:-}" ]]; then printf '%s' "$JITO_SEND_RPC_URLS" | awk -F, '{print NF}'; else printf '0'; fi) configured"
+echo "  sell send rpc urls: $(if [[ -n "${JITO_SELL_SEND_RPC_URLS:-}" ]]; then printf '%s' "$JITO_SELL_SEND_RPC_URLS" | awk -F, '{print NF}'; else printf '0'; fi) configured"
 if [[ -n "$JITO_BLOCK_ENGINE_SEND_URLS" ]]; then
   echo "  jito send urls: $(printf '%s' "$JITO_BLOCK_ENGINE_SEND_URLS" | awk -F, '{print NF}') configured"
 else
@@ -315,6 +478,37 @@ if [[ -n "$JITO_HELIUS_SENDER_TIP_ACCOUNT" ]]; then
 else
   echo "  helius sender tip account: unset"
 fi
+echo "  tpu jet enabled: $JITO_TPU_JET_ENABLED"
+if [[ -n "$JITO_TPU_JET_RPC_URL" ]]; then
+  echo "  tpu jet rpc url: configured"
+else
+  echo "  tpu jet rpc url: unset"
+fi
+if [[ -n "$JITO_TPU_JET_WS_URL" ]]; then
+  echo "  tpu jet ws/grpc url: configured"
+else
+  echo "  tpu jet ws/grpc url: unset"
+fi
+if [[ -n "$JITO_TPU_JET_SIDECAR_URL" ]]; then
+  echo "  tpu jet sidecar url: configured"
+else
+  echo "  tpu jet sidecar url: unset"
+fi
+echo "  tpu jet fanout slots: $JITO_TPU_JET_FANOUT_SLOTS"
+echo "  tpu jet timeout ms: $JITO_TPU_JET_TIMEOUT_MS"
+echo "  tpu quic enabled: $JITO_TPU_QUIC_ENABLED"
+if [[ -n "$JITO_TPU_QUIC_RPC_URL" ]]; then
+  echo "  tpu quic rpc url: configured"
+else
+  echo "  tpu quic rpc url: unset"
+fi
+if [[ -n "$JITO_TPU_QUIC_WS_URL" ]]; then
+  echo "  tpu quic ws url: configured"
+else
+  echo "  tpu quic ws url: unset"
+fi
+echo "  tpu quic fanout slots: $JITO_TPU_QUIC_FANOUT_SLOTS"
+echo "  tpu quic timeout ms: $JITO_TPU_QUIC_TIMEOUT_MS"
 echo "  simulate copy tx: $JITO_SIMULATE_COPY_TX"
 echo "  send enabled: $JITO_ENABLE_COPY_SEND"
 echo "  one shot: $JITO_ONE_SHOT_COPY_SEND"
@@ -330,6 +524,8 @@ echo "  send max retries: $JITO_SEND_MAX_RETRIES"
 echo "  send http timeout ms: $JITO_SEND_HTTP_TIMEOUT_MS"
 echo "  priority fee micro lamports: ${JITO_PRIORITY_FEE_MICRO_LAMPORTS:-0}"
 echo "  max priority fee micro lamports: $JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS"
+echo "  dynamic priority fee enabled: $JITO_DYNAMIC_PRIORITY_FEE_ENABLED"
+echo "  dynamic priority baseline/aggressive/panic/max micro lamports: ${JITO_DYNAMIC_PRIORITY_FEE_BASELINE_MICRO_LAMPORTS:-0}/${JITO_DYNAMIC_PRIORITY_FEE_AGGRESSIVE_MICRO_LAMPORTS:-0}/${JITO_DYNAMIC_PRIORITY_FEE_PANIC_MICRO_LAMPORTS:-0}/${JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS:-0}"
 echo "  jito tip lamports: ${JITO_TIP_LAMPORTS:-0}"
 echo "  max jito tip lamports: $JITO_MAX_TIP_LAMPORTS"
 echo "  sell priority fee micro lamports: ${JITO_SELL_PRIORITY_FEE_MICRO_LAMPORTS:-0}"

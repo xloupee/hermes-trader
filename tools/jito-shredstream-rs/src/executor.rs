@@ -22,11 +22,17 @@ use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize, Serializer};
+use solana_connection_cache::connection_cache::NewConnectionConfig;
 use solana_hash::Hash;
 use solana_keypair::{read_keypair_file, Keypair};
 use solana_message::{v0, VersionedMessage};
 use solana_pubkey::Pubkey;
+use solana_quic_client::{QuicConfig, QuicConnectionManager, QuicPool};
+use solana_rpc_client::nonblocking::rpc_client::RpcClient as NonblockingRpcClient;
 use solana_signer::Signer;
+use solana_tpu_client::{
+    nonblocking::tpu_client::TpuClient as NonblockingTpuClient, tpu_client::TpuClientConfig,
+};
 use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction::Transaction;
 use std::{
@@ -38,7 +44,10 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::{
+    sync::{mpsc, OnceCell},
+    task::JoinSet,
+};
 
 pub(crate) const DEFAULT_MIGRATED_AMM_MIN_COPY_SOL: f64 = 0.00099;
 const LAMPORTS_PER_SOL: f64 = 1_000_000_000.0;
@@ -52,6 +61,7 @@ const AUTO_SELL_BALANCE_RETRY_MS: u64 = 250;
 const DIRECT_PUMP_CASHBACK_FLAG_OFFSET: usize = 82;
 const DIRECT_PUMP_SELL_CONTEXT_CACHE_CAPACITY: usize = 512;
 const TRAILING_SELL_MAX_STEPS: usize = 20;
+const BLOCK_POSITION_BACKFILL_DELAYS_MS: &[u64] = &[2_000, 5_000, 10_000, 20_000];
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TrailingSellPlan {
@@ -93,6 +103,7 @@ pub(crate) struct CopyExecutor {
     client: reqwest::Client,
     send_endpoints: Arc<Vec<SendEndpoint>>,
     sell_send_endpoints: Arc<Vec<SendEndpoint>>,
+    tpu_quic_sender: OnceCell<Arc<TpuQuicSender>>,
     blockhash_cache: Option<BlockhashCache>,
     address_lookup_tables: AddressLookupTableCache,
     wallet_balance_cache: Option<WalletBalanceCache>,
@@ -123,6 +134,7 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) send_fanout: bool,
     pub(crate) send_lane_mode: SendLaneMode,
     pub(crate) send_rpc_urls: Vec<String>,
+    pub(crate) sell_send_rpc_urls: Vec<String>,
     pub(crate) jito_send_urls: Vec<String>,
     pub(crate) jito_auth_uuid: Option<String>,
     pub(crate) helius_sender_enabled: bool,
@@ -130,6 +142,17 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) helius_sender_swqos_only: bool,
     pub(crate) helius_sender_tip_lamports: Option<u64>,
     pub(crate) helius_sender_tip_account: Option<String>,
+    pub(crate) tpu_jet_enabled: bool,
+    pub(crate) tpu_jet_rpc_url: Option<String>,
+    pub(crate) tpu_jet_ws_url: Option<String>,
+    pub(crate) tpu_jet_sidecar_url: Option<String>,
+    pub(crate) tpu_jet_fanout_slots: u64,
+    pub(crate) tpu_jet_timeout_ms: u64,
+    pub(crate) tpu_quic_enabled: bool,
+    pub(crate) tpu_quic_rpc_url: Option<String>,
+    pub(crate) tpu_quic_ws_url: Option<String>,
+    pub(crate) tpu_quic_fanout_slots: u64,
+    pub(crate) tpu_quic_timeout_ms: u64,
     pub(crate) sell_helius_sender_tip_lamports: Option<u64>,
     pub(crate) sell_helius_sender_tip_account: Option<String>,
     pub(crate) max_copy_sol: Option<f64>,
@@ -154,6 +177,11 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) send_http_timeout_ms: u64,
     pub(crate) send_lane_logging: bool,
     pub(crate) priority_fee_micro_lamports: Option<u64>,
+    pub(crate) dynamic_priority_fee_enabled: bool,
+    pub(crate) dynamic_priority_fee_baseline_micro_lamports: Option<u64>,
+    pub(crate) dynamic_priority_fee_aggressive_micro_lamports: Option<u64>,
+    pub(crate) dynamic_priority_fee_panic_micro_lamports: Option<u64>,
+    pub(crate) dynamic_priority_fee_max_micro_lamports: Option<u64>,
     pub(crate) jito_tip_lamports: Option<u64>,
     pub(crate) jito_tip_account: Option<String>,
     pub(crate) sell_priority_fee_micro_lamports: Option<u64>,
@@ -176,6 +204,12 @@ pub(crate) enum SendLaneMode {
     RpcOnly,
     JitoOnly,
     HeliusSenderOnly,
+    HeliusTpuJet,
+    HeliusTpuQuic,
+    TpuJetHeliusTip,
+    TpuQuicHeliusTip,
+    TpuJetOnly,
+    TpuQuicOnly,
 }
 
 impl SendLaneMode {
@@ -185,6 +219,12 @@ impl SendLaneMode {
             Self::RpcOnly => "rpc_only",
             Self::JitoOnly => "jito_only",
             Self::HeliusSenderOnly => "helius_sender_only",
+            Self::HeliusTpuJet => "helius_tpu_jet",
+            Self::HeliusTpuQuic => "helius_tpu_quic",
+            Self::TpuJetHeliusTip => "tpu_jet_helius_tip",
+            Self::TpuQuicHeliusTip => "tpu_quic_helius_tip",
+            Self::TpuJetOnly => "tpu_jet_only",
+            Self::TpuQuicOnly => "tpu_quic_only",
         }
     }
 
@@ -197,7 +237,24 @@ impl SendLaneMode {
     }
 
     fn uses_helius_sender_lanes(self) -> bool {
-        matches!(self, Self::Mixed | Self::HeliusSenderOnly)
+        matches!(
+            self,
+            Self::Mixed | Self::HeliusSenderOnly | Self::HeliusTpuJet | Self::HeliusTpuQuic
+        )
+    }
+
+    fn uses_tpu_quic_lanes(self) -> bool {
+        matches!(
+            self,
+            Self::Mixed | Self::HeliusTpuQuic | Self::TpuQuicHeliusTip | Self::TpuQuicOnly
+        )
+    }
+
+    fn uses_tpu_jet_lanes(self) -> bool {
+        matches!(
+            self,
+            Self::Mixed | Self::HeliusTpuJet | Self::TpuJetHeliusTip | Self::TpuJetOnly
+        )
     }
 
     fn uses_jito_tip(self) -> bool {
@@ -205,7 +262,15 @@ impl SendLaneMode {
     }
 
     fn uses_helius_sender_tip(self) -> bool {
-        matches!(self, Self::Mixed | Self::HeliusSenderOnly)
+        matches!(
+            self,
+            Self::Mixed
+                | Self::HeliusSenderOnly
+                | Self::HeliusTpuJet
+                | Self::HeliusTpuQuic
+                | Self::TpuJetHeliusTip
+                | Self::TpuQuicHeliusTip
+        )
     }
 }
 
@@ -214,6 +279,57 @@ pub(crate) struct CopyExecutorQueueContext {
     pub(crate) lane: &'static str,
     pub(crate) depth_at_enqueue: usize,
     pub(crate) busy_workers_at_enqueue: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourcePositionBucket {
+    Early,
+    Mid,
+    Late,
+    Unknown,
+}
+
+impl SourcePositionBucket {
+    fn from_timings(timings: SignalTimings) -> Self {
+        if timings.batch_transaction_count == 0 {
+            return Self::Unknown;
+        }
+        if timings.matched_transaction_index >= timings.batch_transaction_count {
+            return Self::Unknown;
+        }
+        let position = timings.matched_transaction_index.saturating_mul(3);
+        if position < timings.batch_transaction_count {
+            Self::Early
+        } else if position < timings.batch_transaction_count.saturating_mul(2) {
+            Self::Mid
+        } else {
+            Self::Late
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Early => "early",
+            Self::Mid => "mid",
+            Self::Late => "late",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    fn uses_aggressive_fee(self) -> bool {
+        matches!(self, Self::Early | Self::Mid)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FeeProfile {
+    name: &'static str,
+    priority_fee_micro_lamports: Option<u64>,
+    helius_sender_tip_lamports: Option<u64>,
+    reason: &'static str,
+    cap_hit: bool,
+    source_position_bucket: SourcePositionBucket,
+    tx_fee_config: TxFeeConfig,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -372,6 +488,12 @@ pub(crate) struct CopyExecutionLine {
     helius_sender_tip_lamports: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     helius_sender_tip_account: Option<String>,
+    fee_profile_name: &'static str,
+    selected_priority_fee_micro_lamports: Option<u64>,
+    selected_helius_tip_lamports: Option<u64>,
+    source_position_bucket: &'static str,
+    fee_reason: &'static str,
+    fee_cap_hit: bool,
     auto_sell_attempted: bool,
     auto_sell_signed: bool,
     auto_sell_simulated: bool,
@@ -452,7 +574,11 @@ pub(crate) struct SendLaneAttemptAttribution {
     status: &'static str,
     duration_ms: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
+    fanout_slots: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     ack_at: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_class: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -625,6 +751,7 @@ pub(crate) struct RustTrailingSellLine {
 #[derive(Debug)]
 struct SendTransactionResult {
     signature: String,
+    signature_returned: bool,
     rpc_url_count: usize,
     rpc_winner: String,
     rpc_attempts: Vec<SendRpcAttemptLine>,
@@ -641,7 +768,11 @@ struct SendRpcAttemptLine {
     status: &'static str,
     duration_ms: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
+    fanout_slots: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_class: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -651,6 +782,16 @@ struct SendAttemptOutcome {
     attempt: SendRpcAttemptLine,
     finished_at_ms: u128,
     signature: Option<String>,
+    signature_returned: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TpuJetSidecarResponse {
+    status: Option<String>,
+    signature: Option<String>,
+    error_class: Option<String>,
     error: Option<String>,
 }
 
@@ -694,6 +835,8 @@ struct SendEndpoint {
     kind: SendEndpointKind,
     auth_uuid: Option<String>,
     sender_mode: Option<&'static str>,
+    fanout_slots: Option<u64>,
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -811,6 +954,55 @@ enum SendEndpointKind {
     Rpc,
     Jito,
     HeliusSender,
+    TpuJet,
+    TpuQuic,
+}
+
+type TpuQuicClient = NonblockingTpuClient<QuicPool, QuicConnectionManager, QuicConfig>;
+
+struct TpuQuicSender {
+    client: TpuQuicClient,
+    timeout_ms: u64,
+    fanout_slots: u64,
+}
+
+impl TpuQuicSender {
+    async fn new(
+        rpc_url: String,
+        websocket_url: String,
+        fanout_slots: u64,
+        timeout_ms: u64,
+    ) -> std::result::Result<Self, String> {
+        let rpc_client = Arc::new(NonblockingRpcClient::new(rpc_url));
+        let quic_config = <QuicConfig as NewConnectionConfig>::new()
+            .map_err(|error| format!("create tpu-quic config: {error}"))?;
+        let connection_manager = QuicConnectionManager::new_with_connection_config(quic_config);
+        let client = TpuQuicClient::new(
+            "jito-copy-tpu-quic",
+            rpc_client,
+            &websocket_url,
+            TpuClientConfig { fanout_slots },
+            connection_manager,
+        )
+        .await
+        .map_err(|error| format!("create tpu-quic client: {error}"))?;
+        Ok(Self {
+            client,
+            timeout_ms,
+            fanout_slots,
+        })
+    }
+
+    async fn try_send_wire_transaction(&self, wire_tx: Vec<u8>) -> std::result::Result<(), String> {
+        let send = self.client.try_send_wire_transaction(wire_tx);
+        if self.timeout_ms == 0 {
+            return send.await.map_err(|error| error.to_string());
+        }
+        tokio::time::timeout(Duration::from_millis(self.timeout_ms), send)
+            .await
+            .map_err(|_| format!("tpu-quic dispatch timed out after {}ms", self.timeout_ms))?
+            .map_err(|error| error.to_string())
+    }
 }
 
 impl CopyExecutor {
@@ -833,6 +1025,7 @@ impl CopyExecutor {
                 &options.send_rpc_urls,
                 options.solana_rpc_url.as_deref(),
             ),
+            sell_send_rpc_urls: normalized_send_rpc_urls(&options.sell_send_rpc_urls, None),
             jito_send_urls: normalized_send_rpc_urls(&options.jito_send_urls, None),
             jito_auth_uuid: options
                 .jito_auth_uuid
@@ -850,6 +1043,42 @@ impl CopyExecutor {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToString::to_string),
+            tpu_jet_enabled: options.tpu_jet_enabled,
+            tpu_jet_rpc_url: options
+                .tpu_jet_rpc_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            tpu_jet_ws_url: options
+                .tpu_jet_ws_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            tpu_jet_sidecar_url: options
+                .tpu_jet_sidecar_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            tpu_jet_fanout_slots: options.tpu_jet_fanout_slots,
+            tpu_jet_timeout_ms: options.tpu_jet_timeout_ms,
+            tpu_quic_enabled: options.tpu_quic_enabled,
+            tpu_quic_rpc_url: options
+                .tpu_quic_rpc_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            tpu_quic_ws_url: options
+                .tpu_quic_ws_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            tpu_quic_fanout_slots: options.tpu_quic_fanout_slots,
+            tpu_quic_timeout_ms: options.tpu_quic_timeout_ms,
             sell_helius_sender_tip_lamports: configured_u64(
                 options.sell_helius_sender_tip_lamports,
             )
@@ -895,6 +1124,19 @@ impl CopyExecutor {
             send_http_timeout_ms: options.send_http_timeout_ms,
             send_lane_logging: options.stats,
             priority_fee_micro_lamports: positive_u64(options.priority_fee_micro_lamports),
+            dynamic_priority_fee_enabled: options.dynamic_priority_fee_enabled,
+            dynamic_priority_fee_baseline_micro_lamports: positive_u64(
+                options.dynamic_priority_fee_baseline_micro_lamports,
+            ),
+            dynamic_priority_fee_aggressive_micro_lamports: positive_u64(
+                options.dynamic_priority_fee_aggressive_micro_lamports,
+            ),
+            dynamic_priority_fee_panic_micro_lamports: positive_u64(
+                options.dynamic_priority_fee_panic_micro_lamports,
+            ),
+            dynamic_priority_fee_max_micro_lamports: positive_u64(
+                options.dynamic_priority_fee_max_micro_lamports,
+            ),
             jito_tip_lamports: positive_u64(options.jito_tip_lamports),
             jito_tip_account: options
                 .jito_tip_account
@@ -930,6 +1172,12 @@ impl CopyExecutor {
             .validate_helius_sender()
             .map_err(anyhow::Error::msg)?;
         execution_options
+            .validate_tpu_quic_sender()
+            .map_err(anyhow::Error::msg)?;
+        execution_options
+            .validate_tpu_jet_sender()
+            .map_err(anyhow::Error::msg)?;
+        execution_options
             .validate_send_lane_mode()
             .map_err(anyhow::Error::msg)?;
 
@@ -953,6 +1201,7 @@ impl CopyExecutor {
             client: send_http_client(),
             send_endpoints,
             sell_send_endpoints,
+            tpu_quic_sender: OnceCell::new(),
             blockhash_cache,
             address_lookup_tables,
             wallet_balance_cache,
@@ -972,6 +1221,10 @@ impl CopyExecutor {
             return;
         }
 
+        if let Err(error) = self.ensure_tpu_quic_sender().await {
+            eprintln!("tpu-quic warmup failed: {error}");
+        }
+
         let endpoints = Arc::clone(&self.send_endpoints);
         if endpoints.is_empty() {
             return;
@@ -979,6 +1232,9 @@ impl CopyExecutor {
 
         let mut warm_set = JoinSet::new();
         for endpoint in endpoints.iter().cloned() {
+            if matches!(endpoint.kind, SendEndpointKind::TpuQuic) {
+                continue;
+            }
             let client = self.client.clone();
             warm_set.spawn(async move { warm_send_endpoint(&client, &endpoint).await });
         }
@@ -990,6 +1246,34 @@ impl CopyExecutor {
                 Err(error) => eprintln!("send endpoint warmup join failed: {error}"),
             }
         }
+    }
+
+    async fn ensure_tpu_quic_sender(
+        &self,
+    ) -> std::result::Result<Option<Arc<TpuQuicSender>>, String> {
+        if !self.options.tpu_quic_enabled {
+            return Ok(None);
+        }
+        let sender = self
+            .tpu_quic_sender
+            .get_or_try_init(|| async {
+                let rpc_url = self.options.tpu_quic_rpc_url.clone().ok_or_else(|| {
+                    "JITO_TPU_QUIC_ENABLED requires JITO_TPU_QUIC_RPC_URL".to_string()
+                })?;
+                let websocket_url = self.options.tpu_quic_ws_url.clone().ok_or_else(|| {
+                    "JITO_TPU_QUIC_ENABLED requires JITO_TPU_QUIC_WS_URL".to_string()
+                })?;
+                TpuQuicSender::new(
+                    rpc_url,
+                    websocket_url,
+                    self.options.tpu_quic_fanout_slots,
+                    self.options.tpu_quic_timeout_ms,
+                )
+                .await
+                .map(Arc::new)
+            })
+            .await?;
+        Ok(Some(Arc::clone(sender)))
     }
 
     pub(crate) fn spawn_send_endpoint_warmer(self: Arc<Self>) {
@@ -1105,7 +1389,8 @@ impl CopyExecutor {
         timings: SignalTimings,
         copy_wallet_override: Option<Pubkey>,
     ) -> CopyExecutionLine {
-        let mut line = CopyExecutionLine::new(request, &self.options, timings);
+        let fee_profile = self.options.select_fee_profile(timings);
+        let mut line = CopyExecutionLine::new(request, &self.options, timings, &fee_profile);
         if let Some(copy_wallet) = copy_wallet_override.as_ref() {
             line.copy_wallet = Some(copy_wallet.to_string());
         }
@@ -1129,7 +1414,8 @@ impl CopyExecutor {
         send_lane_attribution_tx: Option<mpsc::UnboundedSender<CopyExecutionOutput>>,
     ) -> CopyExecutionLine {
         let executor_started_at = Instant::now();
-        let mut line = CopyExecutionLine::new(request, &self.options, timings);
+        let fee_profile = self.options.select_fee_profile(timings);
+        let mut line = CopyExecutionLine::new(request, &self.options, timings, &fee_profile);
         if let Some(copy_wallet) = copy_wallet_override.as_ref() {
             line.copy_wallet = Some(copy_wallet.to_string());
         }
@@ -1247,7 +1533,7 @@ impl CopyExecutor {
                 request.route_context.as_deref(),
                 copy_wallet,
                 &request.mint,
-                &self.options.tx_fee_config(),
+                &fee_profile.tx_fee_config,
                 Some(&self.pda_cache),
                 Some(effective_copy_spend_lamports),
             ) {
@@ -1345,7 +1631,8 @@ impl CopyExecutor {
             }
         };
         let signed_tx_bytes = tx_bytes.len();
-        let encoded_tx = STANDARD.encode(tx_bytes);
+        let encoded_tx = STANDARD.encode(&tx_bytes);
+        let wire_tx = Arc::<[u8]>::from(tx_bytes.into_boxed_slice());
         line.record_serialize_us(serialize_started_at);
         line.signed_tx_bytes = Some(signed_tx_bytes);
 
@@ -1403,10 +1690,13 @@ impl CopyExecutor {
             if let Some(cache) = &self.wallet_balance_cache {
                 cache.optimistic_decrement(copy_wallet, estimated_total_spend_lamports);
             }
+            let tpu_quic_sender = self.tpu_quic_sender.get().map(Arc::clone);
             spawn_copy_send_result_task(
                 self.client.clone(),
                 Arc::clone(&self.send_endpoints),
                 Arc::<str>::from(encoded_tx),
+                wire_tx,
+                tpu_quic_sender,
                 self.options.send_config(),
                 line.clone(),
                 attribution_context,
@@ -1669,6 +1959,9 @@ impl CopyExecutor {
             self.client.clone(),
             Arc::clone(&self.send_endpoints),
             Arc::<str>::from(encoded_tx.to_string()),
+            Arc::<[u8]>::from(Vec::<u8>::new().into_boxed_slice()),
+            Arc::<str>::from(String::new()),
+            None,
             self.options.send_config(),
             attribution_context,
             attribution_tx,
@@ -1684,6 +1977,9 @@ impl CopyExecutor {
             self.client.clone(),
             Arc::clone(&self.sell_send_endpoints),
             Arc::<str>::from(encoded_tx.to_string()),
+            Arc::<[u8]>::from(Vec::<u8>::new().into_boxed_slice()),
+            Arc::<str>::from(String::new()),
+            None,
             self.options.send_config(),
             None,
             None,
@@ -2252,7 +2548,8 @@ impl CopyExecutor {
                 reason: Some(format!("missing {transaction_label} signature")),
             };
         };
-        let Some(rpc_url) = self.options.primary_state_rpc_url() else {
+        let rpc_urls = self.options.state_rpc_url_pool();
+        if rpc_urls.is_empty() {
             return SignatureConfirmation {
                 checked: false,
                 status: "error",
@@ -2264,131 +2561,127 @@ impl CopyExecutor {
                 err: None,
                 reason: Some("missing JITO_STATE_RPC_URLS or SOLANA_RPC_URL".to_string()),
             };
-        };
+        }
 
         let started_at = Instant::now();
         let timeout = Duration::from_millis(timeout_ms);
         loop {
-            let request = async {
-                self.client
-                    .post(rpc_url)
-                    .json(&serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": signature,
-                        "method": "getSignatureStatuses",
-                        "params": [[signature], { "searchTransactionHistory": true }]
-                    }))
-                    .send()
+            let mut last_error = None;
+            for rpc_url in &rpc_urls {
+                let request = async {
+                    self.client
+                        .post(rpc_url.as_str())
+                        .json(&serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": signature,
+                            "method": "getSignatureStatuses",
+                            "params": [[signature], { "searchTransactionHistory": true }]
+                        }))
+                        .send()
+                        .await
+                        .map_err(|error| format!("send getSignatureStatuses request: {error}"))?
+                        .error_for_status()
+                        .map_err(|error| format!("getSignatureStatuses HTTP status: {error}"))?
+                        .json::<RpcResponse<SignatureStatusesResult>>()
+                        .await
+                        .map_err(|error| format!("decode getSignatureStatuses response: {error}"))
+                };
+                let response = if self.options.send_http_timeout_ms > 0 {
+                    match tokio::time::timeout(
+                        Duration::from_millis(self.options.send_http_timeout_ms),
+                        request,
+                    )
                     .await
-                    .map_err(|error| format!("send getSignatureStatuses request: {error}"))?
-                    .error_for_status()
-                    .map_err(|error| format!("getSignatureStatuses HTTP status: {error}"))?
-                    .json::<RpcResponse<SignatureStatusesResult>>()
-                    .await
-                    .map_err(|error| format!("decode getSignatureStatuses response: {error}"))
-            };
-            let response = if self.options.send_http_timeout_ms > 0 {
-                match tokio::time::timeout(
-                    Duration::from_millis(self.options.send_http_timeout_ms),
-                    request,
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => Err(format!(
-                        "getSignatureStatuses timed out after {}ms",
-                        self.options.send_http_timeout_ms
-                    )),
-                }
-            } else {
-                request.await
-            };
-
-            match response {
-                Ok(response) => {
-                    if let Some(error) = response.error {
-                        return SignatureConfirmation {
-                            checked: true,
-                            status: "error",
-                            ok: false,
-                            slot: None,
-                            block_position: None,
-                            block_position_error: None,
-                            confirmation_status: None,
-                            err: None,
-                            reason: Some(format!(
-                                "getSignatureStatuses RPC error: {}",
-                                error.message
-                            )),
-                        };
-                    }
-                    if let Some(status) = response
-                        .result
-                        .and_then(|result| result.value.into_iter().next().flatten())
                     {
-                        if let Some(error) = status.err {
-                            let (block_position, block_position_error) = self
-                                .fetch_landed_block_position(
-                                    rpc_url,
-                                    status.slot,
-                                    signature,
-                                    observed_signature,
-                                )
-                                .await;
-                            return SignatureConfirmation {
-                                checked: true,
-                                status: "failed",
-                                ok: false,
-                                slot: status.slot,
-                                block_position,
-                                block_position_error,
-                                confirmation_status: status.confirmation_status,
-                                err: Some(error.clone()),
-                                reason: Some(format!(
-                                    "{transaction_label} landed with error: {error}"
-                                )),
-                            };
+                        Ok(result) => result,
+                        Err(_) => Err(format!(
+                            "getSignatureStatuses timed out after {}ms",
+                            self.options.send_http_timeout_ms
+                        )),
+                    }
+                } else {
+                    request.await
+                };
+
+                match response {
+                    Ok(response) => {
+                        if let Some(error) = response.error {
+                            last_error =
+                                Some(format!("getSignatureStatuses RPC error: {}", error.message));
+                            continue;
                         }
-                        if matches!(
-                            status.confirmation_status.as_deref(),
-                            Some("confirmed") | Some("finalized")
-                        ) {
-                            let (block_position, block_position_error) = self
-                                .fetch_landed_block_position(
-                                    rpc_url,
-                                    status.slot,
-                                    signature,
-                                    observed_signature,
-                                )
-                                .await;
-                            return SignatureConfirmation {
-                                checked: true,
-                                status: "landed",
-                                ok: true,
-                                slot: status.slot,
-                                block_position,
-                                block_position_error,
-                                confirmation_status: status.confirmation_status,
-                                err: None,
-                                reason: None,
-                            };
+                        if let Some(status) = response
+                            .result
+                            .and_then(|result| result.value.into_iter().next().flatten())
+                        {
+                            if let Some(error) = status.err {
+                                let (block_position, block_position_error) = self
+                                    .fetch_landed_block_position(
+                                        rpc_url,
+                                        status.slot,
+                                        signature,
+                                        observed_signature,
+                                    )
+                                    .await;
+                                return SignatureConfirmation {
+                                    checked: true,
+                                    status: "failed",
+                                    ok: false,
+                                    slot: status.slot,
+                                    block_position,
+                                    block_position_error,
+                                    confirmation_status: status.confirmation_status,
+                                    err: Some(error.clone()),
+                                    reason: Some(format!(
+                                        "{transaction_label} landed with error: {error}"
+                                    )),
+                                };
+                            }
+                            if matches!(
+                                status.confirmation_status.as_deref(),
+                                Some("confirmed") | Some("finalized")
+                            ) {
+                                let (block_position, block_position_error) = self
+                                    .fetch_landed_block_position(
+                                        rpc_url,
+                                        status.slot,
+                                        signature,
+                                        observed_signature,
+                                    )
+                                    .await;
+                                return SignatureConfirmation {
+                                    checked: true,
+                                    status: "landed",
+                                    ok: true,
+                                    slot: status.slot,
+                                    block_position,
+                                    block_position_error,
+                                    confirmation_status: status.confirmation_status,
+                                    err: None,
+                                    reason: None,
+                                };
+                            }
                         }
+                    }
+                    Err(error) => {
+                        last_error = Some(error);
                     }
                 }
-                Err(error) => {
-                    if started_at.elapsed() >= timeout {
-                        return SignatureConfirmation {
-                            checked: true,
-                            status: "error",
-                            ok: false,
-                            slot: None,
-                            block_position: None,
-                            block_position_error: None,
-                            confirmation_status: None,
-                            err: None,
-                            reason: Some(error),
-                        };
-                    }
+            }
+
+            if let Some(error) = last_error {
+                if started_at.elapsed() >= timeout {
+                    return SignatureConfirmation {
+                        checked: true,
+                        status: "error",
+                        ok: false,
+                        slot: None,
+                        block_position: None,
+                        block_position_error: None,
+                        confirmation_status: None,
+                        err: None,
+                        reason: Some(error),
+                    };
                 }
             }
 
@@ -2556,6 +2849,35 @@ impl CopyExecutor {
         TransactionConfirmationLine::from_auto_sell_execution(&line, confirmation)
     }
 
+    pub(crate) async fn backfill_transaction_confirmation_block_position(
+        &self,
+        mut line: TransactionConfirmationLine,
+    ) -> Option<TransactionConfirmationLine> {
+        if !line.needs_block_position_backfill() {
+            return None;
+        }
+        let rpc_url = self.options.primary_state_rpc_url()?;
+        let slot = line.confirmation_slot?;
+        let signature = line.signature.clone()?;
+        let observed_signature = Some(line.observed_signature.as_str());
+
+        let mut last_error = line.block_position_error.clone();
+        for delay_ms in BLOCK_POSITION_BACKFILL_DELAYS_MS {
+            tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
+            let (block_position, block_position_error) = self
+                .fetch_landed_block_position(rpc_url, Some(slot), &signature, observed_signature)
+                .await;
+            if let Some(block_position) = block_position {
+                line.apply_block_position(block_position, None);
+                return Some(line);
+            }
+            last_error = block_position_error;
+        }
+
+        line.block_position_error = last_error;
+        None
+    }
+
     fn trailing_sell_tx_fee_config(&self, plan: &TrailingSellPlan) -> TxFeeConfig {
         TxFeeConfig {
             compute_unit_price_micro_lamports: plan
@@ -2596,6 +2918,8 @@ fn spawn_copy_send_result_task(
     client: reqwest::Client,
     endpoints: Arc<Vec<SendEndpoint>>,
     encoded_tx: Arc<str>,
+    wire_tx: Arc<[u8]>,
+    tpu_quic_sender: Option<Arc<TpuQuicSender>>,
     send_config: SendConfig,
     mut line: CopyExecutionLine,
     attribution_context: SendLaneAttributionContext,
@@ -2607,6 +2931,9 @@ fn spawn_copy_send_result_task(
             client,
             endpoints,
             encoded_tx,
+            wire_tx,
+            Arc::<str>::from(line.send_signature.clone().unwrap_or_default()),
+            tpu_quic_sender,
             send_config,
             Some(attribution_context),
             attribution_tx,
@@ -2614,7 +2941,9 @@ fn spawn_copy_send_result_task(
         .await
         {
             Ok(result) => {
-                line.mark_signature_returned();
+                if result.signature_returned {
+                    line.mark_signature_returned();
+                }
                 line.send_signature = Some(result.signature);
                 line.send_rpc_url_count = result.rpc_url_count;
                 line.send_rpc_winner = Some(result.rpc_winner);
@@ -2642,6 +2971,9 @@ async fn send_transaction_with(
     client: reqwest::Client,
     endpoints: Arc<Vec<SendEndpoint>>,
     encoded_tx: Arc<str>,
+    wire_tx: Arc<[u8]>,
+    known_signature: Arc<str>,
+    tpu_quic_sender: Option<Arc<TpuQuicSender>>,
     send_config: SendConfig,
     attribution_context: Option<SendLaneAttributionContext>,
     attribution_tx: Option<mpsc::UnboundedSender<CopyExecutionOutput>>,
@@ -2656,22 +2988,38 @@ async fn send_transaction_with(
 
     if endpoints.len() == 1 {
         let endpoint = &endpoints[0];
-        let outcome =
-            send_transaction_attempt(&client, endpoint, encoded_tx.as_ref(), send_config).await;
+        let outcome = send_transaction_attempt(
+            &client,
+            endpoint,
+            encoded_tx.as_ref(),
+            wire_tx.as_ref(),
+            known_signature.as_ref(),
+            tpu_quic_sender.as_deref(),
+            send_config,
+        )
+        .await;
         let attempts = vec![outcome.attempt];
         let Some(signature) = outcome.signature else {
             return Err(outcome
                 .error
                 .unwrap_or_else(|| "sendTransaction failed".to_string()));
         };
-        let first_ack_at_ms = outcome.finished_at_ms;
+        let first_ack_at_ms = if outcome.signature_returned {
+            outcome.finished_at_ms
+        } else {
+            0
+        };
         if let (Some(context), Some(tx)) = (attribution_context, attribution_tx) {
             spawn_send_lane_attribution_collector(
                 JoinSet::new(),
                 context,
                 tx,
                 signature.clone(),
-                endpoint.label.clone(),
+                if outcome.signature_returned {
+                    endpoint.label.clone()
+                } else {
+                    "none".to_string()
+                },
                 first_ack_at_ms,
                 attempts.clone(),
                 Vec::new(),
@@ -2679,8 +3027,9 @@ async fn send_transaction_with(
         }
         return Ok(SendTransactionResult {
             signature,
+            signature_returned: outcome.signature_returned,
             rpc_url_count: 1,
-            rpc_winner: endpoint.label.clone(),
+            rpc_winner: ack_winner_label(&endpoint.label, outcome.signature_returned),
             rpc_attempts: attempts,
             rpc_errors: Vec::new(),
         });
@@ -2690,21 +3039,38 @@ async fn send_transaction_with(
     for endpoint in endpoints {
         let client = client.clone();
         let encoded_tx = encoded_tx.clone();
+        let wire_tx = Arc::clone(&wire_tx);
+        let known_signature = Arc::clone(&known_signature);
+        let tpu_quic_sender = tpu_quic_sender.clone();
         let endpoint = endpoint.clone();
         let send_config = send_config;
         send_set.spawn(async move {
-            send_transaction_attempt(&client, &endpoint, encoded_tx.as_ref(), send_config).await
+            send_transaction_attempt(
+                &client,
+                &endpoint,
+                encoded_tx.as_ref(),
+                wire_tx.as_ref(),
+                known_signature.as_ref(),
+                tpu_quic_sender.as_deref(),
+                send_config,
+            )
+            .await
         });
     }
 
     let mut errors: Vec<String> = Vec::new();
     let mut attempts = Vec::new();
+    let mut dispatch_signature: Option<String> = None;
     while let Some(result) = send_set.join_next().await {
         match result {
             Ok(outcome) => {
                 let label = outcome.attempt.label.clone();
                 attempts.push(outcome.attempt);
                 if let Some(signature) = outcome.signature {
+                    if !outcome.signature_returned {
+                        dispatch_signature.get_or_insert(signature);
+                        continue;
+                    }
                     let first_ack_at_ms = outcome.finished_at_ms;
                     if let (Some(context), Some(tx)) = (attribution_context, attribution_tx) {
                         spawn_send_lane_attribution_collector(
@@ -2728,6 +3094,7 @@ async fn send_transaction_with(
                     }
                     return Ok(SendTransactionResult {
                         signature,
+                        signature_returned: true,
                         rpc_url_count: endpoints.len(),
                         rpc_winner: label,
                         rpc_attempts: attempts,
@@ -2742,10 +3109,45 @@ async fn send_transaction_with(
         }
     }
 
+    if let Some(signature) = dispatch_signature {
+        if let (Some(context), Some(tx)) = (attribution_context, attribution_tx) {
+            spawn_send_lane_attribution_collector(
+                JoinSet::new(),
+                context,
+                tx,
+                signature.clone(),
+                "none".to_string(),
+                0,
+                attempts.clone(),
+                errors
+                    .iter()
+                    .filter(|error| error.starts_with("join error:"))
+                    .cloned()
+                    .collect(),
+            );
+        }
+        return Ok(SendTransactionResult {
+            signature,
+            signature_returned: false,
+            rpc_url_count: endpoints.len(),
+            rpc_winner: "none".to_string(),
+            rpc_attempts: attempts,
+            rpc_errors: errors,
+        });
+    }
+
     Err(format!(
         "all sendTransaction fanout attempts failed: {}",
         errors.join("; ")
     ))
+}
+
+fn ack_winner_label(endpoint_label: &str, signature_returned: bool) -> String {
+    if signature_returned {
+        endpoint_label.to_string()
+    } else {
+        "none".to_string()
+    }
 }
 
 fn spawn_send_lane_attribution_collector(
@@ -2777,7 +3179,9 @@ fn spawn_send_lane_attribution_collector(
                     mode: None,
                     status: "failed",
                     duration_ms: 0,
+                    fanout_slots: None,
                     ack_at: None,
+                    error_class: Some("join_error"),
                     error: Some(error),
                 }),
         );
@@ -2785,7 +3189,7 @@ fn spawn_send_lane_attribution_collector(
         while let Some(result) = send_set.join_next().await {
             match result {
                 Ok(outcome) => {
-                    let ack_at_ms = outcome.signature.as_ref().map(|_| outcome.finished_at_ms);
+                    let ack_at_ms = outcome.signature_returned.then_some(outcome.finished_at_ms);
                     all_attempts.push(send_lane_attempt_attribution(outcome.attempt, ack_at_ms));
                 }
                 Err(error) => all_attempts.push(SendLaneAttemptAttribution {
@@ -2794,7 +3198,9 @@ fn spawn_send_lane_attribution_collector(
                     mode: None,
                     status: "failed",
                     duration_ms: 0,
+                    fanout_slots: None,
                     ack_at: None,
+                    error_class: Some("join_error"),
                     error: Some(format!("join error: {error}")),
                 }),
             }
@@ -2839,7 +3245,9 @@ fn send_lane_attempt_attribution(
         mode: attempt.mode,
         status: attempt.status,
         duration_ms: attempt.duration_ms,
+        fanout_slots: attempt.fanout_slots,
         ack_at,
+        error_class: attempt.error_class,
         error: attempt.error,
     }
 }
@@ -3310,8 +3718,8 @@ impl CopyExecutionLine {
         request: &CopyRuntimeRequest,
         options: &CopyExecutionOptions,
         timings: SignalTimings,
+        fee_profile: &FeeProfile,
     ) -> Self {
-        let tx_fee_config = options.tx_fee_config();
         Self {
             schema: "copytrade.localExecution.v1",
             observed_at_ms: request.observed_at_ms,
@@ -3408,11 +3816,19 @@ impl CopyExecutionLine {
             auto_sell_delay_ms: options.auto_sell_delay_ms,
             auto_sell_simulation_requested: options.simulate_auto_sell_enabled(),
             buy_latency_test_isolated: options.isolate_buy_latency_test,
-            priority_fee_micro_lamports: tx_fee_config.compute_unit_price_micro_lamports,
-            jito_tip_lamports: tx_fee_config.jito_tip_lamports,
-            jito_tip_account: tx_fee_config.jito_tip_account,
-            helius_sender_tip_lamports: tx_fee_config.helius_sender_tip_lamports,
-            helius_sender_tip_account: tx_fee_config.helius_sender_tip_account,
+            priority_fee_micro_lamports: fee_profile
+                .tx_fee_config
+                .compute_unit_price_micro_lamports,
+            jito_tip_lamports: fee_profile.tx_fee_config.jito_tip_lamports,
+            jito_tip_account: fee_profile.tx_fee_config.jito_tip_account.clone(),
+            helius_sender_tip_lamports: fee_profile.tx_fee_config.helius_sender_tip_lamports,
+            helius_sender_tip_account: fee_profile.tx_fee_config.helius_sender_tip_account.clone(),
+            fee_profile_name: fee_profile.name,
+            selected_priority_fee_micro_lamports: fee_profile.priority_fee_micro_lamports,
+            selected_helius_tip_lamports: fee_profile.helius_sender_tip_lamports,
+            source_position_bucket: fee_profile.source_position_bucket.as_str(),
+            fee_reason: fee_profile.reason,
+            fee_cap_hit: fee_profile.cap_hit,
             auto_sell_attempted: false,
             auto_sell_signed: false,
             auto_sell_simulated: false,
@@ -3597,7 +4013,9 @@ pub(crate) fn sample_copy_execution_output_for_tests() -> CopyExecutionOutput {
             mode: None,
             status: "submitted",
             duration_ms: 7,
+            fanout_slots: None,
             ack_at: Some(112),
+            error_class: None,
             error: None,
         }],
     })
@@ -3628,6 +4046,49 @@ fn same_slot_tx_delta(
 }
 
 impl TransactionConfirmationLine {
+    fn needs_block_position_backfill(&self) -> bool {
+        self.checked
+            && matches!(self.status, "landed" | "failed")
+            && self.confirmation_slot.is_some()
+            && self
+                .signature
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            && self.tx_delta.is_none()
+            && self.block_position_error.is_some()
+    }
+
+    fn apply_block_position(
+        &mut self,
+        block_position: BlockPosition,
+        block_position_error: Option<String>,
+    ) {
+        self.confirmation_at_ms = now_ms();
+        self.landed_block_tx_count = Some(block_position.tx_count);
+        self.landed_tx_index = block_position.landed_tx_index;
+        self.observed_tx_index = block_position.observed_tx_index;
+        self.target_tx_index = block_position.observed_tx_index;
+        self.copy_tx_index = block_position.landed_tx_index;
+        self.txs_after_observed = block_position.txs_after_observed;
+        self.same_slot_tx_delta = same_slot_tx_delta(
+            self.slot,
+            self.confirmation_slot,
+            &SignatureConfirmation {
+                checked: self.checked,
+                status: self.status,
+                ok: self.ok,
+                slot: self.confirmation_slot,
+                block_position: Some(block_position),
+                block_position_error: block_position_error.clone(),
+                confirmation_status: self.confirmation_status.clone(),
+                err: self.err.clone(),
+                reason: self.reason.clone(),
+            },
+        );
+        self.tx_delta = self.same_slot_tx_delta;
+        self.block_position_error = block_position_error;
+    }
+
     fn from_copy_execution(line: &CopyExecutionLine, confirmation: SignatureConfirmation) -> Self {
         Self {
             schema: "copytrade.transactionConfirmation.v1",
@@ -4002,6 +4463,70 @@ impl CopyExecutionOptions {
         }
     }
 
+    fn tx_fee_config_with_priority_fee(
+        &self,
+        priority_fee_micro_lamports: Option<u64>,
+    ) -> TxFeeConfig {
+        TxFeeConfig {
+            compute_unit_price_micro_lamports: priority_fee_micro_lamports,
+            ..self.tx_fee_config()
+        }
+    }
+
+    fn select_fee_profile(&self, timings: SignalTimings) -> FeeProfile {
+        let source_position_bucket = SourcePositionBucket::from_timings(timings);
+        let baseline_priority_fee = self
+            .dynamic_priority_fee_baseline_micro_lamports
+            .or(self.priority_fee_micro_lamports);
+        let aggressive_priority_fee = self
+            .dynamic_priority_fee_aggressive_micro_lamports
+            .or_else(|| baseline_priority_fee.and_then(|value| value.checked_mul(2)))
+            .or(baseline_priority_fee);
+        let max_priority_fee = self
+            .dynamic_priority_fee_max_micro_lamports
+            .or(self.dynamic_priority_fee_panic_micro_lamports)
+            .or(aggressive_priority_fee)
+            .or(baseline_priority_fee);
+
+        let (name, requested_priority_fee, reason) =
+            if self.dynamic_priority_fee_enabled && source_position_bucket.uses_aggressive_fee() {
+                (
+                    "aggressive",
+                    aggressive_priority_fee,
+                    "early_or_mid_source_position_bucket",
+                )
+            } else if self.dynamic_priority_fee_enabled {
+                (
+                    "baseline",
+                    baseline_priority_fee,
+                    "late_or_unknown_source_position_bucket",
+                )
+            } else {
+                (
+                    "baseline",
+                    self.priority_fee_micro_lamports,
+                    "dynamic_priority_fee_disabled",
+                )
+            };
+
+        let capped_priority_fee = match (requested_priority_fee, max_priority_fee) {
+            (Some(requested), Some(maximum)) if requested > maximum => Some(maximum),
+            _ => requested_priority_fee,
+        };
+        let cap_hit = capped_priority_fee != requested_priority_fee;
+        let tx_fee_config = self.tx_fee_config_with_priority_fee(capped_priority_fee);
+
+        FeeProfile {
+            name,
+            priority_fee_micro_lamports: tx_fee_config.compute_unit_price_micro_lamports,
+            helius_sender_tip_lamports: tx_fee_config.helius_sender_tip_lamports,
+            reason,
+            cap_hit,
+            source_position_bucket,
+            tx_fee_config,
+        }
+    }
+
     fn sell_tx_fee_config(&self) -> TxFeeConfig {
         TxFeeConfig {
             compute_unit_price_micro_lamports: self.sell_priority_fee_micro_lamports,
@@ -4074,6 +4599,59 @@ impl CopyExecutionOptions {
         Ok(())
     }
 
+    fn validate_tpu_quic_sender(&self) -> std::result::Result<(), String> {
+        if !self.tpu_quic_enabled {
+            return Ok(());
+        }
+        if !self.send_fanout && self.send_lane_mode != SendLaneMode::TpuQuicOnly {
+            return Err(
+                "JITO_TPU_QUIC_ENABLED requires JITO_SEND_FANOUT=YES unless tpu_quic_only"
+                    .to_string(),
+            );
+        }
+        if !self.fast_copy_send {
+            return Err("JITO_TPU_QUIC_ENABLED requires JITO_FAST_COPY_SEND=YES".to_string());
+        }
+        if self.tpu_quic_rpc_url.is_none() {
+            return Err("JITO_TPU_QUIC_ENABLED requires JITO_TPU_QUIC_RPC_URL".to_string());
+        }
+        if self.tpu_quic_ws_url.is_none() {
+            return Err("JITO_TPU_QUIC_ENABLED requires JITO_TPU_QUIC_WS_URL".to_string());
+        }
+        if self.tpu_quic_fanout_slots == 0 {
+            return Err("JITO_TPU_QUIC_FANOUT_SLOTS must be positive".to_string());
+        }
+        Ok(())
+    }
+
+    fn validate_tpu_jet_sender(&self) -> std::result::Result<(), String> {
+        if !self.tpu_jet_enabled {
+            return Ok(());
+        }
+        if !self.send_fanout && self.send_lane_mode != SendLaneMode::TpuJetOnly {
+            return Err(
+                "JITO_TPU_JET_ENABLED requires JITO_SEND_FANOUT=YES unless tpu_jet_only"
+                    .to_string(),
+            );
+        }
+        if !self.fast_copy_send {
+            return Err("JITO_TPU_JET_ENABLED requires JITO_FAST_COPY_SEND=YES".to_string());
+        }
+        if self.tpu_jet_rpc_url.is_none() {
+            return Err("JITO_TPU_JET_ENABLED requires JITO_TPU_JET_RPC_URL".to_string());
+        }
+        if self.tpu_jet_ws_url.is_none() {
+            return Err("JITO_TPU_JET_ENABLED requires JITO_TPU_JET_WS_URL".to_string());
+        }
+        if self.tpu_jet_sidecar_url.is_none() {
+            return Err("JITO_TPU_JET_ENABLED requires JITO_TPU_JET_SIDECAR_URL".to_string());
+        }
+        if self.tpu_jet_fanout_slots == 0 {
+            return Err("JITO_TPU_JET_FANOUT_SLOTS must be positive".to_string());
+        }
+        Ok(())
+    }
+
     fn validate_send_lane_mode(&self) -> std::result::Result<(), String> {
         if self.send_lane_mode.uses_jito_tip()
             && self.jito_tip_lamports.unwrap_or(0) > 0
@@ -4127,6 +4705,108 @@ impl CopyExecutionOptions {
                 }
                 Ok(())
             }
+            SendLaneMode::HeliusTpuJet => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_tpu_jet requires JITO_SEND_FANOUT=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_tpu_jet requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.tpu_jet_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_tpu_jet requires JITO_TPU_JET_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::HeliusTpuQuic => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_tpu_quic requires JITO_SEND_FANOUT=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_tpu_quic requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.tpu_quic_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_tpu_quic requires JITO_TPU_QUIC_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::TpuJetHeliusTip => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=tpu_jet_helius_tip requires JITO_SEND_FANOUT=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=tpu_jet_helius_tip requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.tpu_jet_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=tpu_jet_helius_tip requires JITO_TPU_JET_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::TpuQuicHeliusTip => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=tpu_quic_helius_tip requires JITO_SEND_FANOUT=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=tpu_quic_helius_tip requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.tpu_quic_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=tpu_quic_helius_tip requires JITO_TPU_QUIC_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::TpuJetOnly => {
+                if !self.tpu_jet_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=tpu_jet_only requires JITO_TPU_JET_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::TpuQuicOnly => {
+                if !self.tpu_quic_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=tpu_quic_only requires JITO_TPU_QUIC_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
         }
     }
 
@@ -4149,10 +4829,24 @@ impl CopyExecutionOptions {
             .or(self.solana_rpc_url.as_deref())
     }
 
+    fn state_rpc_url_pool(&self) -> Vec<String> {
+        normalized_send_rpc_urls(&self.state_rpc_urls, self.solana_rpc_url.as_deref())
+    }
+
     fn selected_send_rpc_urls(&self) -> Vec<String> {
         let mut urls =
             normalized_send_rpc_urls(&self.send_rpc_urls, self.solana_rpc_url.as_deref());
         if !self.send_fanout {
+            urls.truncate(1);
+        }
+        urls
+    }
+
+    fn selected_sell_send_rpc_urls(&self) -> Vec<String> {
+        let mut urls = normalized_send_rpc_urls(&self.sell_send_rpc_urls, None);
+        if urls.is_empty() {
+            urls = self.selected_send_rpc_urls();
+        } else if !self.send_fanout {
             urls.truncate(1);
         }
         urls
@@ -4176,6 +4870,32 @@ impl CopyExecutionOptions {
                 kind: SendEndpointKind::Rpc,
                 auth_uuid: None,
                 sender_mode: None,
+                fanout_slots: None,
+                timeout_ms: None,
+            })
+            .collect()
+    }
+
+    fn selected_sell_rpc_send_endpoints(&self) -> Vec<SendEndpoint> {
+        if normalized_send_rpc_urls(&self.sell_send_rpc_urls, None).is_empty() {
+            return self.selected_rpc_send_endpoints();
+        }
+
+        self.selected_sell_send_rpc_urls()
+            .into_iter()
+            .enumerate()
+            .map(|(index, url)| SendEndpoint {
+                label: if index == 0 {
+                    format!("sell-rpc-primary:{}", rpc_url_label(&url))
+                } else {
+                    format!("sell-rpc-fanout-{}:{}", index, rpc_url_label(&url))
+                },
+                url,
+                kind: SendEndpointKind::Rpc,
+                auth_uuid: None,
+                sender_mode: None,
+                fanout_slots: None,
+                timeout_ms: None,
             })
             .collect()
     }
@@ -4185,12 +4905,19 @@ impl CopyExecutionOptions {
             && self.send_lane_mode.uses_helius_sender_lanes()
             && self.sell_helius_sender_tip_lamports == Some(0)
         {
-            let endpoints = self.selected_rpc_send_endpoints();
+            let endpoints = self.selected_sell_rpc_send_endpoints();
             if !endpoints.is_empty() {
                 return endpoints;
             }
         }
-        self.selected_send_endpoints()
+        let mut endpoints = self.selected_send_endpoints();
+        endpoints.retain(|endpoint| {
+            !matches!(
+                endpoint.kind,
+                SendEndpointKind::TpuJet | SendEndpointKind::TpuQuic
+            )
+        });
+        endpoints
     }
 
     fn selected_send_endpoints(&self) -> Vec<SendEndpoint> {
@@ -4210,6 +4937,8 @@ impl CopyExecutionOptions {
                         kind: SendEndpointKind::Jito,
                         auth_uuid: self.jito_auth_uuid.clone(),
                         sender_mode: None,
+                        fanout_slots: None,
+                        timeout_ms: None,
                     }
                 }));
             }
@@ -4232,10 +4961,54 @@ impl CopyExecutionOptions {
                                 kind: SendEndpointKind::HeliusSender,
                                 auth_uuid: None,
                                 sender_mode: Some(mode),
+                                fanout_slots: None,
+                                timeout_ms: None,
                             }
                         }),
                 );
             }
+            if self.tpu_jet_enabled && self.send_lane_mode.uses_tpu_jet_lanes() {
+                endpoints.push(SendEndpoint {
+                    label: "tpu-jet".to_string(),
+                    url: tpu_jet_sidecar_send_url(self.tpu_jet_sidecar_url.as_deref()),
+                    kind: SendEndpointKind::TpuJet,
+                    auth_uuid: None,
+                    sender_mode: Some("sidecar"),
+                    fanout_slots: Some(self.tpu_jet_fanout_slots),
+                    timeout_ms: Some(self.tpu_jet_timeout_ms),
+                });
+            }
+            if self.tpu_quic_enabled && self.send_lane_mode.uses_tpu_quic_lanes() {
+                endpoints.push(SendEndpoint {
+                    label: "tpu-quic".to_string(),
+                    url: String::new(),
+                    kind: SendEndpointKind::TpuQuic,
+                    auth_uuid: None,
+                    sender_mode: None,
+                    fanout_slots: Some(self.tpu_quic_fanout_slots),
+                    timeout_ms: Some(self.tpu_quic_timeout_ms),
+                });
+            }
+        } else if self.tpu_jet_enabled && self.send_lane_mode == SendLaneMode::TpuJetOnly {
+            endpoints.push(SendEndpoint {
+                label: "tpu-jet".to_string(),
+                url: tpu_jet_sidecar_send_url(self.tpu_jet_sidecar_url.as_deref()),
+                kind: SendEndpointKind::TpuJet,
+                auth_uuid: None,
+                sender_mode: Some("sidecar"),
+                fanout_slots: Some(self.tpu_jet_fanout_slots),
+                timeout_ms: Some(self.tpu_jet_timeout_ms),
+            });
+        } else if self.tpu_quic_enabled && self.send_lane_mode == SendLaneMode::TpuQuicOnly {
+            endpoints.push(SendEndpoint {
+                label: "tpu-quic".to_string(),
+                url: String::new(),
+                kind: SendEndpointKind::TpuQuic,
+                auth_uuid: None,
+                sender_mode: None,
+                fanout_slots: Some(self.tpu_quic_fanout_slots),
+                timeout_ms: Some(self.tpu_quic_timeout_ms),
+            });
         }
 
         endpoints
@@ -4340,6 +5113,24 @@ fn helius_sender_url(url: &str, swqos_only: bool) -> String {
     with_fast
 }
 
+fn tpu_jet_sidecar_send_url(url: Option<&str>) -> String {
+    let base = url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("http://127.0.0.1:8787")
+        .trim_end_matches('/');
+    if base.ends_with("/send") {
+        base.to_string()
+    } else {
+        format!("{base}/send")
+    }
+}
+
+fn tpu_jet_sidecar_health_url(url: &str) -> String {
+    let base = url.trim_end_matches("/send").trim_end_matches('/');
+    format!("{base}/health")
+}
+
 fn send_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .pool_max_idle_per_host(16)
@@ -4357,6 +5148,8 @@ fn send_endpoint_kind(endpoint: &SendEndpoint) -> &'static str {
         SendEndpointKind::Rpc => "rpc",
         SendEndpointKind::Jito => "jito",
         SendEndpointKind::HeliusSender => "helius_sender",
+        SendEndpointKind::TpuJet => "tpu_jet",
+        SendEndpointKind::TpuQuic => "tpu_quic",
     }
 }
 
@@ -4378,6 +5171,39 @@ async fn warm_send_endpoint(
     endpoint: &SendEndpoint,
 ) -> Result<SendRpcAttemptLine, String> {
     let started_at = Instant::now();
+    if matches!(endpoint.kind, SendEndpointKind::TpuJet) {
+        let response = tokio::time::timeout(
+            Duration::from_millis(SEND_WARM_TIMEOUT_MS),
+            client.get(tpu_jet_sidecar_health_url(&endpoint.url)).send(),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "{} warmup timed out after {}ms",
+                endpoint.label, SEND_WARM_TIMEOUT_MS
+            )
+        })?
+        .map_err(|error| format!("{} warmup request failed: {error}", endpoint.label))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "{} warmup returned HTTP {}",
+                endpoint.label,
+                response.status().as_u16()
+            ));
+        }
+        let _ = response.bytes().await;
+        return Ok(SendRpcAttemptLine {
+            label: endpoint.label.clone(),
+            kind: send_endpoint_kind(endpoint),
+            mode: endpoint.sender_mode,
+            status: "warm",
+            duration_ms: started_at.elapsed().as_millis(),
+            fanout_slots: endpoint.fanout_slots,
+            signature: None,
+            error_class: None,
+            error: None,
+        });
+    }
     let request = send_endpoint_post(client, endpoint).json(&serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -4401,7 +5227,9 @@ async fn warm_send_endpoint(
         mode: endpoint.sender_mode,
         status: "warmed",
         duration_ms: started_at.elapsed().as_millis(),
+        fanout_slots: None,
         signature: None,
+        error_class: None,
         error: None,
     })
 }
@@ -4410,9 +5238,34 @@ async fn send_transaction_attempt(
     client: &reqwest::Client,
     endpoint: &SendEndpoint,
     encoded_tx: &str,
+    wire_tx: &[u8],
+    known_signature: &str,
+    tpu_quic_sender: Option<&TpuQuicSender>,
     config: SendConfig,
 ) -> SendAttemptOutcome {
     let started_at = Instant::now();
+    if matches!(endpoint.kind, SendEndpointKind::TpuQuic) {
+        return send_tpu_quic_attempt(
+            endpoint,
+            wire_tx,
+            known_signature,
+            tpu_quic_sender,
+            started_at,
+        )
+        .await;
+    }
+    if matches!(endpoint.kind, SendEndpointKind::TpuJet) {
+        return send_tpu_jet_attempt(
+            client,
+            endpoint,
+            encoded_tx,
+            known_signature,
+            config,
+            started_at,
+        )
+        .await;
+    }
+
     let send = send_transaction_to(client, endpoint, encoded_tx, config);
     let result = if config.http_timeout_ms > 0 {
         match tokio::time::timeout(Duration::from_millis(config.http_timeout_ms), send).await {
@@ -4434,7 +5287,9 @@ async fn send_transaction_attempt(
                 mode: endpoint.sender_mode,
                 status: "submitted",
                 duration_ms: started_at.elapsed().as_millis(),
+                fanout_slots: None,
                 signature: Some(signature.clone()),
+                error_class: None,
                 error: None,
             };
             if config.log_lanes {
@@ -4447,6 +5302,7 @@ async fn send_transaction_attempt(
                 attempt,
                 finished_at_ms: now_ms(),
                 signature: Some(signature),
+                signature_returned: true,
                 error: None,
             }
         }
@@ -4458,7 +5314,9 @@ async fn send_transaction_attempt(
                 mode: endpoint.sender_mode,
                 status: "failed",
                 duration_ms: started_at.elapsed().as_millis(),
+                fanout_slots: None,
                 signature: None,
+                error_class: Some(send_error_class(&error)),
                 error: Some(sanitized.clone()),
             };
             if config.log_lanes {
@@ -4471,9 +5329,217 @@ async fn send_transaction_attempt(
                 attempt,
                 finished_at_ms: now_ms(),
                 signature: None,
+                signature_returned: false,
                 error: Some(sanitized),
             }
         }
+    }
+}
+
+fn tpu_jet_error_class(value: &str) -> &'static str {
+    match value {
+        "invalid_signature" => "invalid_signature",
+        "empty_wire_transaction" => "empty_wire_transaction",
+        "invalid_base64" => "invalid_base64",
+        "dispatch_error" => "dispatch_error",
+        "http_status" => "http_status",
+        "timeout" => "timeout",
+        "decode_error" => "decode_error",
+        "request_error" => "request_error",
+        _ => "sidecar_error",
+    }
+}
+
+async fn send_tpu_jet_attempt(
+    client: &reqwest::Client,
+    endpoint: &SendEndpoint,
+    encoded_tx: &str,
+    known_signature: &str,
+    config: SendConfig,
+    started_at: Instant,
+) -> SendAttemptOutcome {
+    let mut error_class = None;
+    let result: std::result::Result<(), String> = if known_signature.is_empty() {
+        error_class = Some("missing_signature");
+        Err("tpu-jet known signature is empty".to_string())
+    } else if encoded_tx.is_empty() {
+        error_class = Some("empty_wire_transaction");
+        Err("tpu-jet encoded transaction is empty".to_string())
+    } else {
+        let timeout_ms = endpoint.timeout_ms.unwrap_or(config.http_timeout_ms);
+        let send = client.post(&endpoint.url).json(&serde_json::json!({
+            "signature": known_signature,
+            "transactionBase64": encoded_tx
+        }));
+        let response: std::result::Result<reqwest::Response, String> = if timeout_ms > 0 {
+            match tokio::time::timeout(Duration::from_millis(timeout_ms), send.send()).await {
+                Ok(response) => response.map_err(|error| error.to_string()),
+                Err(_) => {
+                    error_class = Some("timeout");
+                    Err(format!("tpu-jet dispatch timed out after {timeout_ms}ms"))
+                }
+            }
+        } else {
+            send.send().await.map_err(|error| error.to_string())
+        };
+
+        match response {
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                let decoded = serde_json::from_str::<TpuJetSidecarResponse>(&body);
+                match decoded {
+                    Ok(decoded)
+                        if status.is_success()
+                            && decoded.status.as_deref() == Some("dispatched") =>
+                    {
+                        if decoded.signature.as_deref() == Some(known_signature) {
+                            Ok(())
+                        } else {
+                            error_class = Some("sidecar_error");
+                            Err(format!(
+                                "tpu-jet sidecar returned mismatched signature: {}",
+                                decoded.signature.as_deref().unwrap_or("missing")
+                            ))
+                        }
+                    }
+                    Ok(decoded) => {
+                        let class = decoded
+                            .error_class
+                            .as_deref()
+                            .map(tpu_jet_error_class)
+                            .unwrap_or("http_status");
+                        error_class = Some(class);
+                        Err(decoded.error.unwrap_or_else(|| {
+                            format!(
+                                "tpu-jet sidecar returned HTTP {} status={}",
+                                status.as_u16(),
+                                decoded.status.as_deref().unwrap_or("unknown")
+                            )
+                        }))
+                    }
+                    Err(error) => {
+                        error_class = Some("decode_error");
+                        Err(format!(
+                            "tpu-jet sidecar returned undecodable HTTP {} body: {error}",
+                            status.as_u16()
+                        ))
+                    }
+                }
+            }
+            Err(error) => {
+                if error_class.is_none() {
+                    error_class = Some("request_error");
+                }
+                Err(error)
+            }
+        }
+    };
+
+    match result {
+        Ok(()) => SendAttemptOutcome {
+            attempt: SendRpcAttemptLine {
+                label: endpoint.label.clone(),
+                kind: send_endpoint_kind(endpoint),
+                mode: endpoint.sender_mode,
+                status: "dispatched",
+                duration_ms: started_at.elapsed().as_millis(),
+                fanout_slots: endpoint.fanout_slots,
+                signature: Some(known_signature.to_string()),
+                error_class: None,
+                error: None,
+            },
+            finished_at_ms: now_ms(),
+            signature: Some(known_signature.to_string()),
+            signature_returned: false,
+            error: None,
+        },
+        Err(error) => SendAttemptOutcome {
+            attempt: SendRpcAttemptLine {
+                label: endpoint.label.clone(),
+                kind: send_endpoint_kind(endpoint),
+                mode: endpoint.sender_mode,
+                status: "error",
+                duration_ms: started_at.elapsed().as_millis(),
+                fanout_slots: endpoint.fanout_slots,
+                signature: None,
+                error_class: Some(error_class.unwrap_or("sidecar_error")),
+                error: Some(error.clone()),
+            },
+            finished_at_ms: now_ms(),
+            signature: None,
+            signature_returned: false,
+            error: Some(format!("{} dispatch failed: {error}", endpoint.label)),
+        },
+    }
+}
+
+async fn send_tpu_quic_attempt(
+    endpoint: &SendEndpoint,
+    wire_tx: &[u8],
+    known_signature: &str,
+    tpu_quic_sender: Option<&TpuQuicSender>,
+    started_at: Instant,
+) -> SendAttemptOutcome {
+    let result: std::result::Result<u64, (&'static str, String)> = match (
+        tpu_quic_sender,
+        wire_tx.is_empty(),
+        known_signature.is_empty(),
+    ) {
+        (None, _, _) => Err((
+            "sender_not_warmed",
+            "tpu-quic sender is not warmed".to_string(),
+        )),
+        (_, true, _) => Err((
+            "empty_wire_transaction",
+            "tpu-quic wire transaction is empty".to_string(),
+        )),
+        (_, _, true) => Err((
+            "missing_signature",
+            "tpu-quic known signature is empty".to_string(),
+        )),
+        (Some(sender), false, false) => sender
+            .try_send_wire_transaction(wire_tx.to_vec())
+            .await
+            .map(|_| sender.fanout_slots)
+            .map_err(|error| ("dispatch_error", error)),
+    };
+
+    match result {
+        Ok(fanout_slots) => SendAttemptOutcome {
+            attempt: SendRpcAttemptLine {
+                label: endpoint.label.clone(),
+                kind: send_endpoint_kind(endpoint),
+                mode: Some("fanout_slots"),
+                status: "dispatched",
+                duration_ms: started_at.elapsed().as_millis(),
+                fanout_slots: Some(fanout_slots),
+                signature: Some(known_signature.to_string()),
+                error_class: None,
+                error: None,
+            },
+            finished_at_ms: now_ms(),
+            signature: Some(known_signature.to_string()),
+            signature_returned: false,
+            error: None,
+        },
+        Err((error_class, error)) => SendAttemptOutcome {
+            attempt: SendRpcAttemptLine {
+                label: endpoint.label.clone(),
+                kind: send_endpoint_kind(endpoint),
+                mode: None,
+                status: "error",
+                duration_ms: started_at.elapsed().as_millis(),
+                fanout_slots: None,
+                signature: None,
+                error_class: Some(error_class),
+                error: Some(error.clone()),
+            },
+            finished_at_ms: now_ms(),
+            signature: None,
+            signature_returned: false,
+            error: Some(format!("{} dispatch failed: {error}", endpoint.label)),
+        },
     }
 }
 
@@ -4527,6 +5593,22 @@ fn send_error_message(endpoint: &SendEndpoint, error: &str) -> String {
         sanitized = sanitized.replace(endpoint.url.trim_end_matches('/'), "<redacted-rpc-url>");
     }
     format!("{}: {sanitized}", endpoint.label)
+}
+
+fn send_error_class(error: &str) -> &'static str {
+    if error.contains("timed out") {
+        "timeout"
+    } else if error.contains("RPC error") {
+        "rpc_error"
+    } else if error.contains("HTTP status") {
+        "http_status"
+    } else if error.contains("decode") {
+        "decode_error"
+    } else if error.contains("request") {
+        "request_error"
+    } else {
+        "send_error"
+    }
 }
 
 fn is_false(value: &bool) -> bool {
@@ -4679,6 +5761,7 @@ mod tests {
             send_fanout: false,
             send_lane_mode: SendLaneMode::Mixed,
             send_rpc_urls: Vec::new(),
+            sell_send_rpc_urls: Vec::new(),
             jito_send_urls: Vec::new(),
             jito_auth_uuid: None,
             helius_sender_enabled: false,
@@ -4686,6 +5769,17 @@ mod tests {
             helius_sender_swqos_only: false,
             helius_sender_tip_lamports: None,
             helius_sender_tip_account: None,
+            tpu_jet_enabled: false,
+            tpu_jet_rpc_url: None,
+            tpu_jet_ws_url: None,
+            tpu_jet_sidecar_url: Some("http://127.0.0.1:8787".to_string()),
+            tpu_jet_fanout_slots: 12,
+            tpu_jet_timeout_ms: 30,
+            tpu_quic_enabled: false,
+            tpu_quic_rpc_url: None,
+            tpu_quic_ws_url: None,
+            tpu_quic_fanout_slots: 12,
+            tpu_quic_timeout_ms: 30,
             sell_helius_sender_tip_lamports: None,
             sell_helius_sender_tip_account: None,
             max_copy_sol: None,
@@ -4710,6 +5804,11 @@ mod tests {
             send_http_timeout_ms: 0,
             send_lane_logging: false,
             priority_fee_micro_lamports: None,
+            dynamic_priority_fee_enabled: false,
+            dynamic_priority_fee_baseline_micro_lamports: None,
+            dynamic_priority_fee_aggressive_micro_lamports: None,
+            dynamic_priority_fee_panic_micro_lamports: None,
+            dynamic_priority_fee_max_micro_lamports: None,
             jito_tip_lamports: None,
             jito_tip_account: None,
             sell_priority_fee_micro_lamports: None,
@@ -4758,7 +5857,9 @@ mod tests {
     ) -> CopyExecutionLine {
         let request =
             CopyRuntimeRequest::from_execution_plan(plan, observed_action, observed_sol_amount);
-        CopyExecutionLine::new(&request, options, sample_timings())
+        let timings = sample_timings();
+        let fee_profile = options.select_fee_profile(timings);
+        CopyExecutionLine::new(&request, options, timings, &fee_profile)
     }
 
     fn sample_timings() -> SignalTimings {
@@ -4952,6 +6053,7 @@ mod tests {
             client: send_http_client(),
             send_endpoints,
             sell_send_endpoints,
+            tpu_quic_sender: OnceCell::new(),
             blockhash_cache: None,
             address_lookup_tables: AddressLookupTableCache::default(),
             wallet_balance_cache: None,
@@ -6019,6 +7121,89 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_priority_fee_selects_aggressive_for_early_and_mid_source_position() {
+        let mut options = disabled_options();
+        options.priority_fee_micro_lamports = Some(1_250_000);
+        options.dynamic_priority_fee_enabled = true;
+        options.dynamic_priority_fee_baseline_micro_lamports = Some(1_250_000);
+        options.dynamic_priority_fee_aggressive_micro_lamports = Some(2_500_000);
+        options.dynamic_priority_fee_max_micro_lamports = Some(2_500_000);
+        options.helius_sender_enabled = true;
+        options.send_lane_mode = SendLaneMode::HeliusSenderOnly;
+        options.helius_sender_tip_lamports = Some(200_000);
+        options.helius_sender_tip_account = Some(COPY_WALLET.to_string());
+
+        let mut timings = sample_timings();
+        timings.batch_transaction_count = 9;
+        timings.matched_transaction_index = 0;
+        let early = options.select_fee_profile(timings);
+        assert_eq!(early.name, "aggressive");
+        assert_eq!(early.source_position_bucket, SourcePositionBucket::Early);
+        assert_eq!(early.priority_fee_micro_lamports, Some(2_500_000));
+        assert_eq!(early.helius_sender_tip_lamports, Some(200_000));
+        assert!(!early.cap_hit);
+
+        timings.matched_transaction_index = 4;
+        let mid = options.select_fee_profile(timings);
+        assert_eq!(mid.name, "aggressive");
+        assert_eq!(mid.source_position_bucket, SourcePositionBucket::Mid);
+        assert_eq!(mid.priority_fee_micro_lamports, Some(2_500_000));
+
+        timings.matched_transaction_index = 8;
+        let late = options.select_fee_profile(timings);
+        assert_eq!(late.name, "baseline");
+        assert_eq!(late.source_position_bucket, SourcePositionBucket::Late);
+        assert_eq!(late.priority_fee_micro_lamports, Some(1_250_000));
+    }
+
+    #[test]
+    fn dynamic_priority_fee_caps_aggressive_profile() {
+        let mut options = disabled_options();
+        options.priority_fee_micro_lamports = Some(1_250_000);
+        options.dynamic_priority_fee_enabled = true;
+        options.dynamic_priority_fee_aggressive_micro_lamports = Some(5_000_000);
+        options.dynamic_priority_fee_max_micro_lamports = Some(2_500_000);
+
+        let mut timings = sample_timings();
+        timings.batch_transaction_count = 3;
+        timings.matched_transaction_index = 0;
+        let profile = options.select_fee_profile(timings);
+
+        assert_eq!(profile.name, "aggressive");
+        assert_eq!(profile.priority_fee_micro_lamports, Some(2_500_000));
+        assert!(profile.cap_hit);
+    }
+
+    #[test]
+    fn copy_execution_line_serializes_fee_profile_telemetry() {
+        let mut options = disabled_options();
+        options.priority_fee_micro_lamports = Some(1_250_000);
+        options.dynamic_priority_fee_enabled = true;
+        options.dynamic_priority_fee_aggressive_micro_lamports = Some(2_500_000);
+        options.dynamic_priority_fee_max_micro_lamports = Some(2_500_000);
+        options.helius_sender_enabled = true;
+        options.send_lane_mode = SendLaneMode::HeliusSenderOnly;
+        options.helius_sender_tip_lamports = Some(200_000);
+        options.helius_sender_tip_account = Some(COPY_WALLET.to_string());
+
+        let mut timings = sample_timings();
+        timings.batch_transaction_count = 9;
+        timings.matched_transaction_index = 1;
+        let fee_profile = options.select_fee_profile(timings);
+        let request =
+            CopyRuntimeRequest::from_execution_plan(&allowed_plan(), Action::Buy, Some(0.1));
+        let line = CopyExecutionLine::new(&request, &options, timings, &fee_profile);
+        let json = serde_json::to_value(line).expect("serialize copy execution line");
+
+        assert_eq!(json["feeProfileName"], "aggressive");
+        assert_eq!(json["selectedPriorityFeeMicroLamports"], 2_500_000);
+        assert_eq!(json["selectedHeliusTipLamports"], 200_000);
+        assert_eq!(json["sourcePositionBucket"], "early");
+        assert_eq!(json["feeReason"], "early_or_mid_source_position_bucket");
+        assert_eq!(json["feeCapHit"], false);
+    }
+
+    #[test]
     fn send_rpc_fanout_uses_deduped_configured_urls() {
         let mut options = disabled_options();
         options.send_fanout = true;
@@ -6202,6 +7387,60 @@ mod tests {
             fee_config.helius_sender_tip_account.as_deref(),
             Some(COPY_WALLET)
         );
+
+        options.send_lane_mode = SendLaneMode::HeliusTpuJet;
+        let fee_config = options.tx_fee_config();
+        assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
+        assert_eq!(fee_config.jito_tip_lamports, None);
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+        );
+        assert_eq!(
+            fee_config.helius_sender_tip_account.as_deref(),
+            Some(COPY_WALLET)
+        );
+
+        options.send_lane_mode = SendLaneMode::HeliusTpuQuic;
+        let fee_config = options.tx_fee_config();
+        assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
+        assert_eq!(fee_config.jito_tip_lamports, None);
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+        );
+        assert_eq!(
+            fee_config.helius_sender_tip_account.as_deref(),
+            Some(COPY_WALLET)
+        );
+
+        options.send_lane_mode = SendLaneMode::TpuJetHeliusTip;
+        let fee_config = options.tx_fee_config();
+        assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
+        assert_eq!(fee_config.jito_tip_lamports, None);
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+        );
+        assert_eq!(
+            fee_config.helius_sender_tip_account.as_deref(),
+            Some(COPY_WALLET)
+        );
+
+        options.send_lane_mode = SendLaneMode::TpuJetOnly;
+        let fee_config = options.tx_fee_config();
+        assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
+        assert_eq!(fee_config.jito_tip_lamports, None);
+        assert_eq!(fee_config.helius_sender_tip_lamports, None);
+
+        options.send_lane_mode = SendLaneMode::TpuQuicHeliusTip;
+        let fee_config = options.tx_fee_config();
+        assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
+        assert_eq!(fee_config.jito_tip_lamports, None);
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+        );
     }
 
     #[test]
@@ -6222,6 +7461,33 @@ mod tests {
         assert_eq!(fee_config.helius_sender_tip_account, None);
         assert_eq!(endpoint_kinds(&sell_endpoints), vec!["rpc"]);
         assert_eq!(sell_endpoints[0].label, "rpc-primary:primary.example.com");
+    }
+
+    #[test]
+    fn zero_tip_sells_can_use_dedicated_sell_rpc_pool() {
+        let mut options = configured_multi_lane_options();
+        options.send_lane_mode = SendLaneMode::HeliusSenderOnly;
+        options.sell_priority_fee_micro_lamports = Some(0);
+        options.sell_jito_tip_lamports = Some(0);
+        options.sell_helius_sender_tip_lamports = Some(0);
+        options.sell_send_rpc_urls = vec![
+            "https://sell-primary.example.com".to_string(),
+            "https://sell-fanout.example.com".to_string(),
+        ];
+
+        let buy_endpoints = options.selected_send_endpoints();
+        let sell_endpoints = options.selected_sell_send_endpoints();
+
+        assert_eq!(endpoint_kinds(&buy_endpoints), vec!["helius_sender"]);
+        assert_eq!(endpoint_kinds(&sell_endpoints), vec!["rpc", "rpc"]);
+        assert_eq!(
+            sell_endpoints[0].label,
+            "sell-rpc-primary:sell-primary.example.com"
+        );
+        assert_eq!(
+            sell_endpoints[1].label,
+            "sell-rpc-fanout-1:sell-fanout.example.com"
+        );
     }
 
     #[test]
@@ -6252,6 +7518,99 @@ mod tests {
         let endpoints = options.selected_send_endpoints();
         assert_eq!(endpoint_kinds(&endpoints), vec!["helius_sender"]);
         assert_eq!(endpoints[0].url, "https://sender.helius-rpc.com/fast");
+
+        options.tpu_jet_enabled = true;
+        options.tpu_jet_rpc_url = Some("https://jet-rpc.example.com".to_string());
+        options.tpu_jet_ws_url = Some("https://jet-grpc.example.com".to_string());
+        options.tpu_jet_sidecar_url = Some("http://127.0.0.1:8787".to_string());
+        options.send_lane_mode = SendLaneMode::HeliusTpuJet;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["helius_sender", "tpu_jet"]
+        );
+
+        options.send_lane_mode = SendLaneMode::TpuJetHeliusTip;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["tpu_jet"]
+        );
+
+        options.tpu_quic_enabled = true;
+        options.tpu_quic_rpc_url = Some("https://tpu-rpc.example.com".to_string());
+        options.tpu_quic_ws_url = Some("wss://tpu-rpc.example.com".to_string());
+        options.send_lane_mode = SendLaneMode::HeliusTpuQuic;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["helius_sender", "tpu_quic"]
+        );
+
+        options.send_lane_mode = SendLaneMode::TpuQuicHeliusTip;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["tpu_quic"]
+        );
+    }
+
+    #[test]
+    fn tpu_quic_lane_is_default_off_and_buy_only() {
+        let mut options = configured_multi_lane_options();
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["rpc", "jito", "helius_sender"]
+        );
+
+        options.tpu_quic_enabled = true;
+        options.tpu_quic_rpc_url = Some("https://tpu-rpc.example.com".to_string());
+        options.tpu_quic_ws_url = Some("wss://tpu-rpc.example.com".to_string());
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["rpc", "jito", "helius_sender", "tpu_quic"]
+        );
+        assert_eq!(
+            endpoint_kinds(&options.selected_sell_send_endpoints()),
+            vec!["rpc", "jito", "helius_sender"]
+        );
+
+        options.send_lane_mode = SendLaneMode::TpuQuicOnly;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["tpu_quic"]
+        );
+    }
+
+    #[test]
+    fn tpu_jet_lane_is_default_off_and_buy_only() {
+        let mut options = configured_multi_lane_options();
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["rpc", "jito", "helius_sender"]
+        );
+
+        options.tpu_jet_enabled = true;
+        options.tpu_jet_rpc_url = Some("https://jet-rpc.example.com".to_string());
+        options.tpu_jet_ws_url = Some("https://jet-grpc.example.com".to_string());
+        options.tpu_jet_sidecar_url = Some("http://127.0.0.1:8787".to_string());
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["rpc", "jito", "helius_sender", "tpu_jet"]
+        );
+        assert_eq!(
+            endpoint_kinds(&options.selected_sell_send_endpoints()),
+            vec!["rpc", "jito", "helius_sender"]
+        );
+        let jet = options
+            .selected_send_endpoints()
+            .into_iter()
+            .find(|endpoint| endpoint.kind == SendEndpointKind::TpuJet)
+            .expect("tpu-jet endpoint");
+        assert_eq!(jet.url, "http://127.0.0.1:8787/send");
+        assert_eq!(jet.fanout_slots, Some(12));
+
+        options.send_lane_mode = SendLaneMode::TpuJetOnly;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["tpu_jet"]
+        );
     }
 
     #[test]
@@ -6280,6 +7639,63 @@ mod tests {
         assert_eq!(
             options.validate_send_lane_mode().unwrap_err(),
             "JITO_SEND_LANE_MODE=helius_sender_only requires JITO_HELIUS_SENDER_ENABLED=YES"
+        );
+
+        options.send_lane_mode = SendLaneMode::HeliusTpuJet;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_tpu_jet requires JITO_HELIUS_SENDER_ENABLED=YES"
+        );
+        options.helius_sender_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_tpu_jet requires JITO_TPU_JET_ENABLED=YES"
+        );
+        options.tpu_jet_enabled = true;
+        options.send_fanout = false;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_tpu_jet requires JITO_SEND_FANOUT=YES"
+        );
+        options.send_fanout = true;
+
+        options.tpu_jet_enabled = false;
+        options.send_lane_mode = SendLaneMode::HeliusTpuQuic;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_tpu_quic requires JITO_TPU_QUIC_ENABLED=YES"
+        );
+
+        options.send_lane_mode = SendLaneMode::TpuJetHeliusTip;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=tpu_jet_helius_tip requires JITO_TPU_JET_ENABLED=YES"
+        );
+        options.tpu_jet_enabled = true;
+        options.send_fanout = false;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=tpu_jet_helius_tip requires JITO_SEND_FANOUT=YES"
+        );
+        options.send_fanout = true;
+        options.tpu_jet_enabled = false;
+
+        options.send_lane_mode = SendLaneMode::TpuQuicHeliusTip;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=tpu_quic_helius_tip requires JITO_TPU_QUIC_ENABLED=YES"
+        );
+
+        options.send_lane_mode = SendLaneMode::TpuJetOnly;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=tpu_jet_only requires JITO_TPU_JET_ENABLED=YES"
+        );
+
+        options.send_lane_mode = SendLaneMode::TpuQuicOnly;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=tpu_quic_only requires JITO_TPU_QUIC_ENABLED=YES"
         );
 
         options.send_lane_mode = SendLaneMode::RpcOnly;
@@ -6367,6 +7783,8 @@ mod tests {
             kind: SendEndpointKind::Rpc,
             auth_uuid: None,
             sender_mode: None,
+            fanout_slots: None,
+            timeout_ms: None,
         };
 
         let message = send_error_message(
@@ -6522,6 +7940,159 @@ mod tests {
     }
 
     #[test]
+    fn send_lane_attribution_line_serializes_tpu_dispatch_without_ack_claim() {
+        let mut line = sample_send_lane_attribution_line();
+        line.first_ack_lane = "none".to_string();
+        line.first_ack_at_ms = 0;
+        line.all_attempts = vec![SendLaneAttemptAttribution {
+            label: "tpu-quic".to_string(),
+            kind: "tpu_quic",
+            mode: Some("fanout_slots"),
+            status: "dispatched",
+            duration_ms: 2,
+            fanout_slots: Some(12),
+            ack_at: None,
+            error_class: None,
+            error: None,
+        }];
+
+        let json = serde_json::to_value(&line).expect("attribution line serializes");
+
+        assert_eq!(
+            json.get("firstAckLane").and_then(serde_json::Value::as_str),
+            Some("none")
+        );
+        assert!(json.pointer("/allAttempts/0/ackAt").is_none());
+        assert_eq!(
+            json.pointer("/allAttempts/0/kind")
+                .and_then(serde_json::Value::as_str),
+            Some("tpu_quic")
+        );
+        assert_eq!(
+            json.pointer("/allAttempts/0/status")
+                .and_then(serde_json::Value::as_str),
+            Some("dispatched")
+        );
+        assert_eq!(
+            json.pointer("/allAttempts/0/fanoutSlots")
+                .and_then(serde_json::Value::as_u64),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn send_lane_attribution_line_serializes_tpu_jet_dispatch_without_ack_claim() {
+        let mut line = sample_send_lane_attribution_line();
+        line.first_ack_lane = "none".to_string();
+        line.first_ack_at_ms = 0;
+        line.all_attempts = vec![SendLaneAttemptAttribution {
+            label: "tpu-jet".to_string(),
+            kind: "tpu_jet",
+            mode: Some("sidecar"),
+            status: "dispatched",
+            duration_ms: 1,
+            fanout_slots: Some(12),
+            ack_at: None,
+            error_class: None,
+            error: None,
+        }];
+
+        let json = serde_json::to_value(&line).expect("attribution line serializes");
+
+        assert_eq!(
+            json.get("firstAckLane").and_then(serde_json::Value::as_str),
+            Some("none")
+        );
+        assert!(json.pointer("/allAttempts/0/ackAt").is_none());
+        assert_eq!(
+            json.pointer("/allAttempts/0/kind")
+                .and_then(serde_json::Value::as_str),
+            Some("tpu_jet")
+        );
+        assert_eq!(
+            json.pointer("/allAttempts/0/status")
+                .and_then(serde_json::Value::as_str),
+            Some("dispatched")
+        );
+        assert_eq!(
+            json.pointer("/allAttempts/0/fanoutSlots")
+                .and_then(serde_json::Value::as_u64),
+            Some(12)
+        );
+    }
+
+    #[tokio::test]
+    async fn tpu_quic_attempt_reports_dispatch_error_class_without_ack() {
+        let endpoint = SendEndpoint {
+            label: "tpu-quic".to_string(),
+            url: String::new(),
+            kind: SendEndpointKind::TpuQuic,
+            auth_uuid: None,
+            sender_mode: None,
+            fanout_slots: Some(12),
+            timeout_ms: Some(30),
+        };
+
+        let outcome = send_tpu_quic_attempt(
+            &endpoint,
+            &[1, 2, 3],
+            "known-signature",
+            None,
+            Instant::now(),
+        )
+        .await;
+
+        assert_eq!(outcome.attempt.kind, "tpu_quic");
+        assert_eq!(outcome.attempt.status, "error");
+        assert_eq!(outcome.attempt.error_class, Some("sender_not_warmed"));
+        assert!(outcome.signature.is_none());
+        assert!(!outcome.signature_returned);
+    }
+
+    #[tokio::test]
+    async fn tpu_jet_attempt_reports_error_class_without_ack() {
+        let endpoint = SendEndpoint {
+            label: "tpu-jet".to_string(),
+            url: "http://127.0.0.1:8787/send".to_string(),
+            kind: SendEndpointKind::TpuJet,
+            auth_uuid: None,
+            sender_mode: Some("sidecar"),
+            fanout_slots: Some(12),
+            timeout_ms: Some(30),
+        };
+
+        let outcome = send_tpu_jet_attempt(
+            &reqwest::Client::new(),
+            &endpoint,
+            "",
+            "known-signature",
+            SendConfig {
+                fast_copy_send: true,
+                max_retries: 0,
+                http_timeout_ms: 30,
+                log_lanes: false,
+            },
+            Instant::now(),
+        )
+        .await;
+
+        assert_eq!(outcome.attempt.kind, "tpu_jet");
+        assert_eq!(outcome.attempt.status, "error");
+        assert_eq!(outcome.attempt.error_class, Some("empty_wire_transaction"));
+        assert!(outcome.signature.is_none());
+        assert!(!outcome.signature_returned);
+    }
+
+    #[test]
+    fn dispatch_only_result_does_not_claim_rpc_winner() {
+        assert_eq!(ack_winner_label("tpu-jet", false), "none");
+        assert_eq!(
+            ack_winner_label("helius-sender-1-fast:sender.helius-rpc.com", true),
+            "helius-sender-1-fast:sender.helius-rpc.com"
+        );
+    }
+
+    #[test]
     fn copy_execution_output_write_json_line_flushes_by_default() {
         let path = temp_path("jito-copy-execution-flush-default.jsonl");
         let file = std::fs::File::create(&path).expect("temp file creates");
@@ -6580,7 +8151,9 @@ mod tests {
                 mode: None,
                 status: "submitted",
                 duration_ms: 7,
+                fanout_slots: None,
                 ack_at: Some(112),
+                error_class: None,
                 error: None,
             }],
         }

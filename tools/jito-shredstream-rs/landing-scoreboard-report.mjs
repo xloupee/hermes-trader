@@ -17,6 +17,7 @@ const DEFAULT_MIN_TX_DELTA_COVERAGE = 0.9;
 const DEFAULT_MIN_POSITION_ELIGIBLE = 1;
 const DEFAULT_MIN_CANARY_SENT = 10;
 const DEFAULT_TARGET_TX_DELTA = 10;
+const DEFAULT_PROMOTION_TX_DELTA_TARGET = 50;
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const SECRET_PARAM_RE = /([?&](?:api[-_]?key|token|auth|signature|access_token|key|c)=)[^&\s]+/gi;
 
@@ -234,7 +235,9 @@ function laneAttribution(row) {
     mode: stringValue(attempt?.mode),
     status: stringValue(attempt?.status) ?? "unknown",
     durationMs: numberValue(attempt?.durationMs),
+    fanoutSlots: numberValue(attempt?.fanoutSlots),
     ackAtMs: firstNumber(attempt?.ackAt, attempt?.ackAtMs),
+    errorClass: stringValue(attempt?.errorClass),
     error: stringValue(attempt?.error)
   }));
 
@@ -327,6 +330,14 @@ function copyBuyLandingRows(rows, { includeUnsent = true } = {}) {
         route: stringValue(row.routeLayout) ?? stringValue(row.selectedRoute),
         instructionCount: numberValue(row.instructionCount),
         signedTxBytes: firstNumber(row.signedTxBytes, row.serializedBytes, row.txBytes),
+        observedToSignedMs: numberValue(row.observedToSignedMs),
+        observedToSendSubmittedMs: numberValue(row.observedToSendSubmittedMs),
+        observedToSignatureReturnedMs: numberValue(row.observedToSignatureReturnedMs),
+        matchedToPlannedMs: numberValue(row.matchedToPlannedMs),
+        plannedToBuiltMs: numberValue(row.plannedToBuiltMs),
+        unsignedBuildUs: numberValue(row.unsignedBuildUs),
+        signUs: numberValue(row.signUs),
+        serializeUs: numberValue(row.serializeUs),
         decision: stringValue(row.decision),
         sent: Boolean(row.sent || row.sendSignature),
         status: landing.status,
@@ -339,16 +350,25 @@ function copyBuyLandingRows(rows, { includeUnsent = true } = {}) {
         firstAckAtMs: lane.firstAckAtMs,
         allLaneAttempts: lane.allAttempts,
         laneAttributionComplete: lane.attributionComplete,
+        feeProfileName: stringValue(row.feeProfileName) ?? "unknown",
+        selectedPriorityFeeMicroLamports: numberValue(row.selectedPriorityFeeMicroLamports),
+        selectedHeliusTipLamports: numberValue(row.selectedHeliusTipLamports),
+        sourcePositionBucket: stringValue(row.sourcePositionBucket) ?? "unknown",
+        feeReason: stringValue(row.feeReason),
+        feeCapHit: Boolean(row.feeCapHit),
         ...position,
         feeTipCost: cost
       };
     });
 }
 
-function filterLandingRows(rows, { sinceMs = null, lastSent = null } = {}) {
+function filterLandingRows(rows, { sinceMs = null, untilMs = null, lastSent = null } = {}) {
   let filtered = rows;
   if (Number.isFinite(sinceMs)) {
     filtered = filtered.filter((row) => Number.isFinite(row.observedAtMs) && row.observedAtMs >= sinceMs);
+  }
+  if (Number.isFinite(untilMs)) {
+    filtered = filtered.filter((row) => Number.isFinite(row.observedAtMs) && row.observedAtMs < untilMs);
   }
   if (Number.isFinite(lastSent) && lastSent > 0) {
     const sentRows = filtered.filter((row) => row.sent);
@@ -407,6 +427,20 @@ function sum(values) {
   return numeric.length === 0 ? null : numeric.reduce((total, value) => total + value, 0);
 }
 
+function duplicateObservedSendGroups(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    if (!row.observedSignature || !row.sendSignature) {
+      continue;
+    }
+    if (!groups.has(row.observedSignature)) {
+      groups.set(row.observedSignature, new Set());
+    }
+    groups.get(row.observedSignature).add(row.sendSignature);
+  }
+  return [...groups.values()].filter((sendSignatures) => sendSignatures.size > 1).length;
+}
+
 function summarizeRows(rows, { targetTxDelta = DEFAULT_TARGET_TX_DELTA } = {}) {
   const sent = rows.filter((row) => row.sent);
   const landed = sent.filter((row) => row.landed);
@@ -435,14 +469,142 @@ function summarizeRows(rows, { targetTxDelta = DEFAULT_TARGET_TX_DELTA } = {}) {
     signedTxBytesPresent: signedTxBytesPresent.length,
     signedTxBytesCoverage: sent.length > 0 ? signedTxBytesPresent.length / sent.length : null,
     missingLaneAttribution: sent.filter((row) => !row.laneAttributionComplete).length,
+    duplicateObservedSendGroups: duplicateObservedSendGroups(sent),
     p50SlotDelta: percentile(landed.map((row) => row.slotDelta), 50),
     p90SlotDelta: percentile(landed.map((row) => row.slotDelta), 90),
     p50TxDelta: percentile(landed.map((row) => row.txDelta), 50),
     p90TxDelta: percentile(landed.map((row) => row.txDelta), 90),
+    p50ObservedToSignedMs: percentile(sent.map((row) => row.observedToSignedMs), 50),
+    p90ObservedToSignedMs: percentile(sent.map((row) => row.observedToSignedMs), 90),
+    p50ObservedToSendSubmittedMs: percentile(sent.map((row) => row.observedToSendSubmittedMs), 50),
+    p90ObservedToSendSubmittedMs: percentile(sent.map((row) => row.observedToSendSubmittedMs), 90),
+    p50ObservedToSignatureReturnedMs: percentile(sent.map((row) => row.observedToSignatureReturnedMs), 50),
+    p90ObservedToSignatureReturnedMs: percentile(sent.map((row) => row.observedToSignatureReturnedMs), 90),
+    p50MatchedToPlannedMs: percentile(sent.map((row) => row.matchedToPlannedMs), 50),
+    p90MatchedToPlannedMs: percentile(sent.map((row) => row.matchedToPlannedMs), 90),
+    p50PlannedToBuiltMs: percentile(sent.map((row) => row.plannedToBuiltMs), 50),
+    p90PlannedToBuiltMs: percentile(sent.map((row) => row.plannedToBuiltMs), 90),
+    p50UnsignedBuildUs: percentile(sent.map((row) => row.unsignedBuildUs), 50),
+    p90UnsignedBuildUs: percentile(sent.map((row) => row.unsignedBuildUs), 90),
+    p50SignUs: percentile(sent.map((row) => row.signUs), 50),
+    p90SignUs: percentile(sent.map((row) => row.signUs), 90),
+    p50SerializeUs: percentile(sent.map((row) => row.serializeUs), 50),
+    p90SerializeUs: percentile(sent.map((row) => row.serializeUs), 90),
     p50SignedTxBytes: percentile(sent.map((row) => row.signedTxBytes), 50),
     p90SignedTxBytes: percentile(sent.map((row) => row.signedTxBytes), 90),
     totalObservedFeeTipSol: sum(sent.map((row) => row.feeTipCost.observedFeeTipSol)),
     totalConfiguredFeeTipSol: sum(sent.map((row) => row.feeTipCost.configuredFeeTipSol))
+  };
+}
+
+function metricNotRegressed(canary, baseline, { tolerance = 0 } = {}) {
+  if (!Number.isFinite(canary) || !Number.isFinite(baseline)) {
+    return null;
+  }
+  return canary + tolerance >= baseline;
+}
+
+function metricImprovedLower(canary, baseline, { minImprovement = 0 } = {}) {
+  if (!Number.isFinite(canary) || !Number.isFinite(baseline)) {
+    return null;
+  }
+  return baseline - canary >= minImprovement;
+}
+
+function metricImprovedHigher(canary, baseline, { minImprovement = 0 } = {}) {
+  if (!Number.isFinite(canary) || !Number.isFinite(baseline)) {
+    return null;
+  }
+  return canary - baseline >= minImprovement;
+}
+
+function gateResult(name, ok, details) {
+  return { name, ok, details };
+}
+
+function evaluatePromotionCandidate(
+  baselineSummary,
+  canarySummary,
+  {
+    txDeltaTarget = DEFAULT_PROMOTION_TX_DELTA_TARGET,
+    minSameSlotImprovement = 0,
+    minTargetTxDeltaRateImprovement = 0,
+    minP50TxDeltaImprovement = 1,
+    minP90TxDeltaImprovement = 1,
+    allowP90ObservedToSignedRegressionMs = 0,
+    allowP90ObservedToSendSubmittedRegressionMs = 0,
+    allowLandedRateRegression = 0
+  } = {}
+) {
+  const gates = [
+    gateResult(
+      "landed_rate_no_regression",
+      metricNotRegressed(canarySummary.landedRate, baselineSummary.landedRate, {
+        tolerance: allowLandedRateRegression
+      }),
+      `baseline=${formatPercent(baselineSummary.landedRate)} canary=${formatPercent(canarySummary.landedRate)}`
+    ),
+    gateResult(
+      "same_slot_rate_improves",
+      metricImprovedHigher(canarySummary.sameSlotRate, baselineSummary.sameSlotRate, {
+        minImprovement: minSameSlotImprovement
+      }),
+      `baseline=${formatPercent(baselineSummary.sameSlotRate)} canary=${formatPercent(canarySummary.sameSlotRate)}`
+    ),
+    gateResult(
+      "p50_tx_delta_improves",
+      metricImprovedLower(canarySummary.p50TxDelta, baselineSummary.p50TxDelta, {
+        minImprovement: minP50TxDeltaImprovement
+      }),
+      `baseline=${formatNumber(baselineSummary.p50TxDelta)} canary=${formatNumber(canarySummary.p50TxDelta)}`
+    ),
+    gateResult(
+      "p90_tx_delta_improves",
+      metricImprovedLower(canarySummary.p90TxDelta, baselineSummary.p90TxDelta, {
+        minImprovement: minP90TxDeltaImprovement
+      }),
+      `baseline=${formatNumber(baselineSummary.p90TxDelta)} canary=${formatNumber(canarySummary.p90TxDelta)}`
+    ),
+    gateResult(
+      `tx_delta_lte_${txDeltaTarget}_improves`,
+      metricImprovedHigher(canarySummary.targetTxDeltaRate, baselineSummary.targetTxDeltaRate, {
+        minImprovement: minTargetTxDeltaRateImprovement
+      }),
+      `baseline=${formatPercent(baselineSummary.targetTxDeltaRate)} canary=${formatPercent(canarySummary.targetTxDeltaRate)}`
+    ),
+    gateResult(
+      "p90_observed_to_signed_no_regression",
+      metricNotRegressed(
+        baselineSummary.p90ObservedToSignedMs,
+        canarySummary.p90ObservedToSignedMs,
+        { tolerance: allowP90ObservedToSignedRegressionMs }
+      ),
+      `baseline=${formatNumber(baselineSummary.p90ObservedToSignedMs)}ms canary=${formatNumber(canarySummary.p90ObservedToSignedMs)}ms`
+    ),
+    gateResult(
+      "p90_observed_to_submitted_no_regression",
+      metricNotRegressed(
+        baselineSummary.p90ObservedToSendSubmittedMs,
+        canarySummary.p90ObservedToSendSubmittedMs,
+        { tolerance: allowP90ObservedToSendSubmittedRegressionMs }
+      ),
+      `baseline=${formatNumber(baselineSummary.p90ObservedToSendSubmittedMs)}ms canary=${formatNumber(canarySummary.p90ObservedToSendSubmittedMs)}ms`
+    ),
+    gateResult(
+      "no_duplicate_observed_send_signatures",
+      Number.isFinite(canarySummary.duplicateObservedSendGroups)
+        ? canarySummary.duplicateObservedSendGroups === 0
+        : null,
+      `canaryDuplicateGroups=${formatNumber(canarySummary.duplicateObservedSendGroups)}`
+    )
+  ];
+  const unknown = gates.filter((gate) => gate.ok === null);
+  const failed = gates.filter((gate) => gate.ok === false);
+  return {
+    ok: unknown.length === 0 && failed.length === 0,
+    gates,
+    unknown: unknown.map((gate) => gate.name),
+    failed: failed.map((gate) => gate.name)
   };
 }
 
@@ -549,6 +711,33 @@ function groupByTransactionShape(rows, options = {}) {
     .sort((a, b) => b.sent - a.sent || a.shape.localeCompare(b.shape));
 }
 
+function feeProfileKey(row) {
+  return [
+    `profile=${row.feeProfileName ?? "unknown"}`,
+    `bucket=${row.sourcePositionBucket ?? "unknown"}`,
+    `priority=${Number.isFinite(row.selectedPriorityFeeMicroLamports) ? row.selectedPriorityFeeMicroLamports : "n/a"}`,
+    `heliusTip=${Number.isFinite(row.selectedHeliusTipLamports) ? row.selectedHeliusTipLamports : "n/a"}`,
+    `capHit=${row.feeCapHit ? "yes" : "no"}`
+  ].join(" | ");
+}
+
+function groupByFeeProfile(rows, options = {}) {
+  const groups = new Map();
+  for (const row of rows.filter((candidate) => candidate.sent)) {
+    const key = feeProfileKey(row);
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+  return [...groups.entries()]
+    .map(([feeProfile, groupRows]) => ({
+      feeProfile,
+      ...summarizeRows(groupRows, options),
+      reasons: [...new Set(groupRows.map((row) => row.feeReason).filter(Boolean))].sort()
+    }))
+    .sort((a, b) => b.sent - a.sent || a.feeProfile.localeCompare(b.feeProfile));
+}
+
 function scoreLaneSummary(summary) {
   if (summary.sent <= 0) {
     return null;
@@ -571,11 +760,15 @@ function laneAttemptKey(attempt) {
   return `${attempt.label}${mode}`;
 }
 
+function isSubmittedOrDispatchedAttempt(attempt) {
+  return attempt.status === "submitted" || attempt.status === "dispatched";
+}
+
 function groupByAttemptLane(rows, options = {}) {
   const groups = new Map();
   for (const row of rows.filter((candidate) => candidate.sent)) {
     for (const attempt of row.allLaneAttempts) {
-      if (attempt.status !== "submitted") {
+      if (!isSubmittedOrDispatchedAttempt(attempt)) {
         continue;
       }
       const lane = laneAttemptKey(attempt);
@@ -595,6 +788,20 @@ function groupByAttemptLane(rows, options = {}) {
           Number.isFinite(summary.totalConfiguredFeeTipSol) && summary.sent > 0
             ? summary.totalConfiguredFeeTipSol / summary.sent
             : null,
+        dispatchedAttempts: groupRows.flatMap((row) => row.allLaneAttempts).filter((attempt) =>
+          laneAttemptKey(attempt) === lane && attempt.status === "dispatched"
+        ).length,
+        submittedAttempts: groupRows.flatMap((row) => row.allLaneAttempts).filter((attempt) =>
+          laneAttemptKey(attempt) === lane && attempt.status === "submitted"
+        ).length,
+        errorClasses: [
+          ...new Set(
+            groupRows
+              .flatMap((row) => row.allLaneAttempts)
+              .filter((attempt) => laneAttemptKey(attempt) === lane && attempt.errorClass)
+              .map((attempt) => attempt.errorClass)
+          )
+        ].sort(),
         adaptiveScore: scoreLaneSummary(summary),
         reportOnly: true
       };
@@ -612,9 +819,40 @@ function buildLandingScoreboard(rows, options = {}) {
     txDeltaGate: evaluateTxDeltaCoverage(summary, options),
     targetGate: evaluateTargetTxDelta(summary),
     byFirstAckLane: groupByFirstAckLane(landingRows, options),
+    byFeeProfile: groupByFeeProfile(landingRows, options),
     byTransactionShape: groupByTransactionShape(landingRows, options),
     adaptiveLaneScores: groupByAttemptLane(landingRows, options),
     rows: landingRows
+  };
+}
+
+function buildPromotionComparison(rows, options = {}) {
+  const {
+    baselineSinceMs = null,
+    baselineUntilMs = null,
+    canarySinceMs = null,
+    canaryUntilMs = null,
+    baselineOptions = {},
+    canaryOptions = {},
+    promotionOptions = {},
+    ...sharedOptions
+  } = options;
+  const baseline = buildLandingScoreboard(rows, {
+    ...sharedOptions,
+    ...baselineOptions,
+    sinceMs: baselineSinceMs,
+    untilMs: baselineUntilMs
+  });
+  const canary = buildLandingScoreboard(rows, {
+    ...sharedOptions,
+    ...canaryOptions,
+    sinceMs: canarySinceMs,
+    untilMs: canaryUntilMs
+  });
+  return {
+    baseline,
+    canary,
+    promotion: evaluatePromotionCandidate(baseline.summary, canary.summary, promotionOptions)
   };
 }
 
@@ -688,13 +926,35 @@ function printTextReport(scoreboard, { path, limit }) {
         row.lane,
         `score=${formatNumber(row.adaptiveScore)}`,
         `sent=${row.sent}`,
+        `submitted=${row.submittedAttempts}`,
+        `dispatched=${row.dispatchedAttempts}`,
         `landedRate=${formatPercent(row.landedRate)}`,
         `sameSlotRate=${formatPercent(row.sameSlotRate)}`,
         `targetTxRate=${formatPercent(row.targetTxDeltaRate)}`,
         `byteCoverage=${formatPercent(row.signedTxBytesCoverage)}`,
         `p90Slot=${formatNumber(row.p90SlotDelta)}`,
         `p90Tx=${formatNumber(row.p90TxDelta)}`,
-        `feeTipPerSent=${formatSol(row.configuredFeeTipPerSentSol)} SOL`
+        `feeTipPerSent=${formatSol(row.configuredFeeTipPerSentSol)} SOL`,
+        `errors=${row.errorClasses.length ? row.errorClasses.join(",") : "none"}`
+      ].join(" | ")
+    );
+  }
+  console.log("");
+  console.log("By fee profile");
+  for (const row of scoreboard.byFeeProfile) {
+    console.log(
+      [
+        row.feeProfile,
+        `sent=${row.sent}`,
+        `landed=${row.landed}`,
+        `notLanded=${row.notLanded}`,
+        `failed=${row.failedOnChain}`,
+        `sameSlotRate=${formatPercent(row.sameSlotRate)}`,
+        `targetTxRate=${formatPercent(row.targetTxDeltaRate)}`,
+        `p50Tx=${formatNumber(row.p50TxDelta)}`,
+        `p90Tx=${formatNumber(row.p90TxDelta)}`,
+        `configuredFeeTip=${formatSol(row.totalConfiguredFeeTipSol)} SOL`,
+        `reasons=${row.reasons.length ? row.reasons.join(",") : "n/a"}`
       ].join(" | ")
     );
   }
@@ -747,6 +1007,7 @@ function printTextReport(scoreboard, { path, limit }) {
         `slotDelta=${formatNumber(row.slotDelta)}`,
         `txDelta=${formatNumber(row.txDelta)}`,
         `idx=${formatNumber(row.targetTxIndex)}->${formatNumber(row.copyTxIndex)}`,
+        `feeProfile=${row.feeProfileName}/${row.sourcePositionBucket}`,
         `feeTip=${formatSol(row.feeTipCost.observedFeeTipSol ?? row.feeTipCost.configuredFeeTipSol)} SOL`,
         `route=${row.route ?? "n/a"}`,
         `ix=${formatNumber(row.instructionCount)}`,
@@ -758,6 +1019,51 @@ function printTextReport(scoreboard, { path, limit }) {
   }
 }
 
+function printPromotionComparison(comparison, { path }) {
+  const { baseline, canary, promotion } = comparison;
+  console.log(`Landing promotion comparison | path=${path}`);
+  console.log(
+    [
+      "baseline",
+      `sent=${baseline.summary.sent}`,
+      `landedRate=${formatPercent(baseline.summary.landedRate)}`,
+      `sameSlotRate=${formatPercent(baseline.summary.sameSlotRate)}`,
+      `p50Tx=${formatNumber(baseline.summary.p50TxDelta)}`,
+      `p90Tx=${formatNumber(baseline.summary.p90TxDelta)}`,
+      `targetTxRate=${formatPercent(baseline.summary.targetTxDeltaRate)}`,
+      `p90ObsToSigned=${formatNumber(baseline.summary.p90ObservedToSignedMs)}ms`,
+      `p90ObsToSubmitted=${formatNumber(baseline.summary.p90ObservedToSendSubmittedMs)}ms`,
+      `duplicateGroups=${formatNumber(baseline.summary.duplicateObservedSendGroups)}`
+    ].join(" | ")
+  );
+  console.log(
+    [
+      "canary",
+      `sent=${canary.summary.sent}`,
+      `landedRate=${formatPercent(canary.summary.landedRate)}`,
+      `sameSlotRate=${formatPercent(canary.summary.sameSlotRate)}`,
+      `p50Tx=${formatNumber(canary.summary.p50TxDelta)}`,
+      `p90Tx=${formatNumber(canary.summary.p90TxDelta)}`,
+      `targetTxRate=${formatPercent(canary.summary.targetTxDeltaRate)}`,
+      `p90ObsToSigned=${formatNumber(canary.summary.p90ObservedToSignedMs)}ms`,
+      `p90ObsToSubmitted=${formatNumber(canary.summary.p90ObservedToSendSubmittedMs)}ms`,
+      `duplicateGroups=${formatNumber(canary.summary.duplicateObservedSendGroups)}`
+    ].join(" | ")
+  );
+  console.log(
+    `baseline sample=${baseline.sampleGate.ok ? "pass" : "fail"} ${baseline.sampleGate.reason}`
+  );
+  console.log(
+    `baseline txDelta=${baseline.txDeltaGate.ok ? "pass" : "fail"} ${baseline.txDeltaGate.reason}`
+  );
+  console.log(`canary sample=${canary.sampleGate.ok ? "pass" : "fail"} ${canary.sampleGate.reason}`);
+  console.log(`canary txDelta=${canary.txDeltaGate.ok ? "pass" : "fail"} ${canary.txDeltaGate.reason}`);
+  console.log(`promotion=${promotion.ok ? "pass" : "fail"}`);
+  for (const gate of promotion.gates) {
+    console.log(`${gate.ok === true ? "pass" : gate.ok === false ? "fail" : "unknown"} ${gate.name} ${gate.details}`);
+  }
+}
+
 async function main() {
   const path = argValue("executions", argValue("path", defaultExecutionsPath()));
   const limit = positiveInteger(argValue("limit", process.env.JITO_LANDING_REPORT_LIMIT), DEFAULT_LIMIT);
@@ -765,6 +1071,9 @@ async function main() {
   const sinceMs =
     nonnegativeInteger(argValue("since-ms"), null) ??
     (stringValue(argValue("since-iso")) === null ? null : Date.parse(argValue("since-iso")));
+  const untilMs =
+    nonnegativeInteger(argValue("until-ms"), null) ??
+    (stringValue(argValue("until-iso")) === null ? null : Date.parse(argValue("until-iso")));
   const lastSent = positiveInteger(argValue("last-sent"), null);
   const positionEnrichLimit = positiveInteger(
     argValue("position-enrich-limit", process.env.JITO_LANDING_POSITION_ENRICH_LIMIT),
@@ -786,11 +1095,93 @@ async function main() {
     argValue("target-tx-delta", process.env.JITO_LANDING_TARGET_TX_DELTA),
     DEFAULT_TARGET_TX_DELTA
   );
-  const rows = dedupeRows(readJsonl(path));
+  const promotionTxDeltaTarget = nonnegativeInteger(
+    argValue("promotion-tx-delta-target", process.env.JITO_LANDING_PROMOTION_TX_DELTA_TARGET),
+    DEFAULT_PROMOTION_TX_DELTA_TARGET
+  );
+  const allowP90ObservedToSignedRegressionMs = nonnegativeNumber(
+    argValue(
+      "allow-p90-observed-to-signed-regression-ms",
+      process.env.JITO_LANDING_ALLOW_P90_OBSERVED_TO_SIGNED_REGRESSION_MS
+    ),
+    0
+  );
+  const allowP90ObservedToSendSubmittedRegressionMs = nonnegativeNumber(
+    argValue(
+      "allow-p90-observed-to-submitted-regression-ms",
+      process.env.JITO_LANDING_ALLOW_P90_OBSERVED_TO_SUBMITTED_REGRESSION_MS
+    ),
+    0
+  );
+  const rawRows = readJsonl(path);
+  const rows = dedupeRows(rawRows);
   const enrichedRows = await enrichMissingPositions(rows, { positionEnrichLimit });
+  if (hasFlag("promotion-compare")) {
+    const baselineSinceMs =
+      nonnegativeInteger(argValue("baseline-since-ms"), null) ??
+      (stringValue(argValue("baseline-since-iso")) === null ? null : Date.parse(argValue("baseline-since-iso")));
+    const baselineUntilMs =
+      nonnegativeInteger(argValue("baseline-until-ms"), null) ??
+      (stringValue(argValue("baseline-until-iso")) === null ? null : Date.parse(argValue("baseline-until-iso")));
+    const canarySinceMs =
+      nonnegativeInteger(argValue("canary-since-ms"), null) ??
+      (stringValue(argValue("canary-since-iso")) === null ? null : Date.parse(argValue("canary-since-iso")));
+    const canaryUntilMs =
+      nonnegativeInteger(argValue("canary-until-ms"), null) ??
+      (stringValue(argValue("canary-until-iso")) === null ? null : Date.parse(argValue("canary-until-iso")));
+    const comparison = buildPromotionComparison(enrichedRows, {
+      includeUnsent,
+      minCoverage: minTxDeltaCoverage,
+      minPositionEligible,
+      minSent: minCanarySent,
+      targetTxDelta: promotionTxDeltaTarget,
+      baselineSinceMs,
+      baselineUntilMs,
+      canarySinceMs,
+      canaryUntilMs,
+      promotionOptions: {
+        txDeltaTarget: promotionTxDeltaTarget,
+        allowP90ObservedToSignedRegressionMs,
+        allowP90ObservedToSendSubmittedRegressionMs
+      }
+    });
+    const rawCanaryRows = filterLandingRows(copyBuyLandingRows(rawRows, { includeUnsent }), {
+      sinceMs: canarySinceMs,
+      untilMs: canaryUntilMs
+    });
+    comparison.canary.summary.duplicateObservedSendGroups = Math.max(
+      comparison.canary.summary.duplicateObservedSendGroups,
+      duplicateObservedSendGroups(rawCanaryRows)
+    );
+    comparison.promotion = evaluatePromotionCandidate(
+      comparison.baseline.summary,
+      comparison.canary.summary,
+      {
+        txDeltaTarget: promotionTxDeltaTarget,
+        allowP90ObservedToSignedRegressionMs,
+        allowP90ObservedToSendSubmittedRegressionMs
+      }
+    );
+    if (hasFlag("json")) {
+      console.log(JSON.stringify({ path, ...comparison }, null, 2));
+    } else {
+      printPromotionComparison(comparison, { path });
+    }
+    if (
+      !comparison.baseline.sampleGate.ok ||
+      !comparison.baseline.txDeltaGate.ok ||
+      !comparison.canary.sampleGate.ok ||
+      !comparison.canary.txDeltaGate.ok ||
+      !comparison.promotion.ok
+    ) {
+      process.exitCode = 1;
+    }
+    return;
+  }
   const scoreboard = buildLandingScoreboard(enrichedRows, {
     includeUnsent,
     sinceMs,
+    untilMs,
     lastSent,
     minCoverage: minTxDeltaCoverage,
     minPositionEligible,
@@ -811,9 +1202,11 @@ async function main() {
 
 export {
   buildLandingScoreboard,
+  buildPromotionComparison,
   copyBuyLandingRows,
   effectiveTipLamports,
   evaluateCanarySample,
+  evaluatePromotionCandidate,
   evaluateTargetTxDelta,
   evaluateTxDeltaCoverage,
   estimatedPriorityFeeLamports,
@@ -821,6 +1214,7 @@ export {
   filterLandingRows,
   enrichMissingPositions,
   groupByTransactionShape,
+  groupByFeeProfile,
   groupByAttemptLane,
   laneAttribution,
   needsPositionEnrichment,

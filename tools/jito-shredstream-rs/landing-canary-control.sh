@@ -11,7 +11,7 @@ BACKUP_DIR="${JITO_CANARY_BACKUP_DIR:-$WORKER_DIR/backups}"
 MARKER_FILE="${JITO_CANARY_MARKER_FILE:-/var/log/jito-copy-canary-current.env}"
 DEFAULT_BASELINE_TIP="${JITO_CANARY_BASELINE_HELIUS_TIP_LAMPORTS:-387500}"
 DEFAULT_BASELINE_PRIORITY="${JITO_CANARY_BASELINE_PRIORITY_FEE_MICRO_LAMPORTS:-968750}"
-DEFAULT_BASELINE_RETRIES="${JITO_CANARY_BASELINE_SEND_MAX_RETRIES:-0}"
+DEFAULT_BASELINE_RETRIES="${JITO_CANARY_BASELINE_SEND_MAX_RETRIES:-3}"
 
 usage() {
   cat <<'USAGE'
@@ -21,19 +21,27 @@ Usage:
   landing-canary-control.sh mark <name> [since-iso]
   landing-canary-control.sh score [since-iso] [min-position-eligible]
   landing-canary-control.sh score-recent [last-sent] [min-position-eligible]
+  landing-canary-control.sh compare [baseline-since-iso] [canary-since-iso] [canary-until-iso]
   landing-canary-control.sh ready
   landing-canary-control.sh apply <name>
   landing-canary-control.sh restore <backup-env-file>
 
 Canaries:
-  baseline       Helius Sender FRA SWQoS, tip 387500, priority 968750, retries 0
+  baseline       Helius Sender FRA SWQoS, tip 387500, priority 968750, retries 3
   tip-250k       Same as baseline, Helius Sender tip 250000
   tip-500k       Same as baseline, Helius Sender tip 500000
   priority-750k  Same as baseline, priority fee 750000
   priority-1250k Same as baseline, priority fee 1250000 and matching max cap
+  dynamic-priority-2500k Helius only, retries 0, 200k tip, early/mid priority 2500000
   retries-0      Same as baseline, send max retries 0
   retries-1      Same as baseline, send max retries 1
-  retries-3      Legacy comparison only, send max retries 3
+  retries-3      Return to baseline, send max retries 3
+  tpu-jet-fanout Helius baseline plus same-signature Yellowstone Jet sidecar fanout
+  tpu-jet-only Same fee shape, Yellowstone Jet sidecar only
+  tpu-jet-cheap Jet sidecar only with Helius Sender tip disabled; requires JITO_CANARY_ALLOW_CHEAP_TPU=YES
+  tpu-quic-fanout Helius baseline plus same-signature direct TPU QUIC fanout
+  tpu-quic-only Same fee shape, direct TPU QUIC only
+  tpu-quic-cheap TPU QUIC only with Helius Sender tip disabled; requires JITO_CANARY_ALLOW_CHEAP_TPU=YES
 USAGE
 }
 
@@ -88,6 +96,16 @@ canary_values() {
   CANARY_PRIORITY="$DEFAULT_BASELINE_PRIORITY"
   CANARY_MAX_PRIORITY="$DEFAULT_BASELINE_PRIORITY"
   CANARY_RETRIES="$DEFAULT_BASELINE_RETRIES"
+  CANARY_LANE_MODE="helius-sender-only"
+  CANARY_HELIUS_ENABLED="true"
+  CANARY_TPU_JET_ENABLED="false"
+  CANARY_TPU_QUIC_ENABLED="false"
+  CANARY_HELIUS_TIP_ACCOUNT="${JITO_HELIUS_SENDER_TIP_ACCOUNT:-}"
+  CANARY_DYNAMIC_PRIORITY_ENABLED="false"
+  CANARY_DYNAMIC_PRIORITY_BASELINE=""
+  CANARY_DYNAMIC_PRIORITY_AGGRESSIVE=""
+  CANARY_DYNAMIC_PRIORITY_PANIC=""
+  CANARY_DYNAMIC_PRIORITY_MAX=""
 
   case "$name" in
     baseline) ;;
@@ -101,9 +119,63 @@ canary_values() {
       CANARY_PRIORITY=1250000
       CANARY_MAX_PRIORITY=1250000
       ;;
+    dynamic-priority-2500k)
+      CANARY_HELIUS_TIP=200000
+      CANARY_PRIORITY=1250000
+      CANARY_MAX_PRIORITY=2500000
+      CANARY_RETRIES=0
+      CANARY_DYNAMIC_PRIORITY_ENABLED="true"
+      CANARY_DYNAMIC_PRIORITY_BASELINE=1250000
+      CANARY_DYNAMIC_PRIORITY_AGGRESSIVE=2500000
+      CANARY_DYNAMIC_PRIORITY_MAX=2500000
+      ;;
     retries-0) CANARY_RETRIES=0 ;;
     retries-1) CANARY_RETRIES=1 ;;
     retries-3) CANARY_RETRIES=3 ;;
+    tpu-jet-fanout)
+      CANARY_LANE_MODE="helius-tpu-jet"
+      CANARY_TPU_JET_ENABLED="true"
+      ;;
+    tpu-jet-only)
+      CANARY_LANE_MODE="tpu-jet-helius-tip"
+      CANARY_TPU_JET_ENABLED="true"
+      ;;
+    tpu-jet-cheap)
+      case "$(printf '%s' "${JITO_CANARY_ALLOW_CHEAP_TPU:-false}" | tr '[:upper:]' '[:lower:]')" in
+        yes|true|1|on) ;;
+        *)
+          echo "tpu-jet-cheap requires JITO_CANARY_ALLOW_CHEAP_TPU=YES after tpu-jet-only proves better" >&2
+          exit 2
+          ;;
+      esac
+      CANARY_LANE_MODE="tpu-jet-only"
+      CANARY_HELIUS_ENABLED="false"
+      CANARY_TPU_JET_ENABLED="true"
+      CANARY_HELIUS_TIP=0
+      CANARY_HELIUS_TIP_ACCOUNT=""
+      ;;
+    tpu-quic-fanout)
+      CANARY_LANE_MODE="helius-tpu-quic"
+      CANARY_TPU_QUIC_ENABLED="true"
+      ;;
+    tpu-quic-only)
+      CANARY_LANE_MODE="tpu-quic-helius-tip"
+      CANARY_TPU_QUIC_ENABLED="true"
+      ;;
+    tpu-quic-cheap)
+      case "$(printf '%s' "${JITO_CANARY_ALLOW_CHEAP_TPU:-false}" | tr '[:upper:]' '[:lower:]')" in
+        yes|true|1|on) ;;
+        *)
+          echo "tpu-quic-cheap requires JITO_CANARY_ALLOW_CHEAP_TPU=YES after tpu-quic-only proves better" >&2
+          exit 2
+          ;;
+      esac
+      CANARY_LANE_MODE="tpu-quic-only"
+      CANARY_HELIUS_ENABLED="false"
+      CANARY_TPU_QUIC_ENABLED="true"
+      CANARY_HELIUS_TIP=0
+      CANARY_HELIUS_TIP_ACCOUNT=""
+      ;;
     *)
       echo "unknown canary: $name" >&2
       usage >&2
@@ -114,13 +186,26 @@ canary_values() {
 
 write_marker() {
   local name="$1" since_iso="$2" backup="${3:-}"
+  local baseline_since_iso="${CANARY_BASELINE_STARTED_AT_ISO:-}"
+  if [[ -z "$baseline_since_iso" && "$name" == "baseline" ]]; then
+    baseline_since_iso="$since_iso"
+  fi
   cat > "$MARKER_FILE" <<EOF_MARKER
 CANARY_NAME=$name
 CANARY_STARTED_AT_ISO=$since_iso
+CANARY_BASELINE_STARTED_AT_ISO=$baseline_since_iso
 CANARY_BACKUP_ENV=$backup
 CANARY_HELIUS_TIP_LAMPORTS=${CANARY_HELIUS_TIP:-}
 CANARY_PRIORITY_FEE_MICRO_LAMPORTS=${CANARY_PRIORITY:-}
 CANARY_SEND_MAX_RETRIES=${CANARY_RETRIES:-}
+CANARY_SEND_LANE_MODE=${CANARY_LANE_MODE:-}
+CANARY_TPU_JET_ENABLED=${CANARY_TPU_JET_ENABLED:-}
+CANARY_TPU_QUIC_ENABLED=${CANARY_TPU_QUIC_ENABLED:-}
+CANARY_DYNAMIC_PRIORITY_FEE_ENABLED=${CANARY_DYNAMIC_PRIORITY_ENABLED:-}
+CANARY_DYNAMIC_PRIORITY_FEE_BASELINE_MICRO_LAMPORTS=${CANARY_DYNAMIC_PRIORITY_BASELINE:-}
+CANARY_DYNAMIC_PRIORITY_FEE_AGGRESSIVE_MICRO_LAMPORTS=${CANARY_DYNAMIC_PRIORITY_AGGRESSIVE:-}
+CANARY_DYNAMIC_PRIORITY_FEE_PANIC_MICRO_LAMPORTS=${CANARY_DYNAMIC_PRIORITY_PANIC:-}
+CANARY_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS=${CANARY_DYNAMIC_PRIORITY_MAX:-}
 EOF_MARKER
 }
 
@@ -138,8 +223,24 @@ print_status() {
   echo "helius_sender_enabled=${JITO_HELIUS_SENDER_ENABLED:-}"
   echo "helius_sender_swqos_only=${JITO_HELIUS_SENDER_SWQOS_ONLY:-}"
   echo "helius_sender_tip_lamports=${JITO_HELIUS_SENDER_TIP_LAMPORTS:-}"
+  echo "tpu_jet_enabled=${JITO_TPU_JET_ENABLED:-}"
+  echo "tpu_jet_rpc_url=$([[ -n "${JITO_TPU_JET_RPC_URL:-}" ]] && echo configured || echo empty)"
+  echo "tpu_jet_ws_url=$([[ -n "${JITO_TPU_JET_WS_URL:-}" ]] && echo configured || echo empty)"
+  echo "tpu_jet_sidecar_url=$([[ -n "${JITO_TPU_JET_SIDECAR_URL:-}" ]] && echo configured || echo empty)"
+  echo "tpu_jet_fanout_slots=${JITO_TPU_JET_FANOUT_SLOTS:-}"
+  echo "tpu_jet_timeout_ms=${JITO_TPU_JET_TIMEOUT_MS:-}"
+  echo "tpu_quic_enabled=${JITO_TPU_QUIC_ENABLED:-}"
+  echo "tpu_quic_rpc_url=$([[ -n "${JITO_TPU_QUIC_RPC_URL:-}" ]] && echo configured || echo empty)"
+  echo "tpu_quic_ws_url=$([[ -n "${JITO_TPU_QUIC_WS_URL:-}" ]] && echo configured || echo empty)"
+  echo "tpu_quic_fanout_slots=${JITO_TPU_QUIC_FANOUT_SLOTS:-}"
+  echo "tpu_quic_timeout_ms=${JITO_TPU_QUIC_TIMEOUT_MS:-}"
   echo "priority_fee_micro_lamports=${JITO_PRIORITY_FEE_MICRO_LAMPORTS:-}"
   echo "max_priority_fee_micro_lamports=${JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS:-}"
+  echo "dynamic_priority_fee_enabled=${JITO_DYNAMIC_PRIORITY_FEE_ENABLED:-}"
+  echo "dynamic_priority_fee_baseline_micro_lamports=${JITO_DYNAMIC_PRIORITY_FEE_BASELINE_MICRO_LAMPORTS:-}"
+  echo "dynamic_priority_fee_aggressive_micro_lamports=${JITO_DYNAMIC_PRIORITY_FEE_AGGRESSIVE_MICRO_LAMPORTS:-}"
+  echo "dynamic_priority_fee_panic_micro_lamports=${JITO_DYNAMIC_PRIORITY_FEE_PANIC_MICRO_LAMPORTS:-}"
+  echo "dynamic_priority_fee_max_micro_lamports=${JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS:-}"
   echo "send_max_retries=${JITO_SEND_MAX_RETRIES:-$DEFAULT_BASELINE_RETRIES}"
   echo "jito_block_engine_send_urls=$([[ -n "${JITO_BLOCK_ENGINE_SEND_URLS:-}" ]] && echo configured || echo empty)"
   if [[ -f "$MARKER_FILE" ]]; then
@@ -193,6 +294,49 @@ score_recent() {
     --target-tx-delta="${JITO_CANARY_TARGET_TX_DELTA:-10}"
 }
 
+compare_windows() {
+  local baseline_since_iso="${1:-}" canary_since_iso="${2:-}" canary_until_iso="${3:-}"
+  if [[ -f "$MARKER_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$MARKER_FILE"
+  fi
+  baseline_since_iso="${baseline_since_iso:-${CANARY_BASELINE_STARTED_AT_ISO:-}}"
+  canary_since_iso="${canary_since_iso:-${CANARY_STARTED_AT_ISO:-}}"
+  if [[ -z "$baseline_since_iso" ]]; then
+    echo "baseline since ISO is required; run 'mark baseline' before applying a canary or pass it explicitly" >&2
+    exit 2
+  fi
+  if [[ -z "$canary_since_iso" ]]; then
+    echo "canary since ISO is required; apply a canary or pass it explicitly" >&2
+    exit 2
+  fi
+
+  load_env_file "$APP_ENV_FILE"
+  load_env_file "$WORKER_ENV_FILE"
+  cd "$WORKER_DIR"
+  local args=(
+    "$WORKER_DIR/landing-scoreboard-report.mjs"
+    --executions="$EXECUTIONS_PATH"
+    --sent-only
+    --promotion-compare
+    --baseline-since-iso="$baseline_since_iso"
+    --baseline-until-iso="$canary_since_iso"
+    --canary-since-iso="$canary_since_iso"
+    --limit="${JITO_CANARY_REPORT_LIMIT:-20}"
+    --position-enrich-limit="${JITO_CANARY_POSITION_ENRICH_LIMIT:-100}"
+    --min-position-eligible="${JITO_CANARY_COMPARE_MIN_POSITION_ELIGIBLE:-${JITO_CANARY_BASELINE_MIN_POSITION_ELIGIBLE:-5}}"
+    --min-tx-delta-coverage="${JITO_CANARY_MIN_TX_DELTA_COVERAGE:-0.9}"
+    --min-canary-sent="${JITO_CANARY_MIN_SENT:-10}"
+    --promotion-tx-delta-target="${JITO_CANARY_PROMOTION_TX_DELTA_TARGET:-50}"
+    --allow-p90-observed-to-signed-regression-ms="${JITO_CANARY_ALLOW_P90_OBSERVED_TO_SIGNED_REGRESSION_MS:-0}"
+    --allow-p90-observed-to-submitted-regression-ms="${JITO_CANARY_ALLOW_P90_OBSERVED_TO_SUBMITTED_REGRESSION_MS:-0}"
+  )
+  if [[ -n "$canary_until_iso" ]]; then
+    args+=(--canary-until-iso="$canary_until_iso")
+  fi
+  node "${args[@]}"
+}
+
 ready_report() {
   local strict_rc recent_rc
   echo "== canary status =="
@@ -230,20 +374,86 @@ baseline_gate() {
   score_window "" "${JITO_CANARY_BASELINE_MIN_POSITION_ELIGIBLE:-5}"
 }
 
+jet_sidecar_health_url() {
+  local base="${JITO_TPU_JET_SIDECAR_URL%/}"
+  base="${base%/send}"
+  printf '%s/health\n' "$base"
+}
+
+require_jet_sidecar_ready() {
+  local health_url
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl is required to preflight the Jet sidecar before applying a Jet canary" >&2
+    exit 2
+  fi
+  health_url="$(jet_sidecar_health_url)"
+  if ! curl -fsS --max-time "${JITO_CANARY_TPU_JET_HEALTH_TIMEOUT_SECONDS:-2}" "$health_url" >/dev/null; then
+    echo "Jet sidecar health check failed at $health_url; start jito-tpu-jet-sidecar.service before applying this canary" >&2
+    exit 2
+  fi
+}
+
 apply_canary() {
   local name="$1" backup since_iso
+  load_env_file "$APP_ENV_FILE"
+  load_env_file "$WORKER_ENV_FILE"
+  if [[ -f "$MARKER_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$MARKER_FILE"
+    if [[ "${CANARY_NAME:-}" == "baseline" && -z "${CANARY_BASELINE_STARTED_AT_ISO:-}" ]]; then
+      CANARY_BASELINE_STARTED_AT_ISO="${CANARY_STARTED_AT_ISO:-}"
+    fi
+  fi
   canary_values "$name"
+  case "$CANARY_TPU_JET_ENABLED" in
+    true)
+      if [[ -z "${JITO_TPU_JET_RPC_URL:-}" ]]; then
+        echo "$name requires JITO_TPU_JET_RPC_URL in $WORKER_ENV_FILE or $APP_ENV_FILE" >&2
+        exit 2
+      fi
+      if [[ -z "${JITO_TPU_JET_WS_URL:-}" ]]; then
+        echo "$name requires JITO_TPU_JET_WS_URL in $WORKER_ENV_FILE or $APP_ENV_FILE" >&2
+        exit 2
+      fi
+      if [[ -z "${JITO_TPU_JET_SIDECAR_URL:-}" ]]; then
+        echo "$name requires JITO_TPU_JET_SIDECAR_URL in $WORKER_ENV_FILE or $APP_ENV_FILE" >&2
+        exit 2
+      fi
+      require_jet_sidecar_ready
+      ;;
+  esac
+  case "$CANARY_TPU_QUIC_ENABLED" in
+    true)
+      if [[ -z "${JITO_TPU_QUIC_RPC_URL:-}" ]]; then
+        echo "$name requires JITO_TPU_QUIC_RPC_URL in $WORKER_ENV_FILE or $APP_ENV_FILE" >&2
+        exit 2
+      fi
+      if [[ -z "${JITO_TPU_QUIC_WS_URL:-}" ]]; then
+        echo "$name requires JITO_TPU_QUIC_WS_URL in $WORKER_ENV_FILE or $APP_ENV_FILE" >&2
+        exit 2
+      fi
+      ;;
+  esac
   baseline_gate "$name"
   backup="$(backup_env)"
 
-  set_env_var "$WORKER_ENV_FILE" JITO_SEND_LANE_MODE "helius-sender-only"
-  set_env_var "$WORKER_ENV_FILE" JITO_HELIUS_SENDER_ENABLED "true"
+  set_env_var "$WORKER_ENV_FILE" JITO_SEND_LANE_MODE "$CANARY_LANE_MODE"
+  set_env_var "$WORKER_ENV_FILE" JITO_HELIUS_SENDER_ENABLED "$CANARY_HELIUS_ENABLED"
   set_env_var "$WORKER_ENV_FILE" JITO_HELIUS_SENDER_SWQOS_ONLY "true"
   set_env_var "$WORKER_ENV_FILE" JITO_BLOCK_ENGINE_SEND_URLS ""
   set_env_var "$WORKER_ENV_FILE" JITO_TIP_LAMPORTS "0"
+  set_env_var "$WORKER_ENV_FILE" JITO_TPU_JET_ENABLED "$CANARY_TPU_JET_ENABLED"
+  set_env_var "$WORKER_ENV_FILE" JITO_TPU_QUIC_ENABLED "$CANARY_TPU_QUIC_ENABLED"
+  set_env_var "$WORKER_ENV_FILE" JITO_SEND_FANOUT "YES"
   set_env_var "$WORKER_ENV_FILE" JITO_HELIUS_SENDER_TIP_LAMPORTS "$CANARY_HELIUS_TIP"
+  set_env_var "$WORKER_ENV_FILE" JITO_HELIUS_SENDER_TIP_ACCOUNT "$CANARY_HELIUS_TIP_ACCOUNT"
   set_env_var "$WORKER_ENV_FILE" JITO_PRIORITY_FEE_MICRO_LAMPORTS "$CANARY_PRIORITY"
   set_env_var "$WORKER_ENV_FILE" JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS "$CANARY_MAX_PRIORITY"
+  set_env_var "$WORKER_ENV_FILE" JITO_DYNAMIC_PRIORITY_FEE_ENABLED "$CANARY_DYNAMIC_PRIORITY_ENABLED"
+  set_env_var "$WORKER_ENV_FILE" JITO_DYNAMIC_PRIORITY_FEE_BASELINE_MICRO_LAMPORTS "$CANARY_DYNAMIC_PRIORITY_BASELINE"
+  set_env_var "$WORKER_ENV_FILE" JITO_DYNAMIC_PRIORITY_FEE_AGGRESSIVE_MICRO_LAMPORTS "$CANARY_DYNAMIC_PRIORITY_AGGRESSIVE"
+  set_env_var "$WORKER_ENV_FILE" JITO_DYNAMIC_PRIORITY_FEE_PANIC_MICRO_LAMPORTS "$CANARY_DYNAMIC_PRIORITY_PANIC"
+  set_env_var "$WORKER_ENV_FILE" JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS "$CANARY_DYNAMIC_PRIORITY_MAX"
   set_env_var "$WORKER_ENV_FILE" JITO_SEND_MAX_RETRIES "$CANARY_RETRIES"
 
   systemctl restart "$LIVE_SERVICE"
@@ -290,6 +500,9 @@ case "$command" in
     ;;
   score-recent)
     score_recent "${2:-50}" "${3:-5}"
+    ;;
+  compare)
+    compare_windows "${2:-}" "${3:-}" "${4:-}"
     ;;
   ready)
     ready_report

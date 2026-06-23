@@ -100,6 +100,12 @@ export interface LocalExecutionReport {
   walletMatchUs: number | null;
   routeParseUs: number | null;
   sendLaneMs: number | null;
+  feeProfileName: string | null;
+  selectedPriorityFeeMicroLamports: number | null;
+  selectedHeliusTipLamports: number | null;
+  sourcePositionBucket: string | null;
+  feeReason: string | null;
+  feeCapHit: boolean;
   targetBlockTimeMs: number | null;
   autoSellEnabled: boolean;
   autoSellDelayMs: number | null;
@@ -190,6 +196,12 @@ interface RawLocalExecutionReport {
   wallet_match_us: number | null;
   route_parse_us: number | null;
   send_lane_ms: number | null;
+  fee_profile_name: string | null;
+  selected_priority_fee_micro_lamports: number | null;
+  selected_helius_tip_lamports: number | null;
+  source_position_bucket: string | null;
+  fee_reason: string | null;
+  fee_cap_hit: boolean | null;
   auto_sell_enabled: boolean;
   auto_sell_delay_ms: number | null;
   auto_sell_attempted: boolean;
@@ -275,6 +287,12 @@ const LOCAL_EXECUTION_BASE_COLUMNS = [
   "wallet_match_us",
   "route_parse_us",
   "send_lane_ms",
+  "fee_profile_name",
+  "selected_priority_fee_micro_lamports",
+  "selected_helius_tip_lamports",
+  "source_position_bucket",
+  "fee_reason",
+  "fee_cap_hit",
   "auto_sell_enabled",
   "auto_sell_delay_ms",
   "auto_sell_attempted",
@@ -503,6 +521,18 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     walletMatchUs: firstNumber(row.wallet_match_us, rawNumber("walletMatchUs")),
     routeParseUs: firstNumber(row.route_parse_us, rawNumber("routeParseUs")),
     sendLaneMs: firstNumber(row.send_lane_ms, rawNumber("sendLaneMs")),
+    feeProfileName: row.fee_profile_name ?? stringValue(rawExecution?.feeProfileName),
+    selectedPriorityFeeMicroLamports: firstNumber(
+      row.selected_priority_fee_micro_lamports,
+      rawNumber("selectedPriorityFeeMicroLamports")
+    ),
+    selectedHeliusTipLamports: firstNumber(
+      row.selected_helius_tip_lamports,
+      rawNumber("selectedHeliusTipLamports")
+    ),
+    sourcePositionBucket: row.source_position_bucket ?? stringValue(rawExecution?.sourcePositionBucket),
+    feeReason: row.fee_reason ?? stringValue(rawExecution?.feeReason),
+    feeCapHit: Boolean(row.fee_cap_hit ?? rawExecution?.feeCapHit),
     targetBlockTimeMs: firstNumber(secondsToMs(chainReport?.targetBlockTime)),
     autoSellEnabled: row.auto_sell_enabled,
     autoSellDelayMs: row.auto_sell_delay_ms,

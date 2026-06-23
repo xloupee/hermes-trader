@@ -10,3 +10,4 @@ target/
 tools/copy-rs/target/
 jito-shredstream-keypair.json
 tools/shredstream-rs/target/
+tools/jito-shredstream-rs/spikes/yellowstone-jet-compat/target/

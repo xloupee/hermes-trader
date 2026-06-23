@@ -1,0 +1,16 @@
+[Unit]
+Description=Jito Copy Yellowstone Jet TPU Sidecar
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/jito-feed-probe-watch
+Environment=JITO_WORKER_DIR=/opt/jito-feed-probe-watch
+ExecStart=/opt/jito-feed-probe-watch/run-tpu-jet-sidecar.sh
+Restart=always
+RestartSec=2
+User=root
+
+[Install]
+WantedBy=multi-user.target

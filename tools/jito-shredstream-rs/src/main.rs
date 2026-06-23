@@ -174,6 +174,13 @@ pub(crate) struct LiveOptions {
     pub(crate) send_rpc_urls: Vec<String>,
 
     #[arg(
+        long = "sell-send-rpc-url",
+        env = "JITO_SELL_SEND_RPC_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) sell_send_rpc_urls: Vec<String>,
+
+    #[arg(
         long = "jito-send-url",
         env = "JITO_BLOCK_ENGINE_SEND_URLS",
         value_delimiter = ','
@@ -211,6 +218,53 @@ pub(crate) struct LiveOptions {
 
     #[arg(long, env = "JITO_HELIUS_SENDER_TIP_ACCOUNT")]
     pub(crate) helius_sender_tip_account: Option<String>,
+
+    #[arg(
+        long,
+        env = "JITO_TPU_JET_ENABLED",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) tpu_jet_enabled: bool,
+
+    #[arg(long, env = "JITO_TPU_JET_RPC_URL")]
+    pub(crate) tpu_jet_rpc_url: Option<String>,
+
+    #[arg(long, env = "JITO_TPU_JET_WS_URL")]
+    pub(crate) tpu_jet_ws_url: Option<String>,
+
+    #[arg(
+        long,
+        env = "JITO_TPU_JET_SIDECAR_URL",
+        default_value = "http://127.0.0.1:8787"
+    )]
+    pub(crate) tpu_jet_sidecar_url: Option<String>,
+
+    #[arg(long, env = "JITO_TPU_JET_FANOUT_SLOTS", default_value_t = 12)]
+    pub(crate) tpu_jet_fanout_slots: u64,
+
+    #[arg(long, env = "JITO_TPU_JET_TIMEOUT_MS", default_value_t = 30)]
+    pub(crate) tpu_jet_timeout_ms: u64,
+
+    #[arg(
+        long,
+        env = "JITO_TPU_QUIC_ENABLED",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) tpu_quic_enabled: bool,
+
+    #[arg(long, env = "JITO_TPU_QUIC_RPC_URL")]
+    pub(crate) tpu_quic_rpc_url: Option<String>,
+
+    #[arg(long, env = "JITO_TPU_QUIC_WS_URL")]
+    pub(crate) tpu_quic_ws_url: Option<String>,
+
+    #[arg(long, env = "JITO_TPU_QUIC_FANOUT_SLOTS", default_value_t = 12)]
+    pub(crate) tpu_quic_fanout_slots: u64,
+
+    #[arg(long, env = "JITO_TPU_QUIC_TIMEOUT_MS", default_value_t = 30)]
+    pub(crate) tpu_quic_timeout_ms: u64,
 
     #[arg(long, env = "JITO_SELL_HELIUS_SENDER_TIP_LAMPORTS")]
     pub(crate) sell_helius_sender_tip_lamports: Option<u64>,
@@ -343,6 +397,26 @@ pub(crate) struct LiveOptions {
 
     #[arg(long, env = "JITO_PRIORITY_FEE_MICRO_LAMPORTS")]
     pub(crate) priority_fee_micro_lamports: Option<u64>,
+
+    #[arg(
+        long,
+        env = "JITO_DYNAMIC_PRIORITY_FEE_ENABLED",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) dynamic_priority_fee_enabled: bool,
+
+    #[arg(long, env = "JITO_DYNAMIC_PRIORITY_FEE_BASELINE_MICRO_LAMPORTS")]
+    pub(crate) dynamic_priority_fee_baseline_micro_lamports: Option<u64>,
+
+    #[arg(long, env = "JITO_DYNAMIC_PRIORITY_FEE_AGGRESSIVE_MICRO_LAMPORTS")]
+    pub(crate) dynamic_priority_fee_aggressive_micro_lamports: Option<u64>,
+
+    #[arg(long, env = "JITO_DYNAMIC_PRIORITY_FEE_PANIC_MICRO_LAMPORTS")]
+    pub(crate) dynamic_priority_fee_panic_micro_lamports: Option<u64>,
+
+    #[arg(long, env = "JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS")]
+    pub(crate) dynamic_priority_fee_max_micro_lamports: Option<u64>,
 
     #[arg(long, env = "JITO_TIP_LAMPORTS")]
     pub(crate) jito_tip_lamports: Option<u64>,

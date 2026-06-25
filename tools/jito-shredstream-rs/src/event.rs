@@ -1,4 +1,6 @@
-use crate::parser::{Action, ParsedTrade, SharedRouteContext, WalletMentionKind, SOL_MINT};
+use crate::parser::{
+    Action, ComputeBudgetInfo, ParsedTrade, SharedRouteContext, WalletMentionKind, SOL_MINT,
+};
 use anyhow::Result;
 use serde::Serialize;
 use solana_pubkey::Pubkey;
@@ -27,6 +29,10 @@ pub(crate) struct NormalizedCopyTradeEvent {
     pub(crate) copyable: bool,
     pub(crate) filters: Vec<String>,
     pub(crate) account_key_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_compute_unit_limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_compute_unit_price_micro_lamports: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,6 +88,10 @@ pub(crate) struct ShadowSignalLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reason: Option<&'static str>,
     pub(crate) account_key_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_compute_unit_limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_compute_unit_price_micro_lamports: Option<u64>,
     #[serde(skip)]
     pub(crate) route_context: Option<SharedRouteContext>,
 }
@@ -114,6 +124,7 @@ pub(crate) fn normalized_event(
         parsed.route,
         parsed.sol_amount,
         parsed.token_amount,
+        parsed.compute_budget,
     )
 }
 
@@ -129,6 +140,7 @@ pub(crate) fn normalized_event_from_raw(
     route: crate::parser::Route,
     sol_amount: Option<f64>,
     token_amount: Option<f64>,
+    compute_budget: ComputeBudgetInfo,
 ) -> NormalizedCopyTradeEvent {
     let target_wallet = target_wallet.to_string();
     let mint = mint.to_string();
@@ -174,6 +186,8 @@ pub(crate) fn normalized_event_from_raw(
         copyable: matches!(action, Action::Buy),
         filters: vec!["jito-entry".to_string()],
         account_key_count,
+        source_compute_unit_limit: compute_budget.compute_unit_limit,
+        source_compute_unit_price_micro_lamports: compute_budget.compute_unit_price_micro_lamports,
     }
 }
 
@@ -208,6 +222,10 @@ pub(crate) fn shadow_signal_line(
             Some("shadow mode only copies buy actions")
         },
         account_key_count,
+        source_compute_unit_limit: parsed.compute_budget.compute_unit_limit,
+        source_compute_unit_price_micro_lamports: parsed
+            .compute_budget
+            .compute_unit_price_micro_lamports,
         route_context: parsed.route_context.clone(),
     }
 }
@@ -244,6 +262,7 @@ mod tests {
                 route: Route::FlashxPump,
                 sol_amount: Some(0.00099),
                 token_amount: None,
+                compute_budget: Default::default(),
                 route_context: None,
             },
         );
@@ -274,6 +293,7 @@ mod tests {
                 route: Route::FlashxPump,
                 sol_amount: None,
                 token_amount: Some(42.0),
+                compute_budget: Default::default(),
                 route_context: None,
             },
         );

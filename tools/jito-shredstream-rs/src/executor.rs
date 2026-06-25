@@ -9,6 +9,7 @@ use crate::{
         RouteContext, SharedRouteContext,
     },
     planner::{CopyRuntimeRequest, ExecutionPlanLine},
+    priority_fee_cache::{PriorityFeeCache, PriorityFeeLookup},
     signal::SignalTimings,
     tx_builder::{
         build_auto_sell_unsigned_flashx_pump_with_fees_and_cache,
@@ -37,7 +38,7 @@ use solana_transaction::versioned::VersionedTransaction;
 use solana_transaction::Transaction;
 use std::{
     borrow::Cow,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io::Write,
     path::PathBuf,
     str::FromStr,
@@ -107,6 +108,7 @@ pub(crate) struct CopyExecutor {
     blockhash_cache: Option<BlockhashCache>,
     address_lookup_tables: AddressLookupTableCache,
     wallet_balance_cache: Option<WalletBalanceCache>,
+    account_priority_fee_cache: Option<PriorityFeeCache>,
     pda_cache: CopyPdaCache,
     direct_pump_sell_contexts: Mutex<DirectPumpSellContextCache>,
 }
@@ -142,6 +144,12 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) helius_sender_swqos_only: bool,
     pub(crate) helius_sender_tip_lamports: Option<u64>,
     pub(crate) helius_sender_tip_account: Option<String>,
+    pub(crate) helius_sender_tip_accounts: Vec<String>,
+    pub(crate) nozomi_enabled: bool,
+    pub(crate) nozomi_urls: Vec<String>,
+    pub(crate) nozomi_tip_lamports: Option<u64>,
+    pub(crate) nozomi_tip_account: Option<String>,
+    pub(crate) nozomi_tip_accounts: Vec<String>,
     pub(crate) tpu_jet_enabled: bool,
     pub(crate) tpu_jet_rpc_url: Option<String>,
     pub(crate) tpu_jet_ws_url: Option<String>,
@@ -157,6 +165,10 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) sell_helius_sender_tip_account: Option<String>,
     pub(crate) max_copy_sol: Option<f64>,
     pub(crate) max_total_copy_spend_sol: Option<f64>,
+    pub(crate) max_provider_tip_lamports: Option<u64>,
+    pub(crate) max_signed_tx_bytes: Option<usize>,
+    pub(crate) max_instruction_count: Option<usize>,
+    pub(crate) max_writable_account_count: Option<usize>,
     pub(crate) migrated_amm_min_copy_sol: f64,
     pub(crate) migrated_amm_small_copy_mode: MigratedAmmSmallCopyMode,
     pub(crate) copy_wallet: Option<String>,
@@ -184,12 +196,14 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) dynamic_priority_fee_max_micro_lamports: Option<u64>,
     pub(crate) jito_tip_lamports: Option<u64>,
     pub(crate) jito_tip_account: Option<String>,
+    pub(crate) jito_tip_accounts: Vec<String>,
     pub(crate) sell_priority_fee_micro_lamports: Option<u64>,
     pub(crate) sell_jito_tip_lamports: Option<u64>,
     pub(crate) sell_jito_tip_account: Option<String>,
     pub(crate) warm_send_endpoints: bool,
     pub(crate) send_endpoint_warm_interval_ms: u64,
     pub(crate) copy_wallet_balance_guard: bool,
+    pub(crate) account_priority_fee_enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -204,6 +218,8 @@ pub(crate) enum SendLaneMode {
     RpcOnly,
     JitoOnly,
     HeliusSenderOnly,
+    NozomiOnly,
+    HeliusNozomiStack,
     HeliusTpuJet,
     HeliusTpuQuic,
     TpuJetHeliusTip,
@@ -219,6 +235,8 @@ impl SendLaneMode {
             Self::RpcOnly => "rpc_only",
             Self::JitoOnly => "jito_only",
             Self::HeliusSenderOnly => "helius_sender_only",
+            Self::NozomiOnly => "nozomi_only",
+            Self::HeliusNozomiStack => "helius_nozomi_stack",
             Self::HeliusTpuJet => "helius_tpu_jet",
             Self::HeliusTpuQuic => "helius_tpu_quic",
             Self::TpuJetHeliusTip => "tpu_jet_helius_tip",
@@ -239,8 +257,16 @@ impl SendLaneMode {
     fn uses_helius_sender_lanes(self) -> bool {
         matches!(
             self,
-            Self::Mixed | Self::HeliusSenderOnly | Self::HeliusTpuJet | Self::HeliusTpuQuic
+            Self::Mixed
+                | Self::HeliusSenderOnly
+                | Self::HeliusNozomiStack
+                | Self::HeliusTpuJet
+                | Self::HeliusTpuQuic
         )
+    }
+
+    fn uses_nozomi_lanes(self) -> bool {
+        matches!(self, Self::Mixed | Self::NozomiOnly | Self::HeliusNozomiStack)
     }
 
     fn uses_tpu_quic_lanes(self) -> bool {
@@ -266,11 +292,16 @@ impl SendLaneMode {
             self,
             Self::Mixed
                 | Self::HeliusSenderOnly
+                | Self::HeliusNozomiStack
                 | Self::HeliusTpuJet
                 | Self::HeliusTpuQuic
                 | Self::TpuJetHeliusTip
                 | Self::TpuQuicHeliusTip
         )
+    }
+
+    fn uses_nozomi_tip(self) -> bool {
+        matches!(self, Self::Mixed | Self::NozomiOnly | Self::HeliusNozomiStack)
     }
 }
 
@@ -452,9 +483,23 @@ pub(crate) struct CopyExecutionLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     signed_tx_bytes: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    writable_account_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compute_unit_limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     copy_signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     blockhash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blockhash_source_rpc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blockhash_commitment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blockhash_context_slot: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blockhash_age_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blockhash_selection_strategy: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     simulation_error: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -488,12 +533,43 @@ pub(crate) struct CopyExecutionLine {
     helius_sender_tip_lamports: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     helius_sender_tip_account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nozomi_tip_lamports: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nozomi_tip_account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bloxroute_tip_lamports: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bloxroute_tip_account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_stack_name: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    selected_tip_accounts: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_tip_account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_compute_unit_limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_compute_unit_price_micro_lamports: Option<u64>,
     fee_profile_name: &'static str,
     selected_priority_fee_micro_lamports: Option<u64>,
     selected_helius_tip_lamports: Option<u64>,
     source_position_bucket: &'static str,
     fee_reason: &'static str,
     fee_cap_hit: bool,
+    account_priority_fee_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_priority_fee_micro_lamports: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_priority_fee_age_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_priority_fee_sample_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_priority_fee_account_count: Option<usize>,
+    #[serde(skip_serializing_if = "is_false")]
+    account_priority_fee_applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_priority_fee_reason: Option<&'static str>,
     auto_sell_attempted: bool,
     auto_sell_signed: bool,
     auto_sell_simulated: bool,
@@ -639,6 +715,12 @@ pub(crate) struct TransactionConfirmationLine {
     same_slot_tx_delta: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tx_delta: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compute_units_consumed: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost_units: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transaction_meta_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     block_position_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -954,6 +1036,8 @@ enum SendEndpointKind {
     Rpc,
     Jito,
     HeliusSender,
+    NozomiJsonRpc,
+    BloxrouteSubmit,
     TpuJet,
     TpuQuic,
 }
@@ -1011,6 +1095,7 @@ impl CopyExecutor {
         blockhash_cache: Option<BlockhashCache>,
         address_lookup_tables: AddressLookupTableCache,
         wallet_balance_cache: Option<WalletBalanceCache>,
+        account_priority_fee_cache: Option<PriorityFeeCache>,
         snapshot_keypair_paths: Vec<(Pubkey, PathBuf)>,
     ) -> Result<Self> {
         let execution_options = CopyExecutionOptions {
@@ -1043,6 +1128,23 @@ impl CopyExecutor {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToString::to_string),
+            helius_sender_tip_accounts: normalized_tip_accounts(
+                &options.helius_sender_tip_accounts,
+                options.helius_sender_tip_account.as_deref(),
+            ),
+            nozomi_enabled: options.nozomi_enabled,
+            nozomi_urls: normalized_send_rpc_urls(&options.nozomi_urls, None),
+            nozomi_tip_lamports: positive_u64(options.nozomi_tip_lamports),
+            nozomi_tip_account: options
+                .nozomi_tip_account
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            nozomi_tip_accounts: normalized_tip_accounts(
+                &options.nozomi_tip_accounts,
+                options.nozomi_tip_account.as_deref(),
+            ),
             tpu_jet_enabled: options.tpu_jet_enabled,
             tpu_jet_rpc_url: options
                 .tpu_jet_rpc_url
@@ -1099,6 +1201,10 @@ impl CopyExecutor {
                 }),
             max_copy_sol: options.max_copy_sol,
             max_total_copy_spend_sol: options.max_total_copy_spend_sol,
+            max_provider_tip_lamports: options.max_provider_tip_lamports,
+            max_signed_tx_bytes: options.max_signed_tx_bytes,
+            max_instruction_count: options.max_instruction_count,
+            max_writable_account_count: options.max_writable_account_count,
             migrated_amm_min_copy_sol: options.migrated_amm_min_copy_sol,
             migrated_amm_small_copy_mode: options.migrated_amm_small_copy_mode,
             copy_wallet: options.copy_wallet.clone(),
@@ -1144,6 +1250,10 @@ impl CopyExecutor {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToString::to_string),
+            jito_tip_accounts: normalized_tip_accounts(
+                &options.jito_tip_accounts,
+                options.jito_tip_account.as_deref(),
+            ),
             sell_priority_fee_micro_lamports: configured_u64(
                 options.sell_priority_fee_micro_lamports,
             )
@@ -1167,9 +1277,13 @@ impl CopyExecutor {
             warm_send_endpoints: options.warm_send_endpoints,
             send_endpoint_warm_interval_ms: options.send_endpoint_warm_interval_ms,
             copy_wallet_balance_guard: options.copy_wallet_balance_guard,
+            account_priority_fee_enabled: options.account_priority_fee_enabled,
         };
         execution_options
             .validate_helius_sender()
+            .map_err(anyhow::Error::msg)?;
+        execution_options
+            .validate_nozomi_sender()
             .map_err(anyhow::Error::msg)?;
         execution_options
             .validate_tpu_quic_sender()
@@ -1205,6 +1319,7 @@ impl CopyExecutor {
             blockhash_cache,
             address_lookup_tables,
             wallet_balance_cache,
+            account_priority_fee_cache,
             pda_cache: CopyPdaCache::default(),
             direct_pump_sell_contexts: Mutex::new(DirectPumpSellContextCache::new(
                 DIRECT_PUMP_SELL_CONTEXT_CACHE_CAPACITY,
@@ -1389,7 +1504,7 @@ impl CopyExecutor {
         timings: SignalTimings,
         copy_wallet_override: Option<Pubkey>,
     ) -> CopyExecutionLine {
-        let fee_profile = self.options.select_fee_profile(timings);
+        let fee_profile = self.options.select_fee_profile(timings, request.signature);
         let mut line = CopyExecutionLine::new(request, &self.options, timings, &fee_profile);
         if let Some(copy_wallet) = copy_wallet_override.as_ref() {
             line.copy_wallet = Some(copy_wallet.to_string());
@@ -1414,7 +1529,7 @@ impl CopyExecutor {
         send_lane_attribution_tx: Option<mpsc::UnboundedSender<CopyExecutionOutput>>,
     ) -> CopyExecutionLine {
         let executor_started_at = Instant::now();
-        let fee_profile = self.options.select_fee_profile(timings);
+        let mut fee_profile = self.options.select_fee_profile(timings, request.signature);
         let mut line = CopyExecutionLine::new(request, &self.options, timings, &fee_profile);
         if let Some(copy_wallet) = copy_wallet_override.as_ref() {
             line.copy_wallet = Some(copy_wallet.to_string());
@@ -1525,10 +1640,15 @@ impl CopyExecutor {
         ) else {
             skip_guard!("missing warm blockhash");
         };
+        line.blockhash_source_rpc = Some(cached_blockhash.source_rpc.clone());
+        line.blockhash_commitment = Some(cached_blockhash.commitment.clone());
+        line.blockhash_context_slot = cached_blockhash.context_slot;
+        line.blockhash_age_ms = Some(now_ms().saturating_sub(cached_blockhash.fetched_at_ms));
+        line.blockhash_selection_strategy = Some(cached_blockhash.selection_strategy);
 
         let prebuild_guards_us = guards_started_at.elapsed().as_micros();
         let unsigned_build_started_at = Instant::now();
-        let build =
+        let mut build =
             match build_full_copy_unsigned_flashx_pump_with_fees_and_cache_and_spend_for_mint(
                 request.route_context.as_deref(),
                 copy_wallet,
@@ -1544,13 +1664,64 @@ impl CopyExecutor {
                     return line.skip(tx_build_error_reason(error));
                 }
             };
+        let mut writable_account_keys = writable_accounts(&build.instructions);
+        if let Some(cache) = &self.account_priority_fee_cache {
+            let lookup = cache.observe_writable_accounts(&writable_account_keys);
+            let account_priority_fee = lookup.priority_fee_micro_lamports;
+            line.record_account_priority_fee_lookup(lookup);
+            if let Some(account_priority_fee) = account_priority_fee {
+                if let Some(next_fee_profile) = self.options.account_priority_fee_profile(
+                    &fee_profile,
+                    account_priority_fee,
+                    request.signature,
+                ) {
+                    build = match build_full_copy_unsigned_flashx_pump_with_fees_and_cache_and_spend_for_mint(
+                        request.route_context.as_deref(),
+                        copy_wallet,
+                        &request.mint,
+                        &next_fee_profile.tx_fee_config,
+                        Some(&self.pda_cache),
+                        Some(effective_copy_spend_lamports),
+                    ) {
+                        Ok(build) => build,
+                        Err(error) => {
+                            line.record_unsigned_build_us(unsigned_build_started_at);
+                            line.record_guards_us(prebuild_guards_us);
+                            return line.skip(tx_build_error_reason(error));
+                        }
+                    };
+                    fee_profile = next_fee_profile;
+                    line.account_priority_fee_applied = true;
+                    line.account_priority_fee_reason = Some("applied");
+                    line.apply_fee_profile(&fee_profile);
+                    writable_account_keys = writable_accounts(&build.instructions);
+                }
+            }
+        }
         line.record_unsigned_build_us(unsigned_build_started_at);
         line.route_layout = Some(build.route_layout);
         line.instruction_count = build.instructions.len();
+        line.writable_account_count = Some(writable_account_keys.len());
+        line.compute_unit_limit = compute_unit_limit_from_instructions(&build.instructions);
         line.copy_wallet_token_account = Some(build.copy_wallet_token_account.to_string());
         line.mark_built();
 
         let postbuild_guards_started_at = Instant::now();
+        if let Some(reason) = provider_tip_guard_reason(&self.options, &fee_profile.tx_fee_config)
+        {
+            line.record_guards_us(
+                prebuild_guards_us + postbuild_guards_started_at.elapsed().as_micros(),
+            );
+            return line.skip(reason);
+        }
+        if let Some(reason) =
+            transaction_shape_guard_reason(&self.options, build.instructions.len(), writable_account_keys.len())
+        {
+            line.record_guards_us(
+                prebuild_guards_us + postbuild_guards_started_at.elapsed().as_micros(),
+            );
+            return line.skip(reason);
+        }
         let estimated_total_spend_lamports =
             match estimate_total_copy_spend_lamports(&build, request.route_context.as_deref()) {
                 Ok(lamports) => lamports,
@@ -1635,6 +1806,10 @@ impl CopyExecutor {
         let wire_tx = Arc::<[u8]>::from(tx_bytes.into_boxed_slice());
         line.record_serialize_us(serialize_started_at);
         line.signed_tx_bytes = Some(signed_tx_bytes);
+
+        if let Some(reason) = signed_tx_bytes_guard_reason(&self.options, signed_tx_bytes) {
+            return line.skip(reason);
+        }
 
         line.signed = true;
         line.mark_signed();
@@ -2543,6 +2718,9 @@ impl CopyExecutor {
                 slot: None,
                 block_position: None,
                 block_position_error: None,
+                compute_units_consumed: None,
+                cost_units: None,
+                transaction_meta_error: None,
                 confirmation_status: None,
                 err: None,
                 reason: Some(format!("missing {transaction_label} signature")),
@@ -2557,6 +2735,9 @@ impl CopyExecutor {
                 slot: None,
                 block_position: None,
                 block_position_error: None,
+                compute_units_consumed: None,
+                cost_units: None,
+                transaction_meta_error: None,
                 confirmation_status: None,
                 err: None,
                 reason: Some("missing JITO_STATE_RPC_URLS or SOLANA_RPC_URL".to_string()),
@@ -2623,6 +2804,8 @@ impl CopyExecutor {
                                         observed_signature,
                                     )
                                     .await;
+                                let (transaction_meta, transaction_meta_error) =
+                                    self.fetch_transaction_meta(rpc_url, signature).await;
                                 return SignatureConfirmation {
                                     checked: true,
                                     status: "failed",
@@ -2630,6 +2813,13 @@ impl CopyExecutor {
                                     slot: status.slot,
                                     block_position,
                                     block_position_error,
+                                    compute_units_consumed: transaction_meta
+                                        .as_ref()
+                                        .and_then(|meta| meta.compute_units_consumed),
+                                    cost_units: transaction_meta
+                                        .as_ref()
+                                        .and_then(|meta| meta.cost_units),
+                                    transaction_meta_error,
                                     confirmation_status: status.confirmation_status,
                                     err: Some(error.clone()),
                                     reason: Some(format!(
@@ -2649,6 +2839,8 @@ impl CopyExecutor {
                                         observed_signature,
                                     )
                                     .await;
+                                let (transaction_meta, transaction_meta_error) =
+                                    self.fetch_transaction_meta(rpc_url, signature).await;
                                 return SignatureConfirmation {
                                     checked: true,
                                     status: "landed",
@@ -2656,6 +2848,13 @@ impl CopyExecutor {
                                     slot: status.slot,
                                     block_position,
                                     block_position_error,
+                                    compute_units_consumed: transaction_meta
+                                        .as_ref()
+                                        .and_then(|meta| meta.compute_units_consumed),
+                                    cost_units: transaction_meta
+                                        .as_ref()
+                                        .and_then(|meta| meta.cost_units),
+                                    transaction_meta_error,
                                     confirmation_status: status.confirmation_status,
                                     err: None,
                                     reason: None,
@@ -2678,6 +2877,9 @@ impl CopyExecutor {
                         slot: None,
                         block_position: None,
                         block_position_error: None,
+                        compute_units_consumed: None,
+                        cost_units: None,
+                        transaction_meta_error: None,
                         confirmation_status: None,
                         err: None,
                         reason: Some(error),
@@ -2693,6 +2895,9 @@ impl CopyExecutor {
                     slot: None,
                     block_position: None,
                     block_position_error: None,
+                    compute_units_consumed: None,
+                    cost_units: None,
+                    transaction_meta_error: None,
                     confirmation_status: None,
                     err: None,
                     reason: Some(format!(
@@ -2794,6 +2999,80 @@ impl CopyExecutor {
                 landed_tx_index,
                 observed_tx_index,
                 txs_after_observed,
+            }),
+            None,
+        )
+    }
+
+    async fn fetch_transaction_meta(
+        &self,
+        rpc_url: &str,
+        signature: &str,
+    ) -> (Option<TransactionMetaTelemetry>, Option<String>) {
+        let request = async {
+            self.client
+                .post(rpc_url)
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": format!("transaction-meta-{signature}"),
+                    "method": "getTransaction",
+                    "params": [
+                        signature,
+                        {
+                            "encoding": "json",
+                            "commitment": "confirmed",
+                            "maxSupportedTransactionVersion": 0
+                        }
+                    ]
+                }))
+                .send()
+                .await
+                .map_err(|error| format!("send getTransaction request: {error}"))?
+                .error_for_status()
+                .map_err(|error| format!("getTransaction HTTP status: {error}"))?
+                .json::<RpcResponse<Option<TransactionMetaResult>>>()
+                .await
+                .map_err(|error| format!("decode getTransaction response: {error}"))
+        };
+
+        let response = if self.options.send_http_timeout_ms > 0 {
+            match tokio::time::timeout(
+                Duration::from_millis(self.options.send_http_timeout_ms),
+                request,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(format!(
+                    "getTransaction timed out after {}ms",
+                    self.options.send_http_timeout_ms
+                )),
+            }
+        } else {
+            request.await
+        };
+
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => return (None, Some(error)),
+        };
+        if let Some(error) = response.error {
+            return (
+                None,
+                Some(format!("getTransaction RPC error: {}", error.message)),
+            );
+        }
+        let Some(Some(result)) = response.result else {
+            return (None, Some("getTransaction result missing".to_string()));
+        };
+        let Some(meta) = result.meta else {
+            return (None, Some("getTransaction meta missing".to_string()));
+        };
+
+        (
+            Some(TransactionMetaTelemetry {
+                compute_units_consumed: meta.compute_units_consumed,
+                cost_units: meta.cost_units,
             }),
             None,
         )
@@ -2910,6 +3189,10 @@ impl CopyExecutor {
                 && self.options.send_lane_mode.uses_helius_sender_tip())
             .then(|| self.options.sell_helius_sender_tip_account.clone())
             .flatten(),
+            nozomi_tip_lamports: None,
+            nozomi_tip_account: None,
+            bloxroute_tip_lamports: None,
+            bloxroute_tip_account: None,
         }
     }
 }
@@ -3632,6 +3915,78 @@ fn has_idempotent_associated_token_account_setup(
     })
 }
 
+fn selected_tip_account(fee_config: &TxFeeConfig) -> Option<String> {
+    fee_config
+        .helius_sender_tip_account
+        .clone()
+        .or_else(|| fee_config.jito_tip_account.clone())
+        .or_else(|| fee_config.nozomi_tip_account.clone())
+        .or_else(|| fee_config.bloxroute_tip_account.clone())
+}
+
+fn selected_tip_accounts(fee_config: &TxFeeConfig) -> Vec<String> {
+    let mut accounts = Vec::new();
+    for account in [
+        fee_config.jito_tip_account.as_ref(),
+        fee_config.helius_sender_tip_account.as_ref(),
+        fee_config.nozomi_tip_account.as_ref(),
+        fee_config.bloxroute_tip_account.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !account.trim().is_empty() && !accounts.contains(account) {
+            accounts.push(account.clone());
+        }
+    }
+    accounts
+}
+
+fn provider_stack_name(fee_config: &TxFeeConfig) -> Option<String> {
+    let mut providers = Vec::new();
+    if fee_config.jito_tip_lamports.unwrap_or(0) > 0 {
+        providers.push("jito");
+    }
+    if fee_config.helius_sender_tip_lamports.unwrap_or(0) > 0 {
+        providers.push("helius");
+    }
+    if fee_config.nozomi_tip_lamports.unwrap_or(0) > 0 {
+        providers.push("nozomi");
+    }
+    if fee_config.bloxroute_tip_lamports.unwrap_or(0) > 0 {
+        providers.push("bloxroute");
+    }
+    if providers.is_empty() {
+        None
+    } else {
+        Some(providers.join("+"))
+    }
+}
+
+fn writable_accounts(instructions: &[solana_instruction::Instruction]) -> Vec<Pubkey> {
+    instructions
+        .iter()
+        .flat_map(|instruction| instruction.accounts.iter())
+        .filter(|account| account.is_writable)
+        .map(|account| account.pubkey)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn compute_unit_limit_from_instructions(
+    instructions: &[solana_instruction::Instruction],
+) -> Option<u32> {
+    instructions
+        .iter()
+        .filter(|instruction| instruction.program_id == *compute_budget_program_id())
+        .filter_map(|instruction| match instruction.data.first().copied() {
+            Some(2) => read_u32_le(&instruction.data, 1),
+            _ => None,
+        })
+        .last()
+}
+
 fn read_u32_le(data: &[u8], offset: usize) -> Option<u32> {
     data.get(offset..offset + 4)
         .and_then(|bytes| bytes.try_into().ok())
@@ -3667,6 +4022,70 @@ fn total_copy_spend_guard_reason(
             )))
         }
         _ => Ok(None),
+    }
+}
+
+fn provider_tip_lamports(fee_config: &TxFeeConfig) -> u64 {
+    fee_config
+        .jito_tip_lamports
+        .unwrap_or(0)
+        .saturating_add(fee_config.helius_sender_tip_lamports.unwrap_or(0))
+        .saturating_add(fee_config.nozomi_tip_lamports.unwrap_or(0))
+        .saturating_add(fee_config.bloxroute_tip_lamports.unwrap_or(0))
+}
+
+fn provider_tip_guard_reason(
+    options: &CopyExecutionOptions,
+    fee_config: &TxFeeConfig,
+) -> Option<String> {
+    let max_provider_tip_lamports = options.max_provider_tip_lamports?;
+    let provider_tip_lamports = provider_tip_lamports(fee_config);
+    if provider_tip_lamports > max_provider_tip_lamports {
+        Some(format!(
+            "provider tips {} lamports exceed max provider tips {} lamports",
+            provider_tip_lamports, max_provider_tip_lamports
+        ))
+    } else {
+        None
+    }
+}
+
+fn transaction_shape_guard_reason(
+    options: &CopyExecutionOptions,
+    instruction_count: usize,
+    writable_account_count: usize,
+) -> Option<String> {
+    if let Some(max_instruction_count) = options.max_instruction_count {
+        if instruction_count > max_instruction_count {
+            return Some(format!(
+                "instruction count {} exceeds max instruction count {}",
+                instruction_count, max_instruction_count
+            ));
+        }
+    }
+    if let Some(max_writable_account_count) = options.max_writable_account_count {
+        if writable_account_count > max_writable_account_count {
+            return Some(format!(
+                "writable account count {} exceeds max writable account count {}",
+                writable_account_count, max_writable_account_count
+            ));
+        }
+    }
+    None
+}
+
+fn signed_tx_bytes_guard_reason(
+    options: &CopyExecutionOptions,
+    signed_tx_bytes: usize,
+) -> Option<String> {
+    let max_signed_tx_bytes = options.max_signed_tx_bytes?;
+    if signed_tx_bytes > max_signed_tx_bytes {
+        Some(format!(
+            "signed transaction bytes {} exceeds max signed transaction bytes {}",
+            signed_tx_bytes, max_signed_tx_bytes
+        ))
+    } else {
+        None
     }
 }
 
@@ -3800,8 +4219,15 @@ impl CopyExecutionLine {
             tx_version: None,
             instruction_count: 0,
             signed_tx_bytes: None,
+            writable_account_count: None,
+            compute_unit_limit: None,
             copy_signature: None,
             blockhash: None,
+            blockhash_source_rpc: None,
+            blockhash_commitment: None,
+            blockhash_context_slot: None,
+            blockhash_age_ms: None,
+            blockhash_selection_strategy: None,
             simulation_error: None,
             simulation_units_consumed: None,
             simulation_logs: Vec::new(),
@@ -3823,12 +4249,29 @@ impl CopyExecutionLine {
             jito_tip_account: fee_profile.tx_fee_config.jito_tip_account.clone(),
             helius_sender_tip_lamports: fee_profile.tx_fee_config.helius_sender_tip_lamports,
             helius_sender_tip_account: fee_profile.tx_fee_config.helius_sender_tip_account.clone(),
+            nozomi_tip_lamports: fee_profile.tx_fee_config.nozomi_tip_lamports,
+            nozomi_tip_account: fee_profile.tx_fee_config.nozomi_tip_account.clone(),
+            bloxroute_tip_lamports: fee_profile.tx_fee_config.bloxroute_tip_lamports,
+            bloxroute_tip_account: fee_profile.tx_fee_config.bloxroute_tip_account.clone(),
+            provider_stack_name: provider_stack_name(&fee_profile.tx_fee_config),
+            selected_tip_accounts: selected_tip_accounts(&fee_profile.tx_fee_config),
+            selected_tip_account: selected_tip_account(&fee_profile.tx_fee_config),
+            source_compute_unit_limit: request.source_compute_unit_limit,
+            source_compute_unit_price_micro_lamports: request
+                .source_compute_unit_price_micro_lamports,
             fee_profile_name: fee_profile.name,
             selected_priority_fee_micro_lamports: fee_profile.priority_fee_micro_lamports,
             selected_helius_tip_lamports: fee_profile.helius_sender_tip_lamports,
             source_position_bucket: fee_profile.source_position_bucket.as_str(),
             fee_reason: fee_profile.reason,
             fee_cap_hit: fee_profile.cap_hit,
+            account_priority_fee_enabled: options.account_priority_fee_enabled,
+            account_priority_fee_micro_lamports: None,
+            account_priority_fee_age_ms: None,
+            account_priority_fee_sample_count: None,
+            account_priority_fee_account_count: None,
+            account_priority_fee_applied: false,
+            account_priority_fee_reason: None,
             auto_sell_attempted: false,
             auto_sell_signed: false,
             auto_sell_simulated: false,
@@ -3851,6 +4294,43 @@ impl CopyExecutionLine {
             auto_sell_simulation_units_consumed: None,
             auto_sell_simulation_logs: Vec::new(),
         }
+    }
+
+    fn apply_fee_profile(&mut self, fee_profile: &FeeProfile) {
+        self.priority_fee_micro_lamports =
+            fee_profile.tx_fee_config.compute_unit_price_micro_lamports;
+        self.jito_tip_lamports = fee_profile.tx_fee_config.jito_tip_lamports;
+        self.jito_tip_account = fee_profile.tx_fee_config.jito_tip_account.clone();
+        self.helius_sender_tip_lamports = fee_profile.tx_fee_config.helius_sender_tip_lamports;
+        self.helius_sender_tip_account =
+            fee_profile.tx_fee_config.helius_sender_tip_account.clone();
+        self.nozomi_tip_lamports = fee_profile.tx_fee_config.nozomi_tip_lamports;
+        self.nozomi_tip_account = fee_profile.tx_fee_config.nozomi_tip_account.clone();
+        self.bloxroute_tip_lamports = fee_profile.tx_fee_config.bloxroute_tip_lamports;
+        self.bloxroute_tip_account = fee_profile.tx_fee_config.bloxroute_tip_account.clone();
+        self.provider_stack_name = provider_stack_name(&fee_profile.tx_fee_config);
+        self.selected_tip_accounts = selected_tip_accounts(&fee_profile.tx_fee_config);
+        self.selected_tip_account = selected_tip_account(&fee_profile.tx_fee_config);
+        self.fee_profile_name = fee_profile.name;
+        self.selected_priority_fee_micro_lamports = fee_profile.priority_fee_micro_lamports;
+        self.selected_helius_tip_lamports = fee_profile.helius_sender_tip_lamports;
+        self.source_position_bucket = fee_profile.source_position_bucket.as_str();
+        self.fee_reason = fee_profile.reason;
+        self.fee_cap_hit = fee_profile.cap_hit;
+    }
+
+    fn record_account_priority_fee_lookup(&mut self, lookup: PriorityFeeLookup) {
+        self.account_priority_fee_account_count = Some(lookup.account_count);
+        self.account_priority_fee_micro_lamports = lookup.priority_fee_micro_lamports;
+        self.account_priority_fee_age_ms = lookup.age_ms;
+        self.account_priority_fee_sample_count = lookup.sample_count;
+        self.account_priority_fee_reason = Some(if lookup.priority_fee_micro_lamports.is_some() {
+            "cache_hit"
+        } else if lookup.fetched_at_ms.is_some() {
+            "cache_stale"
+        } else {
+            "cache_miss"
+        });
     }
 
     fn skip(mut self, reason: impl Into<String>) -> Self {
@@ -4080,6 +4560,9 @@ impl TransactionConfirmationLine {
                 slot: self.confirmation_slot,
                 block_position: Some(block_position),
                 block_position_error: block_position_error.clone(),
+                compute_units_consumed: self.compute_units_consumed,
+                cost_units: self.cost_units,
+                transaction_meta_error: self.transaction_meta_error.clone(),
                 confirmation_status: self.confirmation_status.clone(),
                 err: self.err.clone(),
                 reason: self.reason.clone(),
@@ -4143,6 +4626,9 @@ impl TransactionConfirmationLine {
                 .and_then(|position| position.txs_after_observed),
             same_slot_tx_delta: same_slot_tx_delta(line.slot, confirmation.slot, &confirmation),
             tx_delta: same_slot_tx_delta(line.slot, confirmation.slot, &confirmation),
+            compute_units_consumed: confirmation.compute_units_consumed,
+            cost_units: confirmation.cost_units,
+            transaction_meta_error: confirmation.transaction_meta_error,
             block_position_error: confirmation.block_position_error,
             confirmation_status: confirmation.confirmation_status,
             err: confirmation.err,
@@ -4207,6 +4693,9 @@ impl TransactionConfirmationLine {
                 .and_then(|position| position.txs_after_observed),
             same_slot_tx_delta: same_slot_tx_delta(line.slot, confirmation.slot, &confirmation),
             tx_delta: same_slot_tx_delta(line.slot, confirmation.slot, &confirmation),
+            compute_units_consumed: confirmation.compute_units_consumed,
+            cost_units: confirmation.cost_units,
+            transaction_meta_error: confirmation.transaction_meta_error,
             block_position_error: confirmation.block_position_error,
             confirmation_status: confirmation.confirmation_status,
             err: confirmation.err,
@@ -4275,6 +4764,9 @@ impl TransactionConfirmationLine {
                 .and_then(|position| position.txs_after_observed),
             same_slot_tx_delta: same_slot_tx_delta(line.slot, confirmation.slot, &confirmation),
             tx_delta: same_slot_tx_delta(line.slot, confirmation.slot, &confirmation),
+            compute_units_consumed: confirmation.compute_units_consumed,
+            cost_units: confirmation.cost_units,
+            transaction_meta_error: confirmation.transaction_meta_error,
             block_position_error: confirmation.block_position_error,
             confirmation_status: confirmation.confirmation_status,
             err: confirmation.err,
@@ -4439,7 +4931,7 @@ impl CopyExecutionOptions {
             .map(Option::flatten)
     }
 
-    fn tx_fee_config(&self) -> TxFeeConfig {
+    fn tx_fee_config(&self, signature: [u8; 64]) -> TxFeeConfig {
         TxFeeConfig {
             compute_unit_price_micro_lamports: self.priority_fee_micro_lamports,
             jito_tip_lamports: self
@@ -4450,7 +4942,10 @@ impl CopyExecutionOptions {
             jito_tip_account: self
                 .send_lane_mode
                 .uses_jito_tip()
-                .then(|| self.jito_tip_account.clone())
+                .then(|| {
+                    select_tip_account(&self.jito_tip_accounts, signature, 0)
+                        .or_else(|| self.jito_tip_account.clone())
+                })
                 .flatten(),
             helius_sender_tip_lamports: (self.helius_sender_enabled
                 && self.send_lane_mode.uses_helius_sender_tip())
@@ -4458,22 +4953,86 @@ impl CopyExecutionOptions {
             .flatten(),
             helius_sender_tip_account: (self.helius_sender_enabled
                 && self.send_lane_mode.uses_helius_sender_tip())
-            .then(|| self.helius_sender_tip_account.clone())
+            .then(|| {
+                select_tip_account(&self.helius_sender_tip_accounts, signature, 1)
+                    .or_else(|| self.helius_sender_tip_account.clone())
+            })
             .flatten(),
+            nozomi_tip_lamports: (self.nozomi_enabled && self.send_lane_mode.uses_nozomi_tip())
+                .then_some(self.nozomi_tip_lamports)
+                .flatten(),
+            nozomi_tip_account: (self.nozomi_enabled && self.send_lane_mode.uses_nozomi_tip())
+                .then(|| {
+                    select_tip_account(&self.nozomi_tip_accounts, signature, 2)
+                        .or_else(|| self.nozomi_tip_account.clone())
+                })
+                .flatten(),
+            bloxroute_tip_lamports: None,
+            bloxroute_tip_account: None,
         }
     }
 
     fn tx_fee_config_with_priority_fee(
         &self,
         priority_fee_micro_lamports: Option<u64>,
+        signature: [u8; 64],
     ) -> TxFeeConfig {
         TxFeeConfig {
             compute_unit_price_micro_lamports: priority_fee_micro_lamports,
-            ..self.tx_fee_config()
+            ..self.tx_fee_config(signature)
         }
     }
 
-    fn select_fee_profile(&self, timings: SignalTimings) -> FeeProfile {
+    fn max_priority_fee_micro_lamports(&self) -> Option<u64> {
+        let baseline_priority_fee = self
+            .dynamic_priority_fee_baseline_micro_lamports
+            .or(self.priority_fee_micro_lamports);
+        let aggressive_priority_fee = self
+            .dynamic_priority_fee_aggressive_micro_lamports
+            .or_else(|| baseline_priority_fee.and_then(|value| value.checked_mul(2)))
+            .or(baseline_priority_fee);
+        self.dynamic_priority_fee_max_micro_lamports
+            .or(self.dynamic_priority_fee_panic_micro_lamports)
+            .or(aggressive_priority_fee)
+            .or(baseline_priority_fee)
+    }
+
+    fn account_priority_fee_profile(
+        &self,
+        current: &FeeProfile,
+        account_priority_fee_micro_lamports: u64,
+        signature: [u8; 64],
+    ) -> Option<FeeProfile> {
+        let current_priority_fee = current.priority_fee_micro_lamports.unwrap_or(0);
+        if account_priority_fee_micro_lamports <= current_priority_fee {
+            return None;
+        }
+
+        let max_priority_fee = self.max_priority_fee_micro_lamports();
+        let capped_priority_fee = match max_priority_fee {
+            Some(maximum) if account_priority_fee_micro_lamports > maximum => maximum,
+            _ => account_priority_fee_micro_lamports,
+        };
+        if capped_priority_fee <= current_priority_fee {
+            return None;
+        }
+
+        let tx_fee_config =
+            self.tx_fee_config_with_priority_fee(Some(capped_priority_fee), signature);
+        Some(FeeProfile {
+            name: "account_aware",
+            priority_fee_micro_lamports: tx_fee_config.compute_unit_price_micro_lamports,
+            helius_sender_tip_lamports: tx_fee_config.helius_sender_tip_lamports,
+            reason: "writable_account_priority_fee_cache",
+            cap_hit: max_priority_fee
+                .map(|maximum| account_priority_fee_micro_lamports > maximum)
+                .unwrap_or(false),
+            source_position_bucket: current.source_position_bucket,
+            tx_fee_config,
+        })
+    }
+
+    fn select_fee_profile(&self, timings: SignalTimings, signature: [u8; 64]) -> FeeProfile {
         let source_position_bucket = SourcePositionBucket::from_timings(timings);
         let baseline_priority_fee = self
             .dynamic_priority_fee_baseline_micro_lamports
@@ -4514,7 +5073,7 @@ impl CopyExecutionOptions {
             _ => requested_priority_fee,
         };
         let cap_hit = capped_priority_fee != requested_priority_fee;
-        let tx_fee_config = self.tx_fee_config_with_priority_fee(capped_priority_fee);
+        let tx_fee_config = self.tx_fee_config_with_priority_fee(capped_priority_fee, signature);
 
         FeeProfile {
             name,
@@ -4548,6 +5107,10 @@ impl CopyExecutionOptions {
                 && self.send_lane_mode.uses_helius_sender_tip())
             .then(|| self.sell_helius_sender_tip_account.clone())
             .flatten(),
+            nozomi_tip_lamports: None,
+            nozomi_tip_account: None,
+            bloxroute_tip_lamports: None,
+            bloxroute_tip_account: None,
         }
     }
 
@@ -4596,6 +5159,41 @@ impl CopyExecutionOptions {
         };
         Pubkey::from_str(tip_account)
             .map_err(|_| "JITO_HELIUS_SENDER_TIP_ACCOUNT must be a valid pubkey".to_string())?;
+        Ok(())
+    }
+
+    fn validate_nozomi_sender(&self) -> std::result::Result<(), String> {
+        if !self.nozomi_enabled {
+            return Ok(());
+        }
+        if !self.send_fanout && self.send_lane_mode != SendLaneMode::NozomiOnly {
+            return Err(
+                "JITO_NOZOMI_ENABLED requires JITO_SEND_FANOUT=YES unless nozomi_only"
+                    .to_string(),
+            );
+        }
+        if !self.fast_copy_send {
+            return Err("JITO_NOZOMI_ENABLED requires JITO_FAST_COPY_SEND=YES".to_string());
+        }
+        if self.nozomi_urls.is_empty() {
+            return Err("JITO_NOZOMI_ENABLED requires JITO_NOZOMI_URLS".to_string());
+        }
+        if self.priority_fee_micro_lamports.unwrap_or(0) == 0 {
+            return Err(
+                "JITO_NOZOMI_ENABLED requires JITO_PRIORITY_FEE_MICRO_LAMPORTS".to_string(),
+            );
+        }
+        let Some(tip_lamports) = self.nozomi_tip_lamports else {
+            return Err("JITO_NOZOMI_ENABLED requires JITO_NOZOMI_TIP_LAMPORTS".to_string());
+        };
+        if tip_lamports < 1_000_000 {
+            return Err("JITO_NOZOMI_TIP_LAMPORTS must be >= 1000000 lamports".to_string());
+        }
+        let Some(tip_account) = self.nozomi_tip_account.as_deref() else {
+            return Err("JITO_NOZOMI_ENABLED requires JITO_NOZOMI_TIP_ACCOUNT".to_string());
+        };
+        Pubkey::from_str(tip_account)
+            .map_err(|_| "JITO_NOZOMI_TIP_ACCOUNT must be a valid pubkey".to_string())?;
         Ok(())
     }
 
@@ -4700,6 +5298,36 @@ impl CopyExecutionOptions {
                 if !self.helius_sender_enabled {
                     return Err(
                         "JITO_SEND_LANE_MODE=helius_sender_only requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::NozomiOnly => {
+                if !self.nozomi_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=nozomi_only requires JITO_NOZOMI_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::HeliusNozomiStack => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_stack requires JITO_SEND_FANOUT=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.nozomi_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_stack requires JITO_NOZOMI_ENABLED=YES"
                             .to_string(),
                     );
                 }
@@ -4967,6 +5595,19 @@ impl CopyExecutionOptions {
                         }),
                 );
             }
+            if self.nozomi_enabled && self.send_lane_mode.uses_nozomi_lanes() {
+                endpoints.extend(self.nozomi_urls.iter().enumerate().map(|(index, url)| {
+                    SendEndpoint {
+                        label: format!("nozomi-{}:{}", index + 1, rpc_url_label(url)),
+                        url: url.clone(),
+                        kind: SendEndpointKind::NozomiJsonRpc,
+                        auth_uuid: None,
+                        sender_mode: None,
+                        fanout_slots: None,
+                        timeout_ms: None,
+                    }
+                }));
+            }
             if self.tpu_jet_enabled && self.send_lane_mode.uses_tpu_jet_lanes() {
                 endpoints.push(SendEndpoint {
                     label: "tpu-jet".to_string(),
@@ -5009,6 +5650,18 @@ impl CopyExecutionOptions {
                 fanout_slots: Some(self.tpu_quic_fanout_slots),
                 timeout_ms: Some(self.tpu_quic_timeout_ms),
             });
+        } else if self.nozomi_enabled && self.send_lane_mode == SendLaneMode::NozomiOnly {
+            endpoints.extend(self.nozomi_urls.iter().enumerate().map(|(index, url)| {
+                SendEndpoint {
+                    label: format!("nozomi-{}:{}", index + 1, rpc_url_label(url)),
+                    url: url.clone(),
+                    kind: SendEndpointKind::NozomiJsonRpc,
+                    auth_uuid: None,
+                    sender_mode: None,
+                    fanout_slots: None,
+                    timeout_ms: None,
+                }
+            }));
         }
 
         endpoints
@@ -5037,6 +5690,41 @@ fn positive_u64(value: Option<u64>) -> Option<u64> {
 
 fn configured_u64(value: Option<u64>) -> Option<u64> {
     value
+}
+
+fn normalized_tip_accounts(configured: &[String], fallback: Option<&str>) -> Vec<String> {
+    let mut accounts = Vec::new();
+    for value in configured {
+        for part in value.split(',') {
+            let trimmed = part.trim();
+            if !trimmed.is_empty() && !accounts.iter().any(|account| account == trimmed) {
+                accounts.push(trimmed.to_string());
+            }
+        }
+    }
+
+    if accounts.is_empty() {
+        if let Some(fallback) = fallback.map(str::trim).filter(|value| !value.is_empty()) {
+            accounts.push(fallback.to_string());
+        }
+    }
+
+    accounts
+}
+
+fn select_tip_account(accounts: &[String], signature: [u8; 64], salt: usize) -> Option<String> {
+    if accounts.is_empty() {
+        return None;
+    }
+    let seed = signature
+        .iter()
+        .enumerate()
+        .fold(salt, |acc, (index, byte)| {
+            acc.wrapping_mul(31)
+                .wrapping_add(index)
+                .wrapping_add(usize::from(*byte))
+        });
+    accounts.get(seed % accounts.len()).cloned()
 }
 
 fn normalized_send_rpc_urls(configured: &[String], fallback: Option<&str>) -> Vec<String> {
@@ -5148,6 +5836,8 @@ fn send_endpoint_kind(endpoint: &SendEndpoint) -> &'static str {
         SendEndpointKind::Rpc => "rpc",
         SendEndpointKind::Jito => "jito",
         SendEndpointKind::HeliusSender => "helius_sender",
+        SendEndpointKind::NozomiJsonRpc => "nozomi_json_rpc",
+        SendEndpointKind::BloxrouteSubmit => "bloxroute_submit",
         SendEndpointKind::TpuJet => "tpu_jet",
         SendEndpointKind::TpuQuic => "tpu_quic",
     }
@@ -5264,6 +5954,28 @@ async fn send_transaction_attempt(
             started_at,
         )
         .await;
+    }
+    if matches!(endpoint.kind, SendEndpointKind::BloxrouteSubmit) {
+        return SendAttemptOutcome {
+            attempt: SendRpcAttemptLine {
+                label: endpoint.label.clone(),
+                kind: send_endpoint_kind(endpoint),
+                mode: endpoint.sender_mode,
+                status: "error",
+                duration_ms: started_at.elapsed().as_millis(),
+                fanout_slots: None,
+                signature: None,
+                error_class: Some("unsupported_endpoint"),
+                error: Some("bloxroute_submit adapter is not wired yet".to_string()),
+            },
+            finished_at_ms: now_ms(),
+            signature: None,
+            signature_returned: false,
+            error: Some(format!(
+                "{} dispatch failed: bloxroute_submit adapter is not wired yet",
+                endpoint.label
+            )),
+        };
     }
 
     let send = send_transaction_to(client, endpoint, encoded_tx, config);
@@ -5706,6 +6418,9 @@ struct SignatureConfirmation {
     slot: Option<u64>,
     block_position: Option<BlockPosition>,
     block_position_error: Option<String>,
+    compute_units_consumed: Option<u64>,
+    cost_units: Option<u64>,
+    transaction_meta_error: Option<String>,
     confirmation_status: Option<String>,
     err: Option<serde_json::Value>,
     reason: Option<String>,
@@ -5735,6 +6450,24 @@ struct SignatureStatusValue {
 #[derive(Debug, Deserialize)]
 struct BlockPositionResult {
     signatures: Vec<String>,
+}
+
+#[derive(Debug)]
+struct TransactionMetaTelemetry {
+    compute_units_consumed: Option<u64>,
+    cost_units: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransactionMetaResult {
+    meta: Option<TransactionMetaValue>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TransactionMetaValue {
+    compute_units_consumed: Option<u64>,
+    cost_units: Option<u64>,
 }
 
 #[cfg(test)]
@@ -5769,6 +6502,12 @@ mod tests {
             helius_sender_swqos_only: false,
             helius_sender_tip_lamports: None,
             helius_sender_tip_account: None,
+            helius_sender_tip_accounts: Vec::new(),
+            nozomi_enabled: false,
+            nozomi_urls: Vec::new(),
+            nozomi_tip_lamports: None,
+            nozomi_tip_account: None,
+            nozomi_tip_accounts: Vec::new(),
             tpu_jet_enabled: false,
             tpu_jet_rpc_url: None,
             tpu_jet_ws_url: None,
@@ -5784,6 +6523,10 @@ mod tests {
             sell_helius_sender_tip_account: None,
             max_copy_sol: None,
             max_total_copy_spend_sol: None,
+            max_provider_tip_lamports: None,
+            max_signed_tx_bytes: None,
+            max_instruction_count: None,
+            max_writable_account_count: None,
             migrated_amm_min_copy_sol: DEFAULT_MIGRATED_AMM_MIN_COPY_SOL,
             migrated_amm_small_copy_mode: MigratedAmmSmallCopyMode::Skip,
             copy_wallet: None,
@@ -5811,12 +6554,14 @@ mod tests {
             dynamic_priority_fee_max_micro_lamports: None,
             jito_tip_lamports: None,
             jito_tip_account: None,
+            jito_tip_accounts: Vec::new(),
             sell_priority_fee_micro_lamports: None,
             sell_jito_tip_lamports: None,
             sell_jito_tip_account: None,
             warm_send_endpoints: false,
             send_endpoint_warm_interval_ms: 0,
             copy_wallet_balance_guard: true,
+            account_priority_fee_enabled: false,
         }
     }
 
@@ -5840,6 +6585,8 @@ mod tests {
                 decision: "wouldCopy",
                 reason: None,
                 account_key_count: 1,
+                source_compute_unit_limit: None,
+                source_compute_unit_price_micro_lamports: None,
                 route_context: None,
             },
             3,
@@ -5858,7 +6605,7 @@ mod tests {
         let request =
             CopyRuntimeRequest::from_execution_plan(plan, observed_action, observed_sol_amount);
         let timings = sample_timings();
-        let fee_profile = options.select_fee_profile(timings);
+        let fee_profile = options.select_fee_profile(timings, [0u8; 64]);
         CopyExecutionLine::new(&request, options, timings, &fee_profile)
     }
 
@@ -6057,6 +6804,7 @@ mod tests {
             blockhash_cache: None,
             address_lookup_tables: AddressLookupTableCache::default(),
             wallet_balance_cache: None,
+            account_priority_fee_cache: None,
             pda_cache: CopyPdaCache::default(),
             direct_pump_sell_contexts: Mutex::new(DirectPumpSellContextCache::new(
                 DIRECT_PUMP_SELL_CONTEXT_CACHE_CAPACITY,
@@ -6164,6 +6912,10 @@ mod tests {
             hash: Hash::default(),
             last_valid_block_height: 123,
             fetched_at_ms: 456,
+            source_rpc: "rpc.example.com".to_string(),
+            commitment: "processed".to_string(),
+            context_slot: Some(789),
+            selection_strategy: "highest_context_slot",
         };
         let expected_jsonl_blockhash = cached_blockhash.hash.to_string();
         let keypair = Keypair::new();
@@ -6237,6 +6989,10 @@ mod tests {
             jito_tip_account: Some(Pubkey::new_unique().to_string()),
             helius_sender_tip_lamports: None,
             helius_sender_tip_account: None,
+            nozomi_tip_lamports: None,
+            nozomi_tip_account: None,
+            bloxroute_tip_lamports: None,
+            bloxroute_tip_account: None,
         };
         let build = crate::tx_builder::build_full_copy_unsigned_flashx_pump_with_fees_and_cache(
             Some(&route_context),
@@ -6513,6 +7269,7 @@ mod tests {
             route: Route::FlashxPump,
             sol_amount: None,
             token_amount: Some(42.0),
+            compute_budget: Default::default(),
             route_context: Some(flashx_direct_sell_context().into()),
         };
         let signal = crate::event::shadow_signal_line(
@@ -6868,6 +7625,9 @@ mod tests {
                 txs_after_observed: Some(4),
             }),
             block_position_error: None,
+            compute_units_consumed: Some(188_000),
+            cost_units: Some(205_000),
+            transaction_meta_error: None,
             confirmation_status: Some("confirmed".to_string()),
             err: Some(serde_json::json!({
                 "InstructionError": [1, { "Custom": 6024 }]
@@ -6948,6 +7708,15 @@ mod tests {
             Some(4)
         );
         assert!(json.get("err").is_some());
+        assert_eq!(
+            json.get("computeUnitsConsumed")
+                .and_then(serde_json::Value::as_u64),
+            Some(188_000)
+        );
+        assert_eq!(
+            json.get("costUnits").and_then(serde_json::Value::as_u64),
+            Some(205_000)
+        );
     }
 
     #[test]
@@ -6969,6 +7738,9 @@ mod tests {
             slot: Some(43),
             block_position: None,
             block_position_error: None,
+            compute_units_consumed: None,
+            cost_units: None,
+            transaction_meta_error: None,
             confirmation_status: Some("confirmed".to_string()),
             err: Some(serde_json::json!({
                 "InstructionError": [3, { "Custom": 6024 }]
@@ -7046,6 +7818,9 @@ mod tests {
             slot: None,
             block_position: None,
             block_position_error: None,
+            compute_units_consumed: None,
+            cost_units: None,
+            transaction_meta_error: None,
             confirmation_status: None,
             err: None,
             reason: Some(
@@ -7136,7 +7911,7 @@ mod tests {
         let mut timings = sample_timings();
         timings.batch_transaction_count = 9;
         timings.matched_transaction_index = 0;
-        let early = options.select_fee_profile(timings);
+        let early = options.select_fee_profile(timings, [0u8; 64]);
         assert_eq!(early.name, "aggressive");
         assert_eq!(early.source_position_bucket, SourcePositionBucket::Early);
         assert_eq!(early.priority_fee_micro_lamports, Some(2_500_000));
@@ -7144,13 +7919,13 @@ mod tests {
         assert!(!early.cap_hit);
 
         timings.matched_transaction_index = 4;
-        let mid = options.select_fee_profile(timings);
+        let mid = options.select_fee_profile(timings, [0u8; 64]);
         assert_eq!(mid.name, "aggressive");
         assert_eq!(mid.source_position_bucket, SourcePositionBucket::Mid);
         assert_eq!(mid.priority_fee_micro_lamports, Some(2_500_000));
 
         timings.matched_transaction_index = 8;
-        let late = options.select_fee_profile(timings);
+        let late = options.select_fee_profile(timings, [0u8; 64]);
         assert_eq!(late.name, "baseline");
         assert_eq!(late.source_position_bucket, SourcePositionBucket::Late);
         assert_eq!(late.priority_fee_micro_lamports, Some(1_250_000));
@@ -7167,11 +7942,53 @@ mod tests {
         let mut timings = sample_timings();
         timings.batch_transaction_count = 3;
         timings.matched_transaction_index = 0;
-        let profile = options.select_fee_profile(timings);
+        let profile = options.select_fee_profile(timings, [0u8; 64]);
 
         assert_eq!(profile.name, "aggressive");
         assert_eq!(profile.priority_fee_micro_lamports, Some(2_500_000));
         assert!(profile.cap_hit);
+    }
+
+    #[test]
+    fn account_priority_fee_profile_only_raises_selected_fee() {
+        let mut options = disabled_options();
+        options.priority_fee_micro_lamports = Some(1_250_000);
+        options.dynamic_priority_fee_enabled = true;
+        options.dynamic_priority_fee_baseline_micro_lamports = Some(1_250_000);
+        options.dynamic_priority_fee_aggressive_micro_lamports = Some(2_500_000);
+        options.dynamic_priority_fee_max_micro_lamports = Some(5_000_000);
+
+        let mut timings = sample_timings();
+        timings.batch_transaction_count = 9;
+        timings.matched_transaction_index = 8;
+        let baseline = options.select_fee_profile(timings, [0u8; 64]);
+
+        assert!(options
+            .account_priority_fee_profile(&baseline, 1_000_000, [0u8; 64])
+            .is_none());
+
+        let account_aware = options
+            .account_priority_fee_profile(&baseline, 3_000_000, [0u8; 64])
+            .expect("higher account fee should produce profile");
+        assert_eq!(account_aware.name, "account_aware");
+        assert_eq!(account_aware.reason, "writable_account_priority_fee_cache");
+        assert_eq!(account_aware.priority_fee_micro_lamports, Some(3_000_000));
+        assert!(!account_aware.cap_hit);
+    }
+
+    #[test]
+    fn account_priority_fee_profile_respects_max_cap() {
+        let mut options = disabled_options();
+        options.priority_fee_micro_lamports = Some(1_250_000);
+        options.dynamic_priority_fee_max_micro_lamports = Some(2_500_000);
+
+        let profile = options.select_fee_profile(sample_timings(), [0u8; 64]);
+        let account_aware = options
+            .account_priority_fee_profile(&profile, 5_000_000, [0u8; 64])
+            .expect("capped account fee should still raise profile");
+
+        assert_eq!(account_aware.priority_fee_micro_lamports, Some(2_500_000));
+        assert!(account_aware.cap_hit);
     }
 
     #[test]
@@ -7189,7 +8006,7 @@ mod tests {
         let mut timings = sample_timings();
         timings.batch_transaction_count = 9;
         timings.matched_transaction_index = 1;
-        let fee_profile = options.select_fee_profile(timings);
+        let fee_profile = options.select_fee_profile(timings, [0u8; 64]);
         let request =
             CopyRuntimeRequest::from_execution_plan(&allowed_plan(), Action::Buy, Some(0.1));
         let line = CopyExecutionLine::new(&request, &options, timings, &fee_profile);
@@ -7350,7 +8167,7 @@ mod tests {
         let mut options = configured_multi_lane_options();
 
         options.send_lane_mode = SendLaneMode::Mixed;
-        let fee_config = options.tx_fee_config();
+        let fee_config = options.tx_fee_config([0u8; 64]);
         assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
         assert_eq!(fee_config.jito_tip_lamports, Some(10_000));
         assert_eq!(
@@ -7359,7 +8176,7 @@ mod tests {
         );
 
         options.send_lane_mode = SendLaneMode::RpcOnly;
-        let fee_config = options.tx_fee_config();
+        let fee_config = options.tx_fee_config([0u8; 64]);
         assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
         assert_eq!(fee_config.jito_tip_lamports, None);
         assert_eq!(fee_config.jito_tip_account, None);
@@ -7367,7 +8184,7 @@ mod tests {
         assert_eq!(fee_config.helius_sender_tip_account, None);
 
         options.send_lane_mode = SendLaneMode::JitoOnly;
-        let fee_config = options.tx_fee_config();
+        let fee_config = options.tx_fee_config([0u8; 64]);
         assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
         assert_eq!(fee_config.jito_tip_lamports, Some(10_000));
         assert_eq!(fee_config.jito_tip_account.as_deref(), Some(COPY_WALLET));
@@ -7375,7 +8192,7 @@ mod tests {
         assert_eq!(fee_config.helius_sender_tip_account, None);
 
         options.send_lane_mode = SendLaneMode::HeliusSenderOnly;
-        let fee_config = options.tx_fee_config();
+        let fee_config = options.tx_fee_config([0u8; 64]);
         assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
         assert_eq!(fee_config.jito_tip_lamports, None);
         assert_eq!(fee_config.jito_tip_account, None);
@@ -7389,7 +8206,7 @@ mod tests {
         );
 
         options.send_lane_mode = SendLaneMode::HeliusTpuJet;
-        let fee_config = options.tx_fee_config();
+        let fee_config = options.tx_fee_config([0u8; 64]);
         assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
         assert_eq!(fee_config.jito_tip_lamports, None);
         assert_eq!(
@@ -7402,7 +8219,7 @@ mod tests {
         );
 
         options.send_lane_mode = SendLaneMode::HeliusTpuQuic;
-        let fee_config = options.tx_fee_config();
+        let fee_config = options.tx_fee_config([0u8; 64]);
         assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
         assert_eq!(fee_config.jito_tip_lamports, None);
         assert_eq!(
@@ -7415,7 +8232,7 @@ mod tests {
         );
 
         options.send_lane_mode = SendLaneMode::TpuJetHeliusTip;
-        let fee_config = options.tx_fee_config();
+        let fee_config = options.tx_fee_config([0u8; 64]);
         assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
         assert_eq!(fee_config.jito_tip_lamports, None);
         assert_eq!(
@@ -7428,13 +8245,13 @@ mod tests {
         );
 
         options.send_lane_mode = SendLaneMode::TpuJetOnly;
-        let fee_config = options.tx_fee_config();
+        let fee_config = options.tx_fee_config([0u8; 64]);
         assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
         assert_eq!(fee_config.jito_tip_lamports, None);
         assert_eq!(fee_config.helius_sender_tip_lamports, None);
 
         options.send_lane_mode = SendLaneMode::TpuQuicHeliusTip;
-        let fee_config = options.tx_fee_config();
+        let fee_config = options.tx_fee_config([0u8; 64]);
         assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
         assert_eq!(fee_config.jito_tip_lamports, None);
         assert_eq!(

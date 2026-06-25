@@ -11,7 +11,11 @@ the same window as a fee/tip/retry experiment.
 - `JITO_HELIUS_SENDER_SWQOS_ONLY=true`
 - `JITO_HELIUS_SENDER_TIP_LAMPORTS=387500`
 - `JITO_PRIORITY_FEE_MICRO_LAMPORTS=968750`
-- `JITO_SEND_MAX_RETRIES=3`
+- `JITO_SEND_MAX_RETRIES=0`
+
+The retry baseline is intentionally zero. A provider retry after the first send
+is expected to be too late for the landing race; score this by fresh landing
+rows rather than by first ACK.
 
 Score canaries with landing results, not ACK:
 
@@ -53,6 +57,19 @@ Apply one canary at a time:
 ./landing-canary-control.sh restore /opt/jito-feed-probe-watch/backups/canary-YYYYMMDDTHHMMSSZ/jito-copy-live.env
 ```
 
+For the landing telemetry canary sequence in this runbook, use the gated helper
+after marking baseline:
+
+```sh
+./landing-canary-sequence.sh status
+./landing-canary-sequence.sh next
+```
+
+`next` refuses to advance unless the current window passes
+`landing-canary-control.sh score`, so it will wait on the baseline sample before
+applying `tip-rotated`, then `blockhash-confirmed`, then
+`account-priority-cache`.
+
 The script backs up `/etc/jito-copy-live.env`, restarts only
 `jito-copy-live.service`, writes `/var/log/jito-copy-canary-current.env`, and
 keeps each canary to the lane/fee shape named by the apply target.
@@ -66,25 +83,72 @@ window does not meet the minimum scored-row and `txDelta` coverage thresholds.
 
 1. Baseline: current config until sample is large enough.
 2. Helius Sender tip: `tip-250k`, then `tip-500k`.
-3. Priority fee: `priority-750k`, then `priority-1250k`.
-4. Retries: `retries-0`, `retries-1`, then `retries-3`.
-5. Yellowstone Jet sidecar, only after the sidecar build is deployed and
+3. Priority fee: `priority-1453k`, then `priority-1938k`; keep retries at `0`.
+4. Retries: `retries-1` or `retries-3` only as rollback/diagnostic shapes.
+5. Nozomi delivery isolation, only after `JITO_NOZOMI_URLS` is configured with
+   the API-keyed endpoint and the tip account is confirmed:
+   `nozomi-only` applies `JITO_SEND_LANE_MODE=nozomi-only`,
+   `JITO_NOZOMI_ENABLED=true`, and a Nozomi tip of at least `1000000`
+   lamports. This is a lane test, not the final stack.
+6. Helius + Nozomi same-signature stack:
+   `helius-nozomi-stack` applies `JITO_SEND_LANE_MODE=helius-nozomi-stack`,
+   keeps Helius Sender enabled, enables Nozomi, signs one transaction containing
+   the Helius tip and Nozomi tip, then fans out identical bytes to both
+   providers. This costs both provider tips on every landed transaction, so
+   judge it by landed rate, same-slot rate, `txDelta`, submitted-not-landed,
+   and total configured tip cost.
+7. Yellowstone Jet sidecar, only after the sidecar build is deployed and
    `JITO_TPU_JET_RPC_URL` / `JITO_TPU_JET_WS_URL` /
    `JITO_TPU_JET_SIDECAR_URL` are configured:
    `tpu-jet-fanout` applies `JITO_SEND_LANE_MODE=helius-tpu-jet` for Helius +
    Jet same-signature fanout, then `tpu-jet-only`, which applies
    `JITO_SEND_LANE_MODE=tpu-jet-helius-tip` for Jet-only sending with the same
    Helius-tip transaction shape.
-6. Direct TPU QUIC fallback, only after the direct TPU build is deployed and
+8. Direct TPU QUIC fallback, only after the direct TPU build is deployed and
    `JITO_TPU_QUIC_RPC_URL` / `JITO_TPU_QUIC_WS_URL` are configured:
    `tpu-quic-fanout` applies `JITO_SEND_LANE_MODE=helius-tpu-quic` for Helius
    + TPU same-signature fanout, then `tpu-quic-only`, which applies
    `JITO_SEND_LANE_MODE=tpu-quic-helius-tip` for TPU-only sending with the same
    Helius-tip transaction shape.
-7. Cheaper TPU-only shape: `tpu-jet-cheap` or `tpu-quic-cheap` only after the
+9. Cheaper TPU-only shape: `tpu-jet-cheap` or `tpu-quic-cheap` only after the
    matching same-fee TPU-only window proves better. These switch to
    `tpu-jet-only` / `tpu-quic-only` lane modes with Helius Sender disabled and
    are guarded by `JITO_CANARY_ALLOW_CHEAP_TPU=YES`.
+
+## Nozomi Stack Canary
+
+Required env before applying either Nozomi canary:
+
+```sh
+JITO_NOZOMI_URLS=https://nozomi.temporal.xyz/?c=<api-key>
+JITO_NOZOMI_TIP_LAMPORTS=1000000
+JITO_NOZOMI_TIP_ACCOUNT=TEMPaMeCRFAS9EKF53Jd6KpHxgL47uWLcpFArU1Fanq
+```
+
+The canary helper also accepts `JITO_CANARY_NOZOMI_URLS`,
+`JITO_CANARY_NOZOMI_TIP_LAMPORTS`, `JITO_CANARY_NOZOMI_TIP_ACCOUNT`, and
+`JITO_CANARY_NOZOMI_TIP_ACCOUNTS` so the Nozomi endpoint can be staged without
+changing the steady-state env first.
+
+The Helius + Nozomi stack is not two signed variants. The worker builds one
+transaction with the current priority fee, the Helius Sender tip, the Nozomi
+tip, and the swap, signs once, serializes once, then sends those identical bytes
+to Helius Sender and Nozomi JSON-RPC. This avoids duplicate-buy risk from
+provider-specific signatures, but it increases transaction shape and tip cost.
+
+Guardrails for the stack:
+
+```sh
+JITO_MAX_PROVIDER_TIP_LAMPORTS=1387500
+JITO_MAX_SIGNED_TX_BYTES=1232
+JITO_MAX_INSTRUCTION_COUNT=8
+JITO_MAX_WRITABLE_ACCOUNT_COUNT=16
+```
+
+Raise those only if the worker emits a guarded skip and the skipped transaction
+shape is understood. Do not use first ACK as the decision metric; Nozomi can win
+ACK while Helius, or vice versa, may be the path that actually improves landed
+position.
 
 ## Dynamic Priority Fee Canary
 

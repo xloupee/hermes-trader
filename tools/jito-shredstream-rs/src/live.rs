@@ -16,6 +16,7 @@ use crate::{
         CopyTxPlanLine, CopyTxPlannerOptions, ExecutionPlanLine, PlannerOptions, TxBuildPlanLine,
         TxBuildPlannerOptions, UnsignedTxPlanLine, UnsignedTxPlannerOptions,
     },
+    priority_fee_cache::PriorityFeeCache,
     proto::jito_shredstream::{
         shredstream_proxy_client::ShredstreamProxyClient, SubscribeEntriesRequest,
     },
@@ -66,6 +67,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
     let blockhash_cache = spawn_blockhash_cache(
         state_rpc_urls.clone(),
         options.blockhash_refresh_ms,
+        options.blockhash_commitment.trim().to_string(),
         options.stats,
     );
     let wallet_balance_cache =
@@ -84,11 +86,16 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
         }
         cache.spawn_refresh_loop();
     }
+    let account_priority_fee_cache = account_priority_fee_cache_from_options(&options);
+    if let Some(cache) = &account_priority_fee_cache {
+        cache.spawn_refresh_loop();
+    }
     let copy_executor = Arc::new(CopyExecutor::from_options(
         &options,
         blockhash_cache.clone(),
         address_lookup_tables.clone(),
         wallet_balance_cache.clone(),
+        account_priority_fee_cache,
         telegram_runtime
             .load_full()
             .as_ref()
@@ -574,6 +581,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             route,
                             observed_sol_amount,
                             token_amount,
+                            Default::default(),
                         );
                         enqueue_signal_side_effect(&signal_side_effect_tx, event, timings);
                         emitted += 1;
@@ -1096,6 +1104,23 @@ fn wallet_balance_cache_from_options(
         options.copy_wallet_balance_stale_ms,
         options.send_http_timeout_ms,
         active_copy_wallets(runtime, options.copy_wallet.as_deref()),
+    ))
+}
+
+fn account_priority_fee_cache_from_options(options: &LiveOptions) -> Option<PriorityFeeCache> {
+    if !options.account_priority_fee_enabled {
+        return None;
+    }
+    let rpc_urls = options.normalized_state_rpc_urls();
+    if rpc_urls.is_empty() {
+        return None;
+    }
+    Some(PriorityFeeCache::new(
+        rpc_urls,
+        options.account_priority_fee_refresh_ms,
+        options.account_priority_fee_stale_ms,
+        options.send_http_timeout_ms,
+        options.account_priority_fee_percentile,
     ))
 }
 
@@ -1793,6 +1818,8 @@ mod tests {
             observed_sol_amount: Some(0.001),
             token_amount: None,
             account_key_count: 1,
+            source_compute_unit_limit: None,
+            source_compute_unit_price_micro_lamports: None,
             planned_copy_sol_amount: Some(0.001),
             allowed: true,
             reason: None,

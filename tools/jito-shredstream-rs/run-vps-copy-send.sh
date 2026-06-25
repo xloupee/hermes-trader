@@ -67,6 +67,12 @@ export JITO_HELIUS_SENDER_URLS="${JITO_HELIUS_SENDER_URLS:-}"
 export JITO_HELIUS_SENDER_SWQOS_ONLY="${JITO_HELIUS_SENDER_SWQOS_ONLY:-false}"
 export JITO_HELIUS_SENDER_TIP_LAMPORTS="${JITO_HELIUS_SENDER_TIP_LAMPORTS:-}"
 export JITO_HELIUS_SENDER_TIP_ACCOUNT="${JITO_HELIUS_SENDER_TIP_ACCOUNT:-}"
+export JITO_HELIUS_SENDER_TIP_ACCOUNTS="${JITO_HELIUS_SENDER_TIP_ACCOUNTS:-}"
+export JITO_NOZOMI_ENABLED="${JITO_NOZOMI_ENABLED:-false}"
+export JITO_NOZOMI_URLS="${JITO_NOZOMI_URLS:-}"
+export JITO_NOZOMI_TIP_LAMPORTS="${JITO_NOZOMI_TIP_LAMPORTS:-}"
+export JITO_NOZOMI_TIP_ACCOUNT="${JITO_NOZOMI_TIP_ACCOUNT:-}"
+export JITO_NOZOMI_TIP_ACCOUNTS="${JITO_NOZOMI_TIP_ACCOUNTS:-}"
 export JITO_TPU_JET_ENABLED="${JITO_TPU_JET_ENABLED:-false}"
 export JITO_TPU_JET_RPC_URL="${JITO_TPU_JET_RPC_URL:-${SOLANA_RPC_URL:-}}"
 export JITO_TPU_JET_WS_URL="${JITO_TPU_JET_WS_URL:-}"
@@ -120,6 +126,10 @@ export JITO_SELL_PRIORITY_FEE_MICRO_LAMPORTS="${JITO_SELL_PRIORITY_FEE_MICRO_LAM
 export JITO_SELL_TIP_LAMPORTS="${JITO_SELL_TIP_LAMPORTS:-$JITO_TIP_LAMPORTS}"
 export JITO_SELL_TIP_ACCOUNT="${JITO_SELL_TIP_ACCOUNT:-$JITO_TIP_ACCOUNT}"
 export JITO_MAX_TIP_LAMPORTS="${JITO_MAX_TIP_LAMPORTS:-50000}"
+export JITO_MAX_PROVIDER_TIP_LAMPORTS="${JITO_MAX_PROVIDER_TIP_LAMPORTS:-}"
+export JITO_MAX_SIGNED_TX_BYTES="${JITO_MAX_SIGNED_TX_BYTES:-}"
+export JITO_MAX_INSTRUCTION_COUNT="${JITO_MAX_INSTRUCTION_COUNT:-}"
+export JITO_MAX_WRITABLE_ACCOUNT_COUNT="${JITO_MAX_WRITABLE_ACCOUNT_COUNT:-}"
 export JITO_COPY_EXECUTIONS_PATH="${JITO_COPY_EXECUTIONS_PATH:-/var/log/jito-copy-executions-vps.jsonl}"
 export JITO_COPY_EXECUTIONS_WRITE_QUEUE_CAPACITY="${JITO_COPY_EXECUTIONS_WRITE_QUEUE_CAPACITY:-1024}"
 export JITO_COPY_EXECUTIONS_FLUSH_INTERVAL_MS="${JITO_COPY_EXECUTIONS_FLUSH_INTERVAL_MS:-250}"
@@ -191,6 +201,11 @@ validate_capped_int \
   "$JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS"
 validate_capped_int JITO_TIP_LAMPORTS "$JITO_TIP_LAMPORTS" JITO_MAX_TIP_LAMPORTS "$JITO_MAX_TIP_LAMPORTS"
 validate_nonnegative_int JITO_HELIUS_SENDER_TIP_LAMPORTS "$JITO_HELIUS_SENDER_TIP_LAMPORTS"
+validate_nonnegative_int JITO_NOZOMI_TIP_LAMPORTS "$JITO_NOZOMI_TIP_LAMPORTS"
+validate_nonnegative_int JITO_MAX_PROVIDER_TIP_LAMPORTS "$JITO_MAX_PROVIDER_TIP_LAMPORTS"
+validate_nonnegative_int JITO_MAX_SIGNED_TX_BYTES "$JITO_MAX_SIGNED_TX_BYTES"
+validate_nonnegative_int JITO_MAX_INSTRUCTION_COUNT "$JITO_MAX_INSTRUCTION_COUNT"
+validate_nonnegative_int JITO_MAX_WRITABLE_ACCOUNT_COUNT "$JITO_MAX_WRITABLE_ACCOUNT_COUNT"
 validate_nonnegative_int JITO_TPU_JET_FANOUT_SLOTS "$JITO_TPU_JET_FANOUT_SLOTS"
 validate_nonnegative_int JITO_TPU_JET_TIMEOUT_MS "$JITO_TPU_JET_TIMEOUT_MS"
 validate_nonnegative_int JITO_TPU_QUIC_FANOUT_SLOTS "$JITO_TPU_QUIC_FANOUT_SLOTS"
@@ -245,11 +260,11 @@ esac
 
 SEND_LANE_MODE_NORMALIZED="$(printf '%s' "$JITO_SEND_LANE_MODE" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
 case "$SEND_LANE_MODE_NORMALIZED" in
-  mixed|rpc_only|jito_only|helius_sender_only|helius_tpu_jet|helius_tpu_quic|tpu_jet_helius_tip|tpu_quic_helius_tip|tpu_jet_only|tpu_quic_only)
+  mixed|rpc_only|jito_only|helius_sender_only|nozomi_only|helius_nozomi_stack|helius_tpu_jet|helius_tpu_quic|tpu_jet_helius_tip|tpu_quic_helius_tip|tpu_jet_only|tpu_quic_only)
     export JITO_SEND_LANE_MODE="${SEND_LANE_MODE_NORMALIZED//_/-}"
     ;;
   *)
-    echo "JITO_SEND_LANE_MODE must be mixed, rpc_only/rpc-only, jito_only/jito-only, helius_sender_only/helius-sender-only, helius_tpu_jet/helius-tpu-jet, helius_tpu_quic/helius-tpu-quic, tpu_jet_helius_tip/tpu-jet-helius-tip, tpu_quic_helius_tip/tpu-quic-helius-tip, tpu_jet_only/tpu-jet-only, or tpu_quic_only/tpu-quic-only; got $JITO_SEND_LANE_MODE" >&2
+    echo "JITO_SEND_LANE_MODE must be mixed, rpc_only/rpc-only, jito_only/jito-only, helius_sender_only/helius-sender-only, nozomi_only/nozomi-only, helius_nozomi_stack/helius-nozomi-stack, helius_tpu_jet/helius-tpu-jet, helius_tpu_quic/helius-tpu-quic, tpu_jet_helius_tip/tpu-jet-helius-tip, tpu_quic_helius_tip/tpu-quic-helius-tip, tpu_jet_only/tpu-jet-only, or tpu_quic_only/tpu-quic-only; got $JITO_SEND_LANE_MODE" >&2
     exit 1
     ;;
 esac
@@ -286,6 +301,26 @@ case "$SEND_LANE_MODE_NORMALIZED" in
     case "$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')" in
       yes|true|1|on) ;;
       *) echo "JITO_SEND_LANE_MODE=helius_sender_only requires JITO_HELIUS_SENDER_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    ;;
+  nozomi_only)
+    case "$(printf '%s' "$JITO_NOZOMI_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=nozomi_only requires JITO_NOZOMI_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    ;;
+  helius_nozomi_stack)
+    case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_nozomi_stack requires JITO_SEND_FANOUT=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_nozomi_stack requires JITO_HELIUS_SENDER_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_NOZOMI_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_nozomi_stack requires JITO_NOZOMI_ENABLED=YES" >&2; exit 1 ;;
     esac
     ;;
   helius_tpu_jet)
@@ -359,6 +394,7 @@ case "$SEND_LANE_MODE_NORMALIZED" in
 esac
 HELIUS_SENDER_ENABLED_NORMALIZED="$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')"
 HELIUS_SENDER_SWQOS_NORMALIZED="$(printf '%s' "$JITO_HELIUS_SENDER_SWQOS_ONLY" | tr '[:upper:]' '[:lower:]')"
+NOZOMI_ENABLED_NORMALIZED="$(printf '%s' "$JITO_NOZOMI_ENABLED" | tr '[:upper:]' '[:lower:]')"
 TPU_JET_ENABLED_NORMALIZED="$(printf '%s' "$JITO_TPU_JET_ENABLED" | tr '[:upper:]' '[:lower:]')"
 TPU_QUIC_ENABLED_NORMALIZED="$(printf '%s' "$JITO_TPU_QUIC_ENABLED" | tr '[:upper:]' '[:lower:]')"
 case "$HELIUS_SENDER_ENABLED_NORMALIZED" in
@@ -393,6 +429,40 @@ case "$HELIUS_SENDER_ENABLED_NORMALIZED" in
     fi
     if [[ -z "$JITO_HELIUS_SENDER_TIP_ACCOUNT" ]]; then
       echo "JITO_HELIUS_SENDER_ENABLED requires JITO_HELIUS_SENDER_TIP_ACCOUNT" >&2
+      exit 1
+    fi
+    ;;
+esac
+case "$NOZOMI_ENABLED_NORMALIZED" in
+  yes|true|1|on)
+    if [[ "$SEND_LANE_MODE_NORMALIZED" != "nozomi_only" ]]; then
+      case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+        yes|true|1|on) ;;
+        *) echo "JITO_NOZOMI_ENABLED requires JITO_SEND_FANOUT=YES unless JITO_SEND_LANE_MODE=nozomi_only" >&2; exit 1 ;;
+      esac
+    fi
+    case "$(printf '%s' "$JITO_FAST_COPY_SEND" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_NOZOMI_ENABLED requires JITO_FAST_COPY_SEND=YES" >&2; exit 1 ;;
+    esac
+    if [[ -z "$JITO_NOZOMI_URLS" ]]; then
+      echo "JITO_NOZOMI_ENABLED requires JITO_NOZOMI_URLS" >&2
+      exit 1
+    fi
+    if [[ -z "$JITO_PRIORITY_FEE_MICRO_LAMPORTS" || "$JITO_PRIORITY_FEE_MICRO_LAMPORTS" == "0" ]]; then
+      echo "JITO_NOZOMI_ENABLED requires JITO_PRIORITY_FEE_MICRO_LAMPORTS" >&2
+      exit 1
+    fi
+    if [[ -z "$JITO_NOZOMI_TIP_LAMPORTS" || "$JITO_NOZOMI_TIP_LAMPORTS" == "0" ]]; then
+      echo "JITO_NOZOMI_ENABLED requires JITO_NOZOMI_TIP_LAMPORTS" >&2
+      exit 1
+    fi
+    if (( JITO_NOZOMI_TIP_LAMPORTS < 1000000 )); then
+      echo "JITO_NOZOMI_TIP_LAMPORTS must be >= 1000000 lamports" >&2
+      exit 1
+    fi
+    if [[ -z "$JITO_NOZOMI_TIP_ACCOUNT" ]]; then
+      echo "JITO_NOZOMI_ENABLED requires JITO_NOZOMI_TIP_ACCOUNT" >&2
       exit 1
     fi
     ;;
@@ -487,6 +557,14 @@ if [[ -n "$JITO_HELIUS_SENDER_TIP_ACCOUNT" ]]; then
 else
   echo "  helius sender tip account: unset"
 fi
+echo "  nozomi enabled: $JITO_NOZOMI_ENABLED"
+echo "  nozomi urls: $(if [[ -n "$JITO_NOZOMI_URLS" ]]; then printf '%s' "$JITO_NOZOMI_URLS" | awk -F, '{print NF}'; else printf '0'; fi) configured"
+echo "  nozomi tip lamports: ${JITO_NOZOMI_TIP_LAMPORTS:-0}"
+if [[ -n "$JITO_NOZOMI_TIP_ACCOUNT" ]]; then
+  echo "  nozomi tip account: configured"
+else
+  echo "  nozomi tip account: unset"
+fi
 echo "  tpu jet enabled: $JITO_TPU_JET_ENABLED"
 if [[ -n "$JITO_TPU_JET_RPC_URL" ]]; then
   echo "  tpu jet rpc url: configured"
@@ -537,6 +615,10 @@ echo "  dynamic priority fee enabled: $JITO_DYNAMIC_PRIORITY_FEE_ENABLED"
 echo "  dynamic priority baseline/aggressive/panic/max micro lamports: ${JITO_DYNAMIC_PRIORITY_FEE_BASELINE_MICRO_LAMPORTS:-0}/${JITO_DYNAMIC_PRIORITY_FEE_AGGRESSIVE_MICRO_LAMPORTS:-0}/${JITO_DYNAMIC_PRIORITY_FEE_PANIC_MICRO_LAMPORTS:-0}/${JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS:-0}"
 echo "  jito tip lamports: ${JITO_TIP_LAMPORTS:-0}"
 echo "  max jito tip lamports: $JITO_MAX_TIP_LAMPORTS"
+echo "  max provider tip lamports: ${JITO_MAX_PROVIDER_TIP_LAMPORTS:-0}"
+echo "  max signed tx bytes: ${JITO_MAX_SIGNED_TX_BYTES:-0}"
+echo "  max instruction count: ${JITO_MAX_INSTRUCTION_COUNT:-0}"
+echo "  max writable account count: ${JITO_MAX_WRITABLE_ACCOUNT_COUNT:-0}"
 echo "  sell priority fee micro lamports: ${JITO_SELL_PRIORITY_FEE_MICRO_LAMPORTS:-0}"
 echo "  sell jito tip lamports: ${JITO_SELL_TIP_LAMPORTS:-0}"
 if [[ -n "$JITO_TIP_ACCOUNT" ]]; then
@@ -579,5 +661,32 @@ if [[ -z "${JITO_HELIUS_SENDER_TIP_LAMPORTS:-}" ]]; then
 fi
 if [[ -z "${JITO_HELIUS_SENDER_TIP_ACCOUNT:-}" ]]; then
   unset JITO_HELIUS_SENDER_TIP_ACCOUNT
+fi
+if [[ -z "${JITO_HELIUS_SENDER_TIP_ACCOUNTS:-}" ]]; then
+  unset JITO_HELIUS_SENDER_TIP_ACCOUNTS
+fi
+if [[ -z "${JITO_NOZOMI_URLS:-}" ]]; then
+  unset JITO_NOZOMI_URLS
+fi
+if [[ -z "${JITO_NOZOMI_TIP_LAMPORTS:-}" ]]; then
+  unset JITO_NOZOMI_TIP_LAMPORTS
+fi
+if [[ -z "${JITO_NOZOMI_TIP_ACCOUNT:-}" ]]; then
+  unset JITO_NOZOMI_TIP_ACCOUNT
+fi
+if [[ -z "${JITO_NOZOMI_TIP_ACCOUNTS:-}" ]]; then
+  unset JITO_NOZOMI_TIP_ACCOUNTS
+fi
+if [[ -z "${JITO_MAX_PROVIDER_TIP_LAMPORTS:-}" ]]; then
+  unset JITO_MAX_PROVIDER_TIP_LAMPORTS
+fi
+if [[ -z "${JITO_MAX_SIGNED_TX_BYTES:-}" ]]; then
+  unset JITO_MAX_SIGNED_TX_BYTES
+fi
+if [[ -z "${JITO_MAX_INSTRUCTION_COUNT:-}" ]]; then
+  unset JITO_MAX_INSTRUCTION_COUNT
+fi
+if [[ -z "${JITO_MAX_WRITABLE_ACCOUNT_COUNT:-}" ]]; then
+  unset JITO_MAX_WRITABLE_ACCOUNT_COUNT
 fi
 exec "$WORKER_BIN" live "${LIVE_ARGS[@]}"

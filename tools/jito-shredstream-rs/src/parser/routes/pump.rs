@@ -26,6 +26,7 @@ pub(crate) fn parse(
         route: Route::Pump,
         sol_amount: Some(sol_amount),
         token_amount: Some(token_amount),
+        compute_budget: Default::default(),
         route_context: None,
     })
 }

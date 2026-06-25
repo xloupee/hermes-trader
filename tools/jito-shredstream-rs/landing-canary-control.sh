@@ -11,7 +11,7 @@ BACKUP_DIR="${JITO_CANARY_BACKUP_DIR:-$WORKER_DIR/backups}"
 MARKER_FILE="${JITO_CANARY_MARKER_FILE:-/var/log/jito-copy-canary-current.env}"
 DEFAULT_BASELINE_TIP="${JITO_CANARY_BASELINE_HELIUS_TIP_LAMPORTS:-387500}"
 DEFAULT_BASELINE_PRIORITY="${JITO_CANARY_BASELINE_PRIORITY_FEE_MICRO_LAMPORTS:-968750}"
-DEFAULT_BASELINE_RETRIES="${JITO_CANARY_BASELINE_SEND_MAX_RETRIES:-3}"
+DEFAULT_BASELINE_RETRIES="${JITO_CANARY_BASELINE_SEND_MAX_RETRIES:-0}"
 
 usage() {
   cat <<'USAGE'
@@ -27,15 +27,24 @@ Usage:
   landing-canary-control.sh restore <backup-env-file>
 
 Canaries:
-  baseline       Helius Sender FRA SWQoS, tip 387500, priority 968750, retries 3
+  baseline       Helius Sender FRA SWQoS, tip 387500, priority 968750, retries 0
   tip-250k       Same as baseline, Helius Sender tip 250000
   tip-500k       Same as baseline, Helius Sender tip 500000
   priority-750k  Same as baseline, priority fee 750000
   priority-1250k Same as baseline, priority fee 1250000 and matching max cap
+  priority-1453k Same as baseline, priority fee 1453125 and matching max cap (1.5x baseline)
+  priority-1938k Same as baseline, priority fee 1937500 and matching max cap (2x baseline)
   dynamic-priority-2500k Helius only, retries 0, 200k tip, early/mid priority 2500000
   retries-0      Same as baseline, send max retries 0
   retries-1      Same as baseline, send max retries 1
-  retries-3      Return to baseline, send max retries 3
+  retries-3      Diagnostic rollback shape, send max retries 3
+  tip-fixed      Baseline with plural Helius tip-account pool disabled
+  tip-rotated    Baseline with JITO_CANARY_HELIUS_TIP_ACCOUNTS rotated per tx
+  blockhash-processed Baseline with JITO_BLOCKHASH_COMMITMENT=processed
+  blockhash-confirmed Baseline with JITO_BLOCKHASH_COMMITMENT=confirmed
+  account-priority-cache Baseline plus warm writable-account getRecentPrioritizationFees cache
+  nozomi-only   Nozomi JSON-RPC only with Nozomi tip, for delivery-lane isolation
+  helius-nozomi-stack Helius Sender plus Nozomi same-signature fanout with both tips
   tpu-jet-fanout Helius baseline plus same-signature Yellowstone Jet sidecar fanout
   tpu-jet-only Same fee shape, Yellowstone Jet sidecar only
   tpu-jet-cheap Jet sidecar only with Helius Sender tip disabled; requires JITO_CANARY_ALLOW_CHEAP_TPU=YES
@@ -102,11 +111,26 @@ canary_values() {
   CANARY_TPU_JET_ENABLED="false"
   CANARY_TPU_QUIC_ENABLED="false"
   CANARY_HELIUS_TIP_ACCOUNT="${JITO_HELIUS_SENDER_TIP_ACCOUNT:-}"
+  CANARY_HELIUS_TIP_ACCOUNTS="${JITO_HELIUS_SENDER_TIP_ACCOUNTS:-}"
+  CANARY_NOZOMI_ENABLED="false"
+  CANARY_NOZOMI_URLS="${JITO_CANARY_NOZOMI_URLS:-${JITO_NOZOMI_URLS:-}}"
+  CANARY_NOZOMI_TIP="${JITO_CANARY_NOZOMI_TIP_LAMPORTS:-${JITO_NOZOMI_TIP_LAMPORTS:-1000000}}"
+  CANARY_NOZOMI_TIP_ACCOUNT="${JITO_CANARY_NOZOMI_TIP_ACCOUNT:-${JITO_NOZOMI_TIP_ACCOUNT:-TEMPaMeCRFAS9EKF53Jd6KpHxgL47uWLcpFArU1Fanq}}"
+  CANARY_NOZOMI_TIP_ACCOUNTS="${JITO_CANARY_NOZOMI_TIP_ACCOUNTS:-${JITO_NOZOMI_TIP_ACCOUNTS:-}}"
+  CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_MAX_PROVIDER_TIP_LAMPORTS:-${JITO_MAX_PROVIDER_TIP_LAMPORTS:-1387500}}"
+  CANARY_MAX_SIGNED_TX_BYTES="${JITO_CANARY_MAX_SIGNED_TX_BYTES:-${JITO_MAX_SIGNED_TX_BYTES:-1232}}"
+  CANARY_MAX_INSTRUCTION_COUNT="${JITO_CANARY_MAX_INSTRUCTION_COUNT:-${JITO_MAX_INSTRUCTION_COUNT:-8}}"
+  CANARY_MAX_WRITABLE_ACCOUNT_COUNT="${JITO_CANARY_MAX_WRITABLE_ACCOUNT_COUNT:-${JITO_MAX_WRITABLE_ACCOUNT_COUNT:-16}}"
+  CANARY_BLOCKHASH_COMMITMENT="${JITO_BLOCKHASH_COMMITMENT:-processed}"
+  CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
+  CANARY_ACCOUNT_PRIORITY_FEE_REFRESH_MS="${JITO_ACCOUNT_PRIORITY_FEE_REFRESH_MS:-1000}"
+  CANARY_ACCOUNT_PRIORITY_FEE_STALE_MS="${JITO_ACCOUNT_PRIORITY_FEE_STALE_MS:-5000}"
+  CANARY_ACCOUNT_PRIORITY_FEE_PERCENTILE="${JITO_ACCOUNT_PRIORITY_FEE_PERCENTILE:-75}"
   CANARY_DYNAMIC_PRIORITY_ENABLED="false"
-  CANARY_DYNAMIC_PRIORITY_BASELINE=""
-  CANARY_DYNAMIC_PRIORITY_AGGRESSIVE=""
-  CANARY_DYNAMIC_PRIORITY_PANIC=""
-  CANARY_DYNAMIC_PRIORITY_MAX=""
+  CANARY_DYNAMIC_PRIORITY_BASELINE="0"
+  CANARY_DYNAMIC_PRIORITY_AGGRESSIVE="0"
+  CANARY_DYNAMIC_PRIORITY_PANIC="0"
+  CANARY_DYNAMIC_PRIORITY_MAX="0"
 
   case "$name" in
     baseline) ;;
@@ -119,6 +143,14 @@ canary_values() {
     priority-1250k)
       CANARY_PRIORITY=1250000
       CANARY_MAX_PRIORITY=1250000
+      ;;
+    priority-1453k|priority-1.5x)
+      CANARY_PRIORITY=1453125
+      CANARY_MAX_PRIORITY=1453125
+      ;;
+    priority-1938k|priority-2x)
+      CANARY_PRIORITY=1937500
+      CANARY_MAX_PRIORITY=1937500
       ;;
     dynamic-priority-2500k)
       CANARY_HELIUS_TIP=200000
@@ -134,6 +166,37 @@ canary_values() {
     retries-0) CANARY_RETRIES=0 ;;
     retries-1) CANARY_RETRIES=1 ;;
     retries-3) CANARY_RETRIES=3 ;;
+    tip-fixed)
+      CANARY_HELIUS_TIP_ACCOUNTS=""
+      ;;
+    tip-rotated)
+      CANARY_HELIUS_TIP_ACCOUNTS="${JITO_CANARY_HELIUS_TIP_ACCOUNTS:-}"
+      if [[ -z "$CANARY_HELIUS_TIP_ACCOUNTS" ]]; then
+        echo "tip-rotated requires JITO_CANARY_HELIUS_TIP_ACCOUNTS" >&2
+        exit 2
+      fi
+      ;;
+    blockhash-processed) CANARY_BLOCKHASH_COMMITMENT="processed" ;;
+    blockhash-confirmed) CANARY_BLOCKHASH_COMMITMENT="confirmed" ;;
+    account-priority-cache)
+      CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="true"
+      CANARY_ACCOUNT_PRIORITY_FEE_REFRESH_MS="${JITO_CANARY_ACCOUNT_PRIORITY_FEE_REFRESH_MS:-1000}"
+      CANARY_ACCOUNT_PRIORITY_FEE_STALE_MS="${JITO_CANARY_ACCOUNT_PRIORITY_FEE_STALE_MS:-5000}"
+      CANARY_ACCOUNT_PRIORITY_FEE_PERCENTILE="${JITO_CANARY_ACCOUNT_PRIORITY_FEE_PERCENTILE:-75}"
+      ;;
+    nozomi-only)
+      CANARY_LANE_MODE="nozomi-only"
+      CANARY_HELIUS_ENABLED="false"
+      CANARY_HELIUS_TIP=0
+      CANARY_HELIUS_TIP_ACCOUNT=""
+      CANARY_HELIUS_TIP_ACCOUNTS=""
+      CANARY_NOZOMI_ENABLED="true"
+      ;;
+    helius-nozomi-stack)
+      CANARY_LANE_MODE="helius-nozomi-stack"
+      CANARY_HELIUS_ENABLED="true"
+      CANARY_NOZOMI_ENABLED="true"
+      ;;
     tpu-jet-fanout)
       CANARY_LANE_MODE="helius-tpu-jet"
       CANARY_TPU_JET_ENABLED="true"
@@ -201,6 +264,21 @@ CANARY_HELIUS_TIP_LAMPORTS=${CANARY_HELIUS_TIP:-}
 CANARY_PRIORITY_FEE_MICRO_LAMPORTS=${CANARY_PRIORITY:-}
 CANARY_SEND_MAX_RETRIES=${CANARY_RETRIES:-}
 CANARY_SEND_LANE_MODE=${CANARY_LANE_MODE:-}
+CANARY_HELIUS_TIP_ACCOUNTS=${CANARY_HELIUS_TIP_ACCOUNTS:-}
+CANARY_NOZOMI_ENABLED=${CANARY_NOZOMI_ENABLED:-}
+CANARY_NOZOMI_URLS_CONFIGURED=$([[ -n "${CANARY_NOZOMI_URLS:-}" ]] && echo true || echo false)
+CANARY_NOZOMI_TIP_LAMPORTS=${CANARY_NOZOMI_TIP:-}
+CANARY_NOZOMI_TIP_ACCOUNT_CONFIGURED=$([[ -n "${CANARY_NOZOMI_TIP_ACCOUNT:-}" ]] && echo true || echo false)
+CANARY_NOZOMI_TIP_ACCOUNTS_CONFIGURED=$([[ -n "${CANARY_NOZOMI_TIP_ACCOUNTS:-}" ]] && echo true || echo false)
+CANARY_MAX_PROVIDER_TIP_LAMPORTS=${CANARY_MAX_PROVIDER_TIP_LAMPORTS:-}
+CANARY_MAX_SIGNED_TX_BYTES=${CANARY_MAX_SIGNED_TX_BYTES:-}
+CANARY_MAX_INSTRUCTION_COUNT=${CANARY_MAX_INSTRUCTION_COUNT:-}
+CANARY_MAX_WRITABLE_ACCOUNT_COUNT=${CANARY_MAX_WRITABLE_ACCOUNT_COUNT:-}
+CANARY_BLOCKHASH_COMMITMENT=${CANARY_BLOCKHASH_COMMITMENT:-}
+CANARY_ACCOUNT_PRIORITY_FEE_ENABLED=${CANARY_ACCOUNT_PRIORITY_FEE_ENABLED:-}
+CANARY_ACCOUNT_PRIORITY_FEE_REFRESH_MS=${CANARY_ACCOUNT_PRIORITY_FEE_REFRESH_MS:-}
+CANARY_ACCOUNT_PRIORITY_FEE_STALE_MS=${CANARY_ACCOUNT_PRIORITY_FEE_STALE_MS:-}
+CANARY_ACCOUNT_PRIORITY_FEE_PERCENTILE=${CANARY_ACCOUNT_PRIORITY_FEE_PERCENTILE:-}
 CANARY_TPU_JET_ENABLED=${CANARY_TPU_JET_ENABLED:-}
 CANARY_TPU_QUIC_ENABLED=${CANARY_TPU_QUIC_ENABLED:-}
 CANARY_DYNAMIC_PRIORITY_FEE_ENABLED=${CANARY_DYNAMIC_PRIORITY_ENABLED:-}
@@ -225,6 +303,11 @@ print_status() {
   echo "helius_sender_enabled=${JITO_HELIUS_SENDER_ENABLED:-}"
   echo "helius_sender_swqos_only=${JITO_HELIUS_SENDER_SWQOS_ONLY:-}"
   echo "helius_sender_tip_lamports=${JITO_HELIUS_SENDER_TIP_LAMPORTS:-}"
+  echo "nozomi_enabled=${JITO_NOZOMI_ENABLED:-}"
+  echo "nozomi_urls=$([[ -n "${JITO_NOZOMI_URLS:-}" ]] && echo configured || echo empty)"
+  echo "nozomi_tip_lamports=${JITO_NOZOMI_TIP_LAMPORTS:-}"
+  echo "nozomi_tip_account=$([[ -n "${JITO_NOZOMI_TIP_ACCOUNT:-}" ]] && echo configured || echo empty)"
+  echo "nozomi_tip_accounts=$([[ -n "${JITO_NOZOMI_TIP_ACCOUNTS:-}" ]] && echo configured || echo empty)"
   echo "tpu_jet_enabled=${JITO_TPU_JET_ENABLED:-}"
   echo "tpu_jet_rpc_url=$([[ -n "${JITO_TPU_JET_RPC_URL:-}" ]] && echo configured || echo empty)"
   echo "tpu_jet_ws_url=$([[ -n "${JITO_TPU_JET_WS_URL:-}" ]] && echo configured || echo empty)"
@@ -243,7 +326,15 @@ print_status() {
   echo "dynamic_priority_fee_aggressive_micro_lamports=${JITO_DYNAMIC_PRIORITY_FEE_AGGRESSIVE_MICRO_LAMPORTS:-}"
   echo "dynamic_priority_fee_panic_micro_lamports=${JITO_DYNAMIC_PRIORITY_FEE_PANIC_MICRO_LAMPORTS:-}"
   echo "dynamic_priority_fee_max_micro_lamports=${JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS:-}"
+  echo "account_priority_fee_enabled=${JITO_ACCOUNT_PRIORITY_FEE_ENABLED:-}"
+  echo "account_priority_fee_refresh_ms=${JITO_ACCOUNT_PRIORITY_FEE_REFRESH_MS:-}"
+  echo "account_priority_fee_stale_ms=${JITO_ACCOUNT_PRIORITY_FEE_STALE_MS:-}"
+  echo "account_priority_fee_percentile=${JITO_ACCOUNT_PRIORITY_FEE_PERCENTILE:-}"
   echo "send_max_retries=${JITO_SEND_MAX_RETRIES:-$DEFAULT_BASELINE_RETRIES}"
+  echo "max_provider_tip_lamports=${JITO_MAX_PROVIDER_TIP_LAMPORTS:-}"
+  echo "max_signed_tx_bytes=${JITO_MAX_SIGNED_TX_BYTES:-}"
+  echo "max_instruction_count=${JITO_MAX_INSTRUCTION_COUNT:-}"
+  echo "max_writable_account_count=${JITO_MAX_WRITABLE_ACCOUNT_COUNT:-}"
   echo "jito_block_engine_send_urls=$([[ -n "${JITO_BLOCK_ENGINE_SEND_URLS:-}" ]] && echo configured || echo empty)"
   if [[ -f "$MARKER_FILE" ]]; then
     echo "marker=$MARKER_FILE"
@@ -256,8 +347,7 @@ print_status() {
 score_window() {
   local since_iso="${1:-}" min_position_eligible="${2:-5}"
   if [[ -z "$since_iso" && -f "$MARKER_FILE" ]]; then
-    # shellcheck disable=SC1090
-    source "$MARKER_FILE"
+    load_env_file "$MARKER_FILE"
     since_iso="${CANARY_STARTED_AT_ISO:-}"
   fi
   if [[ -z "$since_iso" ]]; then
@@ -299,8 +389,7 @@ score_recent() {
 compare_windows() {
   local baseline_since_iso="${1:-}" canary_since_iso="${2:-}" canary_until_iso="${3:-}"
   if [[ -f "$MARKER_FILE" ]]; then
-    # shellcheck disable=SC1090
-    source "$MARKER_FILE"
+    load_env_file "$MARKER_FILE"
   fi
   baseline_since_iso="${baseline_since_iso:-${CANARY_BASELINE_STARTED_AT_ISO:-}}"
   canary_since_iso="${canary_since_iso:-${CANARY_STARTED_AT_ISO:-}}"
@@ -395,13 +484,32 @@ require_jet_sidecar_ready() {
   fi
 }
 
+require_nozomi_ready() {
+  local name="$1"
+  if [[ -z "${CANARY_NOZOMI_URLS:-}" ]]; then
+    echo "$name requires JITO_CANARY_NOZOMI_URLS or JITO_NOZOMI_URLS in $WORKER_ENV_FILE or $APP_ENV_FILE" >&2
+    exit 2
+  fi
+  if [[ -z "${CANARY_NOZOMI_TIP:-}" || ! "$CANARY_NOZOMI_TIP" =~ ^[0-9]+$ ]]; then
+    echo "$name requires numeric JITO_CANARY_NOZOMI_TIP_LAMPORTS or JITO_NOZOMI_TIP_LAMPORTS" >&2
+    exit 2
+  fi
+  if (( CANARY_NOZOMI_TIP < 1000000 )); then
+    echo "$name requires Nozomi tip >= 1000000 lamports" >&2
+    exit 2
+  fi
+  if [[ -z "${CANARY_NOZOMI_TIP_ACCOUNT:-}" ]]; then
+    echo "$name requires JITO_CANARY_NOZOMI_TIP_ACCOUNT or JITO_NOZOMI_TIP_ACCOUNT" >&2
+    exit 2
+  fi
+}
+
 apply_canary() {
   local name="$1" backup since_iso
   load_env_file "$APP_ENV_FILE"
   load_env_file "$WORKER_ENV_FILE"
   if [[ -f "$MARKER_FILE" ]]; then
-    # shellcheck disable=SC1090
-    source "$MARKER_FILE"
+    load_env_file "$MARKER_FILE"
     if [[ "${CANARY_NAME:-}" == "baseline" && -z "${CANARY_BASELINE_STARTED_AT_ISO:-}" ]]; then
       CANARY_BASELINE_STARTED_AT_ISO="${CANARY_STARTED_AT_ISO:-}"
     fi
@@ -436,6 +544,11 @@ apply_canary() {
       fi
       ;;
   esac
+  case "$CANARY_NOZOMI_ENABLED" in
+    true)
+      require_nozomi_ready "$name"
+      ;;
+  esac
   baseline_gate "$name"
   backup="$(backup_env)"
 
@@ -449,6 +562,13 @@ apply_canary() {
   set_env_var "$WORKER_ENV_FILE" JITO_SEND_FANOUT "YES"
   set_env_var "$WORKER_ENV_FILE" JITO_HELIUS_SENDER_TIP_LAMPORTS "$CANARY_HELIUS_TIP"
   set_env_var "$WORKER_ENV_FILE" JITO_HELIUS_SENDER_TIP_ACCOUNT "$CANARY_HELIUS_TIP_ACCOUNT"
+  set_env_var "$WORKER_ENV_FILE" JITO_HELIUS_SENDER_TIP_ACCOUNTS "$CANARY_HELIUS_TIP_ACCOUNTS"
+  set_env_var "$WORKER_ENV_FILE" JITO_NOZOMI_ENABLED "$CANARY_NOZOMI_ENABLED"
+  set_env_var "$WORKER_ENV_FILE" JITO_NOZOMI_URLS "$CANARY_NOZOMI_URLS"
+  set_env_var "$WORKER_ENV_FILE" JITO_NOZOMI_TIP_LAMPORTS "$CANARY_NOZOMI_TIP"
+  set_env_var "$WORKER_ENV_FILE" JITO_NOZOMI_TIP_ACCOUNT "$CANARY_NOZOMI_TIP_ACCOUNT"
+  set_env_var "$WORKER_ENV_FILE" JITO_NOZOMI_TIP_ACCOUNTS "$CANARY_NOZOMI_TIP_ACCOUNTS"
+  set_env_var "$WORKER_ENV_FILE" JITO_BLOCKHASH_COMMITMENT "$CANARY_BLOCKHASH_COMMITMENT"
   set_env_var "$WORKER_ENV_FILE" JITO_PRIORITY_FEE_MICRO_LAMPORTS "$CANARY_PRIORITY"
   set_env_var "$WORKER_ENV_FILE" JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS "$CANARY_MAX_PRIORITY"
   set_env_var "$WORKER_ENV_FILE" JITO_DYNAMIC_PRIORITY_FEE_ENABLED "$CANARY_DYNAMIC_PRIORITY_ENABLED"
@@ -456,7 +576,15 @@ apply_canary() {
   set_env_var "$WORKER_ENV_FILE" JITO_DYNAMIC_PRIORITY_FEE_AGGRESSIVE_MICRO_LAMPORTS "$CANARY_DYNAMIC_PRIORITY_AGGRESSIVE"
   set_env_var "$WORKER_ENV_FILE" JITO_DYNAMIC_PRIORITY_FEE_PANIC_MICRO_LAMPORTS "$CANARY_DYNAMIC_PRIORITY_PANIC"
   set_env_var "$WORKER_ENV_FILE" JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS "$CANARY_DYNAMIC_PRIORITY_MAX"
+  set_env_var "$WORKER_ENV_FILE" JITO_ACCOUNT_PRIORITY_FEE_ENABLED "$CANARY_ACCOUNT_PRIORITY_FEE_ENABLED"
+  set_env_var "$WORKER_ENV_FILE" JITO_ACCOUNT_PRIORITY_FEE_REFRESH_MS "$CANARY_ACCOUNT_PRIORITY_FEE_REFRESH_MS"
+  set_env_var "$WORKER_ENV_FILE" JITO_ACCOUNT_PRIORITY_FEE_STALE_MS "$CANARY_ACCOUNT_PRIORITY_FEE_STALE_MS"
+  set_env_var "$WORKER_ENV_FILE" JITO_ACCOUNT_PRIORITY_FEE_PERCENTILE "$CANARY_ACCOUNT_PRIORITY_FEE_PERCENTILE"
   set_env_var "$WORKER_ENV_FILE" JITO_SEND_MAX_RETRIES "$CANARY_RETRIES"
+  set_env_var "$WORKER_ENV_FILE" JITO_MAX_PROVIDER_TIP_LAMPORTS "$CANARY_MAX_PROVIDER_TIP_LAMPORTS"
+  set_env_var "$WORKER_ENV_FILE" JITO_MAX_SIGNED_TX_BYTES "$CANARY_MAX_SIGNED_TX_BYTES"
+  set_env_var "$WORKER_ENV_FILE" JITO_MAX_INSTRUCTION_COUNT "$CANARY_MAX_INSTRUCTION_COUNT"
+  set_env_var "$WORKER_ENV_FILE" JITO_MAX_WRITABLE_ACCOUNT_COUNT "$CANARY_MAX_WRITABLE_ACCOUNT_COUNT"
 
   systemctl restart "$LIVE_SERVICE"
   sleep 2

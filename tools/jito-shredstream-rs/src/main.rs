@@ -10,6 +10,7 @@ mod executor;
 mod live;
 mod parser;
 mod planner;
+mod priority_fee_cache;
 mod proto;
 mod signal;
 mod telegram_snapshot;
@@ -138,8 +139,40 @@ pub(crate) struct LiveOptions {
     #[arg(long, env = "JITO_BLOCKHASH_REFRESH_MS", default_value_t = 500)]
     pub(crate) blockhash_refresh_ms: u64,
 
+    #[arg(long, env = "JITO_BLOCKHASH_COMMITMENT", default_value = "processed")]
+    pub(crate) blockhash_commitment: String,
+
     #[arg(long, env = "JITO_BLOCKHASH_STALE_MS", default_value_t = 5_000)]
     pub(crate) blockhash_stale_ms: u128,
+
+    #[arg(
+        long,
+        env = "JITO_ACCOUNT_PRIORITY_FEE_ENABLED",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) account_priority_fee_enabled: bool,
+
+    #[arg(
+        long,
+        env = "JITO_ACCOUNT_PRIORITY_FEE_REFRESH_MS",
+        default_value_t = 1_000
+    )]
+    pub(crate) account_priority_fee_refresh_ms: u64,
+
+    #[arg(
+        long,
+        env = "JITO_ACCOUNT_PRIORITY_FEE_STALE_MS",
+        default_value_t = 5_000
+    )]
+    pub(crate) account_priority_fee_stale_ms: u128,
+
+    #[arg(
+        long,
+        env = "JITO_ACCOUNT_PRIORITY_FEE_PERCENTILE",
+        default_value_t = 75
+    )]
+    pub(crate) account_priority_fee_percentile: u8,
 
     #[arg(long, env = "JITO_SIMULATE_COPY_TX", default_value_t = false)]
     pub(crate) simulate_copy_tx: bool,
@@ -219,6 +252,29 @@ pub(crate) struct LiveOptions {
     #[arg(long, env = "JITO_HELIUS_SENDER_TIP_ACCOUNT")]
     pub(crate) helius_sender_tip_account: Option<String>,
 
+    #[arg(long, env = "JITO_HELIUS_SENDER_TIP_ACCOUNTS", value_delimiter = ',')]
+    pub(crate) helius_sender_tip_accounts: Vec<String>,
+
+    #[arg(
+        long,
+        env = "JITO_NOZOMI_ENABLED",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) nozomi_enabled: bool,
+
+    #[arg(long = "nozomi-url", env = "JITO_NOZOMI_URLS", value_delimiter = ',')]
+    pub(crate) nozomi_urls: Vec<String>,
+
+    #[arg(long, env = "JITO_NOZOMI_TIP_LAMPORTS")]
+    pub(crate) nozomi_tip_lamports: Option<u64>,
+
+    #[arg(long, env = "JITO_NOZOMI_TIP_ACCOUNT")]
+    pub(crate) nozomi_tip_account: Option<String>,
+
+    #[arg(long, env = "JITO_NOZOMI_TIP_ACCOUNTS", value_delimiter = ',')]
+    pub(crate) nozomi_tip_accounts: Vec<String>,
+
     #[arg(
         long,
         env = "JITO_TPU_JET_ENABLED",
@@ -283,6 +339,18 @@ pub(crate) struct LiveOptions {
 
     #[arg(long, env = "JITO_MAX_TOTAL_COPY_SPEND_SOL")]
     pub(crate) max_total_copy_spend_sol: Option<f64>,
+
+    #[arg(long, env = "JITO_MAX_PROVIDER_TIP_LAMPORTS")]
+    pub(crate) max_provider_tip_lamports: Option<u64>,
+
+    #[arg(long, env = "JITO_MAX_SIGNED_TX_BYTES")]
+    pub(crate) max_signed_tx_bytes: Option<usize>,
+
+    #[arg(long, env = "JITO_MAX_INSTRUCTION_COUNT")]
+    pub(crate) max_instruction_count: Option<usize>,
+
+    #[arg(long, env = "JITO_MAX_WRITABLE_ACCOUNT_COUNT")]
+    pub(crate) max_writable_account_count: Option<usize>,
 
     #[arg(
         long,
@@ -423,6 +491,9 @@ pub(crate) struct LiveOptions {
 
     #[arg(long, env = "JITO_TIP_ACCOUNT")]
     pub(crate) jito_tip_account: Option<String>,
+
+    #[arg(long, env = "JITO_TIP_ACCOUNTS", value_delimiter = ',')]
+    pub(crate) jito_tip_accounts: Vec<String>,
 
     #[arg(long, env = "JITO_SELL_PRIORITY_FEE_MICRO_LAMPORTS")]
     pub(crate) sell_priority_fee_micro_lamports: Option<u64>,

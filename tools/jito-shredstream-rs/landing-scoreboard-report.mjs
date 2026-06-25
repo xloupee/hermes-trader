@@ -142,6 +142,11 @@ function effectiveTipLamports(row) {
       provider: "nozomi",
       lamports: numberValue(row.nozomiTipLamports) ?? 0,
       account: stringValue(row.nozomiTipAccount)
+    },
+    {
+      provider: "bloxroute",
+      lamports: numberValue(row.bloxrouteTipLamports) ?? 0,
+      account: stringValue(row.bloxrouteTipAccount)
     }
   ];
   const byAccount = new Map();
@@ -163,6 +168,7 @@ function effectiveTipLamports(row) {
     jitoTipLamports: tips[0].lamports,
     heliusSenderTipLamports: tips[1].lamports,
     nozomiTipLamports: tips[2].lamports,
+    bloxrouteTipLamports: tips[3].lamports,
     configuredTipLamports,
     mergedTipAccountCount: byAccount.size,
     duplicateTipAccountMerged: configuredTipLamports < tips.reduce((total, tip) => total + tip.lamports, 0)
@@ -183,6 +189,7 @@ function feeTipCost(row) {
     jitoTipLamports,
     heliusSenderTipLamports,
     nozomiTipLamports,
+    bloxrouteTipLamports,
     configuredTipLamports,
     mergedTipAccountCount,
     duplicateTipAccountMerged
@@ -212,6 +219,7 @@ function feeTipCost(row) {
     jitoTipLamports,
     heliusSenderTipLamports,
     nozomiTipLamports,
+    bloxrouteTipLamports,
     configuredTipLamports,
     mergedTipAccountCount,
     duplicateTipAccountMerged,
@@ -330,6 +338,17 @@ function copyBuyLandingRows(rows, { includeUnsent = true } = {}) {
         route: stringValue(row.routeLayout) ?? stringValue(row.selectedRoute),
         instructionCount: numberValue(row.instructionCount),
         signedTxBytes: firstNumber(row.signedTxBytes, row.serializedBytes, row.txBytes),
+        writableAccountCount: numberValue(row.writableAccountCount),
+        computeUnitLimit: numberValue(row.computeUnitLimit),
+        selectedTipAccount: stringValue(row.selectedTipAccount),
+        sourceComputeUnitLimit: numberValue(row.sourceComputeUnitLimit),
+        sourceComputeUnitPriceMicroLamports: numberValue(row.sourceComputeUnitPriceMicroLamports),
+        computeUnitsConsumed: numberValue(row.computeUnitsConsumed),
+        costUnits: numberValue(row.costUnits),
+        blockhashSourceRpc: stringValue(row.blockhashSourceRpc),
+        blockhashCommitment: stringValue(row.blockhashCommitment),
+        blockhashContextSlot: numberValue(row.blockhashContextSlot),
+        blockhashAgeMs: numberValue(row.blockhashAgeMs),
         observedToSignedMs: numberValue(row.observedToSignedMs),
         observedToSendSubmittedMs: numberValue(row.observedToSendSubmittedMs),
         observedToSignatureReturnedMs: numberValue(row.observedToSignatureReturnedMs),
@@ -356,6 +375,13 @@ function copyBuyLandingRows(rows, { includeUnsent = true } = {}) {
         sourcePositionBucket: stringValue(row.sourcePositionBucket) ?? "unknown",
         feeReason: stringValue(row.feeReason),
         feeCapHit: Boolean(row.feeCapHit),
+        accountPriorityFeeEnabled: Boolean(row.accountPriorityFeeEnabled),
+        accountPriorityFeeMicroLamports: numberValue(row.accountPriorityFeeMicroLamports),
+        accountPriorityFeeAgeMs: numberValue(row.accountPriorityFeeAgeMs),
+        accountPriorityFeeSampleCount: numberValue(row.accountPriorityFeeSampleCount),
+        accountPriorityFeeAccountCount: numberValue(row.accountPriorityFeeAccountCount),
+        accountPriorityFeeApplied: Boolean(row.accountPriorityFeeApplied),
+        accountPriorityFeeReason: stringValue(row.accountPriorityFeeReason),
         ...position,
         feeTipCost: cost
       };
@@ -1008,10 +1034,17 @@ function printTextReport(scoreboard, { path, limit }) {
         `txDelta=${formatNumber(row.txDelta)}`,
         `idx=${formatNumber(row.targetTxIndex)}->${formatNumber(row.copyTxIndex)}`,
         `feeProfile=${row.feeProfileName}/${row.sourcePositionBucket}`,
+        `acctFee=${formatNumber(row.accountPriorityFeeMicroLamports)}`,
+        `acctApplied=${row.accountPriorityFeeApplied ? "yes" : "no"}`,
         `feeTip=${formatSol(row.feeTipCost.observedFeeTipSol ?? row.feeTipCost.configuredFeeTipSol)} SOL`,
         `route=${row.route ?? "n/a"}`,
         `ix=${formatNumber(row.instructionCount)}`,
         `bytes=${formatNumber(row.signedTxBytes)}`,
+        `writable=${formatNumber(row.writableAccountCount)}`,
+        `tipAcct=${short(row.selectedTipAccount)}`,
+        `srcCU=${formatNumber(row.sourceComputeUnitPriceMicroLamports)}`,
+        `cost=${formatNumber(row.costUnits)}`,
+        `bh=${row.blockhashCommitment ?? "n/a"}/${formatNumber(row.blockhashAgeMs)}ms`,
         `copy=${short(row.sendSignature)}`,
         `attempts=${formatAttempts(row.allLaneAttempts)}`
       ].join(" | ")

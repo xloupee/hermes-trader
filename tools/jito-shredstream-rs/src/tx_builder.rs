@@ -14,6 +14,10 @@ pub(crate) struct TxFeeConfig {
     pub(crate) jito_tip_account: Option<String>,
     pub(crate) helius_sender_tip_lamports: Option<u64>,
     pub(crate) helius_sender_tip_account: Option<String>,
+    pub(crate) nozomi_tip_lamports: Option<u64>,
+    pub(crate) nozomi_tip_account: Option<String>,
+    pub(crate) bloxroute_tip_lamports: Option<u64>,
+    pub(crate) bloxroute_tip_account: Option<String>,
 }
 
 #[derive(Debug)]
@@ -136,7 +140,7 @@ fn parse_pubkey(value: &str) -> Result<Pubkey, TxBuildError> {
 }
 
 fn fee_tip_transfers(fee_config: &TxFeeConfig) -> Result<Vec<(Pubkey, u64)>, TxBuildError> {
-    let mut transfers = Vec::with_capacity(2);
+    let mut transfers = Vec::with_capacity(4);
     push_fee_tip_transfer(
         &mut transfers,
         fee_config.jito_tip_lamports,
@@ -148,6 +152,18 @@ fn fee_tip_transfers(fee_config: &TxFeeConfig) -> Result<Vec<(Pubkey, u64)>, TxB
         fee_config.helius_sender_tip_lamports,
         fee_config.helius_sender_tip_account.as_deref(),
         "missing Helius Sender tip account",
+    )?;
+    push_fee_tip_transfer(
+        &mut transfers,
+        fee_config.nozomi_tip_lamports,
+        fee_config.nozomi_tip_account.as_deref(),
+        "missing Nozomi tip account",
+    )?;
+    push_fee_tip_transfer(
+        &mut transfers,
+        fee_config.bloxroute_tip_lamports,
+        fee_config.bloxroute_tip_account.as_deref(),
+        "missing bloXroute tip account",
     )?;
     Ok(transfers)
 }
@@ -1624,6 +1640,10 @@ mod tests {
             jito_tip_account: Some("96gYZGLnUQYgE8MWWpYJw8yRjnvB51rAhbG1SogE3uSG".to_string()),
             helius_sender_tip_lamports: None,
             helius_sender_tip_account: None,
+            nozomi_tip_lamports: None,
+            nozomi_tip_account: None,
+            bloxroute_tip_lamports: None,
+            bloxroute_tip_account: None,
         };
 
         let build = build_full_copy_unsigned_flashx_pump_with_fees(
@@ -1693,6 +1713,10 @@ mod tests {
             helius_sender_tip_account: Some(
                 "HWEoBxYs7ssKuudEjzjmpfJVX7Dvi7wescFsVx2L5yoY".to_string(),
             ),
+            nozomi_tip_lamports: None,
+            nozomi_tip_account: None,
+            bloxroute_tip_lamports: None,
+            bloxroute_tip_account: None,
         };
 
         let build = build_full_copy_unsigned_flashx_pump_with_fees(
@@ -1748,6 +1772,10 @@ mod tests {
             jito_tip_account: Some(tip_account.clone()),
             helius_sender_tip_lamports: Some(200_000),
             helius_sender_tip_account: Some(tip_account),
+            nozomi_tip_lamports: None,
+            nozomi_tip_account: None,
+            bloxroute_tip_lamports: None,
+            bloxroute_tip_account: None,
         };
 
         let build = build_full_copy_unsigned_flashx_pump_with_fees(
@@ -1775,6 +1803,64 @@ mod tests {
     }
 
     #[test]
+    fn fee_config_adds_provider_stack_tips_to_one_transaction_shell() {
+        let transaction = replay_transaction(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/flashx/live-buy-2BMXhQfpCcgGqaqSzPCM3uRgjBhbJf5jNh5UGsGyErQ3MF1muES8PBLhXC5kUyYFspeL9eFRT9xoSzLjTNBrEiCo.tx.base64"
+        )));
+        let account_keys = live_direct_pump_buy_hydrated_account_keys(&transaction);
+        let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
+            .expect("live direct Pump FLASHX buy should parse");
+        let jito_account = "96gYZGLnUQYgE8MWWpYJw8yRjnvB51rAhbG1SogE3uSG".to_string();
+        let helius_account = "HWEoBxYs7ssKuudEjzjmpfJVX7Dvi7wescFsVx2L5yoY".to_string();
+        let nozomi_account = "CwyufX5F8vP7gB5Xv8iYfLsCfQeQf9MStjGgYQhE6S9g".to_string();
+        let fee_config = TxFeeConfig {
+            compute_unit_price_micro_lamports: Some(250_000),
+            jito_tip_lamports: Some(1_000),
+            jito_tip_account: Some(jito_account.clone()),
+            helius_sender_tip_lamports: Some(200_000),
+            helius_sender_tip_account: Some(helius_account.clone()),
+            nozomi_tip_lamports: Some(1_000_000),
+            nozomi_tip_account: Some(nozomi_account.clone()),
+            bloxroute_tip_lamports: Some(1_250_000),
+            bloxroute_tip_account: Some(nozomi_account.clone()),
+        };
+
+        let build = build_full_copy_unsigned_flashx_pump_with_fees(
+            parsed.route_context.as_deref(),
+            COPY_WALLET,
+            &parsed.mint.to_string(),
+            &fee_config,
+        )
+        .expect("provider-stack transaction shell should build");
+
+        assert_eq!(build.setup_instruction_count, 6);
+        assert_eq!(build.main_instruction_count, 1);
+        assert_eq!(build.instructions.len(), 7);
+        assert_eq!(build.instructions[3].accounts[1].pubkey.to_string(), jito_account);
+        assert_eq!(
+            build.instructions[4].accounts[1].pubkey.to_string(),
+            helius_account
+        );
+        assert_eq!(
+            build.instructions[5].accounts[1].pubkey.to_string(),
+            nozomi_account
+        );
+        assert_eq!(
+            build.instructions[5].data,
+            [
+                2u32.to_le_bytes().to_vec(),
+                1_250_000u64.to_le_bytes().to_vec()
+            ]
+            .concat()
+        );
+        assert_eq!(
+            build.instructions[6].program_id.to_string(),
+            PUMP_FUN_PROGRAM_ID
+        );
+    }
+
+    #[test]
     fn positive_jito_tip_requires_tip_account() {
         let transaction = replay_transaction(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1789,6 +1875,10 @@ mod tests {
             jito_tip_account: None,
             helius_sender_tip_lamports: None,
             helius_sender_tip_account: None,
+            nozomi_tip_lamports: None,
+            nozomi_tip_account: None,
+            bloxroute_tip_lamports: None,
+            bloxroute_tip_account: None,
         };
 
         let error = build_full_copy_unsigned_flashx_pump_with_fees(

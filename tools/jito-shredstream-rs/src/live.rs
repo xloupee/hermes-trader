@@ -67,6 +67,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
     let blockhash_cache = spawn_blockhash_cache(
         state_rpc_urls.clone(),
         options.blockhash_refresh_ms,
+        options.blockhash_refresh_timeout_ms,
         options.blockhash_commitment.trim().to_string(),
         options.stats,
     );

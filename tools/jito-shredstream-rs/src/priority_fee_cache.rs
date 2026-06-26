@@ -96,11 +96,10 @@ impl PriorityFeeCache {
         }
 
         let entries = self.inner.entries.load();
-        let Some(entry) = entries
-            .get(&key)
-            .cloned()
-            .or_else(|| self.inner.max_fresh_single_account_entry(&entries, &accounts))
-        else {
+        let Some(entry) = entries.get(&key).cloned().or_else(|| {
+            self.inner
+                .max_fresh_single_account_entry(&entries, &accounts)
+        }) else {
             return PriorityFeeLookup {
                 account_count: accounts.len(),
                 ..PriorityFeeLookup::default()

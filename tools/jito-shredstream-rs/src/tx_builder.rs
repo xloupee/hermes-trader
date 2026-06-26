@@ -1837,7 +1837,10 @@ mod tests {
         assert_eq!(build.setup_instruction_count, 6);
         assert_eq!(build.main_instruction_count, 1);
         assert_eq!(build.instructions.len(), 7);
-        assert_eq!(build.instructions[3].accounts[1].pubkey.to_string(), jito_account);
+        assert_eq!(
+            build.instructions[3].accounts[1].pubkey.to_string(),
+            jito_account
+        );
         assert_eq!(
             build.instructions[4].accounts[1].pubkey.to_string(),
             helius_account

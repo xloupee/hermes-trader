@@ -23,6 +23,7 @@ pub(crate) type BlockhashCache = Arc<RwLock<Option<CachedBlockhash>>>;
 pub(crate) fn spawn_blockhash_cache(
     rpc_urls: Vec<String>,
     refresh_ms: u64,
+    refresh_timeout_ms: u64,
     commitment: String,
     stats: bool,
 ) -> Option<BlockhashCache> {
@@ -36,11 +37,15 @@ pub(crate) fn spawn_blockhash_cache(
     tokio::spawn(async move {
         let client = reqwest::Client::new();
         let mut interval = tokio::time::interval(Duration::from_millis(refresh_ms));
+        let mut last_error_log_ms = 0u128;
 
         loop {
             interval.tick().await;
-            match fetch_latest_blockhash_any(&client, &rpc_urls, &commitment).await {
+            match fetch_latest_blockhash_any(&client, &rpc_urls, &commitment, refresh_timeout_ms)
+                .await
+            {
                 Ok(blockhash) => {
+                    last_error_log_ms = 0;
                     if stats {
                         eprintln!(
                             "refreshed blockhash {}; lastValidBlockHeight={}; commitment={}; contextSlot={}; sourceRpc={}; fetchedAtMs={}",
@@ -59,10 +64,13 @@ pub(crate) fn spawn_blockhash_cache(
                         *guard = Some(blockhash);
                     }
                 }
-                Err(error) if stats => {
-                    eprintln!("blockhash refresh failed: {error}");
+                Err(error) => {
+                    let current_ms = now_ms();
+                    if stats || current_ms.saturating_sub(last_error_log_ms) >= 5_000 {
+                        eprintln!("blockhash refresh failed: {error}");
+                        last_error_log_ms = current_ms;
+                    }
                 }
-                Err(_) => {}
             }
         }
     });
@@ -84,11 +92,12 @@ async fn fetch_latest_blockhash_any(
     client: &reqwest::Client,
     rpc_urls: &[String],
     commitment: &str,
+    timeout_ms: u64,
 ) -> Result<CachedBlockhash, String> {
     let mut errors = Vec::new();
     let mut best: Option<CachedBlockhash> = None;
     for rpc_url in rpc_urls {
-        match fetch_latest_blockhash(client, rpc_url, commitment).await {
+        match fetch_latest_blockhash(client, rpc_url, commitment, timeout_ms).await {
             Ok(blockhash) => match (&best, blockhash.context_slot) {
                 (None, _) => best = Some(blockhash),
                 (Some(existing), Some(slot)) if existing.context_slot.unwrap_or(0) < slot => {
@@ -112,27 +121,38 @@ async fn fetch_latest_blockhash(
     client: &reqwest::Client,
     rpc_url: &str,
     commitment: &str,
+    timeout_ms: u64,
 ) -> Result<CachedBlockhash, String> {
-    let response = client
-        .post(rpc_url)
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getLatestBlockhash",
-            "params": [
-                {
-                    "commitment": commitment
-                }
-            ]
-        }))
-        .send()
-        .await
-        .map_err(|error| format!("send getLatestBlockhash request: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("getLatestBlockhash HTTP status: {error}"))?
-        .json::<RpcResponse>()
-        .await
-        .map_err(|error| format!("decode getLatestBlockhash response: {error}"))?;
+    let request = async {
+        client
+            .post(rpc_url)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getLatestBlockhash",
+                "params": [
+                    {
+                        "commitment": commitment
+                    }
+                ]
+            }))
+            .send()
+            .await
+            .map_err(|error| format!("send getLatestBlockhash request: {error}"))?
+            .error_for_status()
+            .map_err(|error| format!("getLatestBlockhash HTTP status: {error}"))?
+            .json::<RpcResponse>()
+            .await
+            .map_err(|error| format!("decode getLatestBlockhash response: {error}"))
+    };
+
+    let response = if timeout_ms > 0 {
+        tokio::time::timeout(Duration::from_millis(timeout_ms), request)
+            .await
+            .map_err(|_| format!("getLatestBlockhash timed out after {timeout_ms}ms"))??
+    } else {
+        request.await?
+    };
 
     if let Some(error) = response.error {
         return Err(format!("getLatestBlockhash RPC error: {}", error.message));

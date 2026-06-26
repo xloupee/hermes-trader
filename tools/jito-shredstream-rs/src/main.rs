@@ -132,17 +132,24 @@ pub(crate) struct LiveOptions {
     #[arg(
         long,
         env = "JITO_COPY_WALLET_BALANCE_STALE_MS",
-        default_value_t = 5_000
+        default_value_t = 120_000
     )]
     pub(crate) copy_wallet_balance_stale_ms: u128,
 
     #[arg(long, env = "JITO_BLOCKHASH_REFRESH_MS", default_value_t = 500)]
     pub(crate) blockhash_refresh_ms: u64,
 
+    #[arg(
+        long,
+        env = "JITO_BLOCKHASH_REFRESH_TIMEOUT_MS",
+        default_value_t = 1_200
+    )]
+    pub(crate) blockhash_refresh_timeout_ms: u64,
+
     #[arg(long, env = "JITO_BLOCKHASH_COMMITMENT", default_value = "processed")]
     pub(crate) blockhash_commitment: String,
 
-    #[arg(long, env = "JITO_BLOCKHASH_STALE_MS", default_value_t = 5_000)]
+    #[arg(long, env = "JITO_BLOCKHASH_STALE_MS", default_value_t = 30_000)]
     pub(crate) blockhash_stale_ms: u128,
 
     #[arg(

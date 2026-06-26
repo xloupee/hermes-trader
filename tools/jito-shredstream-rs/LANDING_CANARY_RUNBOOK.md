@@ -182,6 +182,37 @@ Primary dynamic-priority gates:
 - landed rate
 - configured fee/tip SOL per sent and per landed improvement
 
+## Warm State Guardrails
+
+The copy-buy hot path must use preloaded state. It should not fetch blockhashes
+or balances on signal, but the warm caches must also be tolerant of ordinary RPC
+jitter.
+
+Recommended live values:
+
+```sh
+JITO_BLOCKHASH_REFRESH_MS=500
+JITO_BLOCKHASH_REFRESH_TIMEOUT_MS=1200
+JITO_BLOCKHASH_STALE_MS=30000
+JITO_COPY_WALLET_BALANCE_REFRESH_MS=5000
+JITO_COPY_WALLET_BALANCE_STALE_MS=120000
+```
+
+If buys stop, check skip reasons before changing landing providers:
+
+```sh
+node -e 'const fs=require("fs");const rows=fs.readFileSync("/var/log/jito-copy-executions-vps.jsonl","utf8").trim().split(/\n/).map(JSON.parse).filter(r=>r.schema==="copytrade.localExecution.v1"&&r.observedAction==="buy").slice(-30);console.log(rows.map(r=>[new Date(r.observedAtMs).toISOString(),r.decision,r.reason||"sent"]).join("\n"))'
+```
+
+Warm-state skips mean the bot detected a buy and intentionally failed closed
+before signing. Provider tips and sender lanes do not fix those.
+
+Keep `JITO_ACCOUNT_PRIORITY_FEE_ENABLED=false` during provider-stack canaries
+unless the account-priority cache is the specific variable under test. That
+cache can add many `getRecentPrioritizationFees` reads after writable accounts
+are observed, which can starve the same state RPC used by warm balance and
+blockhash caches.
+
 ## Jet Sidecar Service
 
 Build the sidecar on the Droplet from `/opt/jito-feed-probe-watch` before the

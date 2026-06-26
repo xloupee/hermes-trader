@@ -266,7 +266,10 @@ impl SendLaneMode {
     }
 
     fn uses_nozomi_lanes(self) -> bool {
-        matches!(self, Self::Mixed | Self::NozomiOnly | Self::HeliusNozomiStack)
+        matches!(
+            self,
+            Self::Mixed | Self::NozomiOnly | Self::HeliusNozomiStack
+        )
     }
 
     fn uses_tpu_quic_lanes(self) -> bool {
@@ -301,7 +304,10 @@ impl SendLaneMode {
     }
 
     fn uses_nozomi_tip(self) -> bool {
-        matches!(self, Self::Mixed | Self::NozomiOnly | Self::HeliusNozomiStack)
+        matches!(
+            self,
+            Self::Mixed | Self::NozomiOnly | Self::HeliusNozomiStack
+        )
     }
 }
 
@@ -1707,16 +1713,17 @@ impl CopyExecutor {
         line.mark_built();
 
         let postbuild_guards_started_at = Instant::now();
-        if let Some(reason) = provider_tip_guard_reason(&self.options, &fee_profile.tx_fee_config)
-        {
+        if let Some(reason) = provider_tip_guard_reason(&self.options, &fee_profile.tx_fee_config) {
             line.record_guards_us(
                 prebuild_guards_us + postbuild_guards_started_at.elapsed().as_micros(),
             );
             return line.skip(reason);
         }
-        if let Some(reason) =
-            transaction_shape_guard_reason(&self.options, build.instructions.len(), writable_account_keys.len())
-        {
+        if let Some(reason) = transaction_shape_guard_reason(
+            &self.options,
+            build.instructions.len(),
+            writable_account_keys.len(),
+        ) {
             line.record_guards_us(
                 prebuild_guards_us + postbuild_guards_started_at.elapsed().as_micros(),
             );
@@ -5168,8 +5175,7 @@ impl CopyExecutionOptions {
         }
         if !self.send_fanout && self.send_lane_mode != SendLaneMode::NozomiOnly {
             return Err(
-                "JITO_NOZOMI_ENABLED requires JITO_SEND_FANOUT=YES unless nozomi_only"
-                    .to_string(),
+                "JITO_NOZOMI_ENABLED requires JITO_SEND_FANOUT=YES unless nozomi_only".to_string(),
             );
         }
         if !self.fast_copy_send {

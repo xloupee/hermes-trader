@@ -104,12 +104,18 @@ window does not meet the minimum scored-row and `txDelta` coverage thresholds.
    Jet same-signature fanout, then `tpu-jet-only`, which applies
    `JITO_SEND_LANE_MODE=tpu-jet-helius-tip` for Jet-only sending with the same
    Helius-tip transaction shape.
-8. Direct TPU QUIC fallback, only after the direct TPU build is deployed and
-   `JITO_TPU_QUIC_RPC_URL` / `JITO_TPU_QUIC_WS_URL` are configured:
-   `tpu-quic-fanout` applies `JITO_SEND_LANE_MODE=helius-tpu-quic` for Helius
-   + TPU same-signature fanout, then `tpu-quic-only`, which applies
-   `JITO_SEND_LANE_MODE=tpu-quic-helius-tip` for TPU-only sending with the same
-   Helius-tip transaction shape.
+8. Direct TPU QUIC fallback, only after `JITO_TPU_QUIC_RPC_URL` /
+   `JITO_TPU_QUIC_WS_URL` are configured. Use the current-leader variants for
+   the next retest:
+   `tpu-quic-current-leader-fanout` applies
+   `JITO_SEND_LANE_MODE=helius-tpu-quic`, enables TPU QUIC, and sets
+   `JITO_TPU_QUIC_FANOUT_SLOTS=1`; then
+   `tpu-quic-current-leader-only` applies
+   `JITO_SEND_LANE_MODE=tpu-quic-helius-tip` with the same Helius-tip
+   transaction shape and `JITO_TPU_QUIC_FANOUT_SLOTS=1`.
+   Do not use the legacy multi-leader `tpu-quic-fanout` / `tpu-quic-only`
+   shape for the timeout retest: Solana's TPU client waits for all selected
+   leader sends, so larger fanout can recreate the previous 100ms timeout.
 9. Cheaper TPU-only shape: `tpu-jet-cheap` or `tpu-quic-cheap` only after the
    matching same-fee TPU-only window proves better. These switch to
    `tpu-jet-only` / `tpu-quic-only` lane modes with Helius Sender disabled and
@@ -214,6 +220,12 @@ are observed, which can starve the same state RPC used by warm balance and
 blockhash caches.
 
 ## Jet Sidecar Service
+
+Direct TPU QUIC dispatch telemetry is local dispatch only, not an ACK. Judge it
+by landed rate, same-slot rate, `slotDelta`, `txDelta`, failed-on-chain count,
+and total configured cost. For the current-leader QUIC retest, require the
+canary marker to show `CANARY_TPU_QUIC_FANOUT_SLOTS=1` and watch
+`timeoutMs` / `fanoutSlots` in `copytrade.sendLaneAttribution.v1`.
 
 Build the sidecar on the Droplet from `/opt/jito-feed-probe-watch` before the
 Jet canary:

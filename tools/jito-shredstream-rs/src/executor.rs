@@ -658,6 +658,8 @@ pub(crate) struct SendLaneAttemptAttribution {
     #[serde(skip_serializing_if = "Option::is_none")]
     fanout_slots: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     ack_at: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_class: Option<&'static str>,
@@ -857,6 +859,8 @@ struct SendRpcAttemptLine {
     duration_ms: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
     fanout_slots: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3470,6 +3474,7 @@ fn spawn_send_lane_attribution_collector(
                     status: "failed",
                     duration_ms: 0,
                     fanout_slots: None,
+                    timeout_ms: None,
                     ack_at: None,
                     error_class: Some("join_error"),
                     error: Some(error),
@@ -3489,6 +3494,7 @@ fn spawn_send_lane_attribution_collector(
                     status: "failed",
                     duration_ms: 0,
                     fanout_slots: None,
+                    timeout_ms: None,
                     ack_at: None,
                     error_class: Some("join_error"),
                     error: Some(format!("join error: {error}")),
@@ -3536,6 +3542,7 @@ fn send_lane_attempt_attribution(
         status: attempt.status,
         duration_ms: attempt.duration_ms,
         fanout_slots: attempt.fanout_slots,
+        timeout_ms: attempt.timeout_ms,
         ack_at,
         error_class: attempt.error_class,
         error: attempt.error,
@@ -4501,6 +4508,7 @@ pub(crate) fn sample_copy_execution_output_for_tests() -> CopyExecutionOutput {
             status: "submitted",
             duration_ms: 7,
             fanout_slots: None,
+            timeout_ms: None,
             ack_at: Some(112),
             error_class: None,
             error: None,
@@ -5895,6 +5903,7 @@ async fn warm_send_endpoint(
             status: "warm",
             duration_ms: started_at.elapsed().as_millis(),
             fanout_slots: endpoint.fanout_slots,
+            timeout_ms: endpoint.timeout_ms,
             signature: None,
             error_class: None,
             error: None,
@@ -5924,6 +5933,7 @@ async fn warm_send_endpoint(
         status: "warmed",
         duration_ms: started_at.elapsed().as_millis(),
         fanout_slots: None,
+        timeout_ms: None,
         signature: None,
         error_class: None,
         error: None,
@@ -5970,6 +5980,7 @@ async fn send_transaction_attempt(
                 status: "error",
                 duration_ms: started_at.elapsed().as_millis(),
                 fanout_slots: None,
+                timeout_ms: None,
                 signature: None,
                 error_class: Some("unsupported_endpoint"),
                 error: Some("bloxroute_submit adapter is not wired yet".to_string()),
@@ -6006,6 +6017,7 @@ async fn send_transaction_attempt(
                 status: "submitted",
                 duration_ms: started_at.elapsed().as_millis(),
                 fanout_slots: None,
+                timeout_ms: None,
                 signature: Some(signature.clone()),
                 error_class: None,
                 error: None,
@@ -6033,6 +6045,7 @@ async fn send_transaction_attempt(
                 status: "failed",
                 duration_ms: started_at.elapsed().as_millis(),
                 fanout_slots: None,
+                timeout_ms: None,
                 signature: None,
                 error_class: Some(send_error_class(&error)),
                 error: Some(sanitized.clone()),
@@ -6163,6 +6176,7 @@ async fn send_tpu_jet_attempt(
                 status: "dispatched",
                 duration_ms: started_at.elapsed().as_millis(),
                 fanout_slots: endpoint.fanout_slots,
+                timeout_ms: endpoint.timeout_ms,
                 signature: Some(known_signature.to_string()),
                 error_class: None,
                 error: None,
@@ -6180,6 +6194,7 @@ async fn send_tpu_jet_attempt(
                 status: "error",
                 duration_ms: started_at.elapsed().as_millis(),
                 fanout_slots: endpoint.fanout_slots,
+                timeout_ms: endpoint.timeout_ms,
                 signature: None,
                 error_class: Some(error_class.unwrap_or("sidecar_error")),
                 error: Some(error.clone()),
@@ -6220,7 +6235,13 @@ async fn send_tpu_quic_attempt(
             .try_send_wire_transaction(wire_tx.to_vec())
             .await
             .map(|_| sender.fanout_slots)
-            .map_err(|error| ("dispatch_error", error)),
+            .map_err(|error| {
+                if error.contains("timed out") {
+                    ("timeout", error)
+                } else {
+                    ("dispatch_error", error)
+                }
+            }),
     };
 
     match result {
@@ -6232,6 +6253,7 @@ async fn send_tpu_quic_attempt(
                 status: "dispatched",
                 duration_ms: started_at.elapsed().as_millis(),
                 fanout_slots: Some(fanout_slots),
+                timeout_ms: endpoint.timeout_ms,
                 signature: Some(known_signature.to_string()),
                 error_class: None,
                 error: None,
@@ -6246,9 +6268,10 @@ async fn send_tpu_quic_attempt(
                 label: endpoint.label.clone(),
                 kind: send_endpoint_kind(endpoint),
                 mode: None,
-                status: "error",
+                status: if error_class == "timeout" { "timeout" } else { "error" },
                 duration_ms: started_at.elapsed().as_millis(),
-                fanout_slots: None,
+                fanout_slots: endpoint.fanout_slots,
+                timeout_ms: endpoint.timeout_ms,
                 signature: None,
                 error_class: Some(error_class),
                 error: Some(error.clone()),
@@ -8774,6 +8797,7 @@ mod tests {
             status: "dispatched",
             duration_ms: 2,
             fanout_slots: Some(12),
+            timeout_ms: Some(30),
             ack_at: None,
             error_class: None,
             error: None,
@@ -8801,6 +8825,11 @@ mod tests {
                 .and_then(serde_json::Value::as_u64),
             Some(12)
         );
+        assert_eq!(
+            json.pointer("/allAttempts/0/timeoutMs")
+                .and_then(serde_json::Value::as_u64),
+            Some(30)
+        );
     }
 
     #[test]
@@ -8815,6 +8844,7 @@ mod tests {
             status: "dispatched",
             duration_ms: 1,
             fanout_slots: Some(12),
+            timeout_ms: Some(30),
             ack_at: None,
             error_class: None,
             error: None,
@@ -8841,6 +8871,11 @@ mod tests {
             json.pointer("/allAttempts/0/fanoutSlots")
                 .and_then(serde_json::Value::as_u64),
             Some(12)
+        );
+        assert_eq!(
+            json.pointer("/allAttempts/0/timeoutMs")
+                .and_then(serde_json::Value::as_u64),
+            Some(30)
         );
     }
 
@@ -8975,6 +9010,7 @@ mod tests {
                 status: "submitted",
                 duration_ms: 7,
                 fanout_slots: None,
+                timeout_ms: None,
                 ack_at: Some(112),
                 error_class: None,
                 error: None,

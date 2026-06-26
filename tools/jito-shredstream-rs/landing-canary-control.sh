@@ -53,8 +53,10 @@ Canaries:
   tpu-jet-fanout Helius baseline plus same-signature Yellowstone Jet sidecar fanout
   tpu-jet-only Same fee shape, Yellowstone Jet sidecar only
   tpu-jet-cheap Jet sidecar only with Helius Sender tip disabled; requires JITO_CANARY_ALLOW_CHEAP_TPU=YES
-  tpu-quic-fanout Helius baseline plus same-signature direct TPU QUIC fanout
-  tpu-quic-only Same fee shape, direct TPU QUIC only
+  tpu-quic-current-leader-fanout Helius baseline plus direct TPU QUIC current-leader fanout
+  tpu-quic-current-leader-only Same fee shape, direct TPU QUIC current-leader only
+  tpu-quic-fanout Legacy multi-leader direct TPU QUIC fanout; not recommended for timeout retest
+  tpu-quic-only Legacy same fee shape, multi-leader direct TPU QUIC only
   tpu-quic-cheap TPU QUIC only with Helius Sender tip disabled; requires JITO_CANARY_ALLOW_CHEAP_TPU=YES
 USAGE
 }
@@ -115,6 +117,8 @@ canary_values() {
   CANARY_HELIUS_SWQOS_ONLY="${JITO_HELIUS_SENDER_SWQOS_ONLY:-false}"
   CANARY_TPU_JET_ENABLED="false"
   CANARY_TPU_QUIC_ENABLED="false"
+  CANARY_TPU_QUIC_FANOUT_SLOTS="${JITO_CANARY_TPU_QUIC_FANOUT_SLOTS:-${JITO_TPU_QUIC_FANOUT_SLOTS:-12}}"
+  CANARY_TPU_QUIC_TIMEOUT_MS="${JITO_CANARY_TPU_QUIC_TIMEOUT_MS:-${JITO_TPU_QUIC_TIMEOUT_MS:-30}}"
   CANARY_HELIUS_TIP_ACCOUNT="${JITO_HELIUS_SENDER_TIP_ACCOUNT:-}"
   CANARY_HELIUS_TIP_ACCOUNTS="${JITO_HELIUS_SENDER_TIP_ACCOUNTS:-}"
   CANARY_NOZOMI_ENABLED="false"
@@ -233,6 +237,16 @@ canary_values() {
       CANARY_LANE_MODE="tpu-quic-helius-tip"
       CANARY_TPU_QUIC_ENABLED="true"
       ;;
+    tpu-quic-current-leader-fanout)
+      CANARY_LANE_MODE="helius-tpu-quic"
+      CANARY_TPU_QUIC_ENABLED="true"
+      CANARY_TPU_QUIC_FANOUT_SLOTS=1
+      ;;
+    tpu-quic-current-leader-only)
+      CANARY_LANE_MODE="tpu-quic-helius-tip"
+      CANARY_TPU_QUIC_ENABLED="true"
+      CANARY_TPU_QUIC_FANOUT_SLOTS=1
+      ;;
     tpu-quic-cheap)
       case "$(printf '%s' "${JITO_CANARY_ALLOW_CHEAP_TPU:-false}" | tr '[:upper:]' '[:lower:]')" in
         yes|true|1|on) ;;
@@ -287,6 +301,8 @@ CANARY_ACCOUNT_PRIORITY_FEE_STALE_MS=${CANARY_ACCOUNT_PRIORITY_FEE_STALE_MS:-}
 CANARY_ACCOUNT_PRIORITY_FEE_PERCENTILE=${CANARY_ACCOUNT_PRIORITY_FEE_PERCENTILE:-}
 CANARY_TPU_JET_ENABLED=${CANARY_TPU_JET_ENABLED:-}
 CANARY_TPU_QUIC_ENABLED=${CANARY_TPU_QUIC_ENABLED:-}
+CANARY_TPU_QUIC_FANOUT_SLOTS=${CANARY_TPU_QUIC_FANOUT_SLOTS:-}
+CANARY_TPU_QUIC_TIMEOUT_MS=${CANARY_TPU_QUIC_TIMEOUT_MS:-}
 CANARY_DYNAMIC_PRIORITY_FEE_ENABLED=${CANARY_DYNAMIC_PRIORITY_ENABLED:-}
 CANARY_DYNAMIC_PRIORITY_FEE_BASELINE_MICRO_LAMPORTS=${CANARY_DYNAMIC_PRIORITY_BASELINE:-}
 CANARY_DYNAMIC_PRIORITY_FEE_AGGRESSIVE_MICRO_LAMPORTS=${CANARY_DYNAMIC_PRIORITY_AGGRESSIVE:-}
@@ -570,6 +586,8 @@ apply_canary() {
   set_env_var "$WORKER_ENV_FILE" JITO_TIP_LAMPORTS "0"
   set_env_var "$WORKER_ENV_FILE" JITO_TPU_JET_ENABLED "$CANARY_TPU_JET_ENABLED"
   set_env_var "$WORKER_ENV_FILE" JITO_TPU_QUIC_ENABLED "$CANARY_TPU_QUIC_ENABLED"
+  set_env_var "$WORKER_ENV_FILE" JITO_TPU_QUIC_FANOUT_SLOTS "$CANARY_TPU_QUIC_FANOUT_SLOTS"
+  set_env_var "$WORKER_ENV_FILE" JITO_TPU_QUIC_TIMEOUT_MS "$CANARY_TPU_QUIC_TIMEOUT_MS"
   set_env_var "$WORKER_ENV_FILE" JITO_SEND_FANOUT "YES"
   set_env_var "$WORKER_ENV_FILE" JITO_HELIUS_SENDER_TIP_LAMPORTS "$CANARY_HELIUS_TIP"
   set_env_var "$WORKER_ENV_FILE" JITO_HELIUS_SENDER_TIP_ACCOUNT "$CANARY_HELIUS_TIP_ACCOUNT"

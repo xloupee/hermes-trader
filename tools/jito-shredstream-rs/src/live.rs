@@ -16,6 +16,7 @@ use crate::{
         CopyTxPlanLine, CopyTxPlannerOptions, ExecutionPlanLine, PlannerOptions, TxBuildPlanLine,
         TxBuildPlannerOptions, UnsignedTxPlanLine, UnsignedTxPlannerOptions,
     },
+    priority_fee_cache::PriorityFeeCache,
     proto::jito_shredstream::{
         shredstream_proxy_client::ShredstreamProxyClient, SubscribeEntriesRequest,
     },
@@ -66,6 +67,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
     let blockhash_cache = spawn_blockhash_cache(
         state_rpc_urls.clone(),
         options.blockhash_refresh_ms,
+        options.blockhash_refresh_timeout_ms,
+        options.blockhash_commitment.trim().to_string(),
         options.stats,
     );
     let wallet_balance_cache =
@@ -84,11 +87,16 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
         }
         cache.spawn_refresh_loop();
     }
+    let account_priority_fee_cache = account_priority_fee_cache_from_options(&options);
+    if let Some(cache) = &account_priority_fee_cache {
+        cache.spawn_refresh_loop();
+    }
     let copy_executor = Arc::new(CopyExecutor::from_options(
         &options,
         blockhash_cache.clone(),
         address_lookup_tables.clone(),
         wallet_balance_cache.clone(),
+        account_priority_fee_cache,
         telegram_runtime
             .load_full()
             .as_ref()
@@ -395,13 +403,15 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 parsed.route_context.as_ref(),
                             );
                         }
-                        let telegram_target_configs = telegram_runtime_guard
+                        let execution_profiles = telegram_runtime_guard
                             .as_ref()
                             .map(|runtime| {
-                                runtime.snapshot.target_configs_for_pubkey(&target_wallet)
+                                runtime
+                                    .snapshot
+                                    .execution_profiles_for_pubkey(&target_wallet)
                             })
                             .unwrap_or(&[]);
-                        if telegram_target_configs.is_empty() {
+                        if execution_profiles.is_empty() {
                             let runtime_request = CopyRuntimeRequest::from_parsed_trade(
                                 trade_parsed_at_ms,
                                 now_ms(),
@@ -448,8 +458,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                     &options,
                                 )?;
                             }
-                        } else if telegram_target_configs.len() == 1 {
-                            let telegram_target_config = &telegram_target_configs[0];
+                        } else if execution_profiles.len() == 1 {
+                            let execution_profile = &execution_profiles[0];
                             let runtime_request = CopyRuntimeRequest::from_parsed_trade(
                                 trade_parsed_at_ms,
                                 now_ms(),
@@ -458,7 +468,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                 account_keys.len(),
                                 parsed,
                                 PlannerOptions {
-                                    copy_sol_amount: Some(telegram_target_config.copy_amount_sol),
+                                    copy_sol_amount: Some(execution_profile.copy_amount_sol()),
                                 },
                             );
                             if options.fast_copy_send {
@@ -468,8 +478,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                     &copy_executor,
                                     runtime_request,
                                     timings,
-                                    Some(telegram_target_config.copy_wallet),
-                                    telegram_target_config.trailing_sell.clone(),
+                                    Some(execution_profile.copy_wallet),
+                                    execution_profile.trailing_sell.clone(),
                                 );
                             } else {
                                 let shadow_signal =
@@ -482,8 +492,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                     &copy_executor,
                                     runtime_request,
                                     timings,
-                                    Some(telegram_target_config.copy_wallet),
-                                    telegram_target_config.trailing_sell.clone(),
+                                    Some(execution_profile.copy_wallet),
+                                    execution_profile.trailing_sell.clone(),
                                 );
                                 write_plan_outputs(
                                     &mut shadow_signals,
@@ -498,21 +508,19 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             }
                         } else {
                             let mut parsed_for_runtime = Some(parsed);
-                            let telegram_target_config_count = telegram_target_configs.len();
-                            for (index, telegram_target_config) in
-                                telegram_target_configs.iter().enumerate()
+                            let execution_profile_count = execution_profiles.len();
+                            for (index, execution_profile) in execution_profiles.iter().enumerate()
                             {
-                                let parsed_for_request =
-                                    if index + 1 == telegram_target_config_count {
-                                        parsed_for_runtime.take().expect(
-                                            "parsed trade available for final runtime request",
-                                        )
-                                    } else {
-                                        parsed_for_runtime
-                                            .as_ref()
-                                            .expect("parsed trade available for runtime request")
-                                            .clone()
-                                    };
+                                let parsed_for_request = if index + 1 == execution_profile_count {
+                                    parsed_for_runtime
+                                        .take()
+                                        .expect("parsed trade available for final runtime request")
+                                } else {
+                                    parsed_for_runtime
+                                        .as_ref()
+                                        .expect("parsed trade available for runtime request")
+                                        .clone()
+                                };
                                 let runtime_request = CopyRuntimeRequest::from_parsed_trade(
                                     trade_parsed_at_ms,
                                     now_ms(),
@@ -521,9 +529,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                     account_keys.len(),
                                     parsed_for_request,
                                     PlannerOptions {
-                                        copy_sol_amount: Some(
-                                            telegram_target_config.copy_amount_sol,
-                                        ),
+                                        copy_sol_amount: Some(execution_profile.copy_amount_sol()),
                                     },
                                 );
                                 if options.fast_copy_send {
@@ -533,8 +539,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                         &copy_executor,
                                         runtime_request,
                                         timings,
-                                        Some(telegram_target_config.copy_wallet),
-                                        telegram_target_config.trailing_sell.clone(),
+                                        Some(execution_profile.copy_wallet),
+                                        execution_profile.trailing_sell.clone(),
                                     );
                                 } else {
                                     let shadow_signal = runtime_request
@@ -547,8 +553,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                                         &copy_executor,
                                         runtime_request,
                                         timings,
-                                        Some(telegram_target_config.copy_wallet),
-                                        telegram_target_config.trailing_sell.clone(),
+                                        Some(execution_profile.copy_wallet),
+                                        execution_profile.trailing_sell.clone(),
                                     );
                                     write_plan_outputs(
                                         &mut shadow_signals,
@@ -576,6 +582,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             route,
                             observed_sol_amount,
                             token_amount,
+                            Default::default(),
                         );
                         enqueue_signal_side_effect(&signal_side_effect_tx, event, timings);
                         emitted += 1;
@@ -1101,6 +1108,23 @@ fn wallet_balance_cache_from_options(
     ))
 }
 
+fn account_priority_fee_cache_from_options(options: &LiveOptions) -> Option<PriorityFeeCache> {
+    if !options.account_priority_fee_enabled {
+        return None;
+    }
+    let rpc_urls = options.normalized_state_rpc_urls();
+    if rpc_urls.is_empty() {
+        return None;
+    }
+    Some(PriorityFeeCache::new(
+        rpc_urls,
+        options.account_priority_fee_refresh_ms,
+        options.account_priority_fee_stale_ms,
+        options.send_http_timeout_ms,
+        options.account_priority_fee_percentile,
+    ))
+}
+
 fn active_copy_wallets(
     runtime: Option<&TelegramRuntimeConfig>,
     fallback_copy_wallet: Option<&str>,
@@ -1235,11 +1259,24 @@ fn enqueue_transaction_confirmation(
                 let line = line.clone();
                 tokio::spawn(async move {
                     let confirmation = copy_executor.confirm_copy_transaction(line).await;
+                    let backfill_confirmation = confirmation.clone();
                     if copy_execution_tx
                         .send(CopyExecutionOutput::TransactionConfirmation(confirmation))
                         .is_err()
                     {
                         eprintln!("copy confirmation result dropped; receiver closed");
+                        return;
+                    }
+                    if let Some(confirmation) = copy_executor
+                        .backfill_transaction_confirmation_block_position(backfill_confirmation)
+                        .await
+                    {
+                        if copy_execution_tx
+                            .send(CopyExecutionOutput::TransactionConfirmation(confirmation))
+                            .is_err()
+                        {
+                            eprintln!("copy confirmation backfill result dropped; receiver closed");
+                        }
                     }
                 });
             }
@@ -1249,11 +1286,26 @@ fn enqueue_transaction_confirmation(
                 let line = line.clone();
                 tokio::spawn(async move {
                     let confirmation = copy_executor.confirm_auto_sell_transaction(line).await;
+                    let backfill_confirmation = confirmation.clone();
                     if copy_execution_tx
                         .send(CopyExecutionOutput::TransactionConfirmation(confirmation))
                         .is_err()
                     {
                         eprintln!("auto-sell confirmation result dropped; receiver closed");
+                        return;
+                    }
+                    if let Some(confirmation) = copy_executor
+                        .backfill_transaction_confirmation_block_position(backfill_confirmation)
+                        .await
+                    {
+                        if copy_execution_tx
+                            .send(CopyExecutionOutput::TransactionConfirmation(confirmation))
+                            .is_err()
+                        {
+                            eprintln!(
+                                "auto-sell confirmation backfill result dropped; receiver closed"
+                            );
+                        }
                     }
                 });
             }
@@ -1266,11 +1318,26 @@ fn enqueue_transaction_confirmation(
                 let confirmation = copy_executor
                     .confirm_rust_trailing_sell_transaction(line)
                     .await;
+                let backfill_confirmation = confirmation.clone();
                 if copy_execution_tx
                     .send(CopyExecutionOutput::TransactionConfirmation(confirmation))
                     .is_err()
                 {
                     eprintln!("rust trailing sell confirmation result dropped; receiver closed");
+                    return;
+                }
+                if let Some(confirmation) = copy_executor
+                    .backfill_transaction_confirmation_block_position(backfill_confirmation)
+                    .await
+                {
+                    if copy_execution_tx
+                        .send(CopyExecutionOutput::TransactionConfirmation(confirmation))
+                        .is_err()
+                    {
+                        eprintln!(
+                            "rust trailing sell confirmation backfill result dropped; receiver closed"
+                        );
+                    }
                 }
             });
         }
@@ -1752,6 +1819,8 @@ mod tests {
             observed_sol_amount: Some(0.001),
             token_amount: None,
             account_key_count: 1,
+            source_compute_unit_limit: None,
+            source_compute_unit_price_micro_lamports: None,
             planned_copy_sol_amount: Some(0.001),
             allowed: true,
             reason: None,

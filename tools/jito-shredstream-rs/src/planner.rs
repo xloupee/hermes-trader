@@ -31,6 +31,8 @@ pub(crate) struct CopyRuntimeRequest {
     pub(crate) observed_sol_amount: Option<f64>,
     pub(crate) token_amount: Option<f64>,
     pub(crate) account_key_count: usize,
+    pub(crate) source_compute_unit_limit: Option<u32>,
+    pub(crate) source_compute_unit_price_micro_lamports: Option<u64>,
     pub(crate) planned_copy_sol_amount: Option<f64>,
     pub(crate) allowed: bool,
     pub(crate) reason: Option<&'static str>,
@@ -57,6 +59,10 @@ pub(crate) struct ExecutionPlanLine {
     pub(crate) decision: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) spend_sol_amount: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_compute_unit_limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_compute_unit_price_micro_lamports: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reason: Option<&'static str>,
     #[serde(skip)]
@@ -205,6 +211,8 @@ pub(crate) fn execution_plan_line(
         allowed: plan.allowed,
         decision: if plan.allowed { "wouldBuy" } else { "skip" },
         spend_sol_amount: plan.spend_sol_amount,
+        source_compute_unit_limit: signal.source_compute_unit_limit,
+        source_compute_unit_price_micro_lamports: signal.source_compute_unit_price_micro_lamports,
         reason: plan.reason,
         route_context: signal.route_context.clone(),
     }
@@ -227,6 +235,7 @@ impl CopyRuntimeRequest {
             route,
             sol_amount,
             token_amount,
+            compute_budget,
             route_context,
         } = parsed;
         let decision = copy_runtime_decision(action, route, sol_amount, options);
@@ -242,6 +251,9 @@ impl CopyRuntimeRequest {
             observed_sol_amount: sol_amount,
             token_amount,
             account_key_count,
+            source_compute_unit_limit: compute_budget.compute_unit_limit,
+            source_compute_unit_price_micro_lamports: compute_budget
+                .compute_unit_price_micro_lamports,
             planned_copy_sol_amount: decision.spend_sol_amount,
             allowed: decision.allowed,
             reason: decision.reason,
@@ -266,6 +278,9 @@ impl CopyRuntimeRequest {
             observed_sol_amount,
             token_amount: None,
             account_key_count: 0,
+            source_compute_unit_limit: execution_plan.source_compute_unit_limit,
+            source_compute_unit_price_micro_lamports: execution_plan
+                .source_compute_unit_price_micro_lamports,
             planned_copy_sol_amount: execution_plan.spend_sol_amount,
             allowed: execution_plan.allowed,
             reason: execution_plan.reason,
@@ -316,6 +331,8 @@ impl CopyRuntimeRequest {
             decision: self.shadow_decision(),
             reason: self.shadow_reason(),
             account_key_count: self.account_key_count,
+            source_compute_unit_limit: self.source_compute_unit_limit,
+            source_compute_unit_price_micro_lamports: self.source_compute_unit_price_micro_lamports,
             route_context: self.route_context.clone(),
         }
     }
@@ -338,6 +355,8 @@ impl CopyRuntimeRequest {
             allowed: self.allowed,
             decision: self.execution_decision(),
             spend_sol_amount: self.planned_copy_sol_amount,
+            source_compute_unit_limit: self.source_compute_unit_limit,
+            source_compute_unit_price_micro_lamports: self.source_compute_unit_price_micro_lamports,
             reason: self.reason,
             route_context: self.route_context.clone(),
         }
@@ -889,6 +908,8 @@ mod tests {
                 Some("shadow mode only copies buy actions")
             },
             account_key_count: 14,
+            source_compute_unit_limit: None,
+            source_compute_unit_price_micro_lamports: None,
             route_context: None,
         }
     }
@@ -911,6 +932,7 @@ mod tests {
             route: Route::FlashxPump,
             sol_amount: (action == Action::Buy).then_some(0.00099),
             token_amount: (action == Action::Sell).then_some(42.0),
+            compute_budget: Default::default(),
             route_context: None,
         }
     }

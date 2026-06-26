@@ -47,10 +47,17 @@ pub(crate) struct ParsedTrade {
     pub(crate) route: Route,
     pub(crate) sol_amount: Option<f64>,
     pub(crate) token_amount: Option<f64>,
+    pub(crate) compute_budget: ComputeBudgetInfo,
     pub(crate) route_context: Option<SharedRouteContext>,
 }
 
 pub(crate) type SharedRouteContext = Arc<RouteContext>;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ComputeBudgetInfo {
+    pub(crate) compute_unit_limit: Option<u32>,
+    pub(crate) compute_unit_price_micro_lamports: Option<u64>,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) enum RouteContext {
@@ -431,6 +438,7 @@ pub(crate) fn parse_trade_for_mentioned_targets(
             None
         };
         if let Some(mut parsed) = parsed {
+            parsed.compute_budget = compute_budget_info(&versioned_tx.message, account_keys);
             parsed.route_context =
                 route_context(&versioned_tx.message, instruction, account_keys, &parsed);
             return Some(parsed);
@@ -452,6 +460,32 @@ fn route_context(
         }
         Route::Pump | Route::PumpAmm => None,
     }
+}
+
+fn compute_budget_info(message: &VersionedMessage, account_keys: &[Pubkey]) -> ComputeBudgetInfo {
+    let mut info = ComputeBudgetInfo::default();
+    for instruction in message.instructions() {
+        let Some(program_id) = account_keys.get(instruction.program_id_index as usize) else {
+            continue;
+        };
+        if program_id != compute_budget_program_id() {
+            continue;
+        }
+        match instruction.data.first().copied() {
+            Some(2) => {
+                if let Some(units) = read_u32_le(&instruction.data, 1) {
+                    info.compute_unit_limit = Some(units);
+                }
+            }
+            Some(3) => {
+                if let Some(price) = read_u64_le(&instruction.data, 1) {
+                    info.compute_unit_price_micro_lamports = Some(price);
+                }
+            }
+            _ => {}
+        }
+    }
+    info
 }
 
 #[cfg(test)]
@@ -577,6 +611,11 @@ pub(crate) fn parse_action(data: &[u8]) -> Option<Action> {
 pub(crate) fn read_u64_le(data: &[u8], offset: usize) -> Option<u64> {
     let bytes = data.get(offset..offset + 8)?;
     Some(u64::from_le_bytes(bytes.try_into().ok()?))
+}
+
+pub(crate) fn read_u32_le(data: &[u8], offset: usize) -> Option<u32> {
+    let bytes = data.get(offset..offset + 4)?;
+    Some(u32::from_le_bytes(bytes.try_into().ok()?))
 }
 
 pub(crate) fn system_program_id() -> &'static Pubkey {

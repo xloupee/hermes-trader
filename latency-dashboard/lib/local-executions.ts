@@ -43,6 +43,13 @@ export interface LocalExecutionReport {
   slot: number;
   copySlot: number | null;
   slotDeltaFromObserved: number | null;
+  targetSlot: number | null;
+  targetTxIndex: number | null;
+  copyTxIndex: number | null;
+  sameSlotTxDelta: number | null;
+  slotDelta: number | null;
+  txDelta: number | null;
+  positionUnavailableReason: string | null;
   selectedRoute: string;
   routeLayout: string | null;
   mint: string;
@@ -93,6 +100,12 @@ export interface LocalExecutionReport {
   walletMatchUs: number | null;
   routeParseUs: number | null;
   sendLaneMs: number | null;
+  feeProfileName: string | null;
+  selectedPriorityFeeMicroLamports: number | null;
+  selectedHeliusTipLamports: number | null;
+  sourcePositionBucket: string | null;
+  feeReason: string | null;
+  feeCapHit: boolean;
   targetBlockTimeMs: number | null;
   autoSellEnabled: boolean;
   autoSellDelayMs: number | null;
@@ -128,6 +141,13 @@ interface RawLocalExecutionReport {
   slot: number;
   copy_slot: number | null;
   slot_delta_from_observed: number | null;
+  target_slot: number | null;
+  target_tx_index: number | null;
+  copy_tx_index: number | null;
+  same_slot_tx_delta: number | null;
+  slot_delta: number | null;
+  tx_delta: number | null;
+  position_unavailable_reason: string | null;
   selected_route: string;
   route_layout: string | null;
   mint: string;
@@ -176,6 +196,12 @@ interface RawLocalExecutionReport {
   wallet_match_us: number | null;
   route_parse_us: number | null;
   send_lane_ms: number | null;
+  fee_profile_name: string | null;
+  selected_priority_fee_micro_lamports: number | null;
+  selected_helius_tip_lamports: number | null;
+  source_position_bucket: string | null;
+  fee_reason: string | null;
+  fee_cap_hit: boolean | null;
   auto_sell_enabled: boolean;
   auto_sell_delay_ms: number | null;
   auto_sell_attempted: boolean;
@@ -206,6 +232,13 @@ const LOCAL_EXECUTION_BASE_COLUMNS = [
   "slot",
   "copy_slot",
   "slot_delta_from_observed",
+  "target_slot",
+  "target_tx_index",
+  "copy_tx_index",
+  "same_slot_tx_delta",
+  "slot_delta",
+  "tx_delta",
+  "position_unavailable_reason",
   "selected_route",
   "route_layout",
   "mint",
@@ -254,6 +287,12 @@ const LOCAL_EXECUTION_BASE_COLUMNS = [
   "wallet_match_us",
   "route_parse_us",
   "send_lane_ms",
+  "fee_profile_name",
+  "selected_priority_fee_micro_lamports",
+  "selected_helius_tip_lamports",
+  "source_position_bucket",
+  "fee_reason",
+  "fee_cap_hit",
   "auto_sell_enabled",
   "auto_sell_delay_ms",
   "auto_sell_attempted",
@@ -346,27 +385,54 @@ function autoSellStatus(row: RawLocalExecutionReport): string | null {
   return submittedAutoSellStatus(row);
 }
 
-function normalizeBlockPositionDiagnostics(chainReport: unknown): BlockPositionDiagnostics | null {
-  const report = objectValue(chainReport);
+function firstNumberValue(...values: Array<unknown>): number | null {
+  for (const value of values) {
+    const number = numberValue(value);
+    if (number !== null) {
+      return number;
+    }
+  }
+  return null;
+}
+
+function normalizeBlockPositionDiagnostics(row: RawLocalExecutionReport): BlockPositionDiagnostics | null {
+  const report = objectValue(row.chain_report);
   const diagnostic = objectValue(report?.blockPositionDiagnostics);
-  if (!diagnostic) {
+  const hasFlatPosition =
+    numberValue(row.target_slot) !== null ||
+    numberValue(row.copy_slot) !== null ||
+    numberValue(row.slot_delta) !== null ||
+    numberValue(row.target_tx_index) !== null ||
+    numberValue(row.copy_tx_index) !== null ||
+    numberValue(row.same_slot_tx_delta) !== null ||
+    numberValue(row.tx_delta) !== null ||
+    Boolean(row.position_unavailable_reason);
+
+  if (!diagnostic && !hasFlatPosition) {
     return null;
   }
 
+  const targetTxIndex = firstNumberValue(diagnostic?.targetTxIndex, row.target_tx_index);
+  const copyTxIndex = firstNumberValue(diagnostic?.copyTxIndex, row.copy_tx_index);
+  const txDelta = firstNumberValue(diagnostic?.txDelta, row.tx_delta);
+  const status =
+    stringValue(diagnostic?.status) ||
+    (targetTxIndex !== null && copyTxIndex !== null && txDelta !== null ? "found" : "unknown");
+
   return {
-    schema: stringValue(diagnostic.schema) || "copytrade.blockPositionDiagnostics.v1",
-    status: stringValue(diagnostic.status) || "unknown",
-    targetSignature: stringValue(diagnostic.targetSignature),
-    copySignature: stringValue(diagnostic.copySignature),
-    targetSlot: numberValue(diagnostic.targetSlot),
-    copySlot: numberValue(diagnostic.copySlot),
-    slotDelta: numberValue(diagnostic.slotDelta),
-    targetTxIndex: numberValue(diagnostic.targetTxIndex),
-    copyTxIndex: numberValue(diagnostic.copyTxIndex),
-    sameSlotTxDelta: numberValue(diagnostic.sameSlotTxDelta),
-    txDelta: numberValue(diagnostic.txDelta),
-    crossSlotPositionSummary: objectValue(diagnostic.crossSlotPositionSummary),
-    unavailableReason: stringValue(diagnostic.unavailableReason)
+    schema: stringValue(diagnostic?.schema) || "copytrade.blockPositionDiagnostics.v1",
+    status,
+    targetSignature: stringValue(diagnostic?.targetSignature) || row.observed_signature,
+    copySignature: stringValue(diagnostic?.copySignature) || row.send_signature,
+    targetSlot: firstNumberValue(diagnostic?.targetSlot, row.target_slot, row.slot),
+    copySlot: firstNumberValue(diagnostic?.copySlot, row.copy_slot),
+    slotDelta: firstNumberValue(diagnostic?.slotDelta, row.slot_delta),
+    targetTxIndex,
+    copyTxIndex,
+    sameSlotTxDelta: firstNumberValue(diagnostic?.sameSlotTxDelta, row.same_slot_tx_delta),
+    txDelta,
+    crossSlotPositionSummary: objectValue(diagnostic?.crossSlotPositionSummary),
+    unavailableReason: stringValue(diagnostic?.unavailableReason) || row.position_unavailable_reason
   };
 }
 
@@ -398,6 +464,13 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     slot: row.slot,
     copySlot: row.copy_slot,
     slotDeltaFromObserved: row.slot_delta_from_observed,
+    targetSlot: row.target_slot,
+    targetTxIndex: row.target_tx_index,
+    copyTxIndex: row.copy_tx_index,
+    sameSlotTxDelta: row.same_slot_tx_delta,
+    slotDelta: row.slot_delta,
+    txDelta: row.tx_delta,
+    positionUnavailableReason: row.position_unavailable_reason,
     selectedRoute: row.selected_route,
     routeLayout: row.route_layout,
     mint: row.mint,
@@ -448,6 +521,18 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     walletMatchUs: firstNumber(row.wallet_match_us, rawNumber("walletMatchUs")),
     routeParseUs: firstNumber(row.route_parse_us, rawNumber("routeParseUs")),
     sendLaneMs: firstNumber(row.send_lane_ms, rawNumber("sendLaneMs")),
+    feeProfileName: row.fee_profile_name ?? stringValue(rawExecution?.feeProfileName),
+    selectedPriorityFeeMicroLamports: firstNumber(
+      row.selected_priority_fee_micro_lamports,
+      rawNumber("selectedPriorityFeeMicroLamports")
+    ),
+    selectedHeliusTipLamports: firstNumber(
+      row.selected_helius_tip_lamports,
+      rawNumber("selectedHeliusTipLamports")
+    ),
+    sourcePositionBucket: row.source_position_bucket ?? stringValue(rawExecution?.sourcePositionBucket),
+    feeReason: row.fee_reason ?? stringValue(rawExecution?.feeReason),
+    feeCapHit: Boolean(row.fee_cap_hit ?? rawExecution?.feeCapHit),
     targetBlockTimeMs: firstNumber(secondsToMs(chainReport?.targetBlockTime)),
     autoSellEnabled: row.auto_sell_enabled,
     autoSellDelayMs: row.auto_sell_delay_ms,
@@ -464,7 +549,7 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     autoSellSendSignature: row.auto_sell_send_signature,
     buySignatureToAutoSellSubmittedMs: row.buy_signature_to_auto_sell_submitted_ms,
     buySignatureToAutoSellSignatureReturnedMs: row.buy_signature_to_auto_sell_signature_returned_ms,
-    blockPositionDiagnostics: normalizeBlockPositionDiagnostics(row.chain_report),
+    blockPositionDiagnostics: normalizeBlockPositionDiagnostics(row),
     rawExecution: row.raw_execution,
     chainReport: row.chain_report
   };

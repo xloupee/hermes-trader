@@ -8,8 +8,11 @@ const DEFAULT_SUPABASE_CWD = `${process.env.HOME || ""}/Documents/pumpfunnoti`;
 const DEFAULT_WATCH_INTERVAL_MS = 1000;
 const DEFAULT_REFRESH_INTERVAL_MS = 5000;
 const DEFAULT_REFRESH_RECENT_LIMIT = 1;
+const DEFAULT_REFRESH_PENDING_LIMIT = 25;
 const DEFAULT_NEW_ROW_BACKFILL = 20;
 const DEFAULT_RPC_TIMEOUT_MS = 5000;
+const DEFAULT_BLOCK_POSITION_RETRY_ATTEMPTS = 3;
+const DEFAULT_BLOCK_POSITION_RETRY_MS = 500;
 const confirmedTransactionCache = new Map();
 const blockSignatureCache = new Map();
 
@@ -54,7 +57,11 @@ function boolish(value, fallback = false) {
   return ["1", "true", "yes", "y", "on"].includes(String(value).trim().toLowerCase());
 }
 
-function readJsonl(path, { recentLimit = 0 } = {}) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function readJsonl(path, { recentLimit = 0, pendingPositionLimit = 0 } = {}) {
   if (!existsSync(path)) {
     return [];
   }
@@ -74,6 +81,10 @@ function readJsonl(path, { recentLimit = 0 } = {}) {
       row.schema === "copytrade.sendLaneAttribution.v1" ||
       row.schema === "copytrade.transactionConfirmation.v1"
     );
+  if (pendingPositionLimit > 0) {
+    return pendingPositionRefreshRows(parsedRows, pendingPositionLimit);
+  }
+
   const scopedRows = scopeRowsForRecentLocalExecutions(parsedRows, recentLimit);
   return mergeSidecarRows(scopedRows);
 }
@@ -137,6 +148,42 @@ function mergeSidecarRows(rows) {
         ...(confirmation ? { rustTransactionConfirmation: confirmation } : {})
       };
     });
+}
+
+function isSubmittedCopyBuy(row) {
+  const action = String(row.observedAction ?? "").toLowerCase();
+  return action === "buy" && Boolean(row.sendSignature || row.sent || row.decision === "sent");
+}
+
+function confirmationTxDelta(confirmation) {
+  return finiteNumberOrNull(
+    confirmation?.txDelta ?? confirmation?.sameSlotTxDelta ?? confirmation?.txsAfterObserved
+  );
+}
+
+function needsBlockPositionRefresh(row) {
+  if (!isSubmittedCopyBuy(row) || !row.sendSignature) {
+    return false;
+  }
+
+  const confirmation = row.rustTransactionConfirmation;
+  if (!confirmation) {
+    return true;
+  }
+
+  const txDelta = confirmationTxDelta(confirmation);
+  const targetTxIndex = finiteNumberOrNull(confirmation.targetTxIndex);
+  const copyTxIndex = finiteNumberOrNull(confirmation.copyTxIndex);
+  return (
+    txDelta === null ||
+    targetTxIndex === null ||
+    copyTxIndex === null ||
+    Boolean(confirmation.blockPositionError)
+  );
+}
+
+function pendingPositionRefreshRows(rows, limit) {
+  return mergeSidecarRows(rows).filter(needsBlockPositionRefresh).slice(-limit);
 }
 
 function sqlString(value) {
@@ -376,6 +423,45 @@ async function blockPositionDiagnostics(row, copyTransaction, rpcFn = rpc) {
   return diagnostics;
 }
 
+function retryableBlockPositionReason(reason) {
+  if (!reason) {
+    return false;
+  }
+  return /block unavailable|getBlock failed|getBlock RPC error|Block not available|timeout/i.test(reason);
+}
+
+async function blockPositionDiagnosticsWithRetry(row, copyTransaction, rpcFn = rpc, options = {}) {
+  const attempts = Math.max(
+    1,
+    positiveInteger(
+      options.attempts ??
+        argValue("block-position-retry-attempts", process.env.JITO_SYNC_BLOCK_POSITION_RETRY_ATTEMPTS),
+      DEFAULT_BLOCK_POSITION_RETRY_ATTEMPTS
+    )
+  );
+  const retryDelayMs = nonNegativeInteger(
+    options.retryDelayMs ??
+      argValue("block-position-retry-ms", process.env.JITO_SYNC_BLOCK_POSITION_RETRY_MS),
+    DEFAULT_BLOCK_POSITION_RETRY_MS
+  );
+
+  let diagnostics = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    diagnostics = await blockPositionDiagnostics(row, copyTransaction, rpcFn);
+    if (
+      diagnostics.status === "found" ||
+      attempt >= attempts ||
+      !retryableBlockPositionReason(diagnostics.unavailableReason)
+    ) {
+      return diagnostics;
+    }
+    if (retryDelayMs > 0) {
+      await sleep(retryDelayMs * attempt);
+    }
+  }
+  return diagnostics;
+}
+
 function unknownChainReport(row, unavailableReason) {
   const diagnostics = baseBlockPositionDiagnostics(row, null);
   diagnostics.unavailableReason = unavailableReason;
@@ -607,7 +693,7 @@ async function chainReport(row) {
     extraSpendBeyondObservedSol !== null && networkFeeSol !== null
       ? positiveOrNull(extraSpendBeyondObservedSol - networkFeeSol)
       : null;
-  const positionDiagnostics = await blockPositionDiagnostics(row, transaction);
+  const positionDiagnostics = await blockPositionDiagnosticsWithRetry(row, transaction);
   const autoSellReport = row.autoSellSendSignature
     ? await transactionChainReport(row.autoSellSendSignature)
     : null;
@@ -720,7 +806,11 @@ async function chainReportFromRustConfirmation(row, confirmation, rpcFn = rpc) {
     autoSell: null
   };
   if (positionDiagnostics.status !== "found" && slot !== null) {
-    const refreshedPositionDiagnostics = await blockPositionDiagnostics(row, { slot }, rpcFn);
+    const refreshedPositionDiagnostics = await blockPositionDiagnosticsWithRetry(
+      row,
+      { slot },
+      rpcFn
+    );
     if (refreshedPositionDiagnostics.status === "found") {
       applyPositionDiagnostics(report, refreshedPositionDiagnostics);
     }
@@ -783,11 +873,30 @@ async function buildRestRows(rows) {
       send_rpc_winner: row.sendRpcWinner ?? null,
       send_rpc_url_count: Number.isFinite(row.sendRpcUrlCount) ? row.sendRpcUrlCount : null,
       send_rpc_errors: row.sendRpcErrors ?? [],
-      simulation_requested: Boolean(row.simulationRequested),
-      instruction_count: Number.isFinite(row.instructionCount) ? row.instructionCount : 0,
-      simulation_units_consumed: Number.isFinite(row.simulationUnitsConsumed)
-        ? row.simulationUnitsConsumed
-        : null,
+	      simulation_requested: Boolean(row.simulationRequested),
+	      instruction_count: Number.isFinite(row.instructionCount) ? row.instructionCount : 0,
+	      signed_tx_bytes: Number.isFinite(row.signedTxBytes) ? row.signedTxBytes : null,
+	      writable_account_count: Number.isFinite(row.writableAccountCount) ? row.writableAccountCount : null,
+	      compute_unit_limit: Number.isFinite(row.computeUnitLimit) ? row.computeUnitLimit : null,
+	      selected_tip_account: row.selectedTipAccount ?? null,
+	      source_compute_unit_limit: Number.isFinite(row.sourceComputeUnitLimit)
+	        ? row.sourceComputeUnitLimit
+	        : null,
+	      source_compute_unit_price_micro_lamports: Number.isFinite(row.sourceComputeUnitPriceMicroLamports)
+	        ? row.sourceComputeUnitPriceMicroLamports
+	        : null,
+	      compute_units_consumed: Number.isFinite(row.computeUnitsConsumed) ? row.computeUnitsConsumed : null,
+	      cost_units: Number.isFinite(row.costUnits) ? row.costUnits : null,
+	      transaction_meta_error: row.transactionMetaError ?? null,
+	      blockhash: row.blockhash ?? null,
+	      blockhash_source_rpc: row.blockhashSourceRpc ?? null,
+	      blockhash_commitment: row.blockhashCommitment ?? null,
+	      blockhash_context_slot: Number.isFinite(row.blockhashContextSlot) ? row.blockhashContextSlot : null,
+	      blockhash_age_ms: Number.isFinite(row.blockhashAgeMs) ? row.blockhashAgeMs : null,
+	      blockhash_selection_strategy: row.blockhashSelectionStrategy ?? null,
+	      simulation_units_consumed: Number.isFinite(row.simulationUnitsConsumed)
+	        ? row.simulationUnitsConsumed
+	        : null,
       fill_token_delta: report?.fillTokenDelta ?? null,
       copy_wallet_sol_delta: report?.copyWalletSolDelta ?? null,
       gross_copy_spend_sol: report?.grossCopySpendSol ?? null,
@@ -837,6 +946,31 @@ async function buildRestRows(rows) {
       wallet_match_us: Number.isFinite(row.walletMatchUs) ? row.walletMatchUs : null,
       route_parse_us: Number.isFinite(row.routeParseUs) ? row.routeParseUs : null,
       send_lane_ms: Number.isFinite(row.sendLaneMs) ? row.sendLaneMs : null,
+      fee_profile_name: row.feeProfileName ?? null,
+      selected_priority_fee_micro_lamports: Number.isFinite(row.selectedPriorityFeeMicroLamports)
+        ? row.selectedPriorityFeeMicroLamports
+        : null,
+      selected_helius_tip_lamports: Number.isFinite(row.selectedHeliusTipLamports)
+        ? row.selectedHeliusTipLamports
+        : null,
+      source_position_bucket: row.sourcePositionBucket ?? null,
+      fee_reason: row.feeReason ?? null,
+      fee_cap_hit: Boolean(row.feeCapHit),
+      account_priority_fee_enabled: Boolean(row.accountPriorityFeeEnabled),
+      account_priority_fee_micro_lamports: Number.isFinite(row.accountPriorityFeeMicroLamports)
+        ? row.accountPriorityFeeMicroLamports
+        : null,
+      account_priority_fee_age_ms: Number.isFinite(row.accountPriorityFeeAgeMs)
+        ? row.accountPriorityFeeAgeMs
+        : null,
+      account_priority_fee_sample_count: Number.isFinite(row.accountPriorityFeeSampleCount)
+        ? row.accountPriorityFeeSampleCount
+        : null,
+      account_priority_fee_account_count: Number.isFinite(row.accountPriorityFeeAccountCount)
+        ? row.accountPriorityFeeAccountCount
+        : null,
+      account_priority_fee_applied: Boolean(row.accountPriorityFeeApplied),
+      account_priority_fee_reason: row.accountPriorityFeeReason ?? null,
       auto_sell_enabled: Boolean(row.autoSellEnabled),
       auto_sell_delay_ms: Number.isFinite(row.autoSellDelayMs) ? row.autoSellDelayMs : null,
       auto_sell_attempted: Boolean(row.autoSellAttempted),
@@ -897,6 +1031,34 @@ const OPTIONAL_REST_COLUMNS = new Set([
   "wallet_match_us",
   "route_parse_us",
   "send_lane_ms",
+  "fee_profile_name",
+  "selected_priority_fee_micro_lamports",
+  "selected_helius_tip_lamports",
+  "source_position_bucket",
+  "fee_reason",
+  "fee_cap_hit",
+  "account_priority_fee_enabled",
+  "account_priority_fee_micro_lamports",
+  "account_priority_fee_age_ms",
+  "account_priority_fee_sample_count",
+  "account_priority_fee_account_count",
+  "account_priority_fee_applied",
+  "account_priority_fee_reason",
+  "signed_tx_bytes",
+  "writable_account_count",
+  "compute_unit_limit",
+  "selected_tip_account",
+  "source_compute_unit_limit",
+  "source_compute_unit_price_micro_lamports",
+  "compute_units_consumed",
+  "cost_units",
+  "transaction_meta_error",
+  "blockhash",
+  "blockhash_source_rpc",
+  "blockhash_commitment",
+  "blockhash_context_slot",
+  "blockhash_age_ms",
+  "blockhash_selection_strategy",
   "slot_delta",
   "tx_delta"
 ]);
@@ -1013,6 +1175,21 @@ async function buildSql(rows) {
     "send_rpc_errors",
     "simulation_requested",
     "instruction_count",
+    "signed_tx_bytes",
+    "writable_account_count",
+    "compute_unit_limit",
+    "selected_tip_account",
+    "source_compute_unit_limit",
+    "source_compute_unit_price_micro_lamports",
+    "compute_units_consumed",
+    "cost_units",
+    "transaction_meta_error",
+    "blockhash",
+    "blockhash_source_rpc",
+    "blockhash_commitment",
+    "blockhash_context_slot",
+    "blockhash_age_ms",
+    "blockhash_selection_strategy",
     "simulation_units_consumed",
     "fill_token_delta",
     "copy_wallet_sol_delta",
@@ -1046,6 +1223,19 @@ async function buildSql(rows) {
     "wallet_match_us",
     "route_parse_us",
     "send_lane_ms",
+    "fee_profile_name",
+    "selected_priority_fee_micro_lamports",
+    "selected_helius_tip_lamports",
+    "source_position_bucket",
+    "fee_reason",
+    "fee_cap_hit",
+    "account_priority_fee_enabled",
+    "account_priority_fee_micro_lamports",
+    "account_priority_fee_age_ms",
+    "account_priority_fee_sample_count",
+    "account_priority_fee_account_count",
+    "account_priority_fee_applied",
+    "account_priority_fee_reason",
     "auto_sell_enabled",
     "auto_sell_delay_ms",
     "auto_sell_attempted",
@@ -1119,6 +1309,21 @@ async function buildSql(rows) {
       sqlJson(row.sendRpcErrors ?? []),
       sqlBoolean(row.simulationRequested),
       sqlNumber(row.instructionCount ?? 0),
+      sqlNumber(row.signedTxBytes),
+      sqlNumber(row.writableAccountCount),
+      sqlNumber(row.computeUnitLimit),
+      sqlString(row.selectedTipAccount),
+      sqlNumber(row.sourceComputeUnitLimit),
+      sqlNumber(row.sourceComputeUnitPriceMicroLamports),
+      sqlNumber(row.computeUnitsConsumed),
+      sqlNumber(row.costUnits),
+      sqlString(row.transactionMetaError),
+      sqlString(row.blockhash),
+      sqlString(row.blockhashSourceRpc),
+      sqlString(row.blockhashCommitment),
+      sqlNumber(row.blockhashContextSlot),
+      sqlNumber(row.blockhashAgeMs),
+      sqlString(row.blockhashSelectionStrategy),
       sqlNumber(row.simulationUnitsConsumed),
       sqlNumber(report?.fillTokenDelta),
       sqlNumber(report?.copyWalletSolDelta),
@@ -1152,6 +1357,19 @@ async function buildSql(rows) {
       sqlNumber(row.walletMatchUs),
       sqlNumber(row.routeParseUs),
       sqlNumber(row.sendLaneMs),
+      sqlString(row.feeProfileName),
+      sqlNumber(row.selectedPriorityFeeMicroLamports),
+      sqlNumber(row.selectedHeliusTipLamports),
+      sqlString(row.sourcePositionBucket),
+      sqlString(row.feeReason),
+      sqlBoolean(row.feeCapHit),
+      sqlBoolean(row.accountPriorityFeeEnabled),
+      sqlNumber(row.accountPriorityFeeMicroLamports),
+      sqlNumber(row.accountPriorityFeeAgeMs),
+      sqlNumber(row.accountPriorityFeeSampleCount),
+      sqlNumber(row.accountPriorityFeeAccountCount),
+      sqlBoolean(row.accountPriorityFeeApplied),
+      sqlString(row.accountPriorityFeeReason),
       sqlBoolean(row.autoSellEnabled),
       sqlNumber(row.autoSellDelayMs),
       sqlBoolean(row.autoSellAttempted),
@@ -1180,8 +1398,8 @@ async function buildSql(rows) {
   return `insert into public.copytrade_local_executions (${columns.join(",")}) values ${values.join(",")} on conflict (provider, observed_signature, observed_wallet, copy_wallet, observed_action, mint) do update set ${updates};`;
 }
 
-async function syncOnce(path, { recentLimit = 0 } = {}) {
-  const rawRows = readJsonl(path, { recentLimit });
+async function syncOnce(path, { recentLimit = 0, pendingPositionLimit = 0 } = {}) {
+  const rawRows = readJsonl(path, { recentLimit, pendingPositionLimit });
   const rows = dedupeRows(rawRows);
   if (rows.length === 0) {
     return 0;
@@ -1249,6 +1467,13 @@ async function main() {
     ),
     Math.min(recentLimit, DEFAULT_REFRESH_RECENT_LIMIT)
   );
+  const refreshPendingLimit = positiveInteger(
+    argValue(
+      "refresh-pending-limit",
+      process.env.JITO_SYNC_REFRESH_PENDING_LIMIT || String(DEFAULT_REFRESH_PENDING_LIMIT)
+    ),
+    DEFAULT_REFRESH_PENDING_LIMIT
+  );
   const newRowBackfill = nonNegativeInteger(
     argValue("new-row-backfill", process.env.JITO_SYNC_NEW_ROW_BACKFILL || String(DEFAULT_NEW_ROW_BACKFILL)),
     DEFAULT_NEW_ROW_BACKFILL
@@ -1267,18 +1492,23 @@ async function main() {
     const shouldRefreshRows =
       watch && refreshSentRows && rowCount > 0 && nowMs - lastRefreshAtMs >= refreshIntervalMs;
     if (hasNewRows || shouldRefreshRows) {
-      const syncRecentLimit = syncLimitForCycle({
+      const syncRecentLimit = hasNewRows ? syncLimitForCycle({
         hasNewRows,
         rowCount,
         lastSyncedCount,
         recentLimit,
         refreshRecentLimit,
         newRowBackfill
-      });
-      const synced = await syncOnce(path, { recentLimit: syncRecentLimit });
+      }) : 0;
+      const pendingPositionLimit = hasNewRows ? 0 : refreshPendingLimit;
+      const synced = await syncOnce(path, { recentLimit: syncRecentLimit, pendingPositionLimit });
       lastSyncedCount = rowCount;
       lastRefreshAtMs = Date.now();
-      const scope = syncRecentLimit > 0 ? `last ${syncRecentLimit} rows` : "all rows";
+      const scope = pendingPositionLimit > 0
+        ? `pending position rows up to ${pendingPositionLimit}`
+        : syncRecentLimit > 0
+          ? `last ${syncRecentLimit} rows`
+          : "all rows";
       const reason = hasNewRows ? "new rows" : "refresh";
       console.error(`synced ${synced} unique local copy executions to Supabase (${scope}, ${reason})`);
     }
@@ -1290,14 +1520,19 @@ async function main() {
 
 export {
   blockPositionDiagnostics,
+  blockPositionDiagnosticsWithRetry,
   blockSignatures,
+  buildSql,
   buyStatus,
+  chainReport,
   chainReportFromRustConfirmation,
   dedupeRows,
   executionKey,
   fetchBlockSignatures,
   displayTxDelta,
   mergeSidecarRows,
+  needsBlockPositionRefresh,
+  pendingPositionRefreshRows,
   readJsonl,
   syncLimitForCycle,
   unknownChainReport,

@@ -230,6 +230,56 @@ a send lane. If
   `JITO_SEND_FANOUT=YES` and `JITO_BLOCK_ENGINE_SEND_URLS`.
 - `helius_sender_only`: use Helius Sender endpoints and Sender tip only.
   Requires `JITO_HELIUS_SENDER_ENABLED=YES`.
+- `helius_tpu_jet`: use Helius Sender plus the local Yellowstone Jet sidecar
+  lane. This is the canary mode for same-signature Helius + Jet fanout without
+  adding RPC/Jito lanes.
+- `helius_tpu_quic`: use Helius Sender plus direct TPU QUIC. This is the
+  canary mode for same-signature Helius + TPU QUIC fanout without adding
+  RPC/Jito lanes.
+- `tpu_jet_helius_tip`: use the local Yellowstone Jet sidecar lane only while
+  keeping the Helius Sender tip in the transaction. This isolates lane quality
+  before testing cheaper no-tip TPU sends.
+- `tpu_quic_helius_tip`: use direct TPU QUIC only while keeping the Helius
+  Sender tip in the transaction.
+- `tpu_jet_only`: use the local Yellowstone Jet sidecar lane only. Requires
+  `JITO_TPU_JET_ENABLED=YES`, `JITO_TPU_JET_RPC_URL`,
+  `JITO_TPU_JET_WS_URL`, and `JITO_TPU_JET_SIDECAR_URL`. This mode does not
+  include the Helius Sender tip and is reserved for the cheaper TPU-only canary.
+- `tpu_quic_only`: use the direct TPU QUIC lane only. This is the safe fallback
+  lane for the Yellowstone Jet spike because it stays on the worker's Solana
+  2.2.1 dependency stack. Requires `JITO_TPU_QUIC_ENABLED=YES`,
+  `JITO_TPU_QUIC_RPC_URL`, and `JITO_TPU_QUIC_WS_URL`. This mode does not
+  include the Helius Sender tip and is reserved for the cheaper TPU-only canary.
+
+Yellowstone Jet is default-off and runs through a local sidecar so the main
+worker does not link the Jet Solana 3.x dependency graph:
+
+```bash
+JITO_TPU_JET_ENABLED=false
+JITO_TPU_JET_RPC_URL=https://rpc.example
+JITO_TPU_JET_WS_URL=https://yellowstone-grpc.example
+JITO_TPU_JET_SIDECAR_URL=http://127.0.0.1:8787
+JITO_TPU_JET_FANOUT_SLOTS=12
+JITO_TPU_JET_TIMEOUT_MS=30
+```
+
+The Droplet launcher is `run-tpu-jet-sidecar.sh`; the matching systemd template
+is `systemd/jito-tpu-jet-sidecar.service`.
+
+Direct TPU QUIC is default-off:
+
+```bash
+JITO_TPU_QUIC_ENABLED=false
+JITO_TPU_QUIC_RPC_URL=https://rpc.example
+JITO_TPU_QUIC_WS_URL=wss://rpc.example
+JITO_TPU_QUIC_FANOUT_SLOTS=12
+JITO_TPU_QUIC_TIMEOUT_MS=30
+```
+
+When enabled in `mixed`, the worker sends the same signed wire transaction bytes
+to TPU Jet/QUIC alongside the HTTP lanes. TPU dispatch telemetry is local
+dispatch only; it is not treated as ACK or landing proof. Landing quality still
+comes from confirmation, `slotDelta`, and `txDelta`.
 
 Do not race lane-specific signed variants. Different fee/tip instructions
 produce different messages and signatures, so multiple variants can land as

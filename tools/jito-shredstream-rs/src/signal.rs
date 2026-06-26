@@ -403,6 +403,7 @@ mod tests {
                 route: Route::FlashxPump,
                 sol_amount: Some(0.00099),
                 token_amount: None,
+                compute_budget: Default::default(),
                 route_context: None,
             },
         );

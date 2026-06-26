@@ -4,14 +4,24 @@ import test from "node:test";
 import {
   autoSellStatus,
   blockPositionDiagnostics,
+  blockPositionDiagnosticsWithRetry,
   buyStatus,
   chainReportFromRustConfirmation,
   dedupeRows,
   displayTxDelta,
   executionKey,
+  pendingPositionRefreshRows,
   syncLimitForCycle,
   unknownChainReport
 } from "../tools/jito-shredstream-rs/sync-local-copy-executions-to-supabase.mjs";
+import {
+  buildLandingScoreboard,
+  buildPromotionComparison,
+  evaluateCanarySample,
+  evaluatePromotionCandidate,
+  evaluateTargetTxDelta,
+  evaluateTxDeltaCoverage,
+} from "../tools/jito-shredstream-rs/landing-scoreboard-report.mjs";
 
 const baseRow = {
   observedSignature: "target-sig",
@@ -204,6 +214,28 @@ test("block position diagnostics fail quietly when confirmed block is unavailabl
   assert.match(diagnostics.unavailableReason, /target block unavailable/);
 });
 
+test("block position diagnostics retry temporary block unavailability", async () => {
+  let calls = 0;
+  const diagnostics = await blockPositionDiagnosticsWithRetry(
+    baseRow,
+    { slot: 100 },
+    async (method, params) => {
+      assert.equal(method, "getBlock");
+      assert.equal(params[0], 100);
+      calls += 1;
+      if (calls === 1) {
+        throw new Error("Block not available for slot 100");
+      }
+      return { signatures: ["before", "target-sig", "copy-sig"] };
+    },
+    { attempts: 2, retryDelayMs: 0 }
+  );
+
+  assert.equal(calls, 2);
+  assert.equal(diagnostics.status, "found");
+  assert.equal(diagnostics.txDelta, 1);
+});
+
 test("block position diagnostics fail quietly when target signature is missing", async () => {
   const diagnostics = await blockPositionDiagnostics(
     baseRow,
@@ -305,4 +337,581 @@ test("sync watch loop limits new-row and refresh batches", () => {
     refreshRecentLimit: 1,
     newRowBackfill: 0
   }), 1);
+});
+
+test("pending position refresh selects submitted copy buys missing tx delta", () => {
+  const completeExecution = {
+    schema: "copytrade.localExecution.v1",
+    provider: "shredstream",
+    observedSignature: "observed-complete",
+    observedWallet: "wallet",
+    copyWallet: "copy-wallet",
+    observedAction: "buy",
+    mint: "mint-complete",
+    sendSignature: "copy-complete",
+    sent: true,
+    decision: "sent"
+  };
+  const missingExecution = {
+    ...completeExecution,
+    observedSignature: "observed-missing",
+    mint: "mint-missing",
+    sendSignature: "copy-missing"
+  };
+  const skippedExecution = {
+    ...completeExecution,
+    observedSignature: "observed-skipped",
+    mint: "mint-skipped",
+    sendSignature: null,
+    sent: false,
+    decision: "skipped"
+  };
+
+  const rows = pendingPositionRefreshRows([
+    completeExecution,
+    missingExecution,
+    skippedExecution,
+    {
+      schema: "copytrade.transactionConfirmation.v1",
+      provider: "shredstream",
+      observedSignature: "observed-complete",
+      copyWallet: "copy-wallet",
+      mint: "mint-complete",
+      transactionRole: "copy_buy",
+      signature: "copy-complete",
+      targetTxIndex: 1,
+      copyTxIndex: 3,
+      txDelta: 2
+    }
+  ], 10);
+
+  assert.deepEqual(rows.map((row) => row.observedSignature), ["observed-missing"]);
+});
+
+test("landing scoreboard fails when tx delta coverage is below gate", () => {
+  const scoreboard = buildLandingScoreboard([
+    {
+      schema: "copytrade.localExecution.v1",
+      observedSignature: "obs-base-a",
+      observedAction: "buy",
+      sendSignature: "copy-a",
+      sent: true,
+      rustTransactionConfirmation: {
+        status: "landed",
+        ok: true,
+        slotDelta: 0,
+        txDelta: 2
+      }
+    },
+    {
+      schema: "copytrade.localExecution.v1",
+      observedSignature: "obs-base-b",
+      observedAction: "buy",
+      sendSignature: "copy-b",
+      sent: true,
+      rustTransactionConfirmation: {
+        status: "landed",
+        ok: true,
+        slotDelta: 1
+      }
+    }
+  ], { includeUnsent: false, minCoverage: 0.9, minPositionEligible: 1 });
+  const gate = evaluateTxDeltaCoverage(scoreboard.summary, { minCoverage: 0.9, minPositionEligible: 1 });
+
+  assert.equal(scoreboard.summary.positionEligible, 2);
+  assert.equal(scoreboard.summary.txDeltaPresent, 1);
+  assert.equal(gate.ok, false);
+  assert.equal(scoreboard.txDeltaGate.ok, false);
+  assert.match(gate.reason, /below 90\.0%/);
+});
+
+test("landing scoreboard groups copy buys by transaction shape", () => {
+  const scoreboard = buildLandingScoreboard([
+    {
+      schema: "copytrade.localExecution.v1",
+      observedSignature: "obs-canary-a",
+      observedAction: "buy",
+      routeLayout: "direct-pump",
+      instructionCount: 5,
+      signedTxBytes: 612,
+      sendSignature: "copy-a",
+      sent: true,
+      rustTransactionConfirmation: {
+        status: "landed",
+        ok: true,
+        slotDelta: 0,
+        txDelta: 8
+      }
+    },
+    {
+      schema: "copytrade.localExecution.v1",
+      observedSignature: "obs-canary-b",
+      observedAction: "buy",
+      routeLayout: "direct-pump",
+      instructionCount: 5,
+      signedTxBytes: 645,
+      sendSignature: "copy-b",
+      sent: true,
+      rustTransactionConfirmation: {
+        status: "landed",
+        ok: true,
+        slotDelta: 0,
+        txDelta: 12
+      }
+    },
+    {
+      schema: "copytrade.localExecution.v1",
+      observedSignature: "obs-base-a",
+      observedAction: "buy",
+      routeLayout: "migrated-amm",
+      instructionCount: 6,
+      signedTxBytes: 934,
+      sendSignature: "copy-c",
+      sent: true,
+      rustTransactionConfirmation: {
+        status: "landed",
+        ok: true,
+        slotDelta: 1,
+        txDelta: 300
+      }
+    }
+  ], { includeUnsent: false, minCoverage: 0.9, minPositionEligible: 1 });
+
+  assert.deepEqual(scoreboard.byTransactionShape.map((row) => row.shape), [
+    "direct-pump | ix=5 | bytes=600-699",
+    "migrated-amm | ix=6 | bytes=900-999"
+  ]);
+  assert.equal(scoreboard.byTransactionShape[0].sent, 2);
+  assert.equal(scoreboard.byTransactionShape[0].p50TxDelta, 8);
+  assert.equal(scoreboard.byTransactionShape[0].targetTxDeltaHits, 1);
+  assert.equal(scoreboard.byTransactionShape[0].targetTxDeltaRate, 0.5);
+  assert.equal(scoreboard.byTransactionShape[0].signedTxBytesPresent, 2);
+  assert.equal(scoreboard.byTransactionShape[0].signedTxBytesCoverage, 1);
+  assert.equal(scoreboard.byTransactionShape[0].p50SignedTxBytes, 612);
+  assert.equal(scoreboard.byTransactionShape[1].p50TxDelta, 300);
+});
+
+test("landing scoreboard reports target tx delta gate without changing sample gate", () => {
+  const passing = buildLandingScoreboard([
+    {
+      schema: "copytrade.localExecution.v1",
+      observedSignature: "obs-base-b",
+      observedAction: "buy",
+      sendSignature: "copy-a",
+      sent: true,
+      rustTransactionConfirmation: {
+        status: "landed",
+        ok: true,
+        slotDelta: 0,
+        txDelta: 8
+      }
+    },
+    {
+      schema: "copytrade.localExecution.v1",
+      observedSignature: "obs-canary-a",
+      observedAction: "buy",
+      sendSignature: "copy-b",
+      sent: true,
+      rustTransactionConfirmation: {
+        status: "landed",
+        ok: true,
+        slotDelta: 0,
+        txDelta: 10
+      }
+    }
+  ], { includeUnsent: false, minSent: 20, targetTxDelta: 10 });
+  const failing = buildLandingScoreboard([
+    {
+      schema: "copytrade.localExecution.v1",
+      observedSignature: "obs-canary-b",
+      observedAction: "buy",
+      sendSignature: "copy-c",
+      sent: true,
+      rustTransactionConfirmation: {
+        status: "landed",
+        ok: true,
+        slotDelta: 0,
+        txDelta: 27
+      }
+    },
+    {
+      schema: "copytrade.localExecution.v1",
+      observedSignature: "obs-base-a",
+      observedAction: "buy",
+      sendSignature: "copy-d",
+      sent: true,
+      rustTransactionConfirmation: {
+        status: "landed",
+        ok: true,
+        slotDelta: 1,
+        txDelta: 80
+      }
+    }
+  ], { includeUnsent: false, minSent: 20, targetTxDelta: 10 });
+
+  assert.equal(passing.targetGate.ok, true);
+  assert.equal(passing.sampleGate.ok, false);
+  assert.equal(failing.targetGate.ok, false);
+  assert.match(failing.targetGate.reason, /above target 10/);
+  assert.equal(evaluateTargetTxDelta(failing.summary).ok, false);
+});
+
+test("landing scoreboard reports same-slot rate and waits for canary sample size", () => {
+  const scoreboard = buildLandingScoreboard([
+    {
+      schema: "copytrade.localExecution.v1",
+      observedSignature: "obs-base-b",
+      observedAction: "buy",
+      sendSignature: "copy-a",
+      sent: true,
+      rustTransactionConfirmation: {
+        status: "landed",
+        ok: true,
+        slotDelta: 0,
+        txDelta: 8
+      }
+    },
+    {
+      schema: "copytrade.localExecution.v1",
+      observedSignature: "obs-canary-a",
+      observedAction: "buy",
+      sendSignature: "copy-b",
+      sent: true,
+      rustTransactionConfirmation: {
+        status: "landed",
+        ok: true,
+        slotDelta: 1,
+        txDelta: 80
+      }
+    }
+  ], { includeUnsent: false, minSent: 20, targetTxDelta: 10 });
+
+  assert.equal(scoreboard.summary.landedRate, 1);
+  assert.equal(scoreboard.summary.sameSlotLanded, 1);
+  assert.equal(scoreboard.summary.sameSlotRate, 0.5);
+  assert.equal(scoreboard.summary.targetTxDelta, 10);
+  assert.equal(scoreboard.summary.targetTxDeltaHits, 1);
+  assert.equal(scoreboard.summary.targetTxDeltaRate, 0.5);
+  assert.equal(scoreboard.summary.signedTxBytesPresent, 0);
+  assert.equal(scoreboard.summary.signedTxBytesCoverage, 0);
+  assert.equal(scoreboard.sampleGate.ok, false);
+  assert.match(scoreboard.sampleGate.reason, /only 2 sent rows/);
+  assert.equal(evaluateCanarySample(scoreboard.summary, { minSent: 2 }).ok, true);
+});
+
+test("landing scoreboard includes TPU dispatch attempts in report-only lane scores", () => {
+  const scoreboard = buildLandingScoreboard([
+    {
+      schema: "copytrade.localExecution.v1",
+      observedSignature: "obs-canary-b",
+      observedAction: "buy",
+      sendSignature: "copy-a",
+      sent: true,
+      sendLaneAttribution: {
+        firstAckLane: "helius-sender-1-fast:sender.helius-rpc.com",
+        firstAckAtMs: 123,
+        allAttempts: [
+          {
+            label: "helius-sender-1-fast:sender.helius-rpc.com",
+            kind: "helius_sender",
+            status: "submitted",
+            durationMs: 4,
+            ackAt: 123
+          },
+          {
+            label: "tpu-quic",
+            kind: "tpu_quic",
+            mode: "fanout_slots",
+            status: "dispatched",
+            durationMs: 2,
+            fanoutSlots: 12
+          }
+        ]
+      },
+      rustTransactionConfirmation: {
+        status: "landed",
+        ok: true,
+        slotDelta: 0,
+        txDelta: 9
+      }
+    }
+  ], { includeUnsent: false, minSent: 1, targetTxDelta: 10 });
+
+  const tpuLane = scoreboard.adaptiveLaneScores.find((row) => row.lane === "tpu-quic/fanout_slots");
+  assert.ok(tpuLane);
+  assert.equal(tpuLane.sent, 1);
+  assert.equal(tpuLane.dispatchedAttempts, 1);
+  assert.equal(tpuLane.submittedAttempts, 0);
+  assert.equal(tpuLane.targetTxDeltaHits, 1);
+  assert.equal(tpuLane.errorClasses.length, 0);
+});
+
+test("promotion candidate requires landing and tx delta improvement", () => {
+  const baseline = buildLandingScoreboard([
+    {
+      schema: "copytrade.localExecution.v1",
+      observedAction: "buy",
+      sendSignature: "base-a",
+      sent: true,
+      observedToSignedMs: 8,
+      observedToSendSubmittedMs: 10,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 0, txDelta: 80 }
+    },
+    {
+      schema: "copytrade.localExecution.v1",
+      observedAction: "buy",
+      sendSignature: "base-b",
+      sent: true,
+      observedToSignedMs: 9,
+      observedToSendSubmittedMs: 12,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 1, txDelta: 140 }
+    }
+  ], { includeUnsent: false, minSent: 1, targetTxDelta: 50 });
+  const canary = buildLandingScoreboard([
+    {
+      schema: "copytrade.localExecution.v1",
+      observedAction: "buy",
+      sendSignature: "canary-a",
+      sent: true,
+      observedToSignedMs: 7,
+      observedToSendSubmittedMs: 9,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 0, txDelta: 20 }
+    },
+    {
+      schema: "copytrade.localExecution.v1",
+      observedAction: "buy",
+      sendSignature: "canary-b",
+      sent: true,
+      observedToSignedMs: 8,
+      observedToSendSubmittedMs: 10,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 0, txDelta: 40 }
+    }
+  ], { includeUnsent: false, minSent: 1, targetTxDelta: 50 });
+
+  const promotion = evaluatePromotionCandidate(baseline.summary, canary.summary, {
+    txDeltaTarget: 50
+  });
+
+  assert.equal(promotion.ok, true);
+  assert.deepEqual(promotion.failed, []);
+  assert.deepEqual(promotion.unknown, []);
+});
+
+test("promotion candidate fails on landed-rate regression even with faster tx delta", () => {
+  const baseline = buildLandingScoreboard([
+    {
+      schema: "copytrade.localExecution.v1",
+      observedAction: "buy",
+      sendSignature: "base-a",
+      sent: true,
+      observedToSignedMs: 8,
+      observedToSendSubmittedMs: 10,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 0, txDelta: 80 }
+    },
+    {
+      schema: "copytrade.localExecution.v1",
+      observedAction: "buy",
+      sendSignature: "base-b",
+      sent: true,
+      observedToSignedMs: 9,
+      observedToSendSubmittedMs: 12,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 1, txDelta: 120 }
+    }
+  ], { includeUnsent: false, minSent: 1, targetTxDelta: 50 });
+  const canary = buildLandingScoreboard([
+    {
+      schema: "copytrade.localExecution.v1",
+      observedAction: "buy",
+      sendSignature: "canary-a",
+      sent: true,
+      observedToSignedMs: 7,
+      observedToSendSubmittedMs: 9,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 0, txDelta: 20 }
+    },
+    {
+      schema: "copytrade.localExecution.v1",
+      observedAction: "buy",
+      sendSignature: "canary-b",
+      sent: true,
+      observedToSignedMs: 8,
+      observedToSendSubmittedMs: 10
+    }
+  ], { includeUnsent: false, minSent: 1, targetTxDelta: 50 });
+
+  const promotion = evaluatePromotionCandidate(baseline.summary, canary.summary, {
+    txDeltaTarget: 50
+  });
+
+  assert.equal(promotion.ok, false);
+  assert.ok(promotion.failed.includes("landed_rate_no_regression"));
+});
+
+test("promotion candidate fails on hot-path timing regression", () => {
+  const baseline = buildLandingScoreboard([
+    {
+      schema: "copytrade.localExecution.v1",
+      observedAction: "buy",
+      sendSignature: "base-a",
+      sent: true,
+      observedToSignedMs: 8,
+      observedToSendSubmittedMs: 10,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 0, txDelta: 80 }
+    },
+    {
+      schema: "copytrade.localExecution.v1",
+      observedAction: "buy",
+      sendSignature: "base-b",
+      sent: true,
+      observedToSignedMs: 9,
+      observedToSendSubmittedMs: 12,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 1, txDelta: 120 }
+    }
+  ], { includeUnsent: false, minSent: 1, targetTxDelta: 50 });
+  const canary = buildLandingScoreboard([
+    {
+      schema: "copytrade.localExecution.v1",
+      observedAction: "buy",
+      sendSignature: "canary-a",
+      sent: true,
+      observedToSignedMs: 18,
+      observedToSendSubmittedMs: 25,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 0, txDelta: 20 }
+    },
+    {
+      schema: "copytrade.localExecution.v1",
+      observedAction: "buy",
+      sendSignature: "canary-b",
+      sent: true,
+      observedToSignedMs: 19,
+      observedToSendSubmittedMs: 26,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 0, txDelta: 40 }
+    }
+  ], { includeUnsent: false, minSent: 1, targetTxDelta: 50 });
+
+  const promotion = evaluatePromotionCandidate(baseline.summary, canary.summary, {
+    txDeltaTarget: 50
+  });
+
+  assert.equal(promotion.ok, false);
+  assert.ok(promotion.failed.includes("p90_observed_to_signed_no_regression"));
+  assert.ok(promotion.failed.includes("p90_observed_to_submitted_no_regression"));
+});
+
+test("promotion candidate fails on duplicate observed trade send signatures", () => {
+  const baseline = buildLandingScoreboard([
+    {
+      schema: "copytrade.localExecution.v1",
+      observedSignature: "obs-base-a",
+      observedAction: "buy",
+      sendSignature: "base-a",
+      sent: true,
+      observedToSignedMs: 8,
+      observedToSendSubmittedMs: 10,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 0, txDelta: 80 }
+    },
+    {
+      schema: "copytrade.localExecution.v1",
+      observedSignature: "obs-base-b",
+      observedAction: "buy",
+      sendSignature: "base-b",
+      sent: true,
+      observedToSignedMs: 9,
+      observedToSendSubmittedMs: 12,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 1, txDelta: 120 }
+    }
+  ], { includeUnsent: false, minSent: 1, targetTxDelta: 50 });
+  const canary = buildLandingScoreboard([
+    {
+      schema: "copytrade.localExecution.v1",
+      observedSignature: "obs-canary-dup",
+      observedAction: "buy",
+      sendSignature: "canary-a",
+      sent: true,
+      observedToSignedMs: 7,
+      observedToSendSubmittedMs: 9,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 0, txDelta: 20 }
+    },
+    {
+      schema: "copytrade.localExecution.v1",
+      observedSignature: "obs-canary-dup",
+      observedAction: "buy",
+      sendSignature: "canary-b",
+      sent: true,
+      observedToSignedMs: 8,
+      observedToSendSubmittedMs: 10,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 0, txDelta: 40 }
+    }
+  ], { includeUnsent: false, minSent: 1, targetTxDelta: 50 });
+
+  const promotion = evaluatePromotionCandidate(baseline.summary, canary.summary, {
+    txDeltaTarget: 50
+  });
+
+  assert.equal(canary.summary.duplicateObservedSendGroups, 1);
+  assert.equal(promotion.ok, false);
+  assert.ok(promotion.failed.includes("no_duplicate_observed_send_signatures"));
+});
+
+test("promotion comparison uses non-overlapping observedAt windows", () => {
+  const rows = [
+    {
+      schema: "copytrade.localExecution.v1",
+      observedAtMs: 1000,
+      observedAction: "buy",
+      sendSignature: "base-a",
+      sent: true,
+      observedToSignedMs: 8,
+      observedToSendSubmittedMs: 10,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 0, txDelta: 90 }
+    },
+    {
+      schema: "copytrade.localExecution.v1",
+      observedAtMs: 2000,
+      observedAction: "buy",
+      sendSignature: "base-b",
+      sent: true,
+      observedToSignedMs: 9,
+      observedToSendSubmittedMs: 12,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 1, txDelta: 120 }
+    },
+    {
+      schema: "copytrade.localExecution.v1",
+      observedAtMs: 3000,
+      observedAction: "buy",
+      sendSignature: "canary-a",
+      sent: true,
+      observedToSignedMs: 7,
+      observedToSendSubmittedMs: 9,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 0, txDelta: 20 }
+    },
+    {
+      schema: "copytrade.localExecution.v1",
+      observedAtMs: 4000,
+      observedAction: "buy",
+      sendSignature: "canary-b",
+      sent: true,
+      observedToSignedMs: 8,
+      observedToSendSubmittedMs: 10,
+      rustTransactionConfirmation: { status: "landed", ok: true, slotDelta: 0, txDelta: 40 }
+    }
+  ];
+
+  const comparison = buildPromotionComparison(rows, {
+    includeUnsent: false,
+    minSent: 1,
+    targetTxDelta: 50,
+    baselineSinceMs: 1000,
+    baselineUntilMs: 3000,
+    canarySinceMs: 3000,
+    promotionOptions: { txDeltaTarget: 50 }
+  });
+
+  assert.deepEqual(comparison.baseline.rows.map((row) => row.sendSignature), ["base-a", "base-b"]);
+  assert.deepEqual(comparison.canary.rows.map((row) => row.sendSignature), ["canary-a", "canary-b"]);
+  assert.equal(comparison.baseline.summary.sent, 2);
+  assert.equal(comparison.canary.summary.sent, 2);
+  assert.equal(comparison.baseline.summary.targetTxDeltaRate, 0);
+  assert.equal(comparison.canary.summary.targetTxDeltaRate, 1);
+  assert.equal(comparison.promotion.ok, true);
+  assert.deepEqual(comparison.promotion.failed, []);
 });

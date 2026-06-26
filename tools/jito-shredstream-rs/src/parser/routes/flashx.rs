@@ -49,6 +49,7 @@ pub(crate) fn parse(
             route: Route::FlashxPump,
             sol_amount: Some(amount_in as f64 / LAMPORTS_PER_SOL),
             token_amount: None,
+            compute_budget: Default::default(),
             route_context: None,
         });
     }
@@ -61,6 +62,7 @@ pub(crate) fn parse(
             route: Route::FlashxPump,
             sol_amount: None,
             token_amount: Some(amount_in as f64 / PUMP_FUN_TOKEN_DECIMALS),
+            compute_budget: Default::default(),
             route_context: None,
         });
     }
@@ -93,6 +95,7 @@ fn parse_migrated_amm_layout(
             route: Route::FlashxPump,
             sol_amount: Some(amount_in as f64 / LAMPORTS_PER_SOL),
             token_amount: None,
+            compute_budget: Default::default(),
             route_context: None,
         }),
         1 => Some(ParsedTrade {
@@ -102,6 +105,7 @@ fn parse_migrated_amm_layout(
             route: Route::FlashxPump,
             sol_amount: None,
             token_amount: Some(amount_in as f64 / PUMP_FUN_TOKEN_DECIMALS),
+            compute_budget: Default::default(),
             route_context: None,
         }),
         _ => None,
@@ -132,6 +136,7 @@ fn parse_long_v2_layout(
             route: Route::FlashxPump,
             sol_amount: Some(amount_in as f64 / LAMPORTS_PER_SOL),
             token_amount: None,
+            compute_budget: Default::default(),
             route_context: None,
         });
     }
@@ -145,6 +150,7 @@ fn parse_long_v2_layout(
             route: Route::FlashxPump,
             sol_amount: None,
             token_amount: Some(amount_in as f64 / PUMP_FUN_TOKEN_DECIMALS),
+            compute_budget: Default::default(),
             route_context: None,
         });
     }

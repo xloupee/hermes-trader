@@ -6002,6 +6002,9 @@ impl CopyExecutionOptions {
     }
 
     fn selected_sell_send_endpoints(&self) -> Vec<SendEndpoint> {
+        if !normalized_send_rpc_urls(&self.sell_send_rpc_urls, None).is_empty() {
+            return self.selected_sell_rpc_send_endpoints();
+        }
         if self.helius_sender_enabled
             && self.send_lane_mode.uses_helius_sender_lanes()
             && self.sell_helius_sender_tip_lamports == Some(0)
@@ -9440,6 +9443,27 @@ mod tests {
         assert_eq!(
             sell_endpoints[1].label,
             "sell-rpc-fanout-1:sell-fanout.example.com"
+        );
+    }
+
+    #[test]
+    fn astralane_only_buys_do_not_route_sells_to_irisb_when_sell_rpc_is_configured() {
+        let mut options = configured_multi_lane_options();
+        enable_astralane(&mut options);
+        options.send_lane_mode = SendLaneMode::AstralaneOnly;
+        options.sell_send_rpc_urls = vec!["https://sell-primary.example.com".to_string()];
+        options.sell_priority_fee_micro_lamports = Some(0);
+        options.sell_jito_tip_lamports = Some(0);
+        options.sell_helius_sender_tip_lamports = Some(0);
+
+        let buy_endpoints = options.selected_send_endpoints();
+        let sell_endpoints = options.selected_sell_send_endpoints();
+
+        assert_eq!(endpoint_kinds(&buy_endpoints), vec!["astralane_irisb"]);
+        assert_eq!(endpoint_kinds(&sell_endpoints), vec!["rpc"]);
+        assert_eq!(
+            sell_endpoints[0].label,
+            "sell-rpc-primary:sell-primary.example.com"
         );
     }
 

@@ -236,6 +236,28 @@ test("block position diagnostics retry temporary block unavailability", async ()
   assert.equal(diagnostics.txDelta, 1);
 });
 
+test("block position diagnostics retry temporary RPC rate limits", async () => {
+  let calls = 0;
+  const diagnostics = await blockPositionDiagnosticsWithRetry(
+    baseRow,
+    { slot: 100 },
+    async (method, params) => {
+      assert.equal(method, "getBlock");
+      assert.equal(params[0], 100);
+      calls += 1;
+      if (calls === 1) {
+        throw new Error("getBlock HTTP status: HTTP status client error (429 Too Many Requests)");
+      }
+      return { signatures: ["before", "target-sig", "copy-sig"] };
+    },
+    { attempts: 2, retryDelayMs: 0 }
+  );
+
+  assert.equal(calls, 2);
+  assert.equal(diagnostics.status, "found");
+  assert.equal(diagnostics.txDelta, 1);
+});
+
 test("block position diagnostics fail quietly when target signature is missing", async () => {
   const diagnostics = await blockPositionDiagnostics(
     baseRow,

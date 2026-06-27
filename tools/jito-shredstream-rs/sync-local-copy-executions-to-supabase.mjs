@@ -81,12 +81,18 @@ function readJsonl(path, { recentLimit = 0, pendingPositionLimit = 0 } = {}) {
       row.schema === "copytrade.sendLaneAttribution.v1" ||
       row.schema === "copytrade.transactionConfirmation.v1"
     );
-  if (pendingPositionLimit > 0) {
-    return pendingPositionRefreshRows(parsedRows, pendingPositionLimit);
+  const scopedRows = scopeRowsForRecentLocalExecutions(parsedRows, recentLimit);
+  const recentRows = mergeSidecarRows(scopedRows);
+  if (pendingPositionLimit <= 0) {
+    return recentRows;
   }
 
-  const scopedRows = scopeRowsForRecentLocalExecutions(parsedRows, recentLimit);
-  return mergeSidecarRows(scopedRows);
+  const pendingRows = pendingPositionRefreshRows(parsedRows, pendingPositionLimit);
+  if (recentLimit <= 0) {
+    return pendingRows;
+  }
+
+  return dedupeRows([...recentRows, ...pendingRows]);
 }
 
 function scopeRowsForRecentLocalExecutions(rows, recentLimit) {
@@ -427,7 +433,7 @@ function retryableBlockPositionReason(reason) {
   if (!reason) {
     return false;
   }
-  return /block unavailable|getBlock failed|getBlock RPC error|Block not available|timeout/i.test(reason);
+  return /block unavailable|getBlock failed|getBlock RPC error|Block not available|timeout|429|Too Many Requests/i.test(reason);
 }
 
 async function blockPositionDiagnosticsWithRetry(row, copyTransaction, rpcFn = rpc, options = {}) {
@@ -1500,17 +1506,27 @@ async function main() {
         refreshRecentLimit,
         newRowBackfill
       }) : 0;
-      const pendingPositionLimit = hasNewRows ? 0 : refreshPendingLimit;
+      const pendingPositionLimit = shouldRefreshRows ? refreshPendingLimit : 0;
       const synced = await syncOnce(path, { recentLimit: syncRecentLimit, pendingPositionLimit });
       lastSyncedCount = rowCount;
-      lastRefreshAtMs = Date.now();
-      const scope = pendingPositionLimit > 0
-        ? `pending position rows up to ${pendingPositionLimit}`
-        : syncRecentLimit > 0
-          ? `last ${syncRecentLimit} rows`
-          : "all rows";
-      const reason = hasNewRows ? "new rows" : "refresh";
-      console.error(`synced ${synced} unique local copy executions to Supabase (${scope}, ${reason})`);
+      if (shouldRefreshRows) {
+        lastRefreshAtMs = Date.now();
+      }
+      const scopes = [];
+      if (syncRecentLimit > 0) {
+        scopes.push(`last ${syncRecentLimit} rows`);
+      } else if (pendingPositionLimit <= 0) {
+        scopes.push("all rows");
+      }
+      if (pendingPositionLimit > 0) {
+        scopes.push(`pending position rows up to ${pendingPositionLimit}`);
+      }
+      const reason = hasNewRows && shouldRefreshRows
+        ? "new rows + refresh"
+        : hasNewRows
+          ? "new rows"
+          : "refresh";
+      console.error(`synced ${synced} unique local copy executions to Supabase (${scopes.join(" + ")}, ${reason})`);
     }
     if (watch) {
       await new Promise((resolve) => setTimeout(resolve, intervalMs));

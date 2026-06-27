@@ -50,6 +50,13 @@ Canaries:
   account-priority-cache Baseline plus warm writable-account getRecentPrioritizationFees cache
   nozomi-only   Nozomi JSON-RPC only with Nozomi tip, for delivery-lane isolation
   helius-nozomi-stack Helius Sender plus Nozomi same-signature fanout with both tips
+  astralane-only Astralane IrisB binary HTTP only with Astralane tip, for delivery-lane isolation
+  helius-astralane-stack Helius Sender plus Astralane same-signature fanout
+  helius-nozomi-astralane-stack Helius Sender plus Nozomi plus Astralane fanout
+  beam-only     RPC Fast Beam only with Beam provider tip
+  helius-beam-stack Helius Sender plus Beam same-signature fanout
+  helius-nozomi-beam-stack Helius Sender plus Nozomi plus Beam same-signature fanout
+  all-non-beam-stack Helius Sender plus Nozomi plus Jet if enabled
   tpu-jet-fanout Helius baseline plus same-signature Yellowstone Jet sidecar fanout
   tpu-jet-only Same fee shape, Yellowstone Jet sidecar only
   tpu-jet-cheap Jet sidecar only with Helius Sender tip disabled; requires JITO_CANARY_ALLOW_CHEAP_TPU=YES
@@ -126,6 +133,21 @@ canary_values() {
   CANARY_NOZOMI_TIP="${JITO_CANARY_NOZOMI_TIP_LAMPORTS:-${JITO_NOZOMI_TIP_LAMPORTS:-1000000}}"
   CANARY_NOZOMI_TIP_ACCOUNT="${JITO_CANARY_NOZOMI_TIP_ACCOUNT:-${JITO_NOZOMI_TIP_ACCOUNT:-TEMPaMeCRFAS9EKF53Jd6KpHxgL47uWLcpFArU1Fanq}}"
   CANARY_NOZOMI_TIP_ACCOUNTS="${JITO_CANARY_NOZOMI_TIP_ACCOUNTS:-${JITO_NOZOMI_TIP_ACCOUNTS:-}}"
+  CANARY_ASTRALANE_ENABLED="false"
+  CANARY_ASTRALANE_URLS="${JITO_CANARY_ASTRALANE_URLS:-${JITO_ASTRALANE_URLS:-https://lim.gateway.astralane.io/irisb}}"
+  CANARY_ASTRALANE_API_KEY="${JITO_CANARY_ASTRALANE_API_KEY:-${JITO_ASTRALANE_API_KEY:-}}"
+  CANARY_ASTRALANE_TIP="${JITO_CANARY_ASTRALANE_TIP_LAMPORTS:-${JITO_ASTRALANE_TIP_LAMPORTS:-1000000}}"
+  CANARY_ASTRALANE_TIP_ACCOUNT="${JITO_CANARY_ASTRALANE_TIP_ACCOUNT:-${JITO_ASTRALANE_TIP_ACCOUNT:-astra4uejePWneqNaJKuFFA8oonqCE1sqF6b45kDMZm}}"
+  CANARY_ASTRALANE_TIP_ACCOUNTS="${JITO_CANARY_ASTRALANE_TIP_ACCOUNTS:-${JITO_ASTRALANE_TIP_ACCOUNTS:-}}"
+  CANARY_ASTRALANE_MEV_PROTECT="${JITO_CANARY_ASTRALANE_MEV_PROTECT:-${JITO_ASTRALANE_MEV_PROTECT:-false}}"
+  CANARY_ASTRALANE_SWQOS_ONLY="${JITO_CANARY_ASTRALANE_SWQOS_ONLY:-${JITO_ASTRALANE_SWQOS_ONLY:-false}}"
+  CANARY_BEAM_ENABLED="false"
+  CANARY_BEAM_URL="${JITO_CANARY_BEAM_URL:-${JITO_BEAM_URL:-https://beam.rpcfast.com}}"
+  CANARY_BEAM_TOKEN="${JITO_CANARY_BEAM_TOKEN:-${JITO_BEAM_TOKEN:-}}"
+  CANARY_BEAM_PROVIDER="${JITO_CANARY_BEAM_PROVIDER:-${JITO_BEAM_PROVIDER:-bloxroute}}"
+  CANARY_BEAM_MODE="${JITO_CANARY_BEAM_MODE:-${JITO_BEAM_MODE:-fastest}}"
+  CANARY_BEAM_TIP="${JITO_CANARY_BEAM_TIP_LAMPORTS:-${JITO_BEAM_TIP_LAMPORTS:-1000000}}"
+  CANARY_BEAM_TIP_ACCOUNTS="${JITO_CANARY_BEAM_TIP_ACCOUNTS:-${JITO_BEAM_TIP_ACCOUNTS:-}}"
   CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_MAX_PROVIDER_TIP_LAMPORTS:-${JITO_MAX_PROVIDER_TIP_LAMPORTS:-1387500}}"
   CANARY_MAX_SIGNED_TX_BYTES="${JITO_CANARY_MAX_SIGNED_TX_BYTES:-${JITO_MAX_SIGNED_TX_BYTES:-1232}}"
   CANARY_MAX_INSTRUCTION_COUNT="${JITO_CANARY_MAX_INSTRUCTION_COUNT:-${JITO_MAX_INSTRUCTION_COUNT:-8}}"
@@ -205,6 +227,68 @@ canary_values() {
       CANARY_LANE_MODE="helius-nozomi-stack"
       CANARY_HELIUS_ENABLED="true"
       CANARY_NOZOMI_ENABLED="true"
+      CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
+      ;;
+    astralane-only)
+      CANARY_LANE_MODE="astralane-only"
+      CANARY_HELIUS_ENABLED="false"
+      CANARY_HELIUS_TIP=0
+      CANARY_HELIUS_TIP_ACCOUNT=""
+      CANARY_HELIUS_TIP_ACCOUNTS=""
+      CANARY_NOZOMI_ENABLED="false"
+      CANARY_ASTRALANE_ENABLED="true"
+      CANARY_BEAM_ENABLED="false"
+      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_ASTRALANE_MAX_PROVIDER_TIP_LAMPORTS:-1000000}"
+      ;;
+    helius-astralane-stack)
+      CANARY_LANE_MODE="helius-astralane-stack"
+      CANARY_HELIUS_ENABLED="true"
+      CANARY_NOZOMI_ENABLED="false"
+      CANARY_ASTRALANE_ENABLED="true"
+      CANARY_BEAM_ENABLED="false"
+      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_ASTRALANE_STACK_MAX_PROVIDER_TIP_LAMPORTS:-1387500}"
+      CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
+      ;;
+    helius-nozomi-astralane-stack)
+      CANARY_LANE_MODE="helius-nozomi-astralane-stack"
+      CANARY_HELIUS_ENABLED="true"
+      CANARY_NOZOMI_ENABLED="true"
+      CANARY_ASTRALANE_ENABLED="true"
+      CANARY_BEAM_ENABLED="false"
+      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_ASTRALANE_NOZOMI_STACK_MAX_PROVIDER_TIP_LAMPORTS:-2387500}"
+      CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
+      ;;
+    beam-only)
+      CANARY_LANE_MODE="beam-only"
+      CANARY_HELIUS_ENABLED="false"
+      CANARY_HELIUS_TIP=0
+      CANARY_HELIUS_TIP_ACCOUNT=""
+      CANARY_HELIUS_TIP_ACCOUNTS=""
+      CANARY_NOZOMI_ENABLED="false"
+      CANARY_BEAM_ENABLED="true"
+      ;;
+    helius-beam-stack)
+      CANARY_LANE_MODE="helius-beam-stack"
+      CANARY_HELIUS_ENABLED="true"
+      CANARY_NOZOMI_ENABLED="false"
+      CANARY_BEAM_ENABLED="true"
+      CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
+      ;;
+    helius-nozomi-beam-stack)
+      CANARY_LANE_MODE="helius-nozomi-beam-stack"
+      CANARY_HELIUS_ENABLED="true"
+      CANARY_NOZOMI_ENABLED="true"
+      CANARY_BEAM_ENABLED="true"
+      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_BEAM_STACK_MAX_PROVIDER_TIP_LAMPORTS:-2500000}"
+      CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
+      ;;
+    all-non-beam-stack)
+      CANARY_LANE_MODE="all-non-beam-stack"
+      CANARY_HELIUS_ENABLED="true"
+      CANARY_NOZOMI_ENABLED="true"
+      CANARY_BEAM_ENABLED="false"
+      CANARY_TPU_JET_ENABLED="${JITO_CANARY_ALL_NON_BEAM_TPU_JET_ENABLED:-${JITO_TPU_JET_ENABLED:-false}}"
+      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_ALL_NON_BEAM_MAX_PROVIDER_TIP_LAMPORTS:-1387500}"
       CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
       ;;
     tpu-jet-fanout)
@@ -290,6 +374,21 @@ CANARY_NOZOMI_URLS_CONFIGURED=$([[ -n "${CANARY_NOZOMI_URLS:-}" ]] && echo true 
 CANARY_NOZOMI_TIP_LAMPORTS=${CANARY_NOZOMI_TIP:-}
 CANARY_NOZOMI_TIP_ACCOUNT_CONFIGURED=$([[ -n "${CANARY_NOZOMI_TIP_ACCOUNT:-}" ]] && echo true || echo false)
 CANARY_NOZOMI_TIP_ACCOUNTS_CONFIGURED=$([[ -n "${CANARY_NOZOMI_TIP_ACCOUNTS:-}" ]] && echo true || echo false)
+CANARY_ASTRALANE_ENABLED=${CANARY_ASTRALANE_ENABLED:-}
+CANARY_ASTRALANE_URLS_CONFIGURED=$([[ -n "${CANARY_ASTRALANE_URLS:-}" ]] && echo true || echo false)
+CANARY_ASTRALANE_API_KEY_CONFIGURED=$([[ -n "${CANARY_ASTRALANE_API_KEY:-}" ]] && echo true || echo false)
+CANARY_ASTRALANE_TIP_LAMPORTS=${CANARY_ASTRALANE_TIP:-}
+CANARY_ASTRALANE_TIP_ACCOUNT_CONFIGURED=$([[ -n "${CANARY_ASTRALANE_TIP_ACCOUNT:-}" ]] && echo true || echo false)
+CANARY_ASTRALANE_TIP_ACCOUNTS_CONFIGURED=$([[ -n "${CANARY_ASTRALANE_TIP_ACCOUNTS:-}" ]] && echo true || echo false)
+CANARY_ASTRALANE_MEV_PROTECT=${CANARY_ASTRALANE_MEV_PROTECT:-}
+CANARY_ASTRALANE_SWQOS_ONLY=${CANARY_ASTRALANE_SWQOS_ONLY:-}
+CANARY_BEAM_ENABLED=${CANARY_BEAM_ENABLED:-}
+CANARY_BEAM_URL_CONFIGURED=$([[ -n "${CANARY_BEAM_URL:-}" ]] && echo true || echo false)
+CANARY_BEAM_TOKEN_CONFIGURED=$([[ -n "${CANARY_BEAM_TOKEN:-}" ]] && echo true || echo false)
+CANARY_BEAM_PROVIDER=${CANARY_BEAM_PROVIDER:-}
+CANARY_BEAM_MODE=${CANARY_BEAM_MODE:-}
+CANARY_BEAM_TIP_LAMPORTS=${CANARY_BEAM_TIP:-}
+CANARY_BEAM_TIP_ACCOUNTS_CONFIGURED=$([[ -n "${CANARY_BEAM_TIP_ACCOUNTS:-}" ]] && echo true || echo false)
 CANARY_MAX_PROVIDER_TIP_LAMPORTS=${CANARY_MAX_PROVIDER_TIP_LAMPORTS:-}
 CANARY_MAX_SIGNED_TX_BYTES=${CANARY_MAX_SIGNED_TX_BYTES:-}
 CANARY_MAX_INSTRUCTION_COUNT=${CANARY_MAX_INSTRUCTION_COUNT:-}
@@ -330,6 +429,21 @@ print_status() {
   echo "nozomi_tip_lamports=${JITO_NOZOMI_TIP_LAMPORTS:-}"
   echo "nozomi_tip_account=$([[ -n "${JITO_NOZOMI_TIP_ACCOUNT:-}" ]] && echo configured || echo empty)"
   echo "nozomi_tip_accounts=$([[ -n "${JITO_NOZOMI_TIP_ACCOUNTS:-}" ]] && echo configured || echo empty)"
+  echo "astralane_enabled=${JITO_ASTRALANE_ENABLED:-}"
+  echo "astralane_urls=$([[ -n "${JITO_ASTRALANE_URLS:-}" ]] && echo configured || echo empty)"
+  echo "astralane_api_key=$([[ -n "${JITO_ASTRALANE_API_KEY:-}" ]] && echo configured || echo empty)"
+  echo "astralane_tip_lamports=${JITO_ASTRALANE_TIP_LAMPORTS:-}"
+  echo "astralane_tip_account=$([[ -n "${JITO_ASTRALANE_TIP_ACCOUNT:-}" ]] && echo configured || echo empty)"
+  echo "astralane_tip_accounts=$([[ -n "${JITO_ASTRALANE_TIP_ACCOUNTS:-}" ]] && echo configured || echo empty)"
+  echo "astralane_mev_protect=${JITO_ASTRALANE_MEV_PROTECT:-}"
+  echo "astralane_swqos_only=${JITO_ASTRALANE_SWQOS_ONLY:-}"
+  echo "beam_enabled=${JITO_BEAM_ENABLED:-}"
+  echo "beam_url=$([[ -n "${JITO_BEAM_URL:-}" ]] && echo configured || echo empty)"
+  echo "beam_token=$([[ -n "${JITO_BEAM_TOKEN:-}" ]] && echo configured || echo empty)"
+  echo "beam_provider=${JITO_BEAM_PROVIDER:-}"
+  echo "beam_mode=${JITO_BEAM_MODE:-}"
+  echo "beam_tip_lamports=${JITO_BEAM_TIP_LAMPORTS:-}"
+  echo "beam_tip_accounts=$([[ -n "${JITO_BEAM_TIP_ACCOUNTS:-}" ]] && echo configured || echo empty)"
   echo "tpu_jet_enabled=${JITO_TPU_JET_ENABLED:-}"
   echo "tpu_jet_rpc_url=$([[ -n "${JITO_TPU_JET_RPC_URL:-}" ]] && echo configured || echo empty)"
   echo "tpu_jet_ws_url=$([[ -n "${JITO_TPU_JET_WS_URL:-}" ]] && echo configured || echo empty)"
@@ -531,6 +645,74 @@ require_nozomi_ready() {
   fi
 }
 
+require_astralane_ready() {
+  local name="$1"
+  if [[ -z "${CANARY_ASTRALANE_URLS:-}" ]]; then
+    echo "$name requires JITO_CANARY_ASTRALANE_URLS or JITO_ASTRALANE_URLS in $WORKER_ENV_FILE or $APP_ENV_FILE" >&2
+    exit 2
+  fi
+  if [[ -z "${CANARY_ASTRALANE_API_KEY:-}" ]]; then
+    echo "$name requires JITO_CANARY_ASTRALANE_API_KEY or JITO_ASTRALANE_API_KEY" >&2
+    exit 2
+  fi
+  if [[ -z "${CANARY_ASTRALANE_TIP:-}" || ! "$CANARY_ASTRALANE_TIP" =~ ^[0-9]+$ ]]; then
+    echo "$name requires numeric JITO_CANARY_ASTRALANE_TIP_LAMPORTS or JITO_ASTRALANE_TIP_LAMPORTS" >&2
+    exit 2
+  fi
+  if (( CANARY_ASTRALANE_TIP < 1000000 )); then
+    echo "$name requires Astralane tip >= 1000000 lamports" >&2
+    exit 2
+  fi
+  if [[ -z "${CANARY_ASTRALANE_TIP_ACCOUNT:-}" && -z "${CANARY_ASTRALANE_TIP_ACCOUNTS:-}" ]]; then
+    echo "$name requires JITO_CANARY_ASTRALANE_TIP_ACCOUNT/JITO_ASTRALANE_TIP_ACCOUNT or JITO_CANARY_ASTRALANE_TIP_ACCOUNTS/JITO_ASTRALANE_TIP_ACCOUNTS" >&2
+    exit 2
+  fi
+}
+
+require_beam_ready() {
+  local name="$1" provider mode
+  if [[ -z "${CANARY_BEAM_URL:-}" ]]; then
+    echo "$name requires JITO_CANARY_BEAM_URL or JITO_BEAM_URL" >&2
+    exit 2
+  fi
+  if [[ -z "${CANARY_BEAM_TOKEN:-}" ]]; then
+    echo "$name requires JITO_CANARY_BEAM_TOKEN or JITO_BEAM_TOKEN" >&2
+    exit 2
+  fi
+  provider="$(printf '%s' "${CANARY_BEAM_PROVIDER:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$provider" in
+    bloxroute|astralane|falcon) ;;
+    *)
+      echo "$name requires JITO_CANARY_BEAM_PROVIDER or JITO_BEAM_PROVIDER to be bloxroute, astralane, or falcon" >&2
+      exit 2
+      ;;
+  esac
+  mode="$(printf '%s' "${CANARY_BEAM_MODE:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$mode" in
+    fastest|mev_protect) ;;
+    *)
+      echo "$name requires JITO_CANARY_BEAM_MODE or JITO_BEAM_MODE to be fastest or mev_protect" >&2
+      exit 2
+      ;;
+  esac
+  if [[ "$provider" == "falcon" && "$mode" == "mev_protect" ]]; then
+    echo "$name cannot use JITO_BEAM_MODE=mev_protect with falcon" >&2
+    exit 2
+  fi
+  if [[ -z "${CANARY_BEAM_TIP:-}" || ! "$CANARY_BEAM_TIP" =~ ^[0-9]+$ ]]; then
+    echo "$name requires numeric JITO_CANARY_BEAM_TIP_LAMPORTS or JITO_BEAM_TIP_LAMPORTS" >&2
+    exit 2
+  fi
+  if (( CANARY_BEAM_TIP < 1000000 )); then
+    echo "$name requires Beam tip >= 1000000 lamports" >&2
+    exit 2
+  fi
+  if [[ -z "${CANARY_BEAM_TIP_ACCOUNTS:-}" ]]; then
+    echo "$name requires JITO_CANARY_BEAM_TIP_ACCOUNTS or JITO_BEAM_TIP_ACCOUNTS" >&2
+    exit 2
+  fi
+}
+
 apply_canary() {
   local name="$1" backup since_iso
   load_env_file "$APP_ENV_FILE"
@@ -576,6 +758,16 @@ apply_canary() {
       require_nozomi_ready "$name"
       ;;
   esac
+  case "$CANARY_ASTRALANE_ENABLED" in
+    true)
+      require_astralane_ready "$name"
+      ;;
+  esac
+  case "$CANARY_BEAM_ENABLED" in
+    true)
+      require_beam_ready "$name"
+      ;;
+  esac
   baseline_gate "$name"
   backup="$(backup_env)"
 
@@ -597,6 +789,21 @@ apply_canary() {
   set_env_var "$WORKER_ENV_FILE" JITO_NOZOMI_TIP_LAMPORTS "$CANARY_NOZOMI_TIP"
   set_env_var "$WORKER_ENV_FILE" JITO_NOZOMI_TIP_ACCOUNT "$CANARY_NOZOMI_TIP_ACCOUNT"
   set_env_var "$WORKER_ENV_FILE" JITO_NOZOMI_TIP_ACCOUNTS "$CANARY_NOZOMI_TIP_ACCOUNTS"
+  set_env_var "$WORKER_ENV_FILE" JITO_ASTRALANE_ENABLED "$CANARY_ASTRALANE_ENABLED"
+  set_env_var "$WORKER_ENV_FILE" JITO_ASTRALANE_URLS "$CANARY_ASTRALANE_URLS"
+  set_env_var "$WORKER_ENV_FILE" JITO_ASTRALANE_API_KEY "$CANARY_ASTRALANE_API_KEY"
+  set_env_var "$WORKER_ENV_FILE" JITO_ASTRALANE_TIP_LAMPORTS "$CANARY_ASTRALANE_TIP"
+  set_env_var "$WORKER_ENV_FILE" JITO_ASTRALANE_TIP_ACCOUNT "$CANARY_ASTRALANE_TIP_ACCOUNT"
+  set_env_var "$WORKER_ENV_FILE" JITO_ASTRALANE_TIP_ACCOUNTS "$CANARY_ASTRALANE_TIP_ACCOUNTS"
+  set_env_var "$WORKER_ENV_FILE" JITO_ASTRALANE_MEV_PROTECT "$CANARY_ASTRALANE_MEV_PROTECT"
+  set_env_var "$WORKER_ENV_FILE" JITO_ASTRALANE_SWQOS_ONLY "$CANARY_ASTRALANE_SWQOS_ONLY"
+  set_env_var "$WORKER_ENV_FILE" JITO_BEAM_ENABLED "$CANARY_BEAM_ENABLED"
+  set_env_var "$WORKER_ENV_FILE" JITO_BEAM_URL "$CANARY_BEAM_URL"
+  set_env_var "$WORKER_ENV_FILE" JITO_BEAM_TOKEN "$CANARY_BEAM_TOKEN"
+  set_env_var "$WORKER_ENV_FILE" JITO_BEAM_PROVIDER "$CANARY_BEAM_PROVIDER"
+  set_env_var "$WORKER_ENV_FILE" JITO_BEAM_MODE "$CANARY_BEAM_MODE"
+  set_env_var "$WORKER_ENV_FILE" JITO_BEAM_TIP_LAMPORTS "$CANARY_BEAM_TIP"
+  set_env_var "$WORKER_ENV_FILE" JITO_BEAM_TIP_ACCOUNTS "$CANARY_BEAM_TIP_ACCOUNTS"
   set_env_var "$WORKER_ENV_FILE" JITO_BLOCKHASH_COMMITMENT "$CANARY_BLOCKHASH_COMMITMENT"
   set_env_var "$WORKER_ENV_FILE" JITO_PRIORITY_FEE_MICRO_LAMPORTS "$CANARY_PRIORITY"
   set_env_var "$WORKER_ENV_FILE" JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS "$CANARY_MAX_PRIORITY"

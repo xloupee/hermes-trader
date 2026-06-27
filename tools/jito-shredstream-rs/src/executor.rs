@@ -9045,6 +9045,18 @@ mod tests {
     }
 
     #[test]
+    fn helius_sender_regional_urls_preserve_query_and_do_not_double_fast() {
+        assert_eq!(
+            helius_sender_url("http://fra-sender.helius-rpc.com?api-key=secret", false),
+            "http://fra-sender.helius-rpc.com/fast?api-key=secret"
+        );
+        assert_eq!(
+            helius_sender_url("http://ams-sender.helius-rpc.com/fast?api-key=secret", false),
+            "http://ams-sender.helius-rpc.com/fast?api-key=secret"
+        );
+    }
+
+    #[test]
     fn beam_sender_validation_fails_closed() {
         let mut options = disabled_options();
         options.beam_enabled = true;

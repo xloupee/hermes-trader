@@ -48,6 +48,7 @@ Canaries:
   blockhash-processed Baseline with JITO_BLOCKHASH_COMMITMENT=processed
   blockhash-confirmed Baseline with JITO_BLOCKHASH_COMMITMENT=confirmed
   account-priority-cache Baseline plus warm writable-account getRecentPrioritizationFees cache
+  helius-regional-fanout Helius Sender only, same fee shape, multiple regional Sender endpoints
   nozomi-only   Nozomi JSON-RPC only with Nozomi tip, for delivery-lane isolation
   helius-nozomi-stack Helius Sender plus Nozomi same-signature fanout with both tips
   astralane-only Astralane IrisB binary HTTP only with Astralane tip, for delivery-lane isolation
@@ -122,6 +123,7 @@ canary_values() {
   CANARY_LANE_MODE="helius-sender-only"
   CANARY_HELIUS_ENABLED="true"
   CANARY_HELIUS_SWQOS_ONLY="${JITO_HELIUS_SENDER_SWQOS_ONLY:-false}"
+  CANARY_HELIUS_URLS="${JITO_HELIUS_SENDER_URLS:-}"
   CANARY_TPU_JET_ENABLED="false"
   CANARY_TPU_QUIC_ENABLED="false"
   CANARY_TPU_QUIC_FANOUT_SLOTS="${JITO_CANARY_TPU_QUIC_FANOUT_SLOTS:-${JITO_TPU_QUIC_FANOUT_SLOTS:-12}}"
@@ -214,6 +216,18 @@ canary_values() {
       CANARY_ACCOUNT_PRIORITY_FEE_REFRESH_MS="${JITO_CANARY_ACCOUNT_PRIORITY_FEE_REFRESH_MS:-1000}"
       CANARY_ACCOUNT_PRIORITY_FEE_STALE_MS="${JITO_CANARY_ACCOUNT_PRIORITY_FEE_STALE_MS:-5000}"
       CANARY_ACCOUNT_PRIORITY_FEE_PERCENTILE="${JITO_CANARY_ACCOUNT_PRIORITY_FEE_PERCENTILE:-75}"
+      ;;
+    helius-regional-fanout)
+      CANARY_LANE_MODE="helius-sender-only"
+      CANARY_HELIUS_ENABLED="true"
+      CANARY_HELIUS_URLS="${JITO_CANARY_HELIUS_REGION_URLS:-}"
+      CANARY_NOZOMI_ENABLED="false"
+      CANARY_ASTRALANE_ENABLED="false"
+      CANARY_BEAM_ENABLED="false"
+      if [[ -z "$CANARY_HELIUS_URLS" ]]; then
+        echo "helius-regional-fanout requires JITO_CANARY_HELIUS_REGION_URLS" >&2
+        exit 2
+      fi
       ;;
     nozomi-only)
       CANARY_LANE_MODE="nozomi-only"
@@ -368,6 +382,8 @@ CANARY_HELIUS_TIP_LAMPORTS=${CANARY_HELIUS_TIP:-}
 CANARY_PRIORITY_FEE_MICRO_LAMPORTS=${CANARY_PRIORITY:-}
 CANARY_SEND_MAX_RETRIES=${CANARY_RETRIES:-}
 CANARY_SEND_LANE_MODE=${CANARY_LANE_MODE:-}
+CANARY_HELIUS_URL_COUNT=$(if [[ -n "${CANARY_HELIUS_URLS:-}" ]]; then printf '%s' "$CANARY_HELIUS_URLS" | awk -F, '{print NF}'; else printf '0'; fi)
+CANARY_HELIUS_REGION_URLS_CONFIGURED=$([[ -n "${CANARY_HELIUS_URLS:-}" ]] && echo true || echo false)
 CANARY_HELIUS_TIP_ACCOUNTS=${CANARY_HELIUS_TIP_ACCOUNTS:-}
 CANARY_NOZOMI_ENABLED=${CANARY_NOZOMI_ENABLED:-}
 CANARY_NOZOMI_URLS_CONFIGURED=$([[ -n "${CANARY_NOZOMI_URLS:-}" ]] && echo true || echo false)
@@ -422,6 +438,7 @@ print_status() {
   echo "live_started_at=$(current_service_start_iso || true)"
   echo "send_lane_mode=${JITO_SEND_LANE_MODE:-}"
   echo "helius_sender_enabled=${JITO_HELIUS_SENDER_ENABLED:-}"
+  echo "helius_sender_url_count=$(if [[ -n "${JITO_HELIUS_SENDER_URLS:-}" ]]; then printf '%s' "$JITO_HELIUS_SENDER_URLS" | awk -F, '{print NF}'; else printf '0'; fi)"
   echo "helius_sender_swqos_only=${JITO_HELIUS_SENDER_SWQOS_ONLY:-}"
   echo "helius_sender_tip_lamports=${JITO_HELIUS_SENDER_TIP_LAMPORTS:-}"
   echo "nozomi_enabled=${JITO_NOZOMI_ENABLED:-}"
@@ -773,6 +790,7 @@ apply_canary() {
 
   set_env_var "$WORKER_ENV_FILE" JITO_SEND_LANE_MODE "$CANARY_LANE_MODE"
   set_env_var "$WORKER_ENV_FILE" JITO_HELIUS_SENDER_ENABLED "$CANARY_HELIUS_ENABLED"
+  set_env_var "$WORKER_ENV_FILE" JITO_HELIUS_SENDER_URLS "$CANARY_HELIUS_URLS"
   set_env_var "$WORKER_ENV_FILE" JITO_HELIUS_SENDER_SWQOS_ONLY "$CANARY_HELIUS_SWQOS_ONLY"
   set_env_var "$WORKER_ENV_FILE" JITO_BLOCK_ENGINE_SEND_URLS ""
   set_env_var "$WORKER_ENV_FILE" JITO_TIP_LAMPORTS "0"

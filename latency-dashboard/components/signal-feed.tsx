@@ -24,7 +24,7 @@ import {
 import { benchmarkLatencyCells, durationWithFallback } from "@/lib/benchmark-row-display";
 import type { BenchmarkRow } from "@/lib/benchmark-rows";
 import { metricStats } from "@/lib/benchmark-stats";
-import type { LocalExecutionReport } from "@/lib/local-executions";
+import type { LocalExecutionReport, SendLaneAttempt } from "@/lib/local-executions";
 import { useAutoRefreshQuery } from "@/lib/use-auto-refresh-query";
 
 interface ExecutionSummary {
@@ -359,6 +359,9 @@ function ExecutionReport({ selectedExecution }: { selectedExecution: LocalExecut
         { label: "Sign", value: us(selectedExecution.signUs) },
         { label: "Serialize", value: us(selectedExecution.serializeUs) },
         { label: "Send lane", value: ms(selectedExecution.sendLaneMs) },
+        { label: "Send mode", value: selectedExecution.sendLaneMode || "n/a" },
+        { label: "First ACK lane", value: formatFirstAckLane(selectedExecution.firstAckLane) },
+        { label: "Lane attempts", value: formatSendLaneAttempts(selectedExecution.sendLaneAttempts) },
         { label: "Signed", value: ms(selectedExecution.observedToSignedMs) },
         { label: "Sim/send", value: ms(selectedExecution.observedToSendSubmittedMs) },
         { label: "Gross spend", value: sol(selectedExecution.grossCopySpendSol) },
@@ -367,4 +370,66 @@ function ExecutionReport({ selectedExecution }: { selectedExecution: LocalExecut
       ]} />
     </section>
   );
+}
+
+function formatFirstAckLane(firstAckLane: string | null): string {
+  if (!firstAckLane || firstAckLane === "none") {
+    return "n/a";
+  }
+  return firstAckLane;
+}
+
+function formatSendLaneAttempts(attempts: SendLaneAttempt[]): string {
+  if (attempts.length === 0) {
+    return "n/a";
+  }
+  return attempts.map(formatSendLaneAttempt).join(" | ");
+}
+
+function formatSendLaneAttempt(attempt: SendLaneAttempt): string {
+  const label = attemptLabel(attempt);
+  const status = attempt.status || "unknown";
+  const durationText = ms(attempt.durationMs);
+  const details = attemptDetails(attempt);
+  const errorText = attempt.errorClass ? ` ${attempt.errorClass}` : "";
+  return `${label} ${status} ${durationText}${details}${errorText}`;
+}
+
+function attemptLabel(attempt: SendLaneAttempt): string {
+  if (attempt.kind === "tpu_jet") {
+    return "TPU Jet";
+  }
+  if (attempt.kind === "tpu_quic") {
+    return "TPU QUIC";
+  }
+  if (attempt.kind === "beam_http") {
+    return `Beam${attempt.beamProvider ? `/${attempt.beamProvider}` : ""}`;
+  }
+  if (attempt.kind === "helius_sender") {
+    return attempt.mode ? `Helius/${attempt.mode}` : "Helius";
+  }
+  if (attempt.kind === "nozomi_json_rpc") {
+    return "Nozomi";
+  }
+  if (attempt.kind === "astralane_irisb") {
+    return "Astralane";
+  }
+  if (attempt.kind) {
+    return attempt.kind;
+  }
+  return short(attempt.label, 12);
+}
+
+function attemptDetails(attempt: SendLaneAttempt): string {
+  const details = [];
+  if (typeof attempt.providerTipLamports === "number" && Number.isFinite(attempt.providerTipLamports)) {
+    details.push(`${(attempt.providerTipLamports / 1_000_000_000).toFixed(6)} SOL tip`);
+  }
+  if (typeof attempt.fanoutSlots === "number" && Number.isFinite(attempt.fanoutSlots)) {
+    details.push(`${attempt.fanoutSlots} slots`);
+  }
+  if (typeof attempt.timeoutMs === "number" && Number.isFinite(attempt.timeoutMs)) {
+    details.push(`${attempt.timeoutMs}ms timeout`);
+  }
+  return details.length > 0 ? ` (${details.join(", ")})` : "";
 }

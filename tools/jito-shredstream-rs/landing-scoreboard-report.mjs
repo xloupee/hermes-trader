@@ -144,9 +144,9 @@ function effectiveTipLamports(row) {
       account: stringValue(row.nozomiTipAccount)
     },
     {
-      provider: "bloxroute",
-      lamports: numberValue(row.bloxrouteTipLamports) ?? 0,
-      account: stringValue(row.bloxrouteTipAccount)
+      provider: "astralane",
+      lamports: numberValue(row.astralaneTipLamports) ?? 0,
+      account: stringValue(row.astralaneTipAccount)
     }
   ];
   const byAccount = new Map();
@@ -168,7 +168,7 @@ function effectiveTipLamports(row) {
     jitoTipLamports: tips[0].lamports,
     heliusSenderTipLamports: tips[1].lamports,
     nozomiTipLamports: tips[2].lamports,
-    bloxrouteTipLamports: tips[3].lamports,
+    astralaneTipLamports: tips[3].lamports,
     configuredTipLamports,
     mergedTipAccountCount: byAccount.size,
     duplicateTipAccountMerged: configuredTipLamports < tips.reduce((total, tip) => total + tip.lamports, 0)
@@ -189,7 +189,7 @@ function feeTipCost(row) {
     jitoTipLamports,
     heliusSenderTipLamports,
     nozomiTipLamports,
-    bloxrouteTipLamports,
+    astralaneTipLamports,
     configuredTipLamports,
     mergedTipAccountCount,
     duplicateTipAccountMerged
@@ -219,7 +219,7 @@ function feeTipCost(row) {
     jitoTipLamports,
     heliusSenderTipLamports,
     nozomiTipLamports,
-    bloxrouteTipLamports,
+    astralaneTipLamports,
     configuredTipLamports,
     mergedTipAccountCount,
     duplicateTipAccountMerged,

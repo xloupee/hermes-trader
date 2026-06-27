@@ -150,6 +150,21 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) nozomi_tip_lamports: Option<u64>,
     pub(crate) nozomi_tip_account: Option<String>,
     pub(crate) nozomi_tip_accounts: Vec<String>,
+    pub(crate) astralane_enabled: bool,
+    pub(crate) astralane_urls: Vec<String>,
+    pub(crate) astralane_api_key: Option<String>,
+    pub(crate) astralane_tip_lamports: Option<u64>,
+    pub(crate) astralane_tip_account: Option<String>,
+    pub(crate) astralane_tip_accounts: Vec<String>,
+    pub(crate) astralane_mev_protect: bool,
+    pub(crate) astralane_swqos_only: bool,
+    pub(crate) beam_enabled: bool,
+    pub(crate) beam_url: Option<String>,
+    pub(crate) beam_token: Option<String>,
+    pub(crate) beam_provider: Option<String>,
+    pub(crate) beam_mode: Option<String>,
+    pub(crate) beam_tip_lamports: Option<u64>,
+    pub(crate) beam_tip_accounts: Vec<String>,
     pub(crate) tpu_jet_enabled: bool,
     pub(crate) tpu_jet_rpc_url: Option<String>,
     pub(crate) tpu_jet_ws_url: Option<String>,
@@ -220,6 +235,13 @@ pub(crate) enum SendLaneMode {
     HeliusSenderOnly,
     NozomiOnly,
     HeliusNozomiStack,
+    AstralaneOnly,
+    HeliusAstralaneStack,
+    HeliusNozomiAstralaneStack,
+    BeamOnly,
+    HeliusBeamStack,
+    HeliusNozomiBeamStack,
+    AllNonBeamStack,
     HeliusTpuJet,
     HeliusTpuQuic,
     TpuJetHeliusTip,
@@ -237,6 +259,13 @@ impl SendLaneMode {
             Self::HeliusSenderOnly => "helius_sender_only",
             Self::NozomiOnly => "nozomi_only",
             Self::HeliusNozomiStack => "helius_nozomi_stack",
+            Self::AstralaneOnly => "astralane_only",
+            Self::HeliusAstralaneStack => "helius_astralane_stack",
+            Self::HeliusNozomiAstralaneStack => "helius_nozomi_astralane_stack",
+            Self::BeamOnly => "beam_only",
+            Self::HeliusBeamStack => "helius_beam_stack",
+            Self::HeliusNozomiBeamStack => "helius_nozomi_beam_stack",
+            Self::AllNonBeamStack => "all_non_beam_stack",
             Self::HeliusTpuJet => "helius_tpu_jet",
             Self::HeliusTpuQuic => "helius_tpu_quic",
             Self::TpuJetHeliusTip => "tpu_jet_helius_tip",
@@ -260,6 +289,11 @@ impl SendLaneMode {
             Self::Mixed
                 | Self::HeliusSenderOnly
                 | Self::HeliusNozomiStack
+                | Self::HeliusAstralaneStack
+                | Self::HeliusNozomiAstralaneStack
+                | Self::HeliusBeamStack
+                | Self::HeliusNozomiBeamStack
+                | Self::AllNonBeamStack
                 | Self::HeliusTpuJet
                 | Self::HeliusTpuQuic
         )
@@ -268,7 +302,26 @@ impl SendLaneMode {
     fn uses_nozomi_lanes(self) -> bool {
         matches!(
             self,
-            Self::Mixed | Self::NozomiOnly | Self::HeliusNozomiStack
+            Self::Mixed
+                | Self::NozomiOnly
+                | Self::HeliusNozomiStack
+                | Self::HeliusNozomiAstralaneStack
+                | Self::HeliusNozomiBeamStack
+                | Self::AllNonBeamStack
+        )
+    }
+
+    fn uses_astralane_lanes(self) -> bool {
+        matches!(
+            self,
+            Self::AstralaneOnly | Self::HeliusAstralaneStack | Self::HeliusNozomiAstralaneStack
+        )
+    }
+
+    fn uses_beam_lanes(self) -> bool {
+        matches!(
+            self,
+            Self::BeamOnly | Self::HeliusBeamStack | Self::HeliusNozomiBeamStack
         )
     }
 
@@ -282,7 +335,11 @@ impl SendLaneMode {
     fn uses_tpu_jet_lanes(self) -> bool {
         matches!(
             self,
-            Self::Mixed | Self::HeliusTpuJet | Self::TpuJetHeliusTip | Self::TpuJetOnly
+            Self::Mixed
+                | Self::HeliusTpuJet
+                | Self::TpuJetHeliusTip
+                | Self::TpuJetOnly
+                | Self::AllNonBeamStack
         )
     }
 
@@ -296,6 +353,11 @@ impl SendLaneMode {
             Self::Mixed
                 | Self::HeliusSenderOnly
                 | Self::HeliusNozomiStack
+                | Self::HeliusAstralaneStack
+                | Self::HeliusNozomiAstralaneStack
+                | Self::HeliusBeamStack
+                | Self::HeliusNozomiBeamStack
+                | Self::AllNonBeamStack
                 | Self::HeliusTpuJet
                 | Self::HeliusTpuQuic
                 | Self::TpuJetHeliusTip
@@ -306,7 +368,26 @@ impl SendLaneMode {
     fn uses_nozomi_tip(self) -> bool {
         matches!(
             self,
-            Self::Mixed | Self::NozomiOnly | Self::HeliusNozomiStack
+            Self::Mixed
+                | Self::NozomiOnly
+                | Self::HeliusNozomiStack
+                | Self::HeliusNozomiAstralaneStack
+                | Self::HeliusNozomiBeamStack
+                | Self::AllNonBeamStack
+        )
+    }
+
+    fn uses_astralane_tip(self) -> bool {
+        matches!(
+            self,
+            Self::AstralaneOnly | Self::HeliusAstralaneStack | Self::HeliusNozomiAstralaneStack
+        )
+    }
+
+    fn uses_beam_tip(self) -> bool {
+        matches!(
+            self,
+            Self::BeamOnly | Self::HeliusBeamStack | Self::HeliusNozomiBeamStack
         )
     }
 }
@@ -544,9 +625,13 @@ pub(crate) struct CopyExecutionLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     nozomi_tip_account: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    bloxroute_tip_lamports: Option<u64>,
+    astralane_tip_lamports: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    bloxroute_tip_account: Option<String>,
+    astralane_tip_account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    beam_tip_lamports: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    beam_tip_account: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_stack_name: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -653,8 +738,12 @@ pub(crate) struct SendLaneAttemptAttribution {
     kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     mode: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    beam_provider: Option<&'static str>,
     status: &'static str,
     duration_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_tip_lamports: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fanout_slots: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -855,8 +944,12 @@ struct SendRpcAttemptLine {
     kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     mode: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    beam_provider: Option<&'static str>,
     status: &'static str,
     duration_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_tip_lamports: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fanout_slots: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -926,7 +1019,10 @@ struct SendEndpoint {
     url: String,
     kind: SendEndpointKind,
     auth_uuid: Option<String>,
+    auth_token: Option<String>,
     sender_mode: Option<&'static str>,
+    beam_provider: Option<&'static str>,
+    provider_tip_lamports: Option<u64>,
     fanout_slots: Option<u64>,
     timeout_ms: Option<u64>,
 }
@@ -1047,9 +1143,37 @@ enum SendEndpointKind {
     Jito,
     HeliusSender,
     NozomiJsonRpc,
-    BloxrouteSubmit,
+    AstralaneIrisB,
+    BeamHttp,
     TpuJet,
     TpuQuic,
+}
+
+const BEAM_PROVIDER_BLOXROUTE: &str = "bloxroute";
+const BEAM_PROVIDER_ASTRALANE: &str = "astralane";
+const BEAM_PROVIDER_FALCON: &str = "falcon";
+const BEAM_MODE_FASTEST: &str = "fastest";
+const BEAM_MODE_MEV_PROTECT: &str = "mev_protect";
+const BEAM_DEFAULT_URL: &str = "https://beam.rpcfast.com";
+const BEAM_MIN_TIP_LAMPORTS: u64 = 1_000_000;
+const ASTRALANE_MIN_TIP_LAMPORTS: u64 = 1_000_000;
+const ASTRALANE_DEFAULT_URL: &str = "https://lim.gateway.astralane.io/irisb";
+
+fn beam_provider(value: Option<&str>) -> Option<&'static str> {
+    match value?.trim().to_ascii_lowercase().as_str() {
+        BEAM_PROVIDER_BLOXROUTE => Some(BEAM_PROVIDER_BLOXROUTE),
+        BEAM_PROVIDER_ASTRALANE => Some(BEAM_PROVIDER_ASTRALANE),
+        BEAM_PROVIDER_FALCON => Some(BEAM_PROVIDER_FALCON),
+        _ => None,
+    }
+}
+
+fn beam_mode(value: Option<&str>) -> Option<&'static str> {
+    match value?.trim().to_ascii_lowercase().as_str() {
+        BEAM_MODE_FASTEST => Some(BEAM_MODE_FASTEST),
+        BEAM_MODE_MEV_PROTECT => Some(BEAM_MODE_MEV_PROTECT),
+        _ => None,
+    }
 }
 
 type TpuQuicClient = NonblockingTpuClient<QuicPool, QuicConnectionManager, QuicConfig>;
@@ -1155,6 +1279,54 @@ impl CopyExecutor {
                 &options.nozomi_tip_accounts,
                 options.nozomi_tip_account.as_deref(),
             ),
+            astralane_enabled: options.astralane_enabled,
+            astralane_urls: normalized_send_rpc_urls(&options.astralane_urls, None),
+            astralane_api_key: options
+                .astralane_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            astralane_tip_lamports: positive_u64(options.astralane_tip_lamports),
+            astralane_tip_account: options
+                .astralane_tip_account
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            astralane_tip_accounts: normalized_tip_accounts(
+                &options.astralane_tip_accounts,
+                options.astralane_tip_account.as_deref(),
+            ),
+            astralane_mev_protect: options.astralane_mev_protect,
+            astralane_swqos_only: options.astralane_swqos_only,
+            beam_enabled: options.beam_enabled,
+            beam_url: options
+                .beam_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            beam_token: options
+                .beam_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            beam_provider: options
+                .beam_provider
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_ascii_lowercase()),
+            beam_mode: options
+                .beam_mode
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_ascii_lowercase()),
+            beam_tip_lamports: positive_u64(options.beam_tip_lamports),
+            beam_tip_accounts: normalized_tip_accounts(&options.beam_tip_accounts, None),
             tpu_jet_enabled: options.tpu_jet_enabled,
             tpu_jet_rpc_url: options
                 .tpu_jet_rpc_url
@@ -1294,6 +1466,12 @@ impl CopyExecutor {
             .map_err(anyhow::Error::msg)?;
         execution_options
             .validate_nozomi_sender()
+            .map_err(anyhow::Error::msg)?;
+        execution_options
+            .validate_astralane_sender()
+            .map_err(anyhow::Error::msg)?;
+        execution_options
+            .validate_beam_sender()
             .map_err(anyhow::Error::msg)?;
         execution_options
             .validate_tpu_quic_sender()
@@ -3202,8 +3380,10 @@ impl CopyExecutor {
             .flatten(),
             nozomi_tip_lamports: None,
             nozomi_tip_account: None,
-            bloxroute_tip_lamports: None,
-            bloxroute_tip_account: None,
+            astralane_tip_lamports: None,
+            astralane_tip_account: None,
+            beam_tip_lamports: None,
+            beam_tip_account: None,
         }
     }
 }
@@ -3471,8 +3651,10 @@ fn spawn_send_lane_attribution_collector(
                     label: "fanout-join".to_string(),
                     kind: "internal",
                     mode: None,
+                    beam_provider: None,
                     status: "failed",
                     duration_ms: 0,
+                    provider_tip_lamports: None,
                     fanout_slots: None,
                     timeout_ms: None,
                     ack_at: None,
@@ -3491,8 +3673,10 @@ fn spawn_send_lane_attribution_collector(
                     label: "fanout-join".to_string(),
                     kind: "internal",
                     mode: None,
+                    beam_provider: None,
                     status: "failed",
                     duration_ms: 0,
+                    provider_tip_lamports: None,
                     fanout_slots: None,
                     timeout_ms: None,
                     ack_at: None,
@@ -3539,8 +3723,10 @@ fn send_lane_attempt_attribution(
         label: attempt.label,
         kind: attempt.kind,
         mode: attempt.mode,
+        beam_provider: attempt.beam_provider,
         status: attempt.status,
         duration_ms: attempt.duration_ms,
+        provider_tip_lamports: attempt.provider_tip_lamports,
         fanout_slots: attempt.fanout_slots,
         timeout_ms: attempt.timeout_ms,
         ack_at,
@@ -3935,7 +4121,8 @@ fn selected_tip_account(fee_config: &TxFeeConfig) -> Option<String> {
         .clone()
         .or_else(|| fee_config.jito_tip_account.clone())
         .or_else(|| fee_config.nozomi_tip_account.clone())
-        .or_else(|| fee_config.bloxroute_tip_account.clone())
+        .or_else(|| fee_config.astralane_tip_account.clone())
+        .or_else(|| fee_config.beam_tip_account.clone())
 }
 
 fn selected_tip_accounts(fee_config: &TxFeeConfig) -> Vec<String> {
@@ -3944,7 +4131,8 @@ fn selected_tip_accounts(fee_config: &TxFeeConfig) -> Vec<String> {
         fee_config.jito_tip_account.as_ref(),
         fee_config.helius_sender_tip_account.as_ref(),
         fee_config.nozomi_tip_account.as_ref(),
-        fee_config.bloxroute_tip_account.as_ref(),
+        fee_config.astralane_tip_account.as_ref(),
+        fee_config.beam_tip_account.as_ref(),
     ]
     .into_iter()
     .flatten()
@@ -3967,8 +4155,11 @@ fn provider_stack_name(fee_config: &TxFeeConfig) -> Option<String> {
     if fee_config.nozomi_tip_lamports.unwrap_or(0) > 0 {
         providers.push("nozomi");
     }
-    if fee_config.bloxroute_tip_lamports.unwrap_or(0) > 0 {
-        providers.push("bloxroute");
+    if fee_config.astralane_tip_lamports.unwrap_or(0) > 0 {
+        providers.push("astralane");
+    }
+    if fee_config.beam_tip_lamports.unwrap_or(0) > 0 {
+        providers.push("beam");
     }
     if providers.is_empty() {
         None
@@ -4045,7 +4236,8 @@ fn provider_tip_lamports(fee_config: &TxFeeConfig) -> u64 {
         .unwrap_or(0)
         .saturating_add(fee_config.helius_sender_tip_lamports.unwrap_or(0))
         .saturating_add(fee_config.nozomi_tip_lamports.unwrap_or(0))
-        .saturating_add(fee_config.bloxroute_tip_lamports.unwrap_or(0))
+        .saturating_add(fee_config.astralane_tip_lamports.unwrap_or(0))
+        .saturating_add(fee_config.beam_tip_lamports.unwrap_or(0))
 }
 
 fn provider_tip_guard_reason(
@@ -4265,8 +4457,10 @@ impl CopyExecutionLine {
             helius_sender_tip_account: fee_profile.tx_fee_config.helius_sender_tip_account.clone(),
             nozomi_tip_lamports: fee_profile.tx_fee_config.nozomi_tip_lamports,
             nozomi_tip_account: fee_profile.tx_fee_config.nozomi_tip_account.clone(),
-            bloxroute_tip_lamports: fee_profile.tx_fee_config.bloxroute_tip_lamports,
-            bloxroute_tip_account: fee_profile.tx_fee_config.bloxroute_tip_account.clone(),
+            astralane_tip_lamports: fee_profile.tx_fee_config.astralane_tip_lamports,
+            astralane_tip_account: fee_profile.tx_fee_config.astralane_tip_account.clone(),
+            beam_tip_lamports: fee_profile.tx_fee_config.beam_tip_lamports,
+            beam_tip_account: fee_profile.tx_fee_config.beam_tip_account.clone(),
             provider_stack_name: provider_stack_name(&fee_profile.tx_fee_config),
             selected_tip_accounts: selected_tip_accounts(&fee_profile.tx_fee_config),
             selected_tip_account: selected_tip_account(&fee_profile.tx_fee_config),
@@ -4320,8 +4514,10 @@ impl CopyExecutionLine {
             fee_profile.tx_fee_config.helius_sender_tip_account.clone();
         self.nozomi_tip_lamports = fee_profile.tx_fee_config.nozomi_tip_lamports;
         self.nozomi_tip_account = fee_profile.tx_fee_config.nozomi_tip_account.clone();
-        self.bloxroute_tip_lamports = fee_profile.tx_fee_config.bloxroute_tip_lamports;
-        self.bloxroute_tip_account = fee_profile.tx_fee_config.bloxroute_tip_account.clone();
+        self.astralane_tip_lamports = fee_profile.tx_fee_config.astralane_tip_lamports;
+        self.astralane_tip_account = fee_profile.tx_fee_config.astralane_tip_account.clone();
+        self.beam_tip_lamports = fee_profile.tx_fee_config.beam_tip_lamports;
+        self.beam_tip_account = fee_profile.tx_fee_config.beam_tip_account.clone();
         self.provider_stack_name = provider_stack_name(&fee_profile.tx_fee_config);
         self.selected_tip_accounts = selected_tip_accounts(&fee_profile.tx_fee_config);
         self.selected_tip_account = selected_tip_account(&fee_profile.tx_fee_config);
@@ -4505,8 +4701,10 @@ pub(crate) fn sample_copy_execution_output_for_tests() -> CopyExecutionOutput {
             label: "rpc-primary:example.com".to_string(),
             kind: "rpc",
             mode: None,
+            beam_provider: None,
             status: "submitted",
             duration_ms: 7,
+            provider_tip_lamports: None,
             fanout_slots: None,
             timeout_ms: None,
             ack_at: Some(112),
@@ -4982,8 +5180,23 @@ impl CopyExecutionOptions {
                         .or_else(|| self.nozomi_tip_account.clone())
                 })
                 .flatten(),
-            bloxroute_tip_lamports: None,
-            bloxroute_tip_account: None,
+            astralane_tip_lamports: (self.astralane_enabled
+                && self.send_lane_mode.uses_astralane_tip())
+            .then_some(self.astralane_tip_lamports)
+            .flatten(),
+            astralane_tip_account: (self.astralane_enabled
+                && self.send_lane_mode.uses_astralane_tip())
+            .then(|| {
+                select_tip_account(&self.astralane_tip_accounts, signature, 3)
+                    .or_else(|| self.astralane_tip_account.clone())
+            })
+            .flatten(),
+            beam_tip_lamports: (self.beam_enabled && self.send_lane_mode.uses_beam_tip())
+                .then_some(self.beam_tip_lamports)
+                .flatten(),
+            beam_tip_account: (self.beam_enabled && self.send_lane_mode.uses_beam_tip())
+                .then(|| select_tip_account(&self.beam_tip_accounts, signature, 4))
+                .flatten(),
         }
     }
 
@@ -5124,8 +5337,10 @@ impl CopyExecutionOptions {
             .flatten(),
             nozomi_tip_lamports: None,
             nozomi_tip_account: None,
-            bloxroute_tip_lamports: None,
-            bloxroute_tip_account: None,
+            astralane_tip_lamports: None,
+            astralane_tip_account: None,
+            beam_tip_lamports: None,
+            beam_tip_account: None,
         }
     }
 
@@ -5208,6 +5423,110 @@ impl CopyExecutionOptions {
         };
         Pubkey::from_str(tip_account)
             .map_err(|_| "JITO_NOZOMI_TIP_ACCOUNT must be a valid pubkey".to_string())?;
+        Ok(())
+    }
+
+    fn validate_astralane_sender(&self) -> std::result::Result<(), String> {
+        if !self.astralane_enabled {
+            return Ok(());
+        }
+        if !self.send_fanout && self.send_lane_mode != SendLaneMode::AstralaneOnly {
+            return Err(
+                "JITO_ASTRALANE_ENABLED requires JITO_SEND_FANOUT=YES unless astralane_only"
+                    .to_string(),
+            );
+        }
+        if !self.fast_copy_send {
+            return Err("JITO_ASTRALANE_ENABLED requires JITO_FAST_COPY_SEND=YES".to_string());
+        }
+        if self.astralane_urls.is_empty() {
+            return Err("JITO_ASTRALANE_ENABLED requires JITO_ASTRALANE_URLS".to_string());
+        }
+        if self
+            .astralane_api_key
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            return Err("JITO_ASTRALANE_ENABLED requires JITO_ASTRALANE_API_KEY".to_string());
+        }
+        if self.priority_fee_micro_lamports.unwrap_or(0) == 0 {
+            return Err(
+                "JITO_ASTRALANE_ENABLED requires JITO_PRIORITY_FEE_MICRO_LAMPORTS".to_string(),
+            );
+        }
+        let Some(tip_lamports) = self.astralane_tip_lamports else {
+            return Err("JITO_ASTRALANE_ENABLED requires JITO_ASTRALANE_TIP_LAMPORTS".to_string());
+        };
+        if tip_lamports < ASTRALANE_MIN_TIP_LAMPORTS {
+            return Err(format!(
+                "JITO_ASTRALANE_TIP_LAMPORTS must be >= {ASTRALANE_MIN_TIP_LAMPORTS} lamports"
+            ));
+        }
+        if self.astralane_tip_account.is_none() && self.astralane_tip_accounts.is_empty() {
+            return Err(
+                "JITO_ASTRALANE_ENABLED requires JITO_ASTRALANE_TIP_ACCOUNT or JITO_ASTRALANE_TIP_ACCOUNTS"
+                    .to_string(),
+            );
+        }
+        if let Some(tip_account) = self.astralane_tip_account.as_deref() {
+            Pubkey::from_str(tip_account)
+                .map_err(|_| "JITO_ASTRALANE_TIP_ACCOUNT must be a valid pubkey".to_string())?;
+        }
+        for tip_account in &self.astralane_tip_accounts {
+            Pubkey::from_str(tip_account).map_err(|_| {
+                "JITO_ASTRALANE_TIP_ACCOUNTS must contain only valid pubkeys".to_string()
+            })?;
+        }
+        Ok(())
+    }
+
+    fn validate_beam_sender(&self) -> std::result::Result<(), String> {
+        if !self.beam_enabled {
+            return Ok(());
+        }
+        if !self.send_fanout && self.send_lane_mode != SendLaneMode::BeamOnly {
+            return Err(
+                "JITO_BEAM_ENABLED requires JITO_SEND_FANOUT=YES unless beam_only".to_string(),
+            );
+        }
+        if !self.fast_copy_send {
+            return Err("JITO_BEAM_ENABLED requires JITO_FAST_COPY_SEND=YES".to_string());
+        }
+        if self.beam_url.as_deref().unwrap_or("").trim().is_empty() {
+            return Err("JITO_BEAM_ENABLED requires JITO_BEAM_URL".to_string());
+        }
+        if self.beam_token.as_deref().unwrap_or("").trim().is_empty() {
+            return Err("JITO_BEAM_ENABLED requires JITO_BEAM_TOKEN".to_string());
+        }
+        if beam_provider(self.beam_provider.as_deref()).is_none() {
+            return Err(
+                "JITO_BEAM_PROVIDER must be one of bloxroute, astralane, falcon".to_string(),
+            );
+        }
+        let mode = beam_mode(self.beam_mode.as_deref())
+            .ok_or_else(|| "JITO_BEAM_MODE must be one of fastest, mev_protect".to_string())?;
+        if mode == BEAM_MODE_MEV_PROTECT
+            && beam_provider(self.beam_provider.as_deref()) == Some(BEAM_PROVIDER_FALCON)
+        {
+            return Err("JITO_BEAM_MODE=mev_protect is not supported with falcon".to_string());
+        }
+        let Some(tip_lamports) = self.beam_tip_lamports else {
+            return Err("JITO_BEAM_ENABLED requires JITO_BEAM_TIP_LAMPORTS".to_string());
+        };
+        if tip_lamports < BEAM_MIN_TIP_LAMPORTS {
+            return Err(format!(
+                "JITO_BEAM_TIP_LAMPORTS must be >= {BEAM_MIN_TIP_LAMPORTS} lamports"
+            ));
+        }
+        if self.beam_tip_accounts.is_empty() {
+            return Err("JITO_BEAM_ENABLED requires JITO_BEAM_TIP_ACCOUNTS".to_string());
+        }
+        for account in &self.beam_tip_accounts {
+            Pubkey::from_str(account)
+                .map_err(|_| "JITO_BEAM_TIP_ACCOUNTS must contain valid pubkeys".to_string())?;
+        }
         Ok(())
     }
 
@@ -5342,6 +5661,140 @@ impl CopyExecutionOptions {
                 if !self.nozomi_enabled {
                     return Err(
                         "JITO_SEND_LANE_MODE=helius_nozomi_stack requires JITO_NOZOMI_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::AstralaneOnly => {
+                if !self.astralane_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=astralane_only requires JITO_ASTRALANE_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::HeliusAstralaneStack => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_astralane_stack requires JITO_SEND_FANOUT=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_astralane_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.astralane_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_astralane_stack requires JITO_ASTRALANE_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::HeliusNozomiAstralaneStack => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_astralane_stack requires JITO_SEND_FANOUT=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_astralane_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.nozomi_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_astralane_stack requires JITO_NOZOMI_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.astralane_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_astralane_stack requires JITO_ASTRALANE_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::BeamOnly => {
+                if !self.beam_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=beam_only requires JITO_BEAM_ENABLED=YES".to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::HeliusBeamStack => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_beam_stack requires JITO_SEND_FANOUT=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_beam_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.beam_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_beam_stack requires JITO_BEAM_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::HeliusNozomiBeamStack => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_beam_stack requires JITO_SEND_FANOUT=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_beam_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.nozomi_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_beam_stack requires JITO_NOZOMI_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.beam_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_beam_stack requires JITO_BEAM_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::AllNonBeamStack => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=all_non_beam_stack requires JITO_SEND_FANOUT=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=all_non_beam_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.nozomi_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=all_non_beam_stack requires JITO_NOZOMI_ENABLED=YES"
                             .to_string(),
                     );
                 }
@@ -5511,7 +5964,10 @@ impl CopyExecutionOptions {
                 url,
                 kind: SendEndpointKind::Rpc,
                 auth_uuid: None,
+                auth_token: None,
                 sender_mode: None,
+                beam_provider: None,
+                provider_tip_lamports: None,
                 fanout_slots: None,
                 timeout_ms: None,
             })
@@ -5535,7 +5991,10 @@ impl CopyExecutionOptions {
                 url,
                 kind: SendEndpointKind::Rpc,
                 auth_uuid: None,
+                auth_token: None,
                 sender_mode: None,
+                beam_provider: None,
+                provider_tip_lamports: None,
                 fanout_slots: None,
                 timeout_ms: None,
             })
@@ -5543,6 +6002,9 @@ impl CopyExecutionOptions {
     }
 
     fn selected_sell_send_endpoints(&self) -> Vec<SendEndpoint> {
+        if !normalized_send_rpc_urls(&self.sell_send_rpc_urls, None).is_empty() {
+            return self.selected_sell_rpc_send_endpoints();
+        }
         if self.helius_sender_enabled
             && self.send_lane_mode.uses_helius_sender_lanes()
             && self.sell_helius_sender_tip_lamports == Some(0)
@@ -5578,7 +6040,10 @@ impl CopyExecutionOptions {
                         url,
                         kind: SendEndpointKind::Jito,
                         auth_uuid: self.jito_auth_uuid.clone(),
+                        auth_token: None,
                         sender_mode: None,
+                        beam_provider: None,
+                        provider_tip_lamports: None,
                         fanout_slots: None,
                         timeout_ms: None,
                     }
@@ -5602,7 +6067,10 @@ impl CopyExecutionOptions {
                                 url,
                                 kind: SendEndpointKind::HeliusSender,
                                 auth_uuid: None,
+                                auth_token: None,
                                 sender_mode: Some(mode),
+                                beam_provider: None,
+                                provider_tip_lamports: None,
                                 fanout_slots: None,
                                 timeout_ms: None,
                             }
@@ -5616,11 +6084,59 @@ impl CopyExecutionOptions {
                         url: url.clone(),
                         kind: SendEndpointKind::NozomiJsonRpc,
                         auth_uuid: None,
+                        auth_token: None,
                         sender_mode: None,
+                        beam_provider: None,
+                        provider_tip_lamports: None,
                         fanout_slots: None,
                         timeout_ms: None,
                     }
                 }));
+            }
+            if self.astralane_enabled && self.send_lane_mode.uses_astralane_lanes() {
+                if let Some(api_key) = self.astralane_api_key.clone() {
+                    endpoints.extend(self.astralane_urls.iter().enumerate().map(|(index, url)| {
+                        let url = astralane_irisb_send_url(
+                            Some(url),
+                            &api_key,
+                            self.astralane_mev_protect,
+                            self.astralane_swqos_only,
+                        );
+                        SendEndpoint {
+                            label: format!("astralane-irisb-{}:{}", index + 1, rpc_url_label(&url)),
+                            url,
+                            kind: SendEndpointKind::AstralaneIrisB,
+                            auth_uuid: None,
+                            auth_token: Some(api_key.clone()),
+                            sender_mode: Some("irisb"),
+                            beam_provider: None,
+                            provider_tip_lamports: self.astralane_tip_lamports,
+                            fanout_slots: None,
+                            timeout_ms: None,
+                        }
+                    }));
+                }
+            }
+            if self.beam_enabled && self.send_lane_mode.uses_beam_lanes() {
+                if let (Some(provider), Some(mode), Some(token)) = (
+                    beam_provider(self.beam_provider.as_deref()),
+                    beam_mode(self.beam_mode.as_deref()),
+                    self.beam_token.clone(),
+                ) {
+                    let url = beam_send_url(self.beam_url.as_deref(), provider, mode);
+                    endpoints.push(SendEndpoint {
+                        label: format!("beam-{provider}-{mode}:{}", rpc_url_label(&url)),
+                        url,
+                        kind: SendEndpointKind::BeamHttp,
+                        auth_uuid: None,
+                        auth_token: Some(token),
+                        sender_mode: Some(mode),
+                        beam_provider: Some(provider),
+                        provider_tip_lamports: self.beam_tip_lamports,
+                        fanout_slots: None,
+                        timeout_ms: None,
+                    });
+                }
             }
             if self.tpu_jet_enabled && self.send_lane_mode.uses_tpu_jet_lanes() {
                 endpoints.push(SendEndpoint {
@@ -5628,7 +6144,10 @@ impl CopyExecutionOptions {
                     url: tpu_jet_sidecar_send_url(self.tpu_jet_sidecar_url.as_deref()),
                     kind: SendEndpointKind::TpuJet,
                     auth_uuid: None,
+                    auth_token: None,
                     sender_mode: Some("sidecar"),
+                    beam_provider: None,
+                    provider_tip_lamports: None,
                     fanout_slots: Some(self.tpu_jet_fanout_slots),
                     timeout_ms: Some(self.tpu_jet_timeout_ms),
                 });
@@ -5639,7 +6158,10 @@ impl CopyExecutionOptions {
                     url: String::new(),
                     kind: SendEndpointKind::TpuQuic,
                     auth_uuid: None,
+                    auth_token: None,
                     sender_mode: None,
+                    beam_provider: None,
+                    provider_tip_lamports: None,
                     fanout_slots: Some(self.tpu_quic_fanout_slots),
                     timeout_ms: Some(self.tpu_quic_timeout_ms),
                 });
@@ -5650,7 +6172,10 @@ impl CopyExecutionOptions {
                 url: tpu_jet_sidecar_send_url(self.tpu_jet_sidecar_url.as_deref()),
                 kind: SendEndpointKind::TpuJet,
                 auth_uuid: None,
+                auth_token: None,
                 sender_mode: Some("sidecar"),
+                beam_provider: None,
+                provider_tip_lamports: None,
                 fanout_slots: Some(self.tpu_jet_fanout_slots),
                 timeout_ms: Some(self.tpu_jet_timeout_ms),
             });
@@ -5660,7 +6185,10 @@ impl CopyExecutionOptions {
                 url: String::new(),
                 kind: SendEndpointKind::TpuQuic,
                 auth_uuid: None,
+                auth_token: None,
                 sender_mode: None,
+                beam_provider: None,
+                provider_tip_lamports: None,
                 fanout_slots: Some(self.tpu_quic_fanout_slots),
                 timeout_ms: Some(self.tpu_quic_timeout_ms),
             });
@@ -5671,11 +6199,57 @@ impl CopyExecutionOptions {
                     url: url.clone(),
                     kind: SendEndpointKind::NozomiJsonRpc,
                     auth_uuid: None,
+                    auth_token: None,
                     sender_mode: None,
+                    beam_provider: None,
+                    provider_tip_lamports: None,
                     fanout_slots: None,
                     timeout_ms: None,
                 }
             }));
+        } else if self.astralane_enabled && self.send_lane_mode == SendLaneMode::AstralaneOnly {
+            if let Some(api_key) = self.astralane_api_key.clone() {
+                endpoints.extend(self.astralane_urls.iter().enumerate().map(|(index, url)| {
+                    let url = astralane_irisb_send_url(
+                        Some(url),
+                        &api_key,
+                        self.astralane_mev_protect,
+                        self.astralane_swqos_only,
+                    );
+                    SendEndpoint {
+                        label: format!("astralane-irisb-{}:{}", index + 1, rpc_url_label(&url)),
+                        url,
+                        kind: SendEndpointKind::AstralaneIrisB,
+                        auth_uuid: None,
+                        auth_token: Some(api_key.clone()),
+                        sender_mode: Some("irisb"),
+                        beam_provider: None,
+                        provider_tip_lamports: self.astralane_tip_lamports,
+                        fanout_slots: None,
+                        timeout_ms: None,
+                    }
+                }));
+            }
+        } else if self.beam_enabled && self.send_lane_mode == SendLaneMode::BeamOnly {
+            if let (Some(provider), Some(mode), Some(token)) = (
+                beam_provider(self.beam_provider.as_deref()),
+                beam_mode(self.beam_mode.as_deref()),
+                self.beam_token.clone(),
+            ) {
+                let url = beam_send_url(self.beam_url.as_deref(), provider, mode);
+                endpoints.push(SendEndpoint {
+                    label: format!("beam-{provider}-{mode}:{}", rpc_url_label(&url)),
+                    url,
+                    kind: SendEndpointKind::BeamHttp,
+                    auth_uuid: None,
+                    auth_token: Some(token),
+                    sender_mode: Some(mode),
+                    beam_provider: Some(provider),
+                    provider_tip_lamports: self.beam_tip_lamports,
+                    fanout_slots: None,
+                    timeout_ms: None,
+                });
+            }
         }
 
         endpoints
@@ -5815,6 +6389,70 @@ fn helius_sender_url(url: &str, swqos_only: bool) -> String {
     with_fast
 }
 
+fn beam_send_url(url: Option<&str>, provider: &str, mode: &str) -> String {
+    let base = url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(BEAM_DEFAULT_URL)
+        .trim_end_matches('/');
+    if base.contains('?') {
+        format!("{base}&provider={provider}&mode={mode}")
+    } else {
+        format!("{base}/?provider={provider}&mode={mode}")
+    }
+}
+
+fn append_query_param(url: &mut String, key: &str, value: &str) {
+    url.push(if url.contains('?') { '&' } else { '?' });
+    url.push_str(key);
+    url.push('=');
+    url.push_str(value);
+}
+
+fn astralane_irisb_send_url(
+    url: Option<&str>,
+    api_key: &str,
+    mev_protect: bool,
+    swqos_only: bool,
+) -> String {
+    let mut result = url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(ASTRALANE_DEFAULT_URL)
+        .to_string();
+    let query = result.split_once('?').map(|(_, query)| query.to_string());
+    if let Some((base, _)) = result.split_once('?') {
+        result = base.to_string();
+    }
+    result = result.trim_end_matches('/').to_string();
+    if !result.ends_with("/irisb") {
+        result.push_str("/irisb");
+    }
+    if let Some(query) = query.filter(|value| !value.is_empty()) {
+        result.push('?');
+        result.push_str(&query);
+    }
+    append_query_param(&mut result, "api-key", api_key);
+    append_query_param(&mut result, "method", "sendTransaction");
+    if mev_protect {
+        append_query_param(&mut result, "mev-protect", "true");
+    }
+    if swqos_only {
+        append_query_param(&mut result, "swqos-only", "true");
+    }
+    result
+}
+
+fn astralane_irisb_health_url(url: &str) -> String {
+    if url.contains("method=sendTransaction") {
+        url.replace("method=sendTransaction", "method=getHealth")
+    } else {
+        let mut result = url.to_string();
+        append_query_param(&mut result, "method", "getHealth");
+        result
+    }
+}
+
 fn tpu_jet_sidecar_send_url(url: Option<&str>) -> String {
     let base = url
         .map(str::trim)
@@ -5851,7 +6489,8 @@ fn send_endpoint_kind(endpoint: &SendEndpoint) -> &'static str {
         SendEndpointKind::Jito => "jito",
         SendEndpointKind::HeliusSender => "helius_sender",
         SendEndpointKind::NozomiJsonRpc => "nozomi_json_rpc",
-        SendEndpointKind::BloxrouteSubmit => "bloxroute_submit",
+        SendEndpointKind::AstralaneIrisB => "astralane_irisb",
+        SendEndpointKind::BeamHttp => "beam_http",
         SendEndpointKind::TpuJet => "tpu_jet",
         SendEndpointKind::TpuQuic => "tpu_quic",
     }
@@ -5865,6 +6504,11 @@ fn send_endpoint_post(
     if matches!(endpoint.kind, SendEndpointKind::Jito) {
         if let Some(auth_uuid) = endpoint.auth_uuid.as_deref() {
             request = request.header("x-jito-auth", auth_uuid);
+        }
+    }
+    if matches!(endpoint.kind, SendEndpointKind::BeamHttp) {
+        if let Some(token) = endpoint.auth_token.as_deref() {
+            request = request.header("X-Token", token);
         }
     }
     request
@@ -5887,7 +6531,9 @@ async fn warm_send_endpoint(
                 endpoint.label, SEND_WARM_TIMEOUT_MS
             )
         })?
-        .map_err(|error| format!("{} warmup request failed: {error}", endpoint.label))?;
+        .map_err(|error| {
+            send_error_message(endpoint, &format!("warmup request failed: {error}"))
+        })?;
         if !response.status().is_success() {
             return Err(format!(
                 "{} warmup returned HTTP {}",
@@ -5900,10 +6546,44 @@ async fn warm_send_endpoint(
             label: endpoint.label.clone(),
             kind: send_endpoint_kind(endpoint),
             mode: endpoint.sender_mode,
+            beam_provider: endpoint.beam_provider,
             status: "warm",
             duration_ms: started_at.elapsed().as_millis(),
+            provider_tip_lamports: endpoint.provider_tip_lamports,
             fanout_slots: endpoint.fanout_slots,
             timeout_ms: endpoint.timeout_ms,
+            signature: None,
+            error_class: None,
+            error: None,
+        });
+    }
+    if matches!(endpoint.kind, SendEndpointKind::AstralaneIrisB) {
+        let response = tokio::time::timeout(
+            Duration::from_millis(SEND_WARM_TIMEOUT_MS),
+            client
+                .post(astralane_irisb_health_url(&endpoint.url))
+                .header("Content-Type", "application/octet-stream")
+                .send(),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "{} warmup timed out after {}ms",
+                endpoint.label, SEND_WARM_TIMEOUT_MS
+            )
+        })?
+        .map_err(|error| format!("{} warmup request failed: {error}", endpoint.label))?;
+        let _ = response.bytes().await;
+        return Ok(SendRpcAttemptLine {
+            label: endpoint.label.clone(),
+            kind: send_endpoint_kind(endpoint),
+            mode: endpoint.sender_mode,
+            beam_provider: endpoint.beam_provider,
+            status: "warmed",
+            duration_ms: started_at.elapsed().as_millis(),
+            provider_tip_lamports: endpoint.provider_tip_lamports,
+            fanout_slots: None,
+            timeout_ms: None,
             signature: None,
             error_class: None,
             error: None,
@@ -5930,8 +6610,10 @@ async fn warm_send_endpoint(
         label: endpoint.label.clone(),
         kind: send_endpoint_kind(endpoint),
         mode: endpoint.sender_mode,
+        beam_provider: endpoint.beam_provider,
         status: "warmed",
         duration_ms: started_at.elapsed().as_millis(),
+        provider_tip_lamports: endpoint.provider_tip_lamports,
         fanout_slots: None,
         timeout_ms: None,
         signature: None,
@@ -5971,30 +6653,17 @@ async fn send_transaction_attempt(
         )
         .await;
     }
-    if matches!(endpoint.kind, SendEndpointKind::BloxrouteSubmit) {
-        return SendAttemptOutcome {
-            attempt: SendRpcAttemptLine {
-                label: endpoint.label.clone(),
-                kind: send_endpoint_kind(endpoint),
-                mode: endpoint.sender_mode,
-                status: "error",
-                duration_ms: started_at.elapsed().as_millis(),
-                fanout_slots: None,
-                timeout_ms: None,
-                signature: None,
-                error_class: Some("unsupported_endpoint"),
-                error: Some("bloxroute_submit adapter is not wired yet".to_string()),
-            },
-            finished_at_ms: now_ms(),
-            signature: None,
-            signature_returned: false,
-            error: Some(format!(
-                "{} dispatch failed: bloxroute_submit adapter is not wired yet",
-                endpoint.label
-            )),
-        };
+    if matches!(endpoint.kind, SendEndpointKind::AstralaneIrisB) {
+        return send_astralane_irisb_attempt(
+            client,
+            endpoint,
+            wire_tx,
+            known_signature,
+            config,
+            started_at,
+        )
+        .await;
     }
-
     let send = send_transaction_to(client, endpoint, encoded_tx, config);
     let result = if config.http_timeout_ms > 0 {
         match tokio::time::timeout(Duration::from_millis(config.http_timeout_ms), send).await {
@@ -6014,8 +6683,10 @@ async fn send_transaction_attempt(
                 label: endpoint.label.clone(),
                 kind: send_endpoint_kind(endpoint),
                 mode: endpoint.sender_mode,
+                beam_provider: endpoint.beam_provider,
                 status: "submitted",
                 duration_ms: started_at.elapsed().as_millis(),
+                provider_tip_lamports: endpoint.provider_tip_lamports,
                 fanout_slots: None,
                 timeout_ms: None,
                 signature: Some(signature.clone()),
@@ -6038,16 +6709,116 @@ async fn send_transaction_attempt(
         }
         Err(error) => {
             let sanitized = send_error_message(endpoint, &error);
+            let error_class = send_error_class(&error);
             let attempt = SendRpcAttemptLine {
                 label: endpoint.label.clone(),
                 kind: send_endpoint_kind(endpoint),
                 mode: endpoint.sender_mode,
-                status: "failed",
+                beam_provider: endpoint.beam_provider,
+                status: if error_class == "timeout" {
+                    "timeout"
+                } else {
+                    "failed"
+                },
                 duration_ms: started_at.elapsed().as_millis(),
+                provider_tip_lamports: endpoint.provider_tip_lamports,
                 fanout_slots: None,
                 timeout_ms: None,
                 signature: None,
-                error_class: Some(send_error_class(&error)),
+                error_class: Some(error_class),
+                error: Some(sanitized.clone()),
+            };
+            if config.log_lanes {
+                eprintln!(
+                    "sendTransaction lane failed: label={} kind={} durationMs={} error={}",
+                    attempt.label, attempt.kind, attempt.duration_ms, sanitized
+                );
+            }
+            SendAttemptOutcome {
+                attempt,
+                finished_at_ms: now_ms(),
+                signature: None,
+                signature_returned: false,
+                error: Some(sanitized),
+            }
+        }
+    }
+}
+
+async fn send_astralane_irisb_attempt(
+    client: &reqwest::Client,
+    endpoint: &SendEndpoint,
+    wire_tx: &[u8],
+    known_signature: &str,
+    config: SendConfig,
+    started_at: Instant,
+) -> SendAttemptOutcome {
+    let send = send_astralane_irisb_transaction(client, endpoint, wire_tx);
+    let result = if config.http_timeout_ms > 0 {
+        match tokio::time::timeout(Duration::from_millis(config.http_timeout_ms), send).await {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "Astralane IrisB sendTransaction timed out after {}ms",
+                config.http_timeout_ms
+            )),
+        }
+    } else {
+        send.await
+    };
+
+    match result {
+        Ok(signature) => {
+            let attempt = SendRpcAttemptLine {
+                label: endpoint.label.clone(),
+                kind: send_endpoint_kind(endpoint),
+                mode: endpoint.sender_mode,
+                beam_provider: endpoint.beam_provider,
+                status: "submitted",
+                duration_ms: started_at.elapsed().as_millis(),
+                provider_tip_lamports: endpoint.provider_tip_lamports,
+                fanout_slots: None,
+                timeout_ms: None,
+                signature: Some(signature.clone()),
+                error_class: None,
+                error: None,
+            };
+            if config.log_lanes {
+                eprintln!(
+                    "sendTransaction lane submitted: label={} kind={} durationMs={}",
+                    attempt.label, attempt.kind, attempt.duration_ms
+                );
+            }
+            SendAttemptOutcome {
+                attempt,
+                finished_at_ms: now_ms(),
+                signature: Some(if signature.is_empty() {
+                    known_signature.to_string()
+                } else {
+                    signature
+                }),
+                signature_returned: true,
+                error: None,
+            }
+        }
+        Err(error) => {
+            let sanitized = send_error_message(endpoint, &error);
+            let error_class = send_error_class(&error);
+            let attempt = SendRpcAttemptLine {
+                label: endpoint.label.clone(),
+                kind: send_endpoint_kind(endpoint),
+                mode: endpoint.sender_mode,
+                beam_provider: endpoint.beam_provider,
+                status: if error_class == "timeout" {
+                    "timeout"
+                } else {
+                    "failed"
+                },
+                duration_ms: started_at.elapsed().as_millis(),
+                provider_tip_lamports: endpoint.provider_tip_lamports,
+                fanout_slots: None,
+                timeout_ms: None,
+                signature: None,
+                error_class: Some(error_class),
                 error: Some(sanitized.clone()),
             };
             if config.log_lanes {
@@ -6173,8 +6944,10 @@ async fn send_tpu_jet_attempt(
                 label: endpoint.label.clone(),
                 kind: send_endpoint_kind(endpoint),
                 mode: endpoint.sender_mode,
+                beam_provider: endpoint.beam_provider,
                 status: "dispatched",
                 duration_ms: started_at.elapsed().as_millis(),
+                provider_tip_lamports: endpoint.provider_tip_lamports,
                 fanout_slots: endpoint.fanout_slots,
                 timeout_ms: endpoint.timeout_ms,
                 signature: Some(known_signature.to_string()),
@@ -6191,8 +6964,10 @@ async fn send_tpu_jet_attempt(
                 label: endpoint.label.clone(),
                 kind: send_endpoint_kind(endpoint),
                 mode: endpoint.sender_mode,
+                beam_provider: endpoint.beam_provider,
                 status: "error",
                 duration_ms: started_at.elapsed().as_millis(),
+                provider_tip_lamports: endpoint.provider_tip_lamports,
                 fanout_slots: endpoint.fanout_slots,
                 timeout_ms: endpoint.timeout_ms,
                 signature: None,
@@ -6250,8 +7025,10 @@ async fn send_tpu_quic_attempt(
                 label: endpoint.label.clone(),
                 kind: send_endpoint_kind(endpoint),
                 mode: Some("fanout_slots"),
+                beam_provider: endpoint.beam_provider,
                 status: "dispatched",
                 duration_ms: started_at.elapsed().as_millis(),
+                provider_tip_lamports: endpoint.provider_tip_lamports,
                 fanout_slots: Some(fanout_slots),
                 timeout_ms: endpoint.timeout_ms,
                 signature: Some(known_signature.to_string()),
@@ -6268,8 +7045,14 @@ async fn send_tpu_quic_attempt(
                 label: endpoint.label.clone(),
                 kind: send_endpoint_kind(endpoint),
                 mode: None,
-                status: if error_class == "timeout" { "timeout" } else { "error" },
+                beam_provider: endpoint.beam_provider,
+                status: if error_class == "timeout" {
+                    "timeout"
+                } else {
+                    "error"
+                },
                 duration_ms: started_at.elapsed().as_millis(),
+                provider_tip_lamports: endpoint.provider_tip_lamports,
                 fanout_slots: endpoint.fanout_slots,
                 timeout_ms: endpoint.timeout_ms,
                 signature: None,
@@ -6290,6 +7073,18 @@ async fn send_transaction_to(
     encoded_tx: &str,
     config: SendConfig,
 ) -> Result<String, String> {
+    let options = if matches!(endpoint.kind, SendEndpointKind::BeamHttp) {
+        serde_json::json!({
+            "encoding": "base64"
+        })
+    } else {
+        serde_json::json!({
+            "encoding": "base64",
+            "skipPreflight": config.fast_copy_send,
+            "preflightCommitment": "processed",
+            "maxRetries": config.max_retries
+        })
+    };
     let response = send_endpoint_post(client, endpoint)
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
@@ -6297,12 +7092,7 @@ async fn send_transaction_to(
             "method": "sendTransaction",
             "params": [
                 encoded_tx,
-                {
-                    "encoding": "base64",
-                    "skipPreflight": config.fast_copy_send,
-                    "preflightCommitment": "processed",
-                    "maxRetries": config.max_retries
-                }
+                options
             ]
         }))
         .send()
@@ -6323,8 +7113,43 @@ async fn send_transaction_to(
         .ok_or_else(|| "sendTransaction result missing".to_string())
 }
 
+async fn send_astralane_irisb_transaction(
+    client: &reqwest::Client,
+    endpoint: &SendEndpoint,
+    wire_tx: &[u8],
+) -> Result<String, String> {
+    let response = client
+        .post(&endpoint.url)
+        .header("Content-Type", "application/octet-stream")
+        .body(wire_tx.to_vec())
+        .send()
+        .await
+        .map_err(|error| format!("send Astralane IrisB request: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("Astralane IrisB HTTP status: {error}"))?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("decode Astralane IrisB response: {error}"))?;
+
+    if let Some(error) = response.get("error") {
+        let message = error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown Astralane IrisB error");
+        return Err(format!("Astralane IrisB RPC error: {message}"));
+    }
+
+    json_signature(&response).ok_or_else(|| "Astralane IrisB result missing".to_string())
+}
+
 fn send_error_message(endpoint: &SendEndpoint, error: &str) -> String {
     let mut sanitized = error.replace(&endpoint.url, "<redacted-rpc-url>");
+    if let Some(token) = endpoint.auth_token.as_deref() {
+        sanitized = sanitized.replace(token, "<redacted-token>");
+    }
+    for key in ["api-key", "api_key", "apikey", "token"] {
+        sanitized = sanitized.replace(&format!("{key}=<redacted-token>"), "<redacted-token>");
+    }
     if let Some((base, query)) = endpoint.url.split_once('?') {
         sanitized = sanitized
             .replace(query, "<redacted-query>")
@@ -6334,6 +7159,17 @@ fn send_error_message(endpoint: &SendEndpoint, error: &str) -> String {
         sanitized = sanitized.replace(endpoint.url.trim_end_matches('/'), "<redacted-rpc-url>");
     }
     format!("{}: {sanitized}", endpoint.label)
+}
+
+fn json_signature(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("signature")
+        .or_else(|| value.get("txSignature"))
+        .or_else(|| value.pointer("/result/signature"))
+        .or_else(|| value.pointer("/result/txSignature"))
+        .or_else(|| value.get("result"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string)
 }
 
 fn send_error_class(error: &str) -> &'static str {
@@ -6537,6 +7373,21 @@ mod tests {
             nozomi_tip_lamports: None,
             nozomi_tip_account: None,
             nozomi_tip_accounts: Vec::new(),
+            astralane_enabled: false,
+            astralane_urls: Vec::new(),
+            astralane_api_key: None,
+            astralane_tip_lamports: None,
+            astralane_tip_account: None,
+            astralane_tip_accounts: Vec::new(),
+            astralane_mev_protect: false,
+            astralane_swqos_only: false,
+            beam_enabled: false,
+            beam_url: Some(BEAM_DEFAULT_URL.to_string()),
+            beam_token: None,
+            beam_provider: None,
+            beam_mode: Some(BEAM_MODE_FASTEST.to_string()),
+            beam_tip_lamports: None,
+            beam_tip_accounts: Vec::new(),
             tpu_jet_enabled: false,
             tpu_jet_rpc_url: None,
             tpu_jet_ws_url: None,
@@ -7020,8 +7871,10 @@ mod tests {
             helius_sender_tip_account: None,
             nozomi_tip_lamports: None,
             nozomi_tip_account: None,
-            bloxroute_tip_lamports: None,
-            bloxroute_tip_account: None,
+            astralane_tip_lamports: None,
+            astralane_tip_account: None,
+            beam_tip_lamports: None,
+            beam_tip_account: None,
         };
         let build = crate::tx_builder::build_full_copy_unsigned_flashx_pump_with_fees_and_cache(
             Some(&route_context),
@@ -8192,6 +9045,129 @@ mod tests {
     }
 
     #[test]
+    fn beam_sender_validation_fails_closed() {
+        let mut options = disabled_options();
+        options.beam_enabled = true;
+        options.send_lane_mode = SendLaneMode::BeamOnly;
+        options.fast_copy_send = true;
+
+        assert_eq!(
+            options.validate_beam_sender().unwrap_err(),
+            "JITO_BEAM_ENABLED requires JITO_BEAM_TOKEN"
+        );
+
+        options.beam_token = Some("beam-token".to_string());
+        assert_eq!(
+            options.validate_beam_sender().unwrap_err(),
+            "JITO_BEAM_PROVIDER must be one of bloxroute, astralane, falcon"
+        );
+
+        options.beam_provider = Some("falcon".to_string());
+        options.beam_mode = Some("mev_protect".to_string());
+        assert_eq!(
+            options.validate_beam_sender().unwrap_err(),
+            "JITO_BEAM_MODE=mev_protect is not supported with falcon"
+        );
+
+        options.beam_mode = Some("fastest".to_string());
+        assert_eq!(
+            options.validate_beam_sender().unwrap_err(),
+            "JITO_BEAM_ENABLED requires JITO_BEAM_TIP_LAMPORTS"
+        );
+
+        options.beam_tip_lamports = Some(999_999);
+        assert_eq!(
+            options.validate_beam_sender().unwrap_err(),
+            "JITO_BEAM_TIP_LAMPORTS must be >= 1000000 lamports"
+        );
+
+        options.beam_tip_lamports = Some(1_000_000);
+        assert_eq!(
+            options.validate_beam_sender().unwrap_err(),
+            "JITO_BEAM_ENABLED requires JITO_BEAM_TIP_ACCOUNTS"
+        );
+
+        options.beam_tip_accounts = vec![COPY_WALLET.to_string()];
+        options
+            .validate_beam_sender()
+            .expect("valid Beam sender config");
+    }
+
+    #[test]
+    fn astralane_sender_validation_fails_closed() {
+        let mut options = disabled_options();
+        options.astralane_enabled = true;
+        options.send_lane_mode = SendLaneMode::HeliusAstralaneStack;
+        options.fast_copy_send = true;
+
+        assert_eq!(
+            options.validate_astralane_sender().unwrap_err(),
+            "JITO_ASTRALANE_ENABLED requires JITO_SEND_FANOUT=YES unless astralane_only"
+        );
+
+        options.send_lane_mode = SendLaneMode::AstralaneOnly;
+        options.fast_copy_send = false;
+        assert_eq!(
+            options.validate_astralane_sender().unwrap_err(),
+            "JITO_ASTRALANE_ENABLED requires JITO_FAST_COPY_SEND=YES"
+        );
+
+        options.fast_copy_send = true;
+        assert_eq!(
+            options.validate_astralane_sender().unwrap_err(),
+            "JITO_ASTRALANE_ENABLED requires JITO_ASTRALANE_URLS"
+        );
+
+        options.astralane_urls = vec!["https://lim.gateway.astralane.io/irisb".to_string()];
+        assert_eq!(
+            options.validate_astralane_sender().unwrap_err(),
+            "JITO_ASTRALANE_ENABLED requires JITO_ASTRALANE_API_KEY"
+        );
+
+        options.astralane_api_key = Some("astralane-key".to_string());
+        assert_eq!(
+            options.validate_astralane_sender().unwrap_err(),
+            "JITO_ASTRALANE_ENABLED requires JITO_PRIORITY_FEE_MICRO_LAMPORTS"
+        );
+
+        options.priority_fee_micro_lamports = Some(500_000);
+        assert_eq!(
+            options.validate_astralane_sender().unwrap_err(),
+            "JITO_ASTRALANE_ENABLED requires JITO_ASTRALANE_TIP_LAMPORTS"
+        );
+
+        options.astralane_tip_lamports = Some(999_999);
+        assert_eq!(
+            options.validate_astralane_sender().unwrap_err(),
+            "JITO_ASTRALANE_TIP_LAMPORTS must be >= 1000000 lamports"
+        );
+
+        options.astralane_tip_lamports = Some(1_000_000);
+        assert_eq!(
+            options.validate_astralane_sender().unwrap_err(),
+            "JITO_ASTRALANE_ENABLED requires JITO_ASTRALANE_TIP_ACCOUNT or JITO_ASTRALANE_TIP_ACCOUNTS"
+        );
+
+        options.astralane_tip_account = Some("not-a-pubkey".to_string());
+        assert_eq!(
+            options.validate_astralane_sender().unwrap_err(),
+            "JITO_ASTRALANE_TIP_ACCOUNT must be a valid pubkey"
+        );
+
+        options.astralane_tip_account = None;
+        options.astralane_tip_accounts = vec!["also-not-a-pubkey".to_string()];
+        assert_eq!(
+            options.validate_astralane_sender().unwrap_err(),
+            "JITO_ASTRALANE_TIP_ACCOUNTS must contain only valid pubkeys"
+        );
+
+        options.astralane_tip_accounts = vec![COPY_WALLET.to_string()];
+        options
+            .validate_astralane_sender()
+            .expect("valid Astralane sender config");
+    }
+
+    #[test]
     fn send_lane_mode_filters_fee_tips_without_changing_priority_fee() {
         let mut options = configured_multi_lane_options();
 
@@ -8287,6 +9263,140 @@ mod tests {
             fee_config.helius_sender_tip_lamports,
             Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
         );
+
+        enable_beam(&mut options);
+        options.send_lane_mode = SendLaneMode::BeamOnly;
+        let fee_config = options.tx_fee_config([3u8; 64]);
+        assert_eq!(fee_config.jito_tip_lamports, None);
+        assert_eq!(fee_config.helius_sender_tip_lamports, None);
+        assert_eq!(fee_config.nozomi_tip_lamports, None);
+        assert_eq!(fee_config.beam_tip_lamports, Some(1_000_000));
+        assert_eq!(provider_stack_name(&fee_config).as_deref(), Some("beam"));
+        assert_eq!(selected_tip_accounts(&fee_config).len(), 1);
+
+        options.send_lane_mode = SendLaneMode::HeliusBeamStack;
+        let fee_config = options.tx_fee_config([3u8; 64]);
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+        );
+        assert_eq!(fee_config.beam_tip_lamports, Some(1_000_000));
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+beam")
+        );
+
+        enable_nozomi(&mut options);
+        options.send_lane_mode = SendLaneMode::HeliusNozomiBeamStack;
+        let fee_config = options.tx_fee_config([3u8; 64]);
+        assert_eq!(fee_config.nozomi_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.beam_tip_lamports, Some(1_000_000));
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+nozomi+beam")
+        );
+
+        enable_astralane(&mut options);
+        options.send_lane_mode = SendLaneMode::AstralaneOnly;
+        let fee_config = options.tx_fee_config([7u8; 64]);
+        assert_eq!(fee_config.jito_tip_lamports, None);
+        assert_eq!(fee_config.helius_sender_tip_lamports, None);
+        assert_eq!(fee_config.nozomi_tip_lamports, None);
+        assert_eq!(fee_config.beam_tip_lamports, None);
+        assert_eq!(fee_config.astralane_tip_lamports, Some(1_000_000));
+        let astralane_tip_account = fee_config
+            .astralane_tip_account
+            .as_deref()
+            .expect("selected Astralane tip account");
+        assert!(options
+            .astralane_tip_accounts
+            .iter()
+            .any(|account| account == astralane_tip_account));
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("astralane")
+        );
+        assert_eq!(selected_tip_accounts(&fee_config).len(), 1);
+
+        options.send_lane_mode = SendLaneMode::HeliusAstralaneStack;
+        let fee_config = options.tx_fee_config([7u8; 64]);
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+        );
+        assert_eq!(fee_config.nozomi_tip_lamports, None);
+        assert_eq!(fee_config.beam_tip_lamports, None);
+        assert_eq!(fee_config.astralane_tip_lamports, Some(1_000_000));
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+astralane")
+        );
+
+        options.send_lane_mode = SendLaneMode::HeliusNozomiAstralaneStack;
+        let fee_config = options.tx_fee_config([7u8; 64]);
+        assert_eq!(fee_config.nozomi_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.astralane_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.beam_tip_lamports, None);
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+nozomi+astralane")
+        );
+
+        options.send_lane_mode = SendLaneMode::AllNonBeamStack;
+        let fee_config = options.tx_fee_config([5u8; 64]);
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+        );
+        assert_eq!(fee_config.nozomi_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.astralane_tip_lamports, None);
+        assert_eq!(fee_config.beam_tip_lamports, None);
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+nozomi")
+        );
+    }
+
+    #[test]
+    fn provider_tip_guard_sums_paid_lane_tips_against_cap() {
+        let mut options = configured_multi_lane_options();
+        enable_nozomi(&mut options);
+        options.send_lane_mode = SendLaneMode::AllNonBeamStack;
+
+        let fee_config = options.tx_fee_config([5u8; 64]);
+
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+nozomi")
+        );
+        assert_eq!(provider_tip_lamports(&fee_config), 1_200_000);
+
+        options.max_provider_tip_lamports = Some(1_199_999);
+        assert_eq!(
+            provider_tip_guard_reason(&options, &fee_config).as_deref(),
+            Some("provider tips 1200000 lamports exceed max provider tips 1199999 lamports")
+        );
+
+        options.max_provider_tip_lamports = Some(1_200_000);
+        assert_eq!(provider_tip_guard_reason(&options, &fee_config), None);
+
+        enable_astralane(&mut options);
+        options.send_lane_mode = SendLaneMode::HeliusNozomiAstralaneStack;
+        let fee_config = options.tx_fee_config([8u8; 64]);
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+nozomi+astralane")
+        );
+        assert_eq!(provider_tip_lamports(&fee_config), 2_200_000);
+
+        options.max_provider_tip_lamports = Some(2_199_999);
+        assert_eq!(
+            provider_tip_guard_reason(&options, &fee_config).as_deref(),
+            Some("provider tips 2200000 lamports exceed max provider tips 2199999 lamports")
+        );
+
+        options.max_provider_tip_lamports = Some(2_200_000);
+        assert_eq!(provider_tip_guard_reason(&options, &fee_config), None);
     }
 
     #[test]
@@ -8333,6 +9443,27 @@ mod tests {
         assert_eq!(
             sell_endpoints[1].label,
             "sell-rpc-fanout-1:sell-fanout.example.com"
+        );
+    }
+
+    #[test]
+    fn astralane_only_buys_do_not_route_sells_to_irisb_when_sell_rpc_is_configured() {
+        let mut options = configured_multi_lane_options();
+        enable_astralane(&mut options);
+        options.send_lane_mode = SendLaneMode::AstralaneOnly;
+        options.sell_send_rpc_urls = vec!["https://sell-primary.example.com".to_string()];
+        options.sell_priority_fee_micro_lamports = Some(0);
+        options.sell_jito_tip_lamports = Some(0);
+        options.sell_helius_sender_tip_lamports = Some(0);
+
+        let buy_endpoints = options.selected_send_endpoints();
+        let sell_endpoints = options.selected_sell_send_endpoints();
+
+        assert_eq!(endpoint_kinds(&buy_endpoints), vec!["astralane_irisb"]);
+        assert_eq!(endpoint_kinds(&sell_endpoints), vec!["rpc"]);
+        assert_eq!(
+            sell_endpoints[0].label,
+            "sell-rpc-primary:sell-primary.example.com"
         );
     }
 
@@ -8394,6 +9525,71 @@ mod tests {
         assert_eq!(
             endpoint_kinds(&options.selected_send_endpoints()),
             vec!["tpu_quic"]
+        );
+
+        enable_astralane(&mut options);
+        options.send_lane_mode = SendLaneMode::AstralaneOnly;
+        let endpoints = options.selected_send_endpoints();
+        assert_eq!(endpoint_kinds(&endpoints), vec!["astralane_irisb"]);
+        assert_eq!(
+            endpoints[0].label,
+            "astralane-irisb-1:lim.gateway.astralane.io"
+        );
+        assert_eq!(
+            endpoints[0].url,
+            "https://lim.gateway.astralane.io/irisb?api-key=astralane-key&method=sendTransaction"
+        );
+        assert_eq!(endpoints[0].auth_token.as_deref(), Some("astralane-key"));
+        assert_eq!(endpoints[0].sender_mode, Some("irisb"));
+        assert_eq!(endpoints[0].provider_tip_lamports, Some(1_000_000));
+
+        options.send_fanout = true;
+        options.send_lane_mode = SendLaneMode::HeliusAstralaneStack;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["helius_sender", "astralane_irisb"]
+        );
+
+        enable_nozomi(&mut options);
+        options.send_lane_mode = SendLaneMode::HeliusNozomiAstralaneStack;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["helius_sender", "nozomi_json_rpc", "astralane_irisb"]
+        );
+
+        enable_beam(&mut options);
+        options.send_lane_mode = SendLaneMode::BeamOnly;
+        let endpoints = options.selected_send_endpoints();
+        assert_eq!(endpoint_kinds(&endpoints), vec!["beam_http"]);
+        assert_eq!(
+            endpoints[0].url,
+            "https://beam.rpcfast.com/?provider=bloxroute&mode=fastest"
+        );
+        assert_eq!(endpoints[0].auth_token.as_deref(), Some("beam-token"));
+        assert_eq!(endpoints[0].beam_provider, Some("bloxroute"));
+        assert_eq!(endpoints[0].sender_mode, Some("fastest"));
+        assert_eq!(endpoints[0].provider_tip_lamports, Some(1_000_000));
+
+        options.send_fanout = true;
+        options.send_lane_mode = SendLaneMode::HeliusBeamStack;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["helius_sender", "beam_http"]
+        );
+
+        enable_nozomi(&mut options);
+        options.send_lane_mode = SendLaneMode::HeliusNozomiBeamStack;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["helius_sender", "nozomi_json_rpc", "beam_http"]
+        );
+
+        options.tpu_jet_enabled = true;
+        options.send_fanout = true;
+        options.send_lane_mode = SendLaneMode::AllNonBeamStack;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["helius_sender", "nozomi_json_rpc", "tpu_jet"]
         );
     }
 
@@ -8544,7 +9740,65 @@ mod tests {
             "JITO_SEND_LANE_MODE=tpu_quic_only requires JITO_TPU_QUIC_ENABLED=YES"
         );
 
+        options.send_lane_mode = SendLaneMode::BeamOnly;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=beam_only requires JITO_BEAM_ENABLED=YES"
+        );
+        options.beam_enabled = true;
+        options.send_lane_mode = SendLaneMode::HeliusBeamStack;
+        options.helius_sender_enabled = false;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_beam_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+        );
+
+        options = disabled_options();
+        options.send_lane_mode = SendLaneMode::AstralaneOnly;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=astralane_only requires JITO_ASTRALANE_ENABLED=YES"
+        );
+
+        options.astralane_enabled = true;
+        options.send_lane_mode = SendLaneMode::HeliusAstralaneStack;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_astralane_stack requires JITO_SEND_FANOUT=YES"
+        );
+        options.send_fanout = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_astralane_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+        );
+
+        options.helius_sender_enabled = true;
+        options.astralane_enabled = false;
+        options.send_lane_mode = SendLaneMode::HeliusNozomiAstralaneStack;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_nozomi_astralane_stack requires JITO_NOZOMI_ENABLED=YES"
+        );
+        options.nozomi_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_nozomi_astralane_stack requires JITO_ASTRALANE_ENABLED=YES"
+        );
+
+        options = disabled_options();
+        options.send_lane_mode = SendLaneMode::AllNonBeamStack;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=all_non_beam_stack requires JITO_SEND_FANOUT=YES"
+        );
+        options.send_fanout = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=all_non_beam_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+        );
+
         options.send_lane_mode = SendLaneMode::RpcOnly;
+        options.solana_rpc_url = Some("https://primary.example.com".to_string());
         options.jito_tip_lamports = Some(10_000);
         options.jito_tip_account = None;
         assert!(options.validate_send_lane_mode().is_ok());
@@ -8628,7 +9882,10 @@ mod tests {
             url: "https://mainnet.helius-rpc.com/?api-key=secret".to_string(),
             kind: SendEndpointKind::Rpc,
             auth_uuid: None,
+            auth_token: None,
             sender_mode: None,
+            beam_provider: None,
+            provider_tip_lamports: None,
             fanout_slots: None,
             timeout_ms: None,
         };
@@ -8641,6 +9898,87 @@ mod tests {
         assert!(message.contains("rpc-primary:mainnet.helius-rpc.com"));
         assert!(!message.contains("secret"));
         assert!(!message.contains("api-key"));
+    }
+
+    #[test]
+    fn send_error_message_redacts_beam_token() {
+        let endpoint = SendEndpoint {
+            label: "beam-bloxroute-fastest:beam.rpcfast.com".to_string(),
+            url: "https://beam.rpcfast.com/?provider=bloxroute&mode=fastest".to_string(),
+            kind: SendEndpointKind::BeamHttp,
+            auth_uuid: None,
+            auth_token: Some("super-secret-beam-token".to_string()),
+            sender_mode: Some("fastest"),
+            beam_provider: Some("bloxroute"),
+            provider_tip_lamports: Some(1_000_000),
+            fanout_slots: None,
+            timeout_ms: None,
+        };
+
+        let message = send_error_message(
+            &endpoint,
+            "send request failed with token super-secret-beam-token",
+        );
+
+        assert!(message.contains("beam-bloxroute-fastest:beam.rpcfast.com"));
+        assert!(message.contains("<redacted-token>"));
+        assert!(!message.contains("super-secret-beam-token"));
+    }
+
+    #[test]
+    fn astralane_url_and_error_paths_redact_api_key() {
+        let url = astralane_irisb_send_url(
+            Some("https://lim.gateway.astralane.io"),
+            "super-secret-astralane-key",
+            true,
+            true,
+        );
+        assert_eq!(
+            url,
+            "https://lim.gateway.astralane.io/irisb?api-key=super-secret-astralane-key&method=sendTransaction&mev-protect=true&swqos-only=true"
+        );
+        assert_eq!(
+            astralane_irisb_health_url(&url),
+            "https://lim.gateway.astralane.io/irisb?api-key=super-secret-astralane-key&method=getHealth&mev-protect=true&swqos-only=true"
+        );
+
+        let endpoint = SendEndpoint {
+            label: format!(
+                "astralane-irisb-1:{}",
+                rpc_url_label(
+                    "https://lim.gateway.astralane.io/irisb?api-key=super-secret-astralane-key"
+                )
+            ),
+            url,
+            kind: SendEndpointKind::AstralaneIrisB,
+            auth_uuid: None,
+            auth_token: Some("super-secret-astralane-key".to_string()),
+            sender_mode: Some("irisb"),
+            beam_provider: None,
+            provider_tip_lamports: Some(1_000_000),
+            fanout_slots: None,
+            timeout_ms: None,
+        };
+
+        let message = send_error_message(
+            &endpoint,
+            "send request failed for api-key=super-secret-astralane-key",
+        );
+
+        assert!(message.contains("astralane-irisb-1:lim.gateway.astralane.io"));
+        assert!(message.contains("<redacted-token>"));
+        assert!(!message.contains("super-secret-astralane-key"));
+        assert!(!message.contains("api-key"));
+    }
+
+    #[test]
+    fn json_signature_parsing_handles_supported_shapes() {
+        let direct = serde_json::json!({ "signature": "sig-direct" });
+        let nested = serde_json::json!({ "result": { "signature": "sig-nested" } });
+        let result = serde_json::json!({ "result": "sig-result" });
+        assert_eq!(json_signature(&direct).as_deref(), Some("sig-direct"));
+        assert_eq!(json_signature(&nested).as_deref(), Some("sig-nested"));
+        assert_eq!(json_signature(&result).as_deref(), Some("sig-result"));
     }
 
     #[tokio::test]
@@ -8794,8 +10132,10 @@ mod tests {
             label: "tpu-quic".to_string(),
             kind: "tpu_quic",
             mode: Some("fanout_slots"),
+            beam_provider: None,
             status: "dispatched",
             duration_ms: 2,
+            provider_tip_lamports: None,
             fanout_slots: Some(12),
             timeout_ms: Some(30),
             ack_at: None,
@@ -8841,8 +10181,10 @@ mod tests {
             label: "tpu-jet".to_string(),
             kind: "tpu_jet",
             mode: Some("sidecar"),
+            beam_provider: None,
             status: "dispatched",
             duration_ms: 1,
+            provider_tip_lamports: None,
             fanout_slots: Some(12),
             timeout_ms: Some(30),
             ack_at: None,
@@ -8879,6 +10221,118 @@ mod tests {
         );
     }
 
+    #[test]
+    fn send_lane_attribution_line_serializes_beam_metadata() {
+        let mut line = sample_send_lane_attribution_line();
+        line.first_ack_lane = "beam-bloxroute-fastest:beam.rpcfast.com".to_string();
+        line.all_attempts = vec![SendLaneAttemptAttribution {
+            label: "beam-bloxroute-fastest:beam.rpcfast.com".to_string(),
+            kind: "beam_http",
+            mode: Some("fastest"),
+            beam_provider: Some("bloxroute"),
+            status: "submitted",
+            duration_ms: 3,
+            provider_tip_lamports: Some(1_000_000),
+            fanout_slots: None,
+            timeout_ms: None,
+            ack_at: Some(112),
+            error_class: None,
+            error: None,
+        }];
+
+        let json = serde_json::to_value(&line).expect("Beam attribution line serializes");
+
+        assert_eq!(
+            json.pointer("/allAttempts/0/kind")
+                .and_then(serde_json::Value::as_str),
+            Some("beam_http")
+        );
+        assert_eq!(
+            json.pointer("/allAttempts/0/beamProvider")
+                .and_then(serde_json::Value::as_str),
+            Some("bloxroute")
+        );
+        assert_eq!(
+            json.pointer("/allAttempts/0/mode")
+                .and_then(serde_json::Value::as_str),
+            Some("fastest")
+        );
+        assert_eq!(
+            json.pointer("/allAttempts/0/providerTipLamports")
+                .and_then(serde_json::Value::as_u64),
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn send_lane_attribution_line_serializes_new_provider_metadata() {
+        let mut line = sample_send_lane_attribution_line();
+        line.first_ack_lane = "beam-bloxroute-fastest:beam.rpcfast.com".to_string();
+        line.all_attempts = vec![
+            SendLaneAttemptAttribution {
+                label: "beam-bloxroute-fastest:beam.rpcfast.com".to_string(),
+                kind: "beam_http",
+                mode: Some("fastest"),
+                beam_provider: Some("bloxroute"),
+                status: "submitted",
+                duration_ms: 4,
+                provider_tip_lamports: Some(1_000_000),
+                fanout_slots: None,
+                timeout_ms: None,
+                ack_at: Some(113),
+                error_class: None,
+                error: None,
+            },
+            SendLaneAttemptAttribution {
+                label: "tpu-jet-sidecar:127.0.0.1".to_string(),
+                kind: "tpu_jet",
+                mode: None,
+                beam_provider: None,
+                status: "timeout",
+                duration_ms: 5,
+                provider_tip_lamports: None,
+                fanout_slots: Some(1),
+                timeout_ms: Some(30),
+                ack_at: None,
+                error_class: Some("timeout"),
+                error: Some("deadline exceeded".to_string()),
+            },
+        ];
+
+        let json = serde_json::to_value(&line).expect("provider attribution line serializes");
+
+        assert_eq!(
+            json.pointer("/allAttempts/0/kind")
+                .and_then(serde_json::Value::as_str),
+            Some("beam_http")
+        );
+        assert_eq!(
+            json.pointer("/allAttempts/0/beamProvider")
+                .and_then(serde_json::Value::as_str),
+            Some("bloxroute")
+        );
+        assert_eq!(
+            json.pointer("/allAttempts/0/providerTipLamports")
+                .and_then(serde_json::Value::as_u64),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            json.pointer("/allAttempts/1/kind")
+                .and_then(serde_json::Value::as_str),
+            Some("tpu_jet")
+        );
+        assert_eq!(
+            json.pointer("/allAttempts/1/fanoutSlots")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            json.pointer("/allAttempts/1/timeoutMs")
+                .and_then(serde_json::Value::as_u64),
+            Some(30)
+        );
+    }
+
     #[tokio::test]
     async fn tpu_quic_attempt_reports_dispatch_error_class_without_ack() {
         let endpoint = SendEndpoint {
@@ -8886,7 +10340,10 @@ mod tests {
             url: String::new(),
             kind: SendEndpointKind::TpuQuic,
             auth_uuid: None,
+            auth_token: None,
             sender_mode: None,
+            beam_provider: None,
+            provider_tip_lamports: None,
             fanout_slots: Some(12),
             timeout_ms: Some(30),
         };
@@ -8914,7 +10371,10 @@ mod tests {
             url: "http://127.0.0.1:8787/send".to_string(),
             kind: SendEndpointKind::TpuJet,
             auth_uuid: None,
+            auth_token: None,
             sender_mode: Some("sidecar"),
+            beam_provider: None,
+            provider_tip_lamports: None,
             fanout_slots: Some(12),
             timeout_ms: Some(30),
         };
@@ -9007,8 +10467,10 @@ mod tests {
                 label: "rpc-primary:example.com".to_string(),
                 kind: "rpc",
                 mode: None,
+                beam_provider: None,
                 status: "submitted",
                 duration_ms: 7,
+                provider_tip_lamports: None,
                 fanout_slots: None,
                 timeout_ms: None,
                 ack_at: Some(112),
@@ -9033,6 +10495,41 @@ mod tests {
         options.helius_sender_tip_account = Some(COPY_WALLET.to_string());
         options.priority_fee_micro_lamports = Some(500_000);
         options
+    }
+
+    fn enable_beam(options: &mut CopyExecutionOptions) {
+        options.beam_enabled = true;
+        options.beam_url = Some(BEAM_DEFAULT_URL.to_string());
+        options.beam_token = Some("beam-token".to_string());
+        options.beam_provider = Some(BEAM_PROVIDER_BLOXROUTE.to_string());
+        options.beam_mode = Some(BEAM_MODE_FASTEST.to_string());
+        options.beam_tip_lamports = Some(1_000_000);
+        options.beam_tip_accounts = vec![
+            COPY_WALLET.to_string(),
+            "HWEoBxYs7ssKuudEjzjmpfJVX7Dvi7wescFsVx2L5yoY".to_string(),
+        ];
+    }
+
+    fn enable_nozomi(options: &mut CopyExecutionOptions) {
+        options.nozomi_enabled = true;
+        options.nozomi_urls = vec!["https://nozomi.example.com".to_string()];
+        options.nozomi_tip_lamports = Some(1_000_000);
+        options.nozomi_tip_account =
+            Some("TEMPaMeCRFAS9EKF53Jd6KpHxgL47uWLcpFArU1Fanq".to_string());
+        options.nozomi_tip_accounts =
+            vec!["TEMPaMeCRFAS9EKF53Jd6KpHxgL47uWLcpFArU1Fanq".to_string()];
+    }
+
+    fn enable_astralane(options: &mut CopyExecutionOptions) {
+        options.astralane_enabled = true;
+        options.astralane_urls = vec!["https://lim.gateway.astralane.io/irisb".to_string()];
+        options.astralane_api_key = Some("astralane-key".to_string());
+        options.astralane_tip_lamports = Some(1_000_000);
+        options.astralane_tip_account = Some(COPY_WALLET.to_string());
+        options.astralane_tip_accounts = vec![
+            COPY_WALLET.to_string(),
+            "HWEoBxYs7ssKuudEjzjmpfJVX7Dvi7wescFsVx2L5yoY".to_string(),
+        ];
     }
 
     fn endpoint_kinds(endpoints: &[SendEndpoint]) -> Vec<&'static str> {

@@ -284,6 +284,79 @@ pub(crate) struct LiveOptions {
 
     #[arg(
         long,
+        env = "JITO_ASTRALANE_ENABLED",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) astralane_enabled: bool,
+
+    #[arg(
+        long = "astralane-url",
+        env = "JITO_ASTRALANE_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) astralane_urls: Vec<String>,
+
+    #[arg(long, env = "JITO_ASTRALANE_API_KEY", hide_env_values = true)]
+    pub(crate) astralane_api_key: Option<String>,
+
+    #[arg(long, env = "JITO_ASTRALANE_TIP_LAMPORTS")]
+    pub(crate) astralane_tip_lamports: Option<u64>,
+
+    #[arg(long, env = "JITO_ASTRALANE_TIP_ACCOUNT")]
+    pub(crate) astralane_tip_account: Option<String>,
+
+    #[arg(long, env = "JITO_ASTRALANE_TIP_ACCOUNTS", value_delimiter = ',')]
+    pub(crate) astralane_tip_accounts: Vec<String>,
+
+    #[arg(
+        long,
+        env = "JITO_ASTRALANE_MEV_PROTECT",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) astralane_mev_protect: bool,
+
+    #[arg(
+        long,
+        env = "JITO_ASTRALANE_SWQOS_ONLY",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) astralane_swqos_only: bool,
+
+    #[arg(
+        long,
+        env = "JITO_BEAM_ENABLED",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) beam_enabled: bool,
+
+    #[arg(
+        long,
+        env = "JITO_BEAM_URL",
+        default_value = "https://beam.rpcfast.com"
+    )]
+    pub(crate) beam_url: Option<String>,
+
+    #[arg(long, env = "JITO_BEAM_TOKEN", hide_env_values = true)]
+    pub(crate) beam_token: Option<String>,
+
+    #[arg(long, env = "JITO_BEAM_PROVIDER")]
+    pub(crate) beam_provider: Option<String>,
+
+    #[arg(long, env = "JITO_BEAM_MODE", default_value = "fastest")]
+    pub(crate) beam_mode: Option<String>,
+
+    #[arg(long, env = "JITO_BEAM_TIP_LAMPORTS")]
+    pub(crate) beam_tip_lamports: Option<u64>,
+
+    #[arg(long, env = "JITO_BEAM_TIP_ACCOUNTS", value_delimiter = ',')]
+    pub(crate) beam_tip_accounts: Vec<String>,
+
+    #[arg(
+        long,
         env = "JITO_TPU_JET_ENABLED",
         default_value_t = false,
         value_parser = parse_boolish

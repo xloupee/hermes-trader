@@ -63,6 +63,73 @@ test("sync recent limit counts local execution rows after filtering auxiliary ro
   }
 });
 
+test("sync can combine recent rows with older pending position refresh rows", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "jito-copy-sync-"));
+  const path = join(dir, "executions.jsonl");
+  try {
+    const rows = [
+      {
+        schema: "copytrade.localExecution.v1",
+        provider: "shredstream",
+        observedSignature: "target-buy-pending",
+        observedWallet: "wallet",
+        copyWallet: "copy-wallet",
+        observedAction: "buy",
+        mint: "mint-pending",
+        sendSignature: "copy-pending",
+        sent: true,
+        decision: "sent"
+      },
+      {
+        schema: "copytrade.localExecution.v1",
+        provider: "shredstream",
+        observedSignature: "target-buy-complete",
+        observedWallet: "wallet",
+        copyWallet: "copy-wallet",
+        observedAction: "buy",
+        mint: "mint-complete",
+        sendSignature: "copy-complete",
+        sent: true,
+        decision: "sent"
+      },
+      {
+        schema: "copytrade.transactionConfirmation.v1",
+        provider: "shredstream",
+        observedSignature: "target-buy-complete",
+        copyWallet: "copy-wallet",
+        mint: "mint-complete",
+        transactionRole: "copy_buy",
+        signature: "copy-complete",
+        targetTxIndex: 1,
+        copyTxIndex: 2,
+        txDelta: 1
+      },
+      {
+        schema: "copytrade.localExecution.v1",
+        provider: "shredstream",
+        observedSignature: "target-buy-new",
+        observedWallet: "wallet",
+        copyWallet: "copy-wallet",
+        observedAction: "buy",
+        mint: "mint-new",
+        sendSignature: "copy-new",
+        sent: true,
+        decision: "sent"
+      }
+    ];
+    await writeFile(path, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
+
+    const selected = readJsonl(path, { recentLimit: 1, pendingPositionLimit: 10 });
+
+    assert.deepEqual(
+      selected.map((row) => row.observedSignature).sort(),
+      ["target-buy-new", "target-buy-pending"]
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("sync SQL includes landing telemetry and account priority cache fields", async () => {
   const sql = await buildSql([
     {

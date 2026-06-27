@@ -100,6 +100,9 @@ export interface LocalExecutionReport {
   walletMatchUs: number | null;
   routeParseUs: number | null;
   sendLaneMs: number | null;
+  sendLaneMode: string | null;
+  firstAckLane: string | null;
+  sendLaneAttempts: SendLaneAttempt[];
   feeProfileName: string | null;
   selectedPriorityFeeMicroLamports: number | null;
   selectedHeliusTipLamports: number | null;
@@ -125,6 +128,26 @@ export interface LocalExecutionReport {
   blockPositionDiagnostics: BlockPositionDiagnostics | null;
   rawExecution: unknown;
   chainReport: unknown;
+}
+
+export interface SendLaneAttempt {
+  label: string | null;
+  kind: string | null;
+  mode: string | null;
+  beamProvider: string | null;
+  status: string | null;
+  durationMs: number | null;
+  errorClass: string | null;
+  providerTipLamports: number | null;
+  fanoutSlots: number | null;
+  timeoutMs: number | null;
+}
+
+export interface SendLaneAttribution {
+  sendLaneMode: string | null;
+  firstAckLane: string | null;
+  firstAckAtMs: number | null;
+  allAttempts: SendLaneAttempt[];
 }
 
 interface RawLocalExecutionReport {
@@ -336,6 +359,10 @@ function stringValue(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
+function arrayValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
 function chainReportValue(row: RawLocalExecutionReport): Record<string, unknown> | null {
   return objectValue(row.chain_report);
 }
@@ -436,9 +463,40 @@ function normalizeBlockPositionDiagnostics(row: RawLocalExecutionReport): BlockP
   };
 }
 
+function normalizeSendLaneAttempt(value: unknown): SendLaneAttempt {
+  const attempt = objectValue(value);
+  return {
+    label: stringValue(attempt?.label),
+    kind: stringValue(attempt?.kind),
+    mode: stringValue(attempt?.mode),
+    beamProvider: stringValue(attempt?.beamProvider),
+    status: stringValue(attempt?.status),
+    durationMs: numberValue(attempt?.durationMs),
+    errorClass: stringValue(attempt?.errorClass),
+    providerTipLamports: numberValue(attempt?.providerTipLamports),
+    fanoutSlots: numberValue(attempt?.fanoutSlots),
+    timeoutMs: numberValue(attempt?.timeoutMs)
+  };
+}
+
+function normalizeSendLaneAttribution(rawExecution: Record<string, unknown> | null): SendLaneAttribution | null {
+  const attribution = objectValue(rawExecution?.sendLaneAttribution);
+  if (!attribution) {
+    return null;
+  }
+
+  return {
+    sendLaneMode: stringValue(attribution.sendLaneMode),
+    firstAckLane: stringValue(attribution.firstAckLane),
+    firstAckAtMs: numberValue(attribution.firstAckAtMs),
+    allAttempts: arrayValue(attribution.allAttempts).map(normalizeSendLaneAttempt)
+  };
+}
+
 function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
   const rawExecution = objectValue(row.raw_execution);
   const chainReport = chainReportValue(row);
+  const sendLaneAttribution = normalizeSendLaneAttribution(rawExecution);
   const rawNumber = (key: string) => numberValue(rawExecution?.[key]);
   const firstNumber = (...values: Array<unknown>): number | null => {
     for (const value of values) {
@@ -521,6 +579,9 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     walletMatchUs: firstNumber(row.wallet_match_us, rawNumber("walletMatchUs")),
     routeParseUs: firstNumber(row.route_parse_us, rawNumber("routeParseUs")),
     sendLaneMs: firstNumber(row.send_lane_ms, rawNumber("sendLaneMs")),
+    sendLaneMode: sendLaneAttribution?.sendLaneMode ?? stringValue(rawExecution?.sendLaneMode),
+    firstAckLane: sendLaneAttribution?.firstAckLane ?? stringValue(rawExecution?.sendRpcWinner),
+    sendLaneAttempts: sendLaneAttribution?.allAttempts ?? [],
     feeProfileName: row.fee_profile_name ?? stringValue(rawExecution?.feeProfileName),
     selectedPriorityFeeMicroLamports: firstNumber(
       row.selected_priority_fee_micro_lamports,

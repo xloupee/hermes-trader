@@ -97,14 +97,38 @@ window does not meet the minimum scored-row and `txDelta` coverage thresholds.
    providers. This costs both provider tips on every landed transaction, so
    judge it by landed rate, same-slot rate, `txDelta`, submitted-not-landed,
    and total configured tip cost.
-7. Yellowstone Jet sidecar, only after the sidecar build is deployed and
+7. Astralane IrisB, only after `JITO_ASTRALANE_API_KEY`,
+   `JITO_ASTRALANE_URLS`, and the Astralane tip account(s) are configured.
+   Start with `astralane-only` for delivery-lane isolation, then
+   `helius-astralane-stack` as the first same-signature race, then
+   `helius-nozomi-astralane-stack` only if the extra provider-tip cost is
+   intentional. IrisB is binary HTTP, not QUIC: it returns ACK/signature/error
+   telemetry, but the canary is still judged by landed rate, same-slot rate,
+   `txDelta`, failed-on-chain, submitted-not-landed, and configured tip cost.
+8. RPC Fast Beam, only after `JITO_BEAM_TOKEN` and provider-specific
+   `JITO_BEAM_TIP_ACCOUNTS` are configured. Start with `beam-only` for smoke,
+   then `helius-beam-stack` as a Nozomi-replacement test, then
+   `helius-nozomi-beam-stack` only when the higher tip cost is intentional.
+   Beam requires its tip transfer inside the transaction before signing; do not
+   race a Beam-specific signature against a different Helius/Nozomi signature.
+   The triple stack raises `JITO_MAX_PROVIDER_TIP_LAMPORTS` to `2500000` by
+   default and must be judged by landing position and failed-on-chain rate, not
+   ACK speed.
+9. All non-Beam stack: `all-non-beam-stack` applies Helius Sender + Nozomi,
+   and includes TPU Jet only if
+   `JITO_CANARY_ALL_NON_BEAM_TPU_JET_ENABLED` or the existing
+   `JITO_TPU_JET_ENABLED` is true. Astralane, Beam, and direct TPU QUIC are
+   excluded. Use `helius-nozomi-astralane-stack` when Astralane cost is
+   intentional. The default provider-tip cap is `1387500` lamports because the
+   transaction pays every included provider tip if it lands.
+10. Yellowstone Jet sidecar, only after the sidecar build is deployed and
    `JITO_TPU_JET_RPC_URL` / `JITO_TPU_JET_WS_URL` /
    `JITO_TPU_JET_SIDECAR_URL` are configured:
    `tpu-jet-fanout` applies `JITO_SEND_LANE_MODE=helius-tpu-jet` for Helius +
    Jet same-signature fanout, then `tpu-jet-only`, which applies
    `JITO_SEND_LANE_MODE=tpu-jet-helius-tip` for Jet-only sending with the same
    Helius-tip transaction shape.
-8. Direct TPU QUIC fallback, only after `JITO_TPU_QUIC_RPC_URL` /
+11. Direct TPU QUIC fallback, only after `JITO_TPU_QUIC_RPC_URL` /
    `JITO_TPU_QUIC_WS_URL` are configured. Use the current-leader variants for
    the next retest:
    `tpu-quic-current-leader-fanout` applies
@@ -116,10 +140,60 @@ window does not meet the minimum scored-row and `txDelta` coverage thresholds.
    Do not use the legacy multi-leader `tpu-quic-fanout` / `tpu-quic-only`
    shape for the timeout retest: Solana's TPU client waits for all selected
    leader sends, so larger fanout can recreate the previous 100ms timeout.
-9. Cheaper TPU-only shape: `tpu-jet-cheap` or `tpu-quic-cheap` only after the
+11. Cheaper TPU-only shape: `tpu-jet-cheap` or `tpu-quic-cheap` only after the
    matching same-fee TPU-only window proves better. These switch to
    `tpu-jet-only` / `tpu-quic-only` lane modes with Helius Sender disabled and
    are guarded by `JITO_CANARY_ALLOW_CHEAP_TPU=YES`.
+
+## Paid Tip Lane Safety
+
+bloXroute Trader API canaries were removed from this worker because that route
+requires a paid provider account. RPC Fast Beam may still use
+`JITO_BEAM_PROVIDER=bloxroute`; that is Beam configuration, not the bloXroute
+Trader API lane.
+
+These are paid-tip lanes. The worker builds one transaction containing the
+active Helius, Nozomi, Astralane, and/or Beam tips before signing, then fans out the
+identical signed bytes. This is required for duplicate-buy safety. New
+tip-funded providers should follow the same same-signature pattern.
+Score these lanes by landed rate, same-slot rate, `txDelta`, failed-on-chain
+rate, submitted-not-landed rate, and total provider-tip cost. First ACK is only
+delivery telemetry.
+
+## Astralane IrisB Canary
+
+Required env before applying an Astralane canary:
+
+```sh
+JITO_ASTRALANE_URLS=https://lim.gateway.astralane.io/irisb
+JITO_ASTRALANE_API_KEY=<api-key>
+JITO_ASTRALANE_TIP_LAMPORTS=1000000
+JITO_ASTRALANE_TIP_ACCOUNT=astra4uejePWneqNaJKuFFA8oonqCE1sqF6b45kDMZm
+JITO_ASTRALANE_TIP_ACCOUNTS=astra4uejePWneqNaJKuFFA8oonqCE1sqF6b45kDMZm
+JITO_ASTRALANE_MEV_PROTECT=false
+JITO_ASTRALANE_SWQOS_ONLY=false
+```
+
+The canary helper also accepts `JITO_CANARY_ASTRALANE_URLS`,
+`JITO_CANARY_ASTRALANE_API_KEY`, `JITO_CANARY_ASTRALANE_TIP_LAMPORTS`,
+`JITO_CANARY_ASTRALANE_TIP_ACCOUNT`, `JITO_CANARY_ASTRALANE_TIP_ACCOUNTS`,
+`JITO_CANARY_ASTRALANE_MEV_PROTECT`, and
+`JITO_CANARY_ASTRALANE_SWQOS_ONLY` so IrisB can be staged without changing the
+steady-state env first.
+
+The canary modes are explicit because Astralane adds a `1000000` lamport
+provider tip:
+
+```sh
+./landing-canary-control.sh apply astralane-only
+./landing-canary-control.sh apply helius-astralane-stack
+./landing-canary-control.sh apply helius-nozomi-astralane-stack
+```
+
+`astralane-only` sends the binary signed transaction bytes to
+`/irisb?api-key=...&method=sendTransaction`. Stack modes still sign one
+transaction and race identical bytes. The first ACK lane may show Astralane, but
+success is landed outcome, not ACK speed.
 
 ## Nozomi Stack Canary
 

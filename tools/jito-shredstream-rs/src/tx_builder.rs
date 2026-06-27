@@ -16,8 +16,10 @@ pub(crate) struct TxFeeConfig {
     pub(crate) helius_sender_tip_account: Option<String>,
     pub(crate) nozomi_tip_lamports: Option<u64>,
     pub(crate) nozomi_tip_account: Option<String>,
-    pub(crate) bloxroute_tip_lamports: Option<u64>,
-    pub(crate) bloxroute_tip_account: Option<String>,
+    pub(crate) astralane_tip_lamports: Option<u64>,
+    pub(crate) astralane_tip_account: Option<String>,
+    pub(crate) beam_tip_lamports: Option<u64>,
+    pub(crate) beam_tip_account: Option<String>,
 }
 
 #[derive(Debug)]
@@ -161,9 +163,15 @@ fn fee_tip_transfers(fee_config: &TxFeeConfig) -> Result<Vec<(Pubkey, u64)>, TxB
     )?;
     push_fee_tip_transfer(
         &mut transfers,
-        fee_config.bloxroute_tip_lamports,
-        fee_config.bloxroute_tip_account.as_deref(),
-        "missing bloXroute tip account",
+        fee_config.astralane_tip_lamports,
+        fee_config.astralane_tip_account.as_deref(),
+        "missing Astralane tip account",
+    )?;
+    push_fee_tip_transfer(
+        &mut transfers,
+        fee_config.beam_tip_lamports,
+        fee_config.beam_tip_account.as_deref(),
+        "missing Beam tip account",
     )?;
     Ok(transfers)
 }
@@ -1642,8 +1650,7 @@ mod tests {
             helius_sender_tip_account: None,
             nozomi_tip_lamports: None,
             nozomi_tip_account: None,
-            bloxroute_tip_lamports: None,
-            bloxroute_tip_account: None,
+            ..Default::default()
         };
 
         let build = build_full_copy_unsigned_flashx_pump_with_fees(
@@ -1715,8 +1722,7 @@ mod tests {
             ),
             nozomi_tip_lamports: None,
             nozomi_tip_account: None,
-            bloxroute_tip_lamports: None,
-            bloxroute_tip_account: None,
+            ..Default::default()
         };
 
         let build = build_full_copy_unsigned_flashx_pump_with_fees(
@@ -1774,8 +1780,7 @@ mod tests {
             helius_sender_tip_account: Some(tip_account),
             nozomi_tip_lamports: None,
             nozomi_tip_account: None,
-            bloxroute_tip_lamports: None,
-            bloxroute_tip_account: None,
+            ..Default::default()
         };
 
         let build = build_full_copy_unsigned_flashx_pump_with_fees(
@@ -1814,6 +1819,7 @@ mod tests {
         let jito_account = "96gYZGLnUQYgE8MWWpYJw8yRjnvB51rAhbG1SogE3uSG".to_string();
         let helius_account = "HWEoBxYs7ssKuudEjzjmpfJVX7Dvi7wescFsVx2L5yoY".to_string();
         let nozomi_account = "CwyufX5F8vP7gB5Xv8iYfLsCfQeQf9MStjGgYQhE6S9g".to_string();
+        let astralane_account = "astra4uejePWneqNaJKuFFA8oonqCE1sqF6b45kDMZm".to_string();
         let fee_config = TxFeeConfig {
             compute_unit_price_micro_lamports: Some(250_000),
             jito_tip_lamports: Some(1_000),
@@ -1822,8 +1828,9 @@ mod tests {
             helius_sender_tip_account: Some(helius_account.clone()),
             nozomi_tip_lamports: Some(1_000_000),
             nozomi_tip_account: Some(nozomi_account.clone()),
-            bloxroute_tip_lamports: Some(1_250_000),
-            bloxroute_tip_account: Some(nozomi_account.clone()),
+            astralane_tip_lamports: Some(1_000_000),
+            astralane_tip_account: Some(astralane_account.clone()),
+            ..Default::default()
         };
 
         let build = build_full_copy_unsigned_flashx_pump_with_fees(
@@ -1834,9 +1841,9 @@ mod tests {
         )
         .expect("provider-stack transaction shell should build");
 
-        assert_eq!(build.setup_instruction_count, 6);
+        assert_eq!(build.setup_instruction_count, 7);
         assert_eq!(build.main_instruction_count, 1);
-        assert_eq!(build.instructions.len(), 7);
+        assert_eq!(build.instructions.len(), 8);
         assert_eq!(
             build.instructions[3].accounts[1].pubkey.to_string(),
             jito_account
@@ -1853,12 +1860,24 @@ mod tests {
             build.instructions[5].data,
             [
                 2u32.to_le_bytes().to_vec(),
-                1_250_000u64.to_le_bytes().to_vec()
+                1_000_000u64.to_le_bytes().to_vec()
             ]
             .concat()
         );
         assert_eq!(
-            build.instructions[6].program_id.to_string(),
+            build.instructions[6].accounts[1].pubkey.to_string(),
+            astralane_account
+        );
+        assert_eq!(
+            build.instructions[6].data,
+            [
+                2u32.to_le_bytes().to_vec(),
+                1_000_000u64.to_le_bytes().to_vec()
+            ]
+            .concat()
+        );
+        assert_eq!(
+            build.instructions[7].program_id.to_string(),
             PUMP_FUN_PROGRAM_ID
         );
     }
@@ -1880,8 +1899,7 @@ mod tests {
             helius_sender_tip_account: None,
             nozomi_tip_lamports: None,
             nozomi_tip_account: None,
-            bloxroute_tip_lamports: None,
-            bloxroute_tip_account: None,
+            ..Default::default()
         };
 
         let error = build_full_copy_unsigned_flashx_pump_with_fees(

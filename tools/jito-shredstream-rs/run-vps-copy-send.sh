@@ -78,6 +78,14 @@ export JITO_NOZOMI_URLS="${JITO_NOZOMI_URLS:-}"
 export JITO_NOZOMI_TIP_LAMPORTS="${JITO_NOZOMI_TIP_LAMPORTS:-}"
 export JITO_NOZOMI_TIP_ACCOUNT="${JITO_NOZOMI_TIP_ACCOUNT:-}"
 export JITO_NOZOMI_TIP_ACCOUNTS="${JITO_NOZOMI_TIP_ACCOUNTS:-}"
+export JITO_ASTRALANE_ENABLED="${JITO_ASTRALANE_ENABLED:-false}"
+export JITO_ASTRALANE_URLS="${JITO_ASTRALANE_URLS:-https://lim.gateway.astralane.io/irisb}"
+export JITO_ASTRALANE_API_KEY="${JITO_ASTRALANE_API_KEY:-}"
+export JITO_ASTRALANE_TIP_LAMPORTS="${JITO_ASTRALANE_TIP_LAMPORTS:-1000000}"
+export JITO_ASTRALANE_TIP_ACCOUNT="${JITO_ASTRALANE_TIP_ACCOUNT:-astra4uejePWneqNaJKuFFA8oonqCE1sqF6b45kDMZm}"
+export JITO_ASTRALANE_TIP_ACCOUNTS="${JITO_ASTRALANE_TIP_ACCOUNTS:-$JITO_ASTRALANE_TIP_ACCOUNT}"
+export JITO_ASTRALANE_MEV_PROTECT="${JITO_ASTRALANE_MEV_PROTECT:-false}"
+export JITO_ASTRALANE_SWQOS_ONLY="${JITO_ASTRALANE_SWQOS_ONLY:-false}"
 export JITO_TPU_JET_ENABLED="${JITO_TPU_JET_ENABLED:-false}"
 export JITO_TPU_JET_RPC_URL="${JITO_TPU_JET_RPC_URL:-${SOLANA_RPC_URL:-}}"
 export JITO_TPU_JET_WS_URL="${JITO_TPU_JET_WS_URL:-}"
@@ -212,6 +220,8 @@ validate_nonnegative_int JITO_BLOCKHASH_REFRESH_TIMEOUT_MS "$JITO_BLOCKHASH_REFR
 validate_nonnegative_int JITO_BLOCKHASH_STALE_MS "$JITO_BLOCKHASH_STALE_MS"
 validate_nonnegative_int JITO_HELIUS_SENDER_TIP_LAMPORTS "$JITO_HELIUS_SENDER_TIP_LAMPORTS"
 validate_nonnegative_int JITO_NOZOMI_TIP_LAMPORTS "$JITO_NOZOMI_TIP_LAMPORTS"
+validate_nonnegative_int JITO_ASTRALANE_TIP_LAMPORTS "$JITO_ASTRALANE_TIP_LAMPORTS"
+validate_nonnegative_int JITO_BEAM_TIP_LAMPORTS "$JITO_BEAM_TIP_LAMPORTS"
 validate_nonnegative_int JITO_MAX_PROVIDER_TIP_LAMPORTS "$JITO_MAX_PROVIDER_TIP_LAMPORTS"
 validate_nonnegative_int JITO_MAX_SIGNED_TX_BYTES "$JITO_MAX_SIGNED_TX_BYTES"
 validate_nonnegative_int JITO_MAX_INSTRUCTION_COUNT "$JITO_MAX_INSTRUCTION_COUNT"
@@ -270,11 +280,11 @@ esac
 
 SEND_LANE_MODE_NORMALIZED="$(printf '%s' "$JITO_SEND_LANE_MODE" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
 case "$SEND_LANE_MODE_NORMALIZED" in
-  mixed|rpc_only|jito_only|helius_sender_only|nozomi_only|helius_nozomi_stack|helius_tpu_jet|helius_tpu_quic|tpu_jet_helius_tip|tpu_quic_helius_tip|tpu_jet_only|tpu_quic_only)
+  mixed|rpc_only|jito_only|helius_sender_only|nozomi_only|helius_nozomi_stack|astralane_only|helius_astralane_stack|helius_nozomi_astralane_stack|beam_only|helius_beam_stack|helius_nozomi_beam_stack|all_non_beam_stack|helius_tpu_jet|helius_tpu_quic|tpu_jet_helius_tip|tpu_quic_helius_tip|tpu_jet_only|tpu_quic_only)
     export JITO_SEND_LANE_MODE="${SEND_LANE_MODE_NORMALIZED//_/-}"
     ;;
   *)
-    echo "JITO_SEND_LANE_MODE must be mixed, rpc_only/rpc-only, jito_only/jito-only, helius_sender_only/helius-sender-only, nozomi_only/nozomi-only, helius_nozomi_stack/helius-nozomi-stack, helius_tpu_jet/helius-tpu-jet, helius_tpu_quic/helius-tpu-quic, tpu_jet_helius_tip/tpu-jet-helius-tip, tpu_quic_helius_tip/tpu-quic-helius-tip, tpu_jet_only/tpu-jet-only, or tpu_quic_only/tpu-quic-only; got $JITO_SEND_LANE_MODE" >&2
+    echo "JITO_SEND_LANE_MODE must be mixed, rpc_only/rpc-only, jito_only/jito-only, helius_sender_only/helius-sender-only, nozomi_only/nozomi-only, helius_nozomi_stack/helius-nozomi-stack, astralane_only/astralane-only, helius_astralane_stack/helius-astralane-stack, helius_nozomi_astralane_stack/helius-nozomi-astralane-stack, beam_only/beam-only, helius_beam_stack/helius-beam-stack, helius_nozomi_beam_stack/helius-nozomi-beam-stack, all_non_beam_stack/all-non-beam-stack, helius_tpu_jet/helius-tpu-jet, helius_tpu_quic/helius-tpu-quic, tpu_jet_helius_tip/tpu-jet-helius-tip, tpu_quic_helius_tip/tpu-quic-helius-tip, tpu_jet_only/tpu-jet-only, or tpu_quic_only/tpu-quic-only; got $JITO_SEND_LANE_MODE" >&2
     exit 1
     ;;
 esac
@@ -332,6 +342,94 @@ case "$SEND_LANE_MODE_NORMALIZED" in
       yes|true|1|on) ;;
       *) echo "JITO_SEND_LANE_MODE=helius_nozomi_stack requires JITO_NOZOMI_ENABLED=YES" >&2; exit 1 ;;
     esac
+    ;;
+  astralane_only)
+    case "$(printf '%s' "$JITO_ASTRALANE_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=astralane_only requires JITO_ASTRALANE_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    ;;
+  helius_astralane_stack)
+    case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_astralane_stack requires JITO_SEND_FANOUT=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_astralane_stack requires JITO_HELIUS_SENDER_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_ASTRALANE_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_astralane_stack requires JITO_ASTRALANE_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    ;;
+  helius_nozomi_astralane_stack)
+    case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_nozomi_astralane_stack requires JITO_SEND_FANOUT=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_nozomi_astralane_stack requires JITO_HELIUS_SENDER_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_NOZOMI_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_nozomi_astralane_stack requires JITO_NOZOMI_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_ASTRALANE_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_nozomi_astralane_stack requires JITO_ASTRALANE_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    ;;
+  beam_only)
+    case "$(printf '%s' "$JITO_BEAM_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=beam_only requires JITO_BEAM_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    ;;
+  helius_beam_stack)
+    case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_beam_stack requires JITO_SEND_FANOUT=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_beam_stack requires JITO_HELIUS_SENDER_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_BEAM_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_beam_stack requires JITO_BEAM_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    ;;
+  helius_nozomi_beam_stack)
+    case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_nozomi_beam_stack requires JITO_SEND_FANOUT=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_nozomi_beam_stack requires JITO_HELIUS_SENDER_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_NOZOMI_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_nozomi_beam_stack requires JITO_NOZOMI_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_BEAM_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_nozomi_beam_stack requires JITO_BEAM_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    ;;
+  all_non_beam_stack)
+    case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=all_non_beam_stack requires JITO_SEND_FANOUT=YES" >&2; exit 1 ;;
+    esac
+    for required in JITO_HELIUS_SENDER_ENABLED JITO_NOZOMI_ENABLED; do
+      case "$(printf '%s' "${!required}" | tr '[:upper:]' '[:lower:]')" in
+        yes|true|1|on) ;;
+        *) echo "JITO_SEND_LANE_MODE=all_non_beam_stack requires $required=YES" >&2; exit 1 ;;
+      esac
+    done
     ;;
   helius_tpu_jet)
     case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
@@ -405,6 +503,8 @@ esac
 HELIUS_SENDER_ENABLED_NORMALIZED="$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')"
 HELIUS_SENDER_SWQOS_NORMALIZED="$(printf '%s' "$JITO_HELIUS_SENDER_SWQOS_ONLY" | tr '[:upper:]' '[:lower:]')"
 NOZOMI_ENABLED_NORMALIZED="$(printf '%s' "$JITO_NOZOMI_ENABLED" | tr '[:upper:]' '[:lower:]')"
+ASTRALANE_ENABLED_NORMALIZED="$(printf '%s' "$JITO_ASTRALANE_ENABLED" | tr '[:upper:]' '[:lower:]')"
+BEAM_ENABLED_NORMALIZED="$(printf '%s' "${JITO_BEAM_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')"
 TPU_JET_ENABLED_NORMALIZED="$(printf '%s' "$JITO_TPU_JET_ENABLED" | tr '[:upper:]' '[:lower:]')"
 TPU_QUIC_ENABLED_NORMALIZED="$(printf '%s' "$JITO_TPU_QUIC_ENABLED" | tr '[:upper:]' '[:lower:]')"
 case "$HELIUS_SENDER_ENABLED_NORMALIZED" in
@@ -473,6 +573,90 @@ case "$NOZOMI_ENABLED_NORMALIZED" in
     fi
     if [[ -z "$JITO_NOZOMI_TIP_ACCOUNT" ]]; then
       echo "JITO_NOZOMI_ENABLED requires JITO_NOZOMI_TIP_ACCOUNT" >&2
+      exit 1
+    fi
+    ;;
+esac
+case "$ASTRALANE_ENABLED_NORMALIZED" in
+  yes|true|1|on)
+    if [[ "$SEND_LANE_MODE_NORMALIZED" != "astralane_only" ]]; then
+      case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+        yes|true|1|on) ;;
+        *) echo "JITO_ASTRALANE_ENABLED requires JITO_SEND_FANOUT=YES unless JITO_SEND_LANE_MODE=astralane_only" >&2; exit 1 ;;
+      esac
+    fi
+    case "$(printf '%s' "$JITO_FAST_COPY_SEND" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_ASTRALANE_ENABLED requires JITO_FAST_COPY_SEND=YES" >&2; exit 1 ;;
+    esac
+    if [[ -z "$JITO_ASTRALANE_URLS" ]]; then
+      echo "JITO_ASTRALANE_ENABLED requires JITO_ASTRALANE_URLS" >&2
+      exit 1
+    fi
+    if [[ -z "$JITO_ASTRALANE_API_KEY" ]]; then
+      echo "JITO_ASTRALANE_ENABLED requires JITO_ASTRALANE_API_KEY" >&2
+      exit 1
+    fi
+    if [[ -z "$JITO_PRIORITY_FEE_MICRO_LAMPORTS" || "$JITO_PRIORITY_FEE_MICRO_LAMPORTS" == "0" ]]; then
+      echo "JITO_ASTRALANE_ENABLED requires JITO_PRIORITY_FEE_MICRO_LAMPORTS" >&2
+      exit 1
+    fi
+    if [[ -z "$JITO_ASTRALANE_TIP_LAMPORTS" || "$JITO_ASTRALANE_TIP_LAMPORTS" == "0" ]]; then
+      echo "JITO_ASTRALANE_ENABLED requires JITO_ASTRALANE_TIP_LAMPORTS" >&2
+      exit 1
+    fi
+    if (( JITO_ASTRALANE_TIP_LAMPORTS < 1000000 )); then
+      echo "JITO_ASTRALANE_TIP_LAMPORTS must be >= 1000000 lamports" >&2
+      exit 1
+    fi
+    if [[ -z "$JITO_ASTRALANE_TIP_ACCOUNT" && -z "$JITO_ASTRALANE_TIP_ACCOUNTS" ]]; then
+      echo "JITO_ASTRALANE_ENABLED requires JITO_ASTRALANE_TIP_ACCOUNT or JITO_ASTRALANE_TIP_ACCOUNTS" >&2
+      exit 1
+    fi
+    ;;
+esac
+case "$BEAM_ENABLED_NORMALIZED" in
+  yes|true|1|on)
+    if [[ "$SEND_LANE_MODE_NORMALIZED" != "beam_only" ]]; then
+      case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+        yes|true|1|on) ;;
+        *) echo "JITO_BEAM_ENABLED requires JITO_SEND_FANOUT=YES unless JITO_SEND_LANE_MODE=beam_only" >&2; exit 1 ;;
+      esac
+    fi
+    case "$(printf '%s' "$JITO_FAST_COPY_SEND" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_BEAM_ENABLED requires JITO_FAST_COPY_SEND=YES" >&2; exit 1 ;;
+    esac
+    if [[ -z "${JITO_BEAM_URL:-}" ]]; then
+      echo "JITO_BEAM_ENABLED requires JITO_BEAM_URL" >&2
+      exit 1
+    fi
+    if [[ -z "${JITO_BEAM_TOKEN:-}" ]]; then
+      echo "JITO_BEAM_ENABLED requires JITO_BEAM_TOKEN" >&2
+      exit 1
+    fi
+    case "${JITO_BEAM_PROVIDER:-}" in
+      bloxroute|astralane|falcon) ;;
+      *) echo "JITO_BEAM_PROVIDER must be bloxroute, astralane, or falcon" >&2; exit 1 ;;
+    esac
+    case "${JITO_BEAM_MODE:-}" in
+      fastest|mev_protect) ;;
+      *) echo "JITO_BEAM_MODE must be fastest or mev_protect" >&2; exit 1 ;;
+    esac
+    if [[ "${JITO_BEAM_PROVIDER:-}" == "falcon" && "${JITO_BEAM_MODE:-}" == "mev_protect" ]]; then
+      echo "JITO_BEAM_MODE=mev_protect is not supported with falcon" >&2
+      exit 1
+    fi
+    if [[ -z "${JITO_BEAM_TIP_LAMPORTS:-}" || "$JITO_BEAM_TIP_LAMPORTS" == "0" ]]; then
+      echo "JITO_BEAM_ENABLED requires JITO_BEAM_TIP_LAMPORTS" >&2
+      exit 1
+    fi
+    if (( JITO_BEAM_TIP_LAMPORTS < 1000000 )); then
+      echo "JITO_BEAM_TIP_LAMPORTS must be >= 1000000 lamports" >&2
+      exit 1
+    fi
+    if [[ -z "${JITO_BEAM_TIP_ACCOUNTS:-}" ]]; then
+      echo "JITO_BEAM_ENABLED requires JITO_BEAM_TIP_ACCOUNTS" >&2
       exit 1
     fi
     ;;
@@ -574,6 +758,45 @@ if [[ -n "$JITO_NOZOMI_TIP_ACCOUNT" ]]; then
   echo "  nozomi tip account: configured"
 else
   echo "  nozomi tip account: unset"
+fi
+echo "  astralane enabled: $JITO_ASTRALANE_ENABLED"
+echo "  astralane urls: $(if [[ -n "$JITO_ASTRALANE_URLS" ]]; then printf '%s' "$JITO_ASTRALANE_URLS" | awk -F, '{print NF}'; else printf '0'; fi) configured"
+if [[ -n "$JITO_ASTRALANE_API_KEY" ]]; then
+  echo "  astralane api key: configured"
+else
+  echo "  astralane api key: unset"
+fi
+echo "  astralane tip lamports: ${JITO_ASTRALANE_TIP_LAMPORTS:-0}"
+if [[ -n "$JITO_ASTRALANE_TIP_ACCOUNT" ]]; then
+  echo "  astralane tip account: configured"
+else
+  echo "  astralane tip account: unset"
+fi
+if [[ -n "${JITO_ASTRALANE_TIP_ACCOUNTS:-}" ]]; then
+  echo "  astralane tip accounts: configured"
+else
+  echo "  astralane tip accounts: unset"
+fi
+echo "  astralane mev protect: $JITO_ASTRALANE_MEV_PROTECT"
+echo "  astralane swqos only: $JITO_ASTRALANE_SWQOS_ONLY"
+echo "  beam enabled: ${JITO_BEAM_ENABLED:-false}"
+if [[ -n "${JITO_BEAM_URL:-}" ]]; then
+  echo "  beam url: configured"
+else
+  echo "  beam url: unset"
+fi
+if [[ -n "${JITO_BEAM_TOKEN:-}" ]]; then
+  echo "  beam token: configured"
+else
+  echo "  beam token: unset"
+fi
+echo "  beam provider: ${JITO_BEAM_PROVIDER:-}"
+echo "  beam mode: ${JITO_BEAM_MODE:-}"
+echo "  beam tip lamports: ${JITO_BEAM_TIP_LAMPORTS:-0}"
+if [[ -n "${JITO_BEAM_TIP_ACCOUNTS:-}" ]]; then
+  echo "  beam tip accounts: configured"
+else
+  echo "  beam tip accounts: unset"
 fi
 echo "  tpu jet enabled: $JITO_TPU_JET_ENABLED"
 if [[ -n "$JITO_TPU_JET_RPC_URL" ]]; then
@@ -688,6 +911,21 @@ if [[ -z "${JITO_NOZOMI_TIP_ACCOUNT:-}" ]]; then
 fi
 if [[ -z "${JITO_NOZOMI_TIP_ACCOUNTS:-}" ]]; then
   unset JITO_NOZOMI_TIP_ACCOUNTS
+fi
+if [[ -z "${JITO_ASTRALANE_URLS:-}" ]]; then
+  unset JITO_ASTRALANE_URLS
+fi
+if [[ -z "${JITO_ASTRALANE_API_KEY:-}" ]]; then
+  unset JITO_ASTRALANE_API_KEY
+fi
+if [[ -z "${JITO_ASTRALANE_TIP_LAMPORTS:-}" ]]; then
+  unset JITO_ASTRALANE_TIP_LAMPORTS
+fi
+if [[ -z "${JITO_ASTRALANE_TIP_ACCOUNT:-}" ]]; then
+  unset JITO_ASTRALANE_TIP_ACCOUNT
+fi
+if [[ -z "${JITO_ASTRALANE_TIP_ACCOUNTS:-}" ]]; then
+  unset JITO_ASTRALANE_TIP_ACCOUNTS
 fi
 if [[ -z "${JITO_MAX_PROVIDER_TIP_LAMPORTS:-}" ]]; then
   unset JITO_MAX_PROVIDER_TIP_LAMPORTS

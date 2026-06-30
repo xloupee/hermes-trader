@@ -54,10 +54,17 @@ Canaries:
   astralane-only Astralane IrisB binary HTTP only with Astralane tip, for delivery-lane isolation
   helius-astralane-stack Helius Sender plus Astralane same-signature fanout
   helius-nozomi-astralane-stack Helius Sender plus Nozomi plus Astralane fanout
+  lunar-lander-only Lunar Lander binary HTTP only with Lunar tip, for delivery-lane isolation
+  helius-lunar-lander-stack Helius Sender plus Lunar Lander same-signature fanout
+  erpc-swqos-only ERPC SWQoS JSON-RPC only, for delivery-lane isolation
+  helius-erpc-swqos-stack Helius Sender plus ERPC SWQoS same-signature fanout
   beam-only     RPC Fast Beam only with Beam provider tip
   helius-beam-stack Helius Sender plus Beam same-signature fanout
   helius-nozomi-beam-stack Helius Sender plus Nozomi plus Beam same-signature fanout
-  all-non-beam-stack Helius Sender plus Nozomi plus Jet if enabled
+  zero-slot-only 0slot JSON-RPC only with 0slot tip, for delivery-lane isolation
+  helius-zero-slot-stack Helius Sender plus 0slot same-signature fanout
+  helius-nozomi-zero-slot-stack Helius Sender plus Nozomi plus 0slot fanout
+  all-non-beam-stack Helius Sender plus Nozomi plus 0slot plus Jet if enabled
   tpu-jet-fanout Helius baseline plus same-signature Yellowstone Jet sidecar fanout
   tpu-jet-only Same fee shape, Yellowstone Jet sidecar only
   tpu-jet-cheap Jet sidecar only with Helius Sender tip disabled; requires JITO_CANARY_ALLOW_CHEAP_TPU=YES
@@ -125,6 +132,8 @@ canary_values() {
   CANARY_HELIUS_SWQOS_ONLY="${JITO_HELIUS_SENDER_SWQOS_ONLY:-false}"
   CANARY_HELIUS_URLS="${JITO_HELIUS_SENDER_URLS:-}"
   CANARY_TPU_JET_ENABLED="false"
+  CANARY_TPU_JET_FANOUT_SLOTS="${JITO_CANARY_TPU_JET_FANOUT_SLOTS:-${JITO_TPU_JET_FANOUT_SLOTS:-1}}"
+  CANARY_TPU_JET_TIMEOUT_MS="${JITO_CANARY_TPU_JET_TIMEOUT_MS:-${JITO_TPU_JET_TIMEOUT_MS:-30}}"
   CANARY_TPU_QUIC_ENABLED="false"
   CANARY_TPU_QUIC_FANOUT_SLOTS="${JITO_CANARY_TPU_QUIC_FANOUT_SLOTS:-${JITO_TPU_QUIC_FANOUT_SLOTS:-12}}"
   CANARY_TPU_QUIC_TIMEOUT_MS="${JITO_CANARY_TPU_QUIC_TIMEOUT_MS:-${JITO_TPU_QUIC_TIMEOUT_MS:-30}}"
@@ -143,6 +152,18 @@ canary_values() {
   CANARY_ASTRALANE_TIP_ACCOUNTS="${JITO_CANARY_ASTRALANE_TIP_ACCOUNTS:-${JITO_ASTRALANE_TIP_ACCOUNTS:-}}"
   CANARY_ASTRALANE_MEV_PROTECT="${JITO_CANARY_ASTRALANE_MEV_PROTECT:-${JITO_ASTRALANE_MEV_PROTECT:-false}}"
   CANARY_ASTRALANE_SWQOS_ONLY="${JITO_CANARY_ASTRALANE_SWQOS_ONLY:-${JITO_ASTRALANE_SWQOS_ONLY:-false}}"
+  CANARY_LUNAR_LANDER_ENABLED="false"
+  CANARY_LUNAR_LANDER_URLS="${JITO_CANARY_LUNAR_LANDER_URLS:-${JITO_LUNAR_LANDER_URLS:-https://fra.lunar-lander.hellomoon.io/send-bin}}"
+  CANARY_LUNAR_LANDER_API_KEY="${JITO_CANARY_LUNAR_LANDER_API_KEY:-${JITO_LUNAR_LANDER_API_KEY:-}}"
+  CANARY_LUNAR_LANDER_TIP="${JITO_CANARY_LUNAR_LANDER_TIP_LAMPORTS:-${JITO_LUNAR_LANDER_TIP_LAMPORTS:-1000000}}"
+  CANARY_LUNAR_LANDER_TIP_ACCOUNT="${JITO_CANARY_LUNAR_LANDER_TIP_ACCOUNT:-${JITO_LUNAR_LANDER_TIP_ACCOUNT:-moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F}}"
+  CANARY_LUNAR_LANDER_TIP_ACCOUNTS="${JITO_CANARY_LUNAR_LANDER_TIP_ACCOUNTS:-${JITO_LUNAR_LANDER_TIP_ACCOUNTS:-}}"
+  CANARY_LUNAR_LANDER_MEV_PROTECT="${JITO_CANARY_LUNAR_LANDER_MEV_PROTECT:-${JITO_LUNAR_LANDER_MEV_PROTECT:-false}}"
+  CANARY_ERPC_SWQOS_ENABLED="false"
+  CANARY_ERPC_SWQOS_URLS="${JITO_CANARY_ERPC_SWQOS_URLS:-${JITO_ERPC_SWQOS_URLS:-}}"
+  CANARY_ERPC_LEADER_SLOTS_ENABLED="${JITO_CANARY_ERPC_LEADER_SLOTS_ENABLED:-${JITO_ERPC_LEADER_SLOTS_ENABLED:-false}}"
+  CANARY_ERPC_LEADER_SLOTS_URL="${JITO_CANARY_ERPC_LEADER_SLOTS_URL:-${JITO_ERPC_LEADER_SLOTS_URL:-https://edge.erpc.global}}"
+  CANARY_ERPC_API_KEY="${JITO_CANARY_ERPC_API_KEY:-${JITO_ERPC_API_KEY:-}}"
   CANARY_BEAM_ENABLED="false"
   CANARY_BEAM_URL="${JITO_CANARY_BEAM_URL:-${JITO_BEAM_URL:-https://beam.rpcfast.com}}"
   CANARY_BEAM_TOKEN="${JITO_CANARY_BEAM_TOKEN:-${JITO_BEAM_TOKEN:-}}"
@@ -150,6 +171,11 @@ canary_values() {
   CANARY_BEAM_MODE="${JITO_CANARY_BEAM_MODE:-${JITO_BEAM_MODE:-fastest}}"
   CANARY_BEAM_TIP="${JITO_CANARY_BEAM_TIP_LAMPORTS:-${JITO_BEAM_TIP_LAMPORTS:-1000000}}"
   CANARY_BEAM_TIP_ACCOUNTS="${JITO_CANARY_BEAM_TIP_ACCOUNTS:-${JITO_BEAM_TIP_ACCOUNTS:-}}"
+  CANARY_ZERO_SLOT_ENABLED="false"
+  CANARY_ZERO_SLOT_URLS="${JITO_CANARY_ZERO_SLOT_URLS:-${JITO_ZERO_SLOT_URLS:-}}"
+  CANARY_ZERO_SLOT_API_KEY="${JITO_CANARY_ZERO_SLOT_API_KEY:-${JITO_ZERO_SLOT_API_KEY:-}}"
+  CANARY_ZERO_SLOT_TIP="${JITO_CANARY_ZERO_SLOT_TIP_LAMPORTS:-${JITO_ZERO_SLOT_TIP_LAMPORTS:-1000000}}"
+  CANARY_ZERO_SLOT_TIP_ACCOUNTS="${JITO_CANARY_ZERO_SLOT_TIP_ACCOUNTS:-${JITO_ZERO_SLOT_TIP_ACCOUNTS:-}}"
   CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_MAX_PROVIDER_TIP_LAMPORTS:-${JITO_MAX_PROVIDER_TIP_LAMPORTS:-1387500}}"
   CANARY_MAX_SIGNED_TX_BYTES="${JITO_CANARY_MAX_SIGNED_TX_BYTES:-${JITO_MAX_SIGNED_TX_BYTES:-1232}}"
   CANARY_MAX_INSTRUCTION_COUNT="${JITO_CANARY_MAX_INSTRUCTION_COUNT:-${JITO_MAX_INSTRUCTION_COUNT:-8}}"
@@ -223,6 +249,7 @@ canary_values() {
       CANARY_HELIUS_URLS="${JITO_CANARY_HELIUS_REGION_URLS:-}"
       CANARY_NOZOMI_ENABLED="false"
       CANARY_ASTRALANE_ENABLED="false"
+      CANARY_LUNAR_LANDER_ENABLED="false"
       CANARY_BEAM_ENABLED="false"
       if [[ -z "$CANARY_HELIUS_URLS" ]]; then
         echo "helius-regional-fanout requires JITO_CANARY_HELIUS_REGION_URLS" >&2
@@ -251,7 +278,9 @@ canary_values() {
       CANARY_HELIUS_TIP_ACCOUNTS=""
       CANARY_NOZOMI_ENABLED="false"
       CANARY_ASTRALANE_ENABLED="true"
+      CANARY_LUNAR_LANDER_ENABLED="false"
       CANARY_BEAM_ENABLED="false"
+      CANARY_ZERO_SLOT_ENABLED="false"
       CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_ASTRALANE_MAX_PROVIDER_TIP_LAMPORTS:-1000000}"
       ;;
     helius-astralane-stack)
@@ -259,7 +288,9 @@ canary_values() {
       CANARY_HELIUS_ENABLED="true"
       CANARY_NOZOMI_ENABLED="false"
       CANARY_ASTRALANE_ENABLED="true"
+      CANARY_LUNAR_LANDER_ENABLED="false"
       CANARY_BEAM_ENABLED="false"
+      CANARY_ZERO_SLOT_ENABLED="false"
       CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_ASTRALANE_STACK_MAX_PROVIDER_TIP_LAMPORTS:-1387500}"
       CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
       ;;
@@ -268,8 +299,50 @@ canary_values() {
       CANARY_HELIUS_ENABLED="true"
       CANARY_NOZOMI_ENABLED="true"
       CANARY_ASTRALANE_ENABLED="true"
+      CANARY_LUNAR_LANDER_ENABLED="false"
       CANARY_BEAM_ENABLED="false"
+      CANARY_ZERO_SLOT_ENABLED="false"
       CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_ASTRALANE_NOZOMI_STACK_MAX_PROVIDER_TIP_LAMPORTS:-2387500}"
+      CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
+      ;;
+    lunar-lander-only)
+      CANARY_LANE_MODE="lunar-lander-only"
+      CANARY_HELIUS_ENABLED="false"
+      CANARY_HELIUS_TIP=0
+      CANARY_HELIUS_TIP_ACCOUNT=""
+      CANARY_HELIUS_TIP_ACCOUNTS=""
+      CANARY_NOZOMI_ENABLED="false"
+      CANARY_ASTRALANE_ENABLED="false"
+      CANARY_LUNAR_LANDER_ENABLED="true"
+      CANARY_BEAM_ENABLED="false"
+      CANARY_ZERO_SLOT_ENABLED="false"
+      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_LUNAR_LANDER_MAX_PROVIDER_TIP_LAMPORTS:-1000000}"
+      ;;
+    helius-lunar-lander-stack)
+      CANARY_LANE_MODE="helius-lunar-lander-stack"
+      CANARY_HELIUS_ENABLED="true"
+      CANARY_NOZOMI_ENABLED="false"
+      CANARY_ASTRALANE_ENABLED="false"
+      CANARY_LUNAR_LANDER_ENABLED="true"
+      CANARY_BEAM_ENABLED="false"
+      CANARY_ZERO_SLOT_ENABLED="false"
+      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_LUNAR_LANDER_STACK_MAX_PROVIDER_TIP_LAMPORTS:-1387500}"
+      CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
+      ;;
+    erpc-swqos-only)
+      CANARY_LANE_MODE="erpc-swqos-only"
+      CANARY_HELIUS_ENABLED="false"
+      CANARY_HELIUS_TIP=0
+      CANARY_HELIUS_TIP_ACCOUNT=""
+      CANARY_HELIUS_TIP_ACCOUNTS=""
+      CANARY_NOZOMI_ENABLED="false"
+      CANARY_ERPC_SWQOS_ENABLED="true"
+      ;;
+    helius-erpc-swqos-stack)
+      CANARY_LANE_MODE="helius-erpc-swqos-stack"
+      CANARY_HELIUS_ENABLED="true"
+      CANARY_NOZOMI_ENABLED="false"
+      CANARY_ERPC_SWQOS_ENABLED="true"
       CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
       ;;
     beam-only)
@@ -296,22 +369,56 @@ canary_values() {
       CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_BEAM_STACK_MAX_PROVIDER_TIP_LAMPORTS:-2500000}"
       CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
       ;;
+    zero-slot-only)
+      CANARY_LANE_MODE="zero-slot-only"
+      CANARY_HELIUS_ENABLED="false"
+      CANARY_HELIUS_TIP=0
+      CANARY_HELIUS_TIP_ACCOUNT=""
+      CANARY_HELIUS_TIP_ACCOUNTS=""
+      CANARY_NOZOMI_ENABLED="false"
+      CANARY_BEAM_ENABLED="false"
+      CANARY_ZERO_SLOT_ENABLED="true"
+      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_ZERO_SLOT_MAX_PROVIDER_TIP_LAMPORTS:-1000000}"
+      ;;
+    helius-zero-slot-stack)
+      CANARY_LANE_MODE="helius-zero-slot-stack"
+      CANARY_HELIUS_ENABLED="true"
+      CANARY_NOZOMI_ENABLED="false"
+      CANARY_BEAM_ENABLED="false"
+      CANARY_ZERO_SLOT_ENABLED="true"
+      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_ZERO_SLOT_STACK_MAX_PROVIDER_TIP_LAMPORTS:-1200000}"
+      CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
+      ;;
+    helius-nozomi-zero-slot-stack)
+      CANARY_LANE_MODE="helius-nozomi-zero-slot-stack"
+      CANARY_HELIUS_ENABLED="true"
+      CANARY_NOZOMI_ENABLED="true"
+      CANARY_BEAM_ENABLED="false"
+      CANARY_ZERO_SLOT_ENABLED="true"
+      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_ZERO_SLOT_NOZOMI_STACK_MAX_PROVIDER_TIP_LAMPORTS:-2200000}"
+      CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
+      ;;
     all-non-beam-stack)
       CANARY_LANE_MODE="all-non-beam-stack"
       CANARY_HELIUS_ENABLED="true"
       CANARY_NOZOMI_ENABLED="true"
       CANARY_BEAM_ENABLED="false"
+      CANARY_ZERO_SLOT_ENABLED="true"
       CANARY_TPU_JET_ENABLED="${JITO_CANARY_ALL_NON_BEAM_TPU_JET_ENABLED:-${JITO_TPU_JET_ENABLED:-false}}"
-      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_ALL_NON_BEAM_MAX_PROVIDER_TIP_LAMPORTS:-1387500}"
+      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_ALL_NON_BEAM_MAX_PROVIDER_TIP_LAMPORTS:-2387500}"
       CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
       ;;
     tpu-jet-fanout)
       CANARY_LANE_MODE="helius-tpu-jet"
       CANARY_TPU_JET_ENABLED="true"
+      CANARY_TPU_JET_FANOUT_SLOTS="${JITO_CANARY_TPU_JET_FANOUT_SLOTS:-1}"
+      CANARY_TPU_JET_TIMEOUT_MS="${JITO_CANARY_TPU_JET_TIMEOUT_MS:-30}"
       ;;
     tpu-jet-only)
       CANARY_LANE_MODE="tpu-jet-helius-tip"
       CANARY_TPU_JET_ENABLED="true"
+      CANARY_TPU_JET_FANOUT_SLOTS="${JITO_CANARY_TPU_JET_FANOUT_SLOTS:-1}"
+      CANARY_TPU_JET_TIMEOUT_MS="${JITO_CANARY_TPU_JET_TIMEOUT_MS:-30}"
       ;;
     tpu-jet-cheap)
       case "$(printf '%s' "${JITO_CANARY_ALLOW_CHEAP_TPU:-false}" | tr '[:upper:]' '[:lower:]')" in
@@ -324,6 +431,8 @@ canary_values() {
       CANARY_LANE_MODE="tpu-jet-only"
       CANARY_HELIUS_ENABLED="false"
       CANARY_TPU_JET_ENABLED="true"
+      CANARY_TPU_JET_FANOUT_SLOTS="${JITO_CANARY_TPU_JET_FANOUT_SLOTS:-1}"
+      CANARY_TPU_JET_TIMEOUT_MS="${JITO_CANARY_TPU_JET_TIMEOUT_MS:-30}"
       CANARY_HELIUS_TIP=0
       CANARY_HELIUS_TIP_ACCOUNT=""
       ;;
@@ -398,6 +507,18 @@ CANARY_ASTRALANE_TIP_ACCOUNT_CONFIGURED=$([[ -n "${CANARY_ASTRALANE_TIP_ACCOUNT:
 CANARY_ASTRALANE_TIP_ACCOUNTS_CONFIGURED=$([[ -n "${CANARY_ASTRALANE_TIP_ACCOUNTS:-}" ]] && echo true || echo false)
 CANARY_ASTRALANE_MEV_PROTECT=${CANARY_ASTRALANE_MEV_PROTECT:-}
 CANARY_ASTRALANE_SWQOS_ONLY=${CANARY_ASTRALANE_SWQOS_ONLY:-}
+CANARY_LUNAR_LANDER_ENABLED=${CANARY_LUNAR_LANDER_ENABLED:-}
+CANARY_LUNAR_LANDER_URLS_CONFIGURED=$([[ -n "${CANARY_LUNAR_LANDER_URLS:-}" ]] && echo true || echo false)
+CANARY_LUNAR_LANDER_API_KEY_CONFIGURED=$([[ -n "${CANARY_LUNAR_LANDER_API_KEY:-}" ]] && echo true || echo false)
+CANARY_LUNAR_LANDER_TIP_LAMPORTS=${CANARY_LUNAR_LANDER_TIP:-}
+CANARY_LUNAR_LANDER_TIP_ACCOUNT_CONFIGURED=$([[ -n "${CANARY_LUNAR_LANDER_TIP_ACCOUNT:-}" ]] && echo true || echo false)
+CANARY_LUNAR_LANDER_TIP_ACCOUNTS_CONFIGURED=$([[ -n "${CANARY_LUNAR_LANDER_TIP_ACCOUNTS:-}" ]] && echo true || echo false)
+CANARY_LUNAR_LANDER_MEV_PROTECT=${CANARY_LUNAR_LANDER_MEV_PROTECT:-}
+CANARY_ERPC_SWQOS_ENABLED=${CANARY_ERPC_SWQOS_ENABLED:-}
+CANARY_ERPC_SWQOS_URLS_CONFIGURED=$([[ -n "${CANARY_ERPC_SWQOS_URLS:-}" ]] && echo true || echo false)
+CANARY_ERPC_LEADER_SLOTS_ENABLED=${CANARY_ERPC_LEADER_SLOTS_ENABLED:-}
+CANARY_ERPC_LEADER_SLOTS_URL_CONFIGURED=$([[ -n "${CANARY_ERPC_LEADER_SLOTS_URL:-}" ]] && echo true || echo false)
+CANARY_ERPC_API_KEY_CONFIGURED=$([[ -n "${CANARY_ERPC_API_KEY:-}" ]] && echo true || echo false)
 CANARY_BEAM_ENABLED=${CANARY_BEAM_ENABLED:-}
 CANARY_BEAM_URL_CONFIGURED=$([[ -n "${CANARY_BEAM_URL:-}" ]] && echo true || echo false)
 CANARY_BEAM_TOKEN_CONFIGURED=$([[ -n "${CANARY_BEAM_TOKEN:-}" ]] && echo true || echo false)
@@ -405,6 +526,11 @@ CANARY_BEAM_PROVIDER=${CANARY_BEAM_PROVIDER:-}
 CANARY_BEAM_MODE=${CANARY_BEAM_MODE:-}
 CANARY_BEAM_TIP_LAMPORTS=${CANARY_BEAM_TIP:-}
 CANARY_BEAM_TIP_ACCOUNTS_CONFIGURED=$([[ -n "${CANARY_BEAM_TIP_ACCOUNTS:-}" ]] && echo true || echo false)
+CANARY_ZERO_SLOT_ENABLED=${CANARY_ZERO_SLOT_ENABLED:-}
+CANARY_ZERO_SLOT_URLS_CONFIGURED=$([[ -n "${CANARY_ZERO_SLOT_URLS:-}" ]] && echo true || echo false)
+CANARY_ZERO_SLOT_API_KEY_CONFIGURED=$([[ -n "${CANARY_ZERO_SLOT_API_KEY:-}" ]] && echo true || echo false)
+CANARY_ZERO_SLOT_TIP_LAMPORTS=${CANARY_ZERO_SLOT_TIP:-}
+CANARY_ZERO_SLOT_TIP_ACCOUNTS_CONFIGURED=$([[ -n "${CANARY_ZERO_SLOT_TIP_ACCOUNTS:-}" ]] && echo true || echo false)
 CANARY_MAX_PROVIDER_TIP_LAMPORTS=${CANARY_MAX_PROVIDER_TIP_LAMPORTS:-}
 CANARY_MAX_SIGNED_TX_BYTES=${CANARY_MAX_SIGNED_TX_BYTES:-}
 CANARY_MAX_INSTRUCTION_COUNT=${CANARY_MAX_INSTRUCTION_COUNT:-}
@@ -415,6 +541,8 @@ CANARY_ACCOUNT_PRIORITY_FEE_REFRESH_MS=${CANARY_ACCOUNT_PRIORITY_FEE_REFRESH_MS:
 CANARY_ACCOUNT_PRIORITY_FEE_STALE_MS=${CANARY_ACCOUNT_PRIORITY_FEE_STALE_MS:-}
 CANARY_ACCOUNT_PRIORITY_FEE_PERCENTILE=${CANARY_ACCOUNT_PRIORITY_FEE_PERCENTILE:-}
 CANARY_TPU_JET_ENABLED=${CANARY_TPU_JET_ENABLED:-}
+CANARY_TPU_JET_FANOUT_SLOTS=${CANARY_TPU_JET_FANOUT_SLOTS:-}
+CANARY_TPU_JET_TIMEOUT_MS=${CANARY_TPU_JET_TIMEOUT_MS:-}
 CANARY_TPU_QUIC_ENABLED=${CANARY_TPU_QUIC_ENABLED:-}
 CANARY_TPU_QUIC_FANOUT_SLOTS=${CANARY_TPU_QUIC_FANOUT_SLOTS:-}
 CANARY_TPU_QUIC_TIMEOUT_MS=${CANARY_TPU_QUIC_TIMEOUT_MS:-}
@@ -454,6 +582,20 @@ print_status() {
   echo "astralane_tip_accounts=$([[ -n "${JITO_ASTRALANE_TIP_ACCOUNTS:-}" ]] && echo configured || echo empty)"
   echo "astralane_mev_protect=${JITO_ASTRALANE_MEV_PROTECT:-}"
   echo "astralane_swqos_only=${JITO_ASTRALANE_SWQOS_ONLY:-}"
+  echo "lunar_lander_enabled=${JITO_LUNAR_LANDER_ENABLED:-}"
+  echo "lunar_lander_urls=$([[ -n "${JITO_LUNAR_LANDER_URLS:-}" ]] && echo configured || echo empty)"
+  echo "lunar_lander_api_key=$([[ -n "${JITO_LUNAR_LANDER_API_KEY:-}" ]] && echo configured || echo empty)"
+  echo "lunar_lander_tip_lamports=${JITO_LUNAR_LANDER_TIP_LAMPORTS:-}"
+  echo "lunar_lander_tip_account=$([[ -n "${JITO_LUNAR_LANDER_TIP_ACCOUNT:-}" ]] && echo configured || echo empty)"
+  echo "lunar_lander_tip_accounts=$([[ -n "${JITO_LUNAR_LANDER_TIP_ACCOUNTS:-}" ]] && echo configured || echo empty)"
+  echo "lunar_lander_mev_protect=${JITO_LUNAR_LANDER_MEV_PROTECT:-}"
+  echo "erpc_swqos_enabled=${JITO_ERPC_SWQOS_ENABLED:-}"
+  echo "erpc_swqos_urls=$([[ -n "${JITO_ERPC_SWQOS_URLS:-}" ]] && echo configured || echo empty)"
+  echo "erpc_leader_slots_enabled=${JITO_ERPC_LEADER_SLOTS_ENABLED:-}"
+  echo "erpc_leader_slots_url=$([[ -n "${JITO_ERPC_LEADER_SLOTS_URL:-}" ]] && echo configured || echo empty)"
+  echo "erpc_api_key=$([[ -n "${JITO_ERPC_API_KEY:-}" ]] && echo configured || echo empty)"
+  echo "erpc_yellowstone_grpc_url=$([[ -n "${JITO_ERPC_YELLOWSTONE_GRPC_URL:-}" ]] && echo configured || echo empty)"
+  echo "erpc_yellowstone_grpc_x_token=$([[ -n "${JITO_ERPC_YELLOWSTONE_GRPC_X_TOKEN:-}" ]] && echo configured || echo empty)"
   echo "beam_enabled=${JITO_BEAM_ENABLED:-}"
   echo "beam_url=$([[ -n "${JITO_BEAM_URL:-}" ]] && echo configured || echo empty)"
   echo "beam_token=$([[ -n "${JITO_BEAM_TOKEN:-}" ]] && echo configured || echo empty)"
@@ -461,6 +603,11 @@ print_status() {
   echo "beam_mode=${JITO_BEAM_MODE:-}"
   echo "beam_tip_lamports=${JITO_BEAM_TIP_LAMPORTS:-}"
   echo "beam_tip_accounts=$([[ -n "${JITO_BEAM_TIP_ACCOUNTS:-}" ]] && echo configured || echo empty)"
+  echo "zero_slot_enabled=${JITO_ZERO_SLOT_ENABLED:-}"
+  echo "zero_slot_urls=$([[ -n "${JITO_ZERO_SLOT_URLS:-}" ]] && echo configured || echo empty)"
+  echo "zero_slot_api_key=$([[ -n "${JITO_ZERO_SLOT_API_KEY:-}" ]] && echo configured || echo empty)"
+  echo "zero_slot_tip_lamports=${JITO_ZERO_SLOT_TIP_LAMPORTS:-}"
+  echo "zero_slot_tip_accounts=$([[ -n "${JITO_ZERO_SLOT_TIP_ACCOUNTS:-}" ]] && echo configured || echo empty)"
   echo "tpu_jet_enabled=${JITO_TPU_JET_ENABLED:-}"
   echo "tpu_jet_rpc_url=$([[ -n "${JITO_TPU_JET_RPC_URL:-}" ]] && echo configured || echo empty)"
   echo "tpu_jet_ws_url=$([[ -n "${JITO_TPU_JET_WS_URL:-}" ]] && echo configured || echo empty)"
@@ -662,6 +809,14 @@ require_nozomi_ready() {
   fi
 }
 
+require_erpc_swqos_ready() {
+  local name="$1"
+  if [[ -z "${CANARY_ERPC_SWQOS_URLS:-}" ]]; then
+    echo "$name requires JITO_CANARY_ERPC_SWQOS_URLS or JITO_ERPC_SWQOS_URLS" >&2
+    exit 2
+  fi
+}
+
 require_astralane_ready() {
   local name="$1"
   if [[ -z "${CANARY_ASTRALANE_URLS:-}" ]]; then
@@ -682,6 +837,30 @@ require_astralane_ready() {
   fi
   if [[ -z "${CANARY_ASTRALANE_TIP_ACCOUNT:-}" && -z "${CANARY_ASTRALANE_TIP_ACCOUNTS:-}" ]]; then
     echo "$name requires JITO_CANARY_ASTRALANE_TIP_ACCOUNT/JITO_ASTRALANE_TIP_ACCOUNT or JITO_CANARY_ASTRALANE_TIP_ACCOUNTS/JITO_ASTRALANE_TIP_ACCOUNTS" >&2
+    exit 2
+  fi
+}
+
+require_lunar_lander_ready() {
+  local name="$1"
+  if [[ -z "${CANARY_LUNAR_LANDER_URLS:-}" ]]; then
+    echo "$name requires JITO_CANARY_LUNAR_LANDER_URLS or JITO_LUNAR_LANDER_URLS in $WORKER_ENV_FILE or $APP_ENV_FILE" >&2
+    exit 2
+  fi
+  if [[ -z "${CANARY_LUNAR_LANDER_API_KEY:-}" ]]; then
+    echo "$name requires JITO_CANARY_LUNAR_LANDER_API_KEY or JITO_LUNAR_LANDER_API_KEY" >&2
+    exit 2
+  fi
+  if [[ -z "${CANARY_LUNAR_LANDER_TIP:-}" || ! "$CANARY_LUNAR_LANDER_TIP" =~ ^[0-9]+$ ]]; then
+    echo "$name requires numeric JITO_CANARY_LUNAR_LANDER_TIP_LAMPORTS or JITO_LUNAR_LANDER_TIP_LAMPORTS" >&2
+    exit 2
+  fi
+  if (( CANARY_LUNAR_LANDER_TIP < 1000000 )); then
+    echo "$name requires Lunar Lander tip >= 1000000 lamports" >&2
+    exit 2
+  fi
+  if [[ -z "${CANARY_LUNAR_LANDER_TIP_ACCOUNT:-}" && -z "${CANARY_LUNAR_LANDER_TIP_ACCOUNTS:-}" ]]; then
+    echo "$name requires JITO_CANARY_LUNAR_LANDER_TIP_ACCOUNT/JITO_LUNAR_LANDER_TIP_ACCOUNT or JITO_CANARY_LUNAR_LANDER_TIP_ACCOUNTS/JITO_LUNAR_LANDER_TIP_ACCOUNTS" >&2
     exit 2
   fi
 }
@@ -726,6 +905,30 @@ require_beam_ready() {
   fi
   if [[ -z "${CANARY_BEAM_TIP_ACCOUNTS:-}" ]]; then
     echo "$name requires JITO_CANARY_BEAM_TIP_ACCOUNTS or JITO_BEAM_TIP_ACCOUNTS" >&2
+    exit 2
+  fi
+}
+
+require_zero_slot_ready() {
+  local name="$1"
+  if [[ -z "${CANARY_ZERO_SLOT_URLS:-}" ]]; then
+    echo "$name requires JITO_CANARY_ZERO_SLOT_URLS or JITO_ZERO_SLOT_URLS" >&2
+    exit 2
+  fi
+  if [[ -z "${CANARY_ZERO_SLOT_API_KEY:-}" ]]; then
+    echo "$name requires JITO_CANARY_ZERO_SLOT_API_KEY or JITO_ZERO_SLOT_API_KEY" >&2
+    exit 2
+  fi
+  if [[ -z "${CANARY_ZERO_SLOT_TIP:-}" || ! "$CANARY_ZERO_SLOT_TIP" =~ ^[0-9]+$ ]]; then
+    echo "$name requires numeric JITO_CANARY_ZERO_SLOT_TIP_LAMPORTS or JITO_ZERO_SLOT_TIP_LAMPORTS" >&2
+    exit 2
+  fi
+  if (( CANARY_ZERO_SLOT_TIP < 1000000 )); then
+    echo "$name requires 0slot tip >= 1000000 lamports" >&2
+    exit 2
+  fi
+  if [[ -z "${CANARY_ZERO_SLOT_TIP_ACCOUNTS:-}" ]]; then
+    echo "$name requires JITO_CANARY_ZERO_SLOT_TIP_ACCOUNTS or JITO_ZERO_SLOT_TIP_ACCOUNTS" >&2
     exit 2
   fi
 }
@@ -780,9 +983,24 @@ apply_canary() {
       require_astralane_ready "$name"
       ;;
   esac
+  case "$CANARY_LUNAR_LANDER_ENABLED" in
+    true)
+      require_lunar_lander_ready "$name"
+      ;;
+  esac
+  case "$CANARY_ERPC_SWQOS_ENABLED" in
+    true)
+      require_erpc_swqos_ready "$name"
+      ;;
+  esac
   case "$CANARY_BEAM_ENABLED" in
     true)
       require_beam_ready "$name"
+      ;;
+  esac
+  case "$CANARY_ZERO_SLOT_ENABLED" in
+    true)
+      require_zero_slot_ready "$name"
       ;;
   esac
   baseline_gate "$name"
@@ -795,6 +1013,8 @@ apply_canary() {
   set_env_var "$WORKER_ENV_FILE" JITO_BLOCK_ENGINE_SEND_URLS ""
   set_env_var "$WORKER_ENV_FILE" JITO_TIP_LAMPORTS "0"
   set_env_var "$WORKER_ENV_FILE" JITO_TPU_JET_ENABLED "$CANARY_TPU_JET_ENABLED"
+  set_env_var "$WORKER_ENV_FILE" JITO_TPU_JET_FANOUT_SLOTS "$CANARY_TPU_JET_FANOUT_SLOTS"
+  set_env_var "$WORKER_ENV_FILE" JITO_TPU_JET_TIMEOUT_MS "$CANARY_TPU_JET_TIMEOUT_MS"
   set_env_var "$WORKER_ENV_FILE" JITO_TPU_QUIC_ENABLED "$CANARY_TPU_QUIC_ENABLED"
   set_env_var "$WORKER_ENV_FILE" JITO_TPU_QUIC_FANOUT_SLOTS "$CANARY_TPU_QUIC_FANOUT_SLOTS"
   set_env_var "$WORKER_ENV_FILE" JITO_TPU_QUIC_TIMEOUT_MS "$CANARY_TPU_QUIC_TIMEOUT_MS"
@@ -815,6 +1035,18 @@ apply_canary() {
   set_env_var "$WORKER_ENV_FILE" JITO_ASTRALANE_TIP_ACCOUNTS "$CANARY_ASTRALANE_TIP_ACCOUNTS"
   set_env_var "$WORKER_ENV_FILE" JITO_ASTRALANE_MEV_PROTECT "$CANARY_ASTRALANE_MEV_PROTECT"
   set_env_var "$WORKER_ENV_FILE" JITO_ASTRALANE_SWQOS_ONLY "$CANARY_ASTRALANE_SWQOS_ONLY"
+  set_env_var "$WORKER_ENV_FILE" JITO_LUNAR_LANDER_ENABLED "$CANARY_LUNAR_LANDER_ENABLED"
+  set_env_var "$WORKER_ENV_FILE" JITO_LUNAR_LANDER_URLS "$CANARY_LUNAR_LANDER_URLS"
+  set_env_var "$WORKER_ENV_FILE" JITO_LUNAR_LANDER_API_KEY "$CANARY_LUNAR_LANDER_API_KEY"
+  set_env_var "$WORKER_ENV_FILE" JITO_LUNAR_LANDER_TIP_LAMPORTS "$CANARY_LUNAR_LANDER_TIP"
+  set_env_var "$WORKER_ENV_FILE" JITO_LUNAR_LANDER_TIP_ACCOUNT "$CANARY_LUNAR_LANDER_TIP_ACCOUNT"
+  set_env_var "$WORKER_ENV_FILE" JITO_LUNAR_LANDER_TIP_ACCOUNTS "$CANARY_LUNAR_LANDER_TIP_ACCOUNTS"
+  set_env_var "$WORKER_ENV_FILE" JITO_LUNAR_LANDER_MEV_PROTECT "$CANARY_LUNAR_LANDER_MEV_PROTECT"
+  set_env_var "$WORKER_ENV_FILE" JITO_ERPC_SWQOS_ENABLED "$CANARY_ERPC_SWQOS_ENABLED"
+  set_env_var "$WORKER_ENV_FILE" JITO_ERPC_SWQOS_URLS "$CANARY_ERPC_SWQOS_URLS"
+  set_env_var "$WORKER_ENV_FILE" JITO_ERPC_LEADER_SLOTS_ENABLED "$CANARY_ERPC_LEADER_SLOTS_ENABLED"
+  set_env_var "$WORKER_ENV_FILE" JITO_ERPC_LEADER_SLOTS_URL "$CANARY_ERPC_LEADER_SLOTS_URL"
+  set_env_var "$WORKER_ENV_FILE" JITO_ERPC_API_KEY "$CANARY_ERPC_API_KEY"
   set_env_var "$WORKER_ENV_FILE" JITO_BEAM_ENABLED "$CANARY_BEAM_ENABLED"
   set_env_var "$WORKER_ENV_FILE" JITO_BEAM_URL "$CANARY_BEAM_URL"
   set_env_var "$WORKER_ENV_FILE" JITO_BEAM_TOKEN "$CANARY_BEAM_TOKEN"
@@ -822,6 +1054,11 @@ apply_canary() {
   set_env_var "$WORKER_ENV_FILE" JITO_BEAM_MODE "$CANARY_BEAM_MODE"
   set_env_var "$WORKER_ENV_FILE" JITO_BEAM_TIP_LAMPORTS "$CANARY_BEAM_TIP"
   set_env_var "$WORKER_ENV_FILE" JITO_BEAM_TIP_ACCOUNTS "$CANARY_BEAM_TIP_ACCOUNTS"
+  set_env_var "$WORKER_ENV_FILE" JITO_ZERO_SLOT_ENABLED "$CANARY_ZERO_SLOT_ENABLED"
+  set_env_var "$WORKER_ENV_FILE" JITO_ZERO_SLOT_URLS "$CANARY_ZERO_SLOT_URLS"
+  set_env_var "$WORKER_ENV_FILE" JITO_ZERO_SLOT_API_KEY "$CANARY_ZERO_SLOT_API_KEY"
+  set_env_var "$WORKER_ENV_FILE" JITO_ZERO_SLOT_TIP_LAMPORTS "$CANARY_ZERO_SLOT_TIP"
+  set_env_var "$WORKER_ENV_FILE" JITO_ZERO_SLOT_TIP_ACCOUNTS "$CANARY_ZERO_SLOT_TIP_ACCOUNTS"
   set_env_var "$WORKER_ENV_FILE" JITO_BLOCKHASH_COMMITMENT "$CANARY_BLOCKHASH_COMMITMENT"
   set_env_var "$WORKER_ENV_FILE" JITO_PRIORITY_FEE_MICRO_LAMPORTS "$CANARY_PRIORITY"
   set_env_var "$WORKER_ENV_FILE" JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS "$CANARY_MAX_PRIORITY"

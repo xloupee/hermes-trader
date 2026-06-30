@@ -222,14 +222,20 @@ a send lane. If
 
 `JITO_SEND_LANE_MODE` is resolved at startup and never from per-signal IO:
 
-- `mixed`: current behavior. Build/sign one transaction with configured Jito and
-  Helius Sender tips, then fan out the same signed bytes to all enabled lane
-  families.
+- `mixed`: current behavior. Build/sign one transaction with configured Jito,
+  Helius Sender, and enabled paid-provider tips, then fan out the same signed
+  bytes to all enabled lane families.
 - `rpc_only`: use RPC endpoints and priority fee only.
 - `jito_only`: use Jito block-engine endpoints and Jito tip only. Requires
   `JITO_SEND_FANOUT=YES` and `JITO_BLOCK_ENGINE_SEND_URLS`.
 - `helius_sender_only`: use Helius Sender endpoints and Sender tip only.
   Requires `JITO_HELIUS_SENDER_ENABLED=YES`.
+- `lunar_lander_only`: use Lunar Lander `/send-bin` endpoints and Lunar Lander
+  tip only. Requires `JITO_LUNAR_LANDER_ENABLED=YES`,
+  `JITO_LUNAR_LANDER_API_KEY`, and a Lunar tip account.
+- `helius_lunar_lander_stack`: use Helius Sender plus Lunar Lander with the
+  same signed bytes. Requires `JITO_SEND_FANOUT=YES`,
+  `JITO_HELIUS_SENDER_ENABLED=YES`, and `JITO_LUNAR_LANDER_ENABLED=YES`.
 - `helius_tpu_jet`: use Helius Sender plus the local Yellowstone Jet sidecar
   lane. This is the canary mode for same-signature Helius + Jet fanout without
   adding RPC/Jito lanes.
@@ -257,11 +263,23 @@ worker does not link the Jet Solana 3.x dependency graph:
 ```bash
 JITO_TPU_JET_ENABLED=false
 JITO_TPU_JET_RPC_URL=https://rpc.example
-JITO_TPU_JET_WS_URL=https://yellowstone-grpc.example
+JITO_TPU_JET_WS_URL=http://grpc-fra1-burst.erpc.global
 JITO_TPU_JET_SIDECAR_URL=http://127.0.0.1:8787
-JITO_TPU_JET_FANOUT_SLOTS=12
+JITO_TPU_JET_FANOUT_SLOTS=1
 JITO_TPU_JET_TIMEOUT_MS=30
 ```
+
+For ERPC Burst trials, prefer the ERPC-specific aliases in the env file:
+
+```bash
+JITO_ERPC_YELLOWSTONE_GRPC_URL=http://grpc-fra1-burst.erpc.global
+JITO_ERPC_YELLOWSTONE_GRPC_X_TOKEN=
+```
+
+The sidecar launcher maps those to `JITO_TPU_JET_GRPC_URL` and
+`JITO_TPU_JET_GRPC_X_TOKEN`. Use the exact endpoint/token from the ERPC
+dashboard after registering the Droplet IP; the Frankfurt Burst public endpoint
+is the expected first choice for a Frankfurt Droplet.
 
 The Droplet launcher is `run-tpu-jet-sidecar.sh`; the matching systemd template
 is `systemd/jito-tpu-jet-sidecar.service`.
@@ -280,6 +298,20 @@ When enabled in `mixed`, the worker sends the same signed wire transaction bytes
 to TPU Jet/QUIC alongside the HTTP lanes. TPU dispatch telemetry is local
 dispatch only; it is not treated as ACK or landing proof. Landing quality still
 comes from confirmation, `slotDelta`, and `txDelta`.
+
+Lunar Lander is default-off and uses binary HTTP with the API key in the
+request URL. Keep keys in env only; status output reports only whether the key
+is configured.
+
+```bash
+JITO_LUNAR_LANDER_ENABLED=false
+JITO_LUNAR_LANDER_URLS=https://fra.lunar-lander.hellomoon.io/send-bin
+JITO_LUNAR_LANDER_API_KEY=
+JITO_LUNAR_LANDER_TIP_LAMPORTS=1000000
+JITO_LUNAR_LANDER_TIP_ACCOUNT=moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F
+JITO_LUNAR_LANDER_TIP_ACCOUNTS=moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F
+JITO_LUNAR_LANDER_MEV_PROTECT=false
+```
 
 Do not race lane-specific signed variants. Different fee/tip instructions
 produce different messages and signatures, so multiple variants can land as

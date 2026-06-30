@@ -111,7 +111,21 @@ window does not meet the minimum scored-row and `txDelta` coverage thresholds.
    intentional. IrisB is binary HTTP, not QUIC: it returns ACK/signature/error
    telemetry, but the canary is still judged by landed rate, same-slot rate,
    `txDelta`, failed-on-chain, submitted-not-landed, and configured tip cost.
-9. RPC Fast Beam, only after `JITO_BEAM_TOKEN` and provider-specific
+9. Lunar Lander, only after `JITO_LUNAR_LANDER_API_KEY`,
+   `JITO_LUNAR_LANDER_URLS`, and the Lunar Lander tip account(s) are
+   configured. Start with `lunar-lander-only` for delivery-lane isolation,
+   then `helius-lunar-lander-stack` as the first same-signature race. Lunar
+   Lander is binary HTTP at `/send-bin`, requires a provider tip of at least
+   `1000000` lamports in the signed transaction, and should be judged by
+   landed rate, same-slot rate, `txDelta`, submitted-not-landed, failed-on-chain,
+   and configured tip cost, not first ACK.
+10. ERPC SWQoS, only after `JITO_ERPC_SWQOS_URLS` is configured. Start with
+   `erpc-swqos-only` for delivery-lane isolation, then
+   `helius-erpc-swqos-stack` for Helius Sender + ERPC SWQoS same-signature
+   fanout. This is a normal JSON-RPC send surface, so the worker does not add a
+   provider tip instruction for ERPC SWQoS. Score by landed position and
+   submitted-not-landed rate; do not promote on first ACK alone.
+11. RPC Fast Beam, only after `JITO_BEAM_TOKEN` and provider-specific
    `JITO_BEAM_TIP_ACCOUNTS` are configured. Start with `beam-only` for smoke,
    then `helius-beam-stack` as a Nozomi-replacement test, then
    `helius-nozomi-beam-stack` only when the higher tip cost is intentional.
@@ -120,21 +134,37 @@ window does not meet the minimum scored-row and `txDelta` coverage thresholds.
    The triple stack raises `JITO_MAX_PROVIDER_TIP_LAMPORTS` to `2500000` by
    default and must be judged by landing position and failed-on-chain rate, not
    ACK speed.
-10. All non-Beam stack: `all-non-beam-stack` applies Helius Sender + Nozomi,
-   and includes TPU Jet only if
+12. 0slot, only after `JITO_ZERO_SLOT_URLS`, `JITO_ZERO_SLOT_API_KEY`, and
+   `JITO_ZERO_SLOT_TIP_ACCOUNTS` are configured. Start with `zero-slot-only`,
+   then `helius-zero-slot-stack`, then `helius-nozomi-zero-slot-stack` only if
+   the cost is justified. The default 0slot canary tip is `1000000` lamports, so
+   keep the sample tiny until it proves value.
+13. All non-Beam stack: `all-non-beam-stack` applies Helius Sender + Nozomi +
+   0slot, and includes TPU Jet only if
    `JITO_CANARY_ALL_NON_BEAM_TPU_JET_ENABLED` or the existing
    `JITO_TPU_JET_ENABLED` is true. Astralane, Beam, and direct TPU QUIC are
    excluded. Use `helius-nozomi-astralane-stack` when Astralane cost is
-   intentional. The default provider-tip cap is `1387500` lamports because the
+   intentional. The default provider-tip cap is `2387500` lamports because the
    transaction pays every included provider tip if it lands.
-11. Yellowstone Jet sidecar, only after the sidecar build is deployed and
+14. Yellowstone Jet sidecar, only after the sidecar build is deployed and
    `JITO_TPU_JET_RPC_URL` / `JITO_TPU_JET_WS_URL` /
    `JITO_TPU_JET_SIDECAR_URL` are configured:
    `tpu-jet-fanout` applies `JITO_SEND_LANE_MODE=helius-tpu-jet` for Helius +
    Jet same-signature fanout, then `tpu-jet-only`, which applies
    `JITO_SEND_LANE_MODE=tpu-jet-helius-tip` for Jet-only sending with the same
    Helius-tip transaction shape.
-12. Direct TPU QUIC fallback, only after `JITO_TPU_QUIC_RPC_URL` /
+15. ERPC Yellowstone gRPC can be staged as the Jet source by setting
+   `JITO_ERPC_YELLOWSTONE_GRPC_URL` and, if required,
+   `JITO_ERPC_YELLOWSTONE_GRPC_X_TOKEN`. The sidecar launcher maps those into
+   `JITO_TPU_JET_GRPC_URL` / `JITO_TPU_JET_GRPC_X_TOKEN`. Keep this as a
+   sidecar credential path; the copy-buy hot path must not call Yellowstone on
+   signal.
+16. ERPC Leader Slot API can be enabled after SWQoS and Jet are understood by
+   setting `JITO_ERPC_LEADER_SLOTS_ENABLED=true`, `JITO_ERPC_API_KEY`, and
+   optionally `JITO_ERPC_LEADER_SLOTS_URL=https://edge.erpc.global`. This is a
+   background cache input for smarter direct-TPU targeting. A trade may only
+   read the warmed cache and must fail closed if the cache is stale.
+17. Direct TPU QUIC fallback, only after `JITO_TPU_QUIC_RPC_URL` /
    `JITO_TPU_QUIC_WS_URL` are configured. Use the current-leader variants for
    the next retest:
    `tpu-quic-current-leader-fanout` applies
@@ -146,7 +176,7 @@ window does not meet the minimum scored-row and `txDelta` coverage thresholds.
    Do not use the legacy multi-leader `tpu-quic-fanout` / `tpu-quic-only`
    shape for the timeout retest: Solana's TPU client waits for all selected
    leader sends, so larger fanout can recreate the previous 100ms timeout.
-13. Cheaper TPU-only shape: `tpu-jet-cheap` or `tpu-quic-cheap` only after the
+18. Cheaper TPU-only shape: `tpu-jet-cheap` or `tpu-quic-cheap` only after the
    matching same-fee TPU-only window proves better. These switch to
    `tpu-jet-only` / `tpu-quic-only` lane modes with Helius Sender disabled and
    are guarded by `JITO_CANARY_ALLOW_CHEAP_TPU=YES`.
@@ -159,9 +189,10 @@ requires a paid provider account. RPC Fast Beam may still use
 Trader API lane.
 
 These are paid-tip lanes. The worker builds one transaction containing the
-active Helius, Nozomi, Astralane, and/or Beam tips before signing, then fans out the
-identical signed bytes. This is required for duplicate-buy safety. New
-tip-funded providers should follow the same same-signature pattern.
+active Helius, Nozomi, Astralane, Lunar Lander, Beam, and/or 0slot tips before
+signing, then fans out the identical signed bytes. This is required for
+duplicate-buy safety. New tip-funded providers should follow the same
+same-signature pattern.
 Score these lanes by landed rate, same-slot rate, `txDelta`, failed-on-chain
 rate, submitted-not-landed rate, and total provider-tip cost. First ACK is only
 delivery telemetry.
@@ -188,8 +219,8 @@ Then apply:
 The helper writes those URLs to `JITO_HELIUS_SENDER_URLS`, keeps
 `JITO_SEND_LANE_MODE=helius-sender-only`, keeps the baseline Helius Sender tip,
 priority fee, and `JITO_SEND_MAX_RETRIES=0`, and disables Nozomi, Astralane,
-and Beam. The Rust worker appends `/fast` to each regional base URL and
-preserves the `api-key` query.
+Lunar Lander, and Beam. The Rust worker appends `/fast` to each regional base
+URL and preserves the `api-key` query.
 
 This canary sends five Helius HTTP requests per buy when five regions are
 configured, but it is still one signed Solana transaction with one signature and
@@ -226,16 +257,134 @@ steady-state env first.
 The canary modes are explicit because Astralane adds a `1000000` lamport
 provider tip:
 
+- `astralane-only`: IrisB only, Helius Sender and Nozomi disabled.
+- `helius-astralane-stack`: Helius Sender + IrisB, same signed bytes.
+- `helius-nozomi-astralane-stack`: Helius Sender + Nozomi + IrisB, same signed
+  bytes, highest configured provider-tip cost.
+
+Do not treat IrisB as a TPU lane or a QUIC lane. It is an outbound send
+provider and should be scored by landed confirmation, not by first ACK alone.
+
+## Lunar Lander Canary
+
+Required env before applying a Lunar Lander canary:
+
 ```sh
-./landing-canary-control.sh apply astralane-only
-./landing-canary-control.sh apply helius-astralane-stack
-./landing-canary-control.sh apply helius-nozomi-astralane-stack
+JITO_LUNAR_LANDER_URLS=https://fra.lunar-lander.hellomoon.io/send-bin
+JITO_LUNAR_LANDER_API_KEY=<api-key>
+JITO_LUNAR_LANDER_TIP_LAMPORTS=1000000
+JITO_LUNAR_LANDER_TIP_ACCOUNT=moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F
+JITO_LUNAR_LANDER_TIP_ACCOUNTS=moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F
+JITO_LUNAR_LANDER_MEV_PROTECT=false
 ```
 
-`astralane-only` sends the binary signed transaction bytes to
-`/irisb?api-key=...&method=sendTransaction`. Stack modes still sign one
-transaction and race identical bytes. The first ACK lane may show Astralane, but
-success is landed outcome, not ACK speed.
+HelloMoon's docs show `http://` regional examples, but the HTTPS FRA `/ping`
+endpoint also responds and is the worker default. If HTTPS ever fails from the
+Droplet, override `JITO_LUNAR_LANDER_URLS` with the documented HTTP endpoint
+before canarying.
+
+The canary helper also accepts `JITO_CANARY_LUNAR_LANDER_URLS`,
+`JITO_CANARY_LUNAR_LANDER_API_KEY`,
+`JITO_CANARY_LUNAR_LANDER_TIP_LAMPORTS`,
+`JITO_CANARY_LUNAR_LANDER_TIP_ACCOUNT`,
+`JITO_CANARY_LUNAR_LANDER_TIP_ACCOUNTS`, and
+`JITO_CANARY_LUNAR_LANDER_MEV_PROTECT` so the lane can be staged without
+changing the steady-state env first.
+
+The canary modes are explicit because Lunar Lander adds a `1000000` lamport
+provider tip:
+
+- `lunar-lander-only`: Lunar Lander `/send-bin` only, Helius Sender and Nozomi disabled.
+- `helius-lunar-lander-stack`: Helius Sender + Lunar Lander, same signed bytes.
+
+Do not hardcode API keys in scripts or checked-in env files. Use the Droplet env
+file or canary override env, then score by landed confirmation and `txDelta`.
+The first useful window should be small because every landed transaction pays
+the Lunar provider tip.
+
+## ERPC Surfaces
+
+ERPC is three separate integrations:
+
+```sh
+# SWQoS JSON-RPC send lane
+JITO_ERPC_SWQOS_ENABLED=true
+JITO_ERPC_SWQOS_URLS=<erpc-swqos-send-url>
+
+# Leader Slot API background cache
+JITO_ERPC_LEADER_SLOTS_ENABLED=true
+JITO_ERPC_LEADER_SLOTS_URL=https://edge.erpc.global
+JITO_ERPC_API_KEY=<api-key>
+JITO_ERPC_LEADER_SLOTS_REFRESH_MS=5000
+JITO_ERPC_LEADER_SLOTS_STALE_MS=15000
+
+# Yellowstone gRPC provider for the Jet sidecar
+JITO_ERPC_YELLOWSTONE_GRPC_URL=http://grpc-fra1-burst.erpc.global
+JITO_ERPC_YELLOWSTONE_GRPC_X_TOKEN=<x-token-if-required>
+```
+
+The first canary after credentials should be `erpc-swqos-only` or
+`helius-erpc-swqos-stack`. Only after that has a real landed-position sample
+should the ERPC Yellowstone gRPC endpoint be used by the Jet sidecar. Leader
+Slots should be the last step because it changes TPU targeting logic rather
+than provider send quality.
+
+### ERPC Burst Geyser gRPC Readiness
+
+For a Frankfurt Droplet, use the endpoint shown in the ERPC dashboard after
+registering the Droplet IP. ERPC's public docs list the Frankfurt Burst endpoint
+as:
+
+```sh
+JITO_ERPC_YELLOWSTONE_GRPC_URL=http://grpc-fra1-burst.erpc.global
+```
+
+ERPC says Burst is still a full Yellowstone/Geyser gRPC stream, separate from
+Direct Shreds/ShredStream, so it can feed the Yellowstone Jet sidecar. If the
+dashboard shows a different URL for the trial, use the dashboard URL.
+
+Allow inbound/outbound ICMP to ERPC's gRPC load-balancer ping-source IPs if the
+Droplet firewall blocks ping; ERPC uses those pings to select the nearest
+regional node. For Frankfurt, the regular gRPC ping-source IPs listed by ERPC
+are `185.191.118.149`, `185.191.118.177`, and `185.191.118.206`. The public
+Frankfurt Burst load-balancer IP is `64.130.41.234`.
+
+For the first Jet trial window, keep lookahead narrow:
+
+```sh
+JITO_TPU_JET_FANOUT_SLOTS=1
+JITO_TPU_JET_TIMEOUT_MS=30
+JITO_SEND_LANE_MODE=helius-tpu-jet
+JITO_TPU_JET_ENABLED=true
+```
+
+This keeps Helius as the baseline lane and adds Jet as dispatch-only telemetry.
+Do not start with `tpu-jet-only`; use it only after `helius-tpu-jet` proves no
+landing regression.
+
+## 0slot Canaries
+
+bloXroute Trader API canaries were removed from this worker because that route
+requires a paid provider account. RPC Fast Beam may still use
+`JITO_BEAM_PROVIDER=bloxroute`; that is Beam configuration, not the bloXroute
+Trader API lane.
+
+Required 0slot env before applying a 0slot canary:
+
+```sh
+JITO_ZERO_SLOT_URLS=https://ny.0slot.trade
+JITO_ZERO_SLOT_API_KEY=<api-key>
+JITO_ZERO_SLOT_TIP_LAMPORTS=1000000
+JITO_ZERO_SLOT_TIP_ACCOUNTS=<comma-separated-tip-accounts>
+```
+
+These are paid-tip lanes. The worker builds one transaction containing the
+active Helius, Nozomi, Astralane, Lunar Lander, Beam, and/or 0slot tips before
+signing, then fans out the identical signed bytes. This is required for
+duplicate-buy safety.
+Score these lanes by landed rate, same-slot rate, `txDelta`, failed-on-chain
+rate, submitted-not-landed rate, and total provider-tip cost. First ACK is only
+delivery telemetry.
 
 ## Nozomi Stack Canary
 
@@ -349,6 +498,21 @@ Jet canary:
 ```bash
 cargo build --release --manifest-path spikes/yellowstone-jet-compat/Cargo.toml --bin yellowstone-jet-sidecar
 ```
+
+Required env before starting the sidecar:
+
+```sh
+JITO_TPU_JET_RPC_URL=<state-rpc-url-or-SOLANA_RPC_URL>
+JITO_ERPC_YELLOWSTONE_GRPC_URL=http://grpc-fra1-burst.erpc.global
+JITO_ERPC_YELLOWSTONE_GRPC_X_TOKEN=<x-token-if-dashboard-provides-one>
+JITO_TPU_JET_SIDECAR_URL=http://127.0.0.1:8787
+JITO_TPU_JET_FANOUT_SLOTS=1
+JITO_TPU_JET_TIMEOUT_MS=30
+```
+
+The sidecar launcher maps `JITO_ERPC_YELLOWSTONE_GRPC_URL` into
+`JITO_TPU_JET_GRPC_URL` and maps `JITO_ERPC_YELLOWSTONE_GRPC_X_TOKEN` into
+`JITO_TPU_JET_GRPC_X_TOKEN`.
 
 Use a local-only sidecar service so the main worker sends to
 `http://127.0.0.1:8787/send`:

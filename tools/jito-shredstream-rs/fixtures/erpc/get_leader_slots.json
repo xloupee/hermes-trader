@@ -1,0 +1,43 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "success": true,
+    "message": "Leader schedule records retrieved successfully",
+    "total": 2,
+    "data": [
+      {
+        "slot": "348100001",
+        "identity": "Leader11111111111111111111111111111111111111",
+        "stakeWeight": 2502391.138720913,
+        "ipAddress": "203.0.113.10",
+        "gossipPort": 8001,
+        "tpuPort": 8003,
+        "tpuQuicPort": 8004,
+        "leaderRegion": "frankfurt",
+        "leaderCity": "Frankfurt am Main",
+        "leaderCountry": "DE",
+        "pingToLeaders": [
+          {
+            "city": "Frankfurt am Main",
+            "region": "frankfurt",
+            "ms": 0.974
+          }
+        ]
+      },
+      {
+        "slot": "348100002",
+        "identity": "Leader22222222222222222222222222222222222222",
+        "stakeWeight": 12254651.761860535,
+        "ipAddress": "203.0.113.11",
+        "gossipPort": 8001,
+        "tpuPort": 8003,
+        "tpuQuicPort": 8004,
+        "leaderRegion": "amsterdam",
+        "leaderCity": "Amsterdam",
+        "leaderCountry": "NL",
+        "pingToLeaders": []
+      }
+    ]
+  }
+}

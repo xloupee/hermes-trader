@@ -18,8 +18,12 @@ pub(crate) struct TxFeeConfig {
     pub(crate) nozomi_tip_account: Option<String>,
     pub(crate) astralane_tip_lamports: Option<u64>,
     pub(crate) astralane_tip_account: Option<String>,
+    pub(crate) lunar_lander_tip_lamports: Option<u64>,
+    pub(crate) lunar_lander_tip_account: Option<String>,
     pub(crate) beam_tip_lamports: Option<u64>,
     pub(crate) beam_tip_account: Option<String>,
+    pub(crate) zero_slot_tip_lamports: Option<u64>,
+    pub(crate) zero_slot_tip_account: Option<String>,
 }
 
 #[derive(Debug)]
@@ -142,7 +146,7 @@ fn parse_pubkey(value: &str) -> Result<Pubkey, TxBuildError> {
 }
 
 fn fee_tip_transfers(fee_config: &TxFeeConfig) -> Result<Vec<(Pubkey, u64)>, TxBuildError> {
-    let mut transfers = Vec::with_capacity(4);
+    let mut transfers = Vec::with_capacity(6);
     push_fee_tip_transfer(
         &mut transfers,
         fee_config.jito_tip_lamports,
@@ -169,9 +173,21 @@ fn fee_tip_transfers(fee_config: &TxFeeConfig) -> Result<Vec<(Pubkey, u64)>, TxB
     )?;
     push_fee_tip_transfer(
         &mut transfers,
+        fee_config.lunar_lander_tip_lamports,
+        fee_config.lunar_lander_tip_account.as_deref(),
+        "missing Lunar Lander tip account",
+    )?;
+    push_fee_tip_transfer(
+        &mut transfers,
         fee_config.beam_tip_lamports,
         fee_config.beam_tip_account.as_deref(),
         "missing Beam tip account",
+    )?;
+    push_fee_tip_transfer(
+        &mut transfers,
+        fee_config.zero_slot_tip_lamports,
+        fee_config.zero_slot_tip_account.as_deref(),
+        "missing 0slot tip account",
     )?;
     Ok(transfers)
 }
@@ -1820,6 +1836,7 @@ mod tests {
         let helius_account = "HWEoBxYs7ssKuudEjzjmpfJVX7Dvi7wescFsVx2L5yoY".to_string();
         let nozomi_account = "CwyufX5F8vP7gB5Xv8iYfLsCfQeQf9MStjGgYQhE6S9g".to_string();
         let astralane_account = "astra4uejePWneqNaJKuFFA8oonqCE1sqF6b45kDMZm".to_string();
+        let zero_slot_account = "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE".to_string();
         let fee_config = TxFeeConfig {
             compute_unit_price_micro_lamports: Some(250_000),
             jito_tip_lamports: Some(1_000),
@@ -1830,6 +1847,8 @@ mod tests {
             nozomi_tip_account: Some(nozomi_account.clone()),
             astralane_tip_lamports: Some(1_000_000),
             astralane_tip_account: Some(astralane_account.clone()),
+            zero_slot_tip_lamports: Some(1_000_000),
+            zero_slot_tip_account: Some(zero_slot_account.clone()),
             ..Default::default()
         };
 
@@ -1841,9 +1860,9 @@ mod tests {
         )
         .expect("provider-stack transaction shell should build");
 
-        assert_eq!(build.setup_instruction_count, 7);
+        assert_eq!(build.setup_instruction_count, 8);
         assert_eq!(build.main_instruction_count, 1);
-        assert_eq!(build.instructions.len(), 8);
+        assert_eq!(build.instructions.len(), 9);
         assert_eq!(
             build.instructions[3].accounts[1].pubkey.to_string(),
             jito_account
@@ -1877,7 +1896,19 @@ mod tests {
             .concat()
         );
         assert_eq!(
-            build.instructions[7].program_id.to_string(),
+            build.instructions[7].accounts[1].pubkey.to_string(),
+            zero_slot_account
+        );
+        assert_eq!(
+            build.instructions[7].data,
+            [
+                2u32.to_le_bytes().to_vec(),
+                1_000_000u64.to_le_bytes().to_vec()
+            ]
+            .concat()
+        );
+        assert_eq!(
+            build.instructions[8].program_id.to_string(),
             PUMP_FUN_PROGRAM_ID
         );
     }

@@ -28,10 +28,11 @@ load_env_file "$APP_ENV_FILE"
 load_env_file "$WORKER_ENV_FILE"
 
 export JITO_TPU_JET_RPC_URL="${JITO_TPU_JET_RPC_URL:-${SOLANA_RPC_URL:-}}"
-export JITO_TPU_JET_WS_URL="${JITO_TPU_JET_WS_URL:-${JITO_TPU_JET_GRPC_URL:-}}"
+export JITO_TPU_JET_WS_URL="${JITO_TPU_JET_WS_URL:-${JITO_TPU_JET_GRPC_URL:-${JITO_ERPC_YELLOWSTONE_GRPC_URL:-}}}"
 export JITO_TPU_JET_GRPC_URL="${JITO_TPU_JET_GRPC_URL:-$JITO_TPU_JET_WS_URL}"
+export JITO_TPU_JET_GRPC_X_TOKEN="${JITO_TPU_JET_GRPC_X_TOKEN:-${JITO_ERPC_YELLOWSTONE_GRPC_X_TOKEN:-}}"
 export JITO_TPU_JET_SIDECAR_BIND="${JITO_TPU_JET_SIDECAR_BIND:-127.0.0.1:8787}"
-export JITO_TPU_JET_FANOUT_SLOTS="${JITO_TPU_JET_FANOUT_SLOTS:-12}"
+export JITO_TPU_JET_FANOUT_SLOTS="${JITO_TPU_JET_FANOUT_SLOTS:-1}"
 export JITO_TPU_JET_TIMEOUT_MS="${JITO_TPU_JET_TIMEOUT_MS:-30}"
 
 if [[ -z "${JITO_TPU_JET_RPC_URL:-}" ]]; then
@@ -39,7 +40,7 @@ if [[ -z "${JITO_TPU_JET_RPC_URL:-}" ]]; then
   exit 1
 fi
 if [[ -z "${JITO_TPU_JET_GRPC_URL:-}" ]]; then
-  echo "JITO_TPU_JET_GRPC_URL or JITO_TPU_JET_WS_URL must be set in $APP_ENV_FILE or $WORKER_ENV_FILE" >&2
+  echo "JITO_TPU_JET_GRPC_URL, JITO_TPU_JET_WS_URL, or JITO_ERPC_YELLOWSTONE_GRPC_URL must be set in $APP_ENV_FILE or $WORKER_ENV_FILE" >&2
   exit 1
 fi
 if [[ ! -x "$SIDECAR_BIN" ]]; then
@@ -51,6 +52,11 @@ echo "TPU Jet sidecar starting"
 echo "  bind: $JITO_TPU_JET_SIDECAR_BIND"
 echo "  rpc url: configured"
 echo "  grpc/ws url: configured"
+if [[ -n "${JITO_TPU_JET_GRPC_X_TOKEN:-}" ]]; then
+  echo "  grpc x-token: configured"
+else
+  echo "  grpc x-token: unset"
+fi
 echo "  fanout/lookahead slots: $JITO_TPU_JET_FANOUT_SLOTS"
 echo "  send timeout ms: $JITO_TPU_JET_TIMEOUT_MS"
 

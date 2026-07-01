@@ -1,3 +1,4 @@
+use crate::cache_rpc::rpc_url_label;
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use solana_address_lookup_table_interface::state::AddressLookupTable;
@@ -247,16 +248,6 @@ fn base64_decode(value: &str) -> Result<Vec<u8>> {
     base64::engine::general_purpose::STANDARD
         .decode(value)
         .context("base64 decode")
-}
-
-fn rpc_url_label(url: &str) -> String {
-    url.split("://")
-        .nth(1)
-        .unwrap_or(url)
-        .split('/')
-        .next()
-        .unwrap_or(url)
-        .to_string()
 }
 
 fn build_table_accounts(

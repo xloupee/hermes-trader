@@ -30,6 +30,10 @@ export JITO_CANARY_LUNAR_LANDER_API_KEY="test-lunar-key"
 export JITO_CANARY_LUNAR_LANDER_TIP_LAMPORTS=1000000
 export JITO_CANARY_LUNAR_LANDER_TIP_ACCOUNT="moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F"
 export JITO_CANARY_LUNAR_LANDER_TIP_ACCOUNTS="moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F,moon26g6M87pkyWyg3Uzz3P9dYfnPtnSVwQ4RXrJihDD"
+export JITO_CANARY_CIRCULAR_FAST_API_KEY="test-circular-key"
+export JITO_CANARY_CIRCULAR_FAST_TIP_LAMPORTS=1000000
+export JITO_CANARY_CIRCULAR_FAST_TIP_ACCOUNT="FAST3dMFZvESiEipBvLSiXq3QCV51o3xuoHScqRU6cB6"
+export JITO_CANARY_CIRCULAR_FAST_TIP_ACCOUNTS="FAST3dMFZvESiEipBvLSiXq3QCV51o3xuoHScqRU6cB6,FASTHPWR9bCUVZHJofp8Yr5rywxPgZnY6tDKZa2umHLB"
 export JITO_CANARY_HELIUS_REGION_URLS="http://fra-sender.helius-rpc.com?api-key=test,http://ams-sender.helius-rpc.com?api-key=test,http://lon-sender.helius-rpc.com?api-key=test,http://ewr-sender.helius-rpc.com?api-key=test,http://slc-sender.helius-rpc.com?api-key=test"
 export JITO_CANARY_ERPC_SWQOS_URLS="https://swqos.erpc.global"
 export JITO_CANARY_ERPC_API_KEY="test-erpc-key"
@@ -154,6 +158,30 @@ assert_marker CANARY_NOZOMI_ENABLED false
 assert_marker CANARY_ASTRALANE_ENABLED false
 assert_marker CANARY_MAX_PROVIDER_TIP_LAMPORTS 1387500
 
+"$CONTROL" mark circular-fast-only 2026-06-25T00:00:00Z >/dev/null 2>/dev/null
+assert_marker CANARY_SEND_LANE_MODE circular-fast-only
+assert_marker CANARY_CIRCULAR_FAST_ENABLED true
+assert_marker CANARY_CIRCULAR_FAST_URLS_CONFIGURED true
+assert_marker CANARY_CIRCULAR_FAST_API_KEY_CONFIGURED true
+assert_marker CANARY_CIRCULAR_FAST_TIP_LAMPORTS 1000000
+assert_marker CANARY_CIRCULAR_FAST_TIP_ACCOUNTS_CONFIGURED true
+assert_marker CANARY_HELIUS_TIP_LAMPORTS 0
+assert_marker CANARY_NOZOMI_ENABLED false
+assert_marker CANARY_ASTRALANE_ENABLED false
+assert_marker CANARY_LUNAR_LANDER_ENABLED false
+assert_marker CANARY_BEAM_ENABLED false
+assert_marker CANARY_ZERO_SLOT_ENABLED false
+assert_marker CANARY_MAX_PROVIDER_TIP_LAMPORTS 1000000
+
+"$CONTROL" mark helius-circular-fast-stack 2026-06-25T00:00:00Z >/dev/null 2>/dev/null
+assert_marker CANARY_SEND_LANE_MODE helius-circular-fast-stack
+assert_marker CANARY_CIRCULAR_FAST_ENABLED true
+assert_marker CANARY_HELIUS_TIP_LAMPORTS 387500
+assert_marker CANARY_NOZOMI_ENABLED false
+assert_marker CANARY_ASTRALANE_ENABLED false
+assert_marker CANARY_LUNAR_LANDER_ENABLED false
+assert_marker CANARY_MAX_PROVIDER_TIP_LAMPORTS 1387500
+
 "$CONTROL" mark erpc-swqos-only 2026-06-25T00:00:00Z >/dev/null 2>/dev/null
 assert_marker CANARY_SEND_LANE_MODE erpc-swqos-only
 assert_marker CANARY_ERPC_SWQOS_ENABLED true
@@ -273,7 +301,33 @@ assert_env JITO_HELIUS_SENDER_URLS "$JITO_CANARY_HELIUS_REGION_URLS"
 assert_env JITO_NOZOMI_ENABLED false
 assert_env JITO_ASTRALANE_ENABLED false
 assert_env JITO_LUNAR_LANDER_ENABLED false
+assert_env JITO_CIRCULAR_FAST_ENABLED false
 assert_env JITO_BEAM_ENABLED false
+
+PATH="$MOCK_BIN:$PATH" JITO_CANARY_SKIP_BASELINE_GATE=YES "$CONTROL" apply circular-fast-only >/dev/null
+assert_env JITO_SEND_LANE_MODE circular-fast-only
+assert_env JITO_HELIUS_SENDER_ENABLED false
+assert_env JITO_CIRCULAR_FAST_ENABLED true
+assert_env JITO_CIRCULAR_FAST_URLS https://fra.fast.circular.fi/transactions
+assert_env JITO_CIRCULAR_FAST_API_KEY test-circular-key
+assert_env JITO_CIRCULAR_FAST_TIP_LAMPORTS 1000000
+assert_env JITO_CIRCULAR_FAST_TIP_ACCOUNT FAST3dMFZvESiEipBvLSiXq3QCV51o3xuoHScqRU6cB6
+assert_env JITO_CIRCULAR_FAST_TIP_ACCOUNTS "$JITO_CANARY_CIRCULAR_FAST_TIP_ACCOUNTS"
+assert_env JITO_CIRCULAR_FAST_FRONT_RUNNING_PROTECTION false
+
+unset JITO_CANARY_CIRCULAR_FAST_API_KEY
+awk '$0 !~ /^JITO_CIRCULAR_FAST_API_KEY=/' "$JITO_WORKER_ENV_FILE" > "$TMP_DIR/worker.no-circular-key"
+mv "$TMP_DIR/worker.no-circular-key" "$JITO_WORKER_ENV_FILE"
+if PATH="$MOCK_BIN:$PATH" JITO_CANARY_SKIP_BASELINE_GATE=YES "$CONTROL" apply circular-fast-only >/dev/null 2>"$TMP_DIR/missing-circular-key.err"; then
+  echo "circular-fast-only should require JITO_CANARY_CIRCULAR_FAST_API_KEY" >&2
+  exit 1
+fi
+if ! grep -q "requires JITO_CANARY_CIRCULAR_FAST_API_KEY" "$TMP_DIR/missing-circular-key.err"; then
+  echo "missing expected Circular Fast API key error" >&2
+  cat "$TMP_DIR/missing-circular-key.err" >&2
+  exit 1
+fi
+export JITO_CANARY_CIRCULAR_FAST_API_KEY="test-circular-key"
 
 export JITO_TPU_JET_RPC_URL="https://rpc.example"
 export JITO_TPU_JET_WS_URL="http://grpc-fra1-burst.erpc.global"

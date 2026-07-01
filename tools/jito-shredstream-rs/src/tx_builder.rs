@@ -20,6 +20,8 @@ pub(crate) struct TxFeeConfig {
     pub(crate) astralane_tip_account: Option<String>,
     pub(crate) lunar_lander_tip_lamports: Option<u64>,
     pub(crate) lunar_lander_tip_account: Option<String>,
+    pub(crate) circular_fast_tip_lamports: Option<u64>,
+    pub(crate) circular_fast_tip_account: Option<String>,
     pub(crate) beam_tip_lamports: Option<u64>,
     pub(crate) beam_tip_account: Option<String>,
     pub(crate) zero_slot_tip_lamports: Option<u64>,
@@ -176,6 +178,12 @@ fn fee_tip_transfers(fee_config: &TxFeeConfig) -> Result<Vec<(Pubkey, u64)>, TxB
         fee_config.lunar_lander_tip_lamports,
         fee_config.lunar_lander_tip_account.as_deref(),
         "missing Lunar Lander tip account",
+    )?;
+    push_fee_tip_transfer(
+        &mut transfers,
+        fee_config.circular_fast_tip_lamports,
+        fee_config.circular_fast_tip_account.as_deref(),
+        "missing Circular Fast tip account",
     )?;
     push_fee_tip_transfer(
         &mut transfers,

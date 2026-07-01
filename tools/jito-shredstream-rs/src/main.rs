@@ -5,6 +5,7 @@ use std::path::PathBuf;
 mod address_lookup;
 mod balance_cache;
 mod blockhash;
+mod cache_rpc;
 mod erpc;
 mod event;
 mod executor;
@@ -154,6 +155,13 @@ pub(crate) struct LiveOptions {
     pub(crate) blockhash_stale_ms: u128,
 
     #[arg(
+        long = "blockhash-rpc-url",
+        env = "JITO_BLOCKHASH_RPC_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) blockhash_rpc_urls: Vec<String>,
+
+    #[arg(
         long,
         env = "JITO_ACCOUNT_PRIORITY_FEE_ENABLED",
         default_value_t = false,
@@ -181,6 +189,20 @@ pub(crate) struct LiveOptions {
         default_value_t = 75
     )]
     pub(crate) account_priority_fee_percentile: u8,
+
+    #[arg(
+        long = "priority-fee-rpc-url",
+        env = "JITO_PRIORITY_FEE_RPC_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) priority_fee_rpc_urls: Vec<String>,
+
+    #[arg(
+        long = "balance-cache-rpc-url",
+        env = "JITO_BALANCE_CACHE_RPC_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) balance_cache_rpc_urls: Vec<String>,
 
     #[arg(long, env = "JITO_SIMULATE_COPY_TX", default_value_t = false)]
     pub(crate) simulate_copy_tx: bool,
@@ -361,6 +383,42 @@ pub(crate) struct LiveOptions {
         value_parser = parse_boolish
     )]
     pub(crate) lunar_lander_mev_protect: bool,
+
+    #[arg(
+        long,
+        env = "JITO_CIRCULAR_FAST_ENABLED",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) circular_fast_enabled: bool,
+
+    #[arg(
+        long = "circular-fast-url",
+        env = "JITO_CIRCULAR_FAST_URLS",
+        value_delimiter = ',',
+        default_value = "https://fra.fast.circular.fi/transactions"
+    )]
+    pub(crate) circular_fast_urls: Vec<String>,
+
+    #[arg(long, env = "JITO_CIRCULAR_FAST_API_KEY", hide_env_values = true)]
+    pub(crate) circular_fast_api_key: Option<String>,
+
+    #[arg(long, env = "JITO_CIRCULAR_FAST_TIP_LAMPORTS")]
+    pub(crate) circular_fast_tip_lamports: Option<u64>,
+
+    #[arg(long, env = "JITO_CIRCULAR_FAST_TIP_ACCOUNT")]
+    pub(crate) circular_fast_tip_account: Option<String>,
+
+    #[arg(long, env = "JITO_CIRCULAR_FAST_TIP_ACCOUNTS", value_delimiter = ',')]
+    pub(crate) circular_fast_tip_accounts: Vec<String>,
+
+    #[arg(
+        long,
+        env = "JITO_CIRCULAR_FAST_FRONT_RUNNING_PROTECTION",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) circular_fast_front_running_protection: bool,
 
     #[arg(
         long,
@@ -770,6 +828,35 @@ fn parse_boolish(value: &str) -> std::result::Result<bool, String> {
 impl LiveOptions {
     pub(crate) fn normalized_state_rpc_urls(&self) -> Vec<String> {
         normalized_rpc_urls(&self.state_rpc_urls, self.solana_rpc_url.as_deref())
+    }
+
+    pub(crate) fn normalized_blockhash_rpc_urls(&self) -> Vec<String> {
+        let state_urls = self.normalized_state_rpc_urls();
+        normalized_rpc_urls(&self.blockhash_rpc_urls, None).or_fallback(state_urls)
+    }
+
+    pub(crate) fn normalized_balance_cache_rpc_urls(&self) -> Vec<String> {
+        let state_urls = self.normalized_state_rpc_urls();
+        normalized_rpc_urls(&self.balance_cache_rpc_urls, None).or_fallback(state_urls)
+    }
+
+    pub(crate) fn normalized_priority_fee_rpc_urls(&self) -> Vec<String> {
+        let state_urls = self.normalized_state_rpc_urls();
+        normalized_rpc_urls(&self.priority_fee_rpc_urls, None).or_fallback(state_urls)
+    }
+}
+
+trait VecFallback {
+    fn or_fallback(self, fallback: Vec<String>) -> Vec<String>;
+}
+
+impl VecFallback for Vec<String> {
+    fn or_fallback(self, fallback: Vec<String>) -> Vec<String> {
+        if self.is_empty() {
+            fallback
+        } else {
+            self
+        }
     }
 }
 

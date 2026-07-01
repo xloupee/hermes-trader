@@ -53,9 +53,11 @@ export JITO_MAX_COPY_SOL="${JITO_MAX_COPY_SOL:-0}"
 export JITO_MAX_TOTAL_COPY_SPEND_SOL="${JITO_MAX_TOTAL_COPY_SPEND_SOL:-0}"
 export JITO_COPY_WALLET_BALANCE_REFRESH_MS="${JITO_COPY_WALLET_BALANCE_REFRESH_MS:-5000}"
 export JITO_COPY_WALLET_BALANCE_STALE_MS="${JITO_COPY_WALLET_BALANCE_STALE_MS:-120000}"
+export JITO_BALANCE_CACHE_RPC_URLS="${JITO_BALANCE_CACHE_RPC_URLS:-}"
 export JITO_BLOCKHASH_REFRESH_MS="${JITO_BLOCKHASH_REFRESH_MS:-500}"
 export JITO_BLOCKHASH_REFRESH_TIMEOUT_MS="${JITO_BLOCKHASH_REFRESH_TIMEOUT_MS:-1200}"
 export JITO_BLOCKHASH_STALE_MS="${JITO_BLOCKHASH_STALE_MS:-30000}"
+export JITO_BLOCKHASH_RPC_URLS="${JITO_BLOCKHASH_RPC_URLS:-}"
 export JITO_MIGRATED_AMM_MIN_COPY_SOL="${JITO_MIGRATED_AMM_MIN_COPY_SOL:-0.00099}"
 export JITO_MIGRATED_AMM_SMALL_COPY_MODE="${JITO_MIGRATED_AMM_SMALL_COPY_MODE:-skip}"
 export JITO_FAST_COPY_SEND="${JITO_FAST_COPY_SEND:-YES}"
@@ -93,6 +95,13 @@ export JITO_LUNAR_LANDER_TIP_LAMPORTS="${JITO_LUNAR_LANDER_TIP_LAMPORTS:-1000000
 export JITO_LUNAR_LANDER_TIP_ACCOUNT="${JITO_LUNAR_LANDER_TIP_ACCOUNT:-moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F}"
 export JITO_LUNAR_LANDER_TIP_ACCOUNTS="${JITO_LUNAR_LANDER_TIP_ACCOUNTS:-$JITO_LUNAR_LANDER_TIP_ACCOUNT}"
 export JITO_LUNAR_LANDER_MEV_PROTECT="${JITO_LUNAR_LANDER_MEV_PROTECT:-false}"
+export JITO_CIRCULAR_FAST_ENABLED="${JITO_CIRCULAR_FAST_ENABLED:-false}"
+export JITO_CIRCULAR_FAST_URLS="${JITO_CIRCULAR_FAST_URLS:-https://fra.fast.circular.fi/transactions}"
+export JITO_CIRCULAR_FAST_API_KEY="${JITO_CIRCULAR_FAST_API_KEY:-}"
+export JITO_CIRCULAR_FAST_TIP_LAMPORTS="${JITO_CIRCULAR_FAST_TIP_LAMPORTS:-1000000}"
+export JITO_CIRCULAR_FAST_TIP_ACCOUNT="${JITO_CIRCULAR_FAST_TIP_ACCOUNT:-FAST3dMFZvESiEipBvLSiXq3QCV51o3xuoHScqRU6cB6}"
+export JITO_CIRCULAR_FAST_TIP_ACCOUNTS="${JITO_CIRCULAR_FAST_TIP_ACCOUNTS:-$JITO_CIRCULAR_FAST_TIP_ACCOUNT}"
+export JITO_CIRCULAR_FAST_FRONT_RUNNING_PROTECTION="${JITO_CIRCULAR_FAST_FRONT_RUNNING_PROTECTION:-false}"
 export JITO_ERPC_SWQOS_ENABLED="${JITO_ERPC_SWQOS_ENABLED:-false}"
 export JITO_ERPC_SWQOS_URLS="${JITO_ERPC_SWQOS_URLS:-}"
 export JITO_ERPC_LEADER_SLOTS_ENABLED="${JITO_ERPC_LEADER_SLOTS_ENABLED:-false}"
@@ -102,6 +111,8 @@ export JITO_ERPC_LEADER_SLOTS_REFRESH_MS="${JITO_ERPC_LEADER_SLOTS_REFRESH_MS:-5
 export JITO_ERPC_LEADER_SLOTS_STALE_MS="${JITO_ERPC_LEADER_SLOTS_STALE_MS:-15000}"
 export JITO_ERPC_YELLOWSTONE_GRPC_URL="${JITO_ERPC_YELLOWSTONE_GRPC_URL:-}"
 export JITO_ERPC_YELLOWSTONE_GRPC_X_TOKEN="${JITO_ERPC_YELLOWSTONE_GRPC_X_TOKEN:-}"
+export JITO_SHREDER_FASTLANE_GRPC_URL="${JITO_SHREDER_FASTLANE_GRPC_URL:-}"
+export JITO_SHREDER_FASTLANE_GRPC_X_TOKEN="${JITO_SHREDER_FASTLANE_GRPC_X_TOKEN:-}"
 export JITO_BEAM_ENABLED="${JITO_BEAM_ENABLED:-false}"
 export JITO_BEAM_URL="${JITO_BEAM_URL:-https://beam.rpcfast.com}"
 export JITO_BEAM_TOKEN="${JITO_BEAM_TOKEN:-}"
@@ -116,7 +127,7 @@ export JITO_ZERO_SLOT_TIP_LAMPORTS="${JITO_ZERO_SLOT_TIP_LAMPORTS:-}"
 export JITO_ZERO_SLOT_TIP_ACCOUNTS="${JITO_ZERO_SLOT_TIP_ACCOUNTS:-}"
 export JITO_TPU_JET_ENABLED="${JITO_TPU_JET_ENABLED:-false}"
 export JITO_TPU_JET_RPC_URL="${JITO_TPU_JET_RPC_URL:-${SOLANA_RPC_URL:-}}"
-export JITO_TPU_JET_WS_URL="${JITO_TPU_JET_WS_URL:-${JITO_ERPC_YELLOWSTONE_GRPC_URL:-}}"
+export JITO_TPU_JET_WS_URL="${JITO_TPU_JET_WS_URL:-${JITO_SHREDER_FASTLANE_GRPC_URL:-${JITO_ERPC_YELLOWSTONE_GRPC_URL:-}}}"
 export JITO_TPU_JET_SIDECAR_URL="${JITO_TPU_JET_SIDECAR_URL:-http://127.0.0.1:8787}"
 export JITO_TPU_JET_FANOUT_SLOTS="${JITO_TPU_JET_FANOUT_SLOTS:-1}"
 export JITO_TPU_JET_TIMEOUT_MS="${JITO_TPU_JET_TIMEOUT_MS:-30}"
@@ -161,6 +172,11 @@ fi
 if [[ -n "$JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS" ]]; then
   export JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS
 fi
+export JITO_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
+export JITO_ACCOUNT_PRIORITY_FEE_REFRESH_MS="${JITO_ACCOUNT_PRIORITY_FEE_REFRESH_MS:-1000}"
+export JITO_ACCOUNT_PRIORITY_FEE_STALE_MS="${JITO_ACCOUNT_PRIORITY_FEE_STALE_MS:-5000}"
+export JITO_ACCOUNT_PRIORITY_FEE_PERCENTILE="${JITO_ACCOUNT_PRIORITY_FEE_PERCENTILE:-75}"
+export JITO_PRIORITY_FEE_RPC_URLS="${JITO_PRIORITY_FEE_RPC_URLS:-}"
 export JITO_TIP_LAMPORTS="${JITO_TIP_LAMPORTS:-${DIRECT_EXECUTION_JITO_TIP_LAMPORTS:-}}"
 export JITO_TIP_ACCOUNT="${JITO_TIP_ACCOUNT:-${DIRECT_EXECUTION_JITO_TIP_ACCOUNT:-}}"
 export JITO_SELL_PRIORITY_FEE_MICRO_LAMPORTS="${JITO_SELL_PRIORITY_FEE_MICRO_LAMPORTS:-$JITO_PRIORITY_FEE_MICRO_LAMPORTS}"
@@ -312,11 +328,11 @@ esac
 
 SEND_LANE_MODE_NORMALIZED="$(printf '%s' "$JITO_SEND_LANE_MODE" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
 case "$SEND_LANE_MODE_NORMALIZED" in
-  mixed|rpc_only|jito_only|helius_sender_only|nozomi_only|helius_nozomi_stack|astralane_only|helius_astralane_stack|helius_nozomi_astralane_stack|lunar_lander_only|helius_lunar_lander_stack|erpc_swqos_only|helius_erpc_swqos_stack|beam_only|helius_beam_stack|helius_nozomi_beam_stack|zero_slot_only|helius_zero_slot_stack|helius_nozomi_zero_slot_stack|all_non_beam_stack|helius_tpu_jet|helius_tpu_quic|tpu_jet_helius_tip|tpu_quic_helius_tip|tpu_jet_only|tpu_quic_only)
+  mixed|rpc_only|jito_only|helius_sender_only|nozomi_only|helius_nozomi_stack|astralane_only|helius_astralane_stack|helius_nozomi_astralane_stack|lunar_lander_only|helius_lunar_lander_stack|circular_fast_only|helius_circular_fast_stack|erpc_swqos_only|helius_erpc_swqos_stack|beam_only|helius_beam_stack|helius_nozomi_beam_stack|zero_slot_only|helius_zero_slot_stack|helius_nozomi_zero_slot_stack|all_non_beam_stack|helius_tpu_jet|helius_tpu_quic|tpu_jet_helius_tip|tpu_quic_helius_tip|tpu_jet_only|tpu_quic_only)
     export JITO_SEND_LANE_MODE="${SEND_LANE_MODE_NORMALIZED//_/-}"
     ;;
   *)
-    echo "JITO_SEND_LANE_MODE must be mixed, rpc_only/rpc-only, jito_only/jito-only, helius_sender_only/helius-sender-only, nozomi_only/nozomi-only, helius_nozomi_stack/helius-nozomi-stack, astralane_only/astralane-only, helius_astralane_stack/helius-astralane-stack, helius_nozomi_astralane_stack/helius-nozomi-astralane-stack, lunar_lander_only/lunar-lander-only, helius_lunar_lander_stack/helius-lunar-lander-stack, erpc_swqos_only/erpc-swqos-only, helius_erpc_swqos_stack/helius-erpc-swqos-stack, beam_only/beam-only, helius_beam_stack/helius-beam-stack, helius_nozomi_beam_stack/helius-nozomi-beam-stack, zero_slot_only/zero-slot-only, helius_zero_slot_stack/helius-zero-slot-stack, helius_nozomi_zero_slot_stack/helius-nozomi-zero-slot-stack, all_non_beam_stack/all-non-beam-stack, helius_tpu_jet/helius-tpu-jet, helius_tpu_quic/helius-tpu-quic, tpu_jet_helius_tip/tpu-jet-helius-tip, tpu_quic_helius_tip/tpu-quic-helius-tip, tpu_jet_only/tpu-jet-only, or tpu_quic_only/tpu-quic-only; got $JITO_SEND_LANE_MODE" >&2
+    echo "JITO_SEND_LANE_MODE must be mixed, rpc_only/rpc-only, jito_only/jito-only, helius_sender_only/helius-sender-only, nozomi_only/nozomi-only, helius_nozomi_stack/helius-nozomi-stack, astralane_only/astralane-only, helius_astralane_stack/helius-astralane-stack, helius_nozomi_astralane_stack/helius-nozomi-astralane-stack, lunar_lander_only/lunar-lander-only, helius_lunar_lander_stack/helius-lunar-lander-stack, circular_fast_only/circular-fast-only, helius_circular_fast_stack/helius-circular-fast-stack, erpc_swqos_only/erpc-swqos-only, helius_erpc_swqos_stack/helius-erpc-swqos-stack, beam_only/beam-only, helius_beam_stack/helius-beam-stack, helius_nozomi_beam_stack/helius-nozomi-beam-stack, zero_slot_only/zero-slot-only, helius_zero_slot_stack/helius-zero-slot-stack, helius_nozomi_zero_slot_stack/helius-nozomi-zero-slot-stack, all_non_beam_stack/all-non-beam-stack, helius_tpu_jet/helius-tpu-jet, helius_tpu_quic/helius-tpu-quic, tpu_jet_helius_tip/tpu-jet-helius-tip, tpu_quic_helius_tip/tpu-quic-helius-tip, tpu_jet_only/tpu-jet-only, or tpu_quic_only/tpu-quic-only; got $JITO_SEND_LANE_MODE" >&2
     exit 1
     ;;
 esac
@@ -431,6 +447,26 @@ case "$SEND_LANE_MODE_NORMALIZED" in
     case "$(printf '%s' "$JITO_LUNAR_LANDER_ENABLED" | tr '[:upper:]' '[:lower:]')" in
       yes|true|1|on) ;;
       *) echo "JITO_SEND_LANE_MODE=helius_lunar_lander_stack requires JITO_LUNAR_LANDER_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    ;;
+  circular_fast_only)
+    case "$(printf '%s' "$JITO_CIRCULAR_FAST_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=circular_fast_only requires JITO_CIRCULAR_FAST_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    ;;
+  helius_circular_fast_stack)
+    case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_circular_fast_stack requires JITO_SEND_FANOUT=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_circular_fast_stack requires JITO_HELIUS_SENDER_ENABLED=YES" >&2; exit 1 ;;
+    esac
+    case "$(printf '%s' "$JITO_CIRCULAR_FAST_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_circular_fast_stack requires JITO_CIRCULAR_FAST_ENABLED=YES" >&2; exit 1 ;;
     esac
     ;;
   erpc_swqos_only)
@@ -615,6 +651,7 @@ HELIUS_SENDER_SWQOS_NORMALIZED="$(printf '%s' "$JITO_HELIUS_SENDER_SWQOS_ONLY" |
 NOZOMI_ENABLED_NORMALIZED="$(printf '%s' "$JITO_NOZOMI_ENABLED" | tr '[:upper:]' '[:lower:]')"
 ASTRALANE_ENABLED_NORMALIZED="$(printf '%s' "$JITO_ASTRALANE_ENABLED" | tr '[:upper:]' '[:lower:]')"
 LUNAR_LANDER_ENABLED_NORMALIZED="$(printf '%s' "$JITO_LUNAR_LANDER_ENABLED" | tr '[:upper:]' '[:lower:]')"
+CIRCULAR_FAST_ENABLED_NORMALIZED="$(printf '%s' "$JITO_CIRCULAR_FAST_ENABLED" | tr '[:upper:]' '[:lower:]')"
 ERPC_SWQOS_ENABLED_NORMALIZED="$(printf '%s' "$JITO_ERPC_SWQOS_ENABLED" | tr '[:upper:]' '[:lower:]')"
 ERPC_LEADER_SLOTS_ENABLED_NORMALIZED="$(printf '%s' "$JITO_ERPC_LEADER_SLOTS_ENABLED" | tr '[:upper:]' '[:lower:]')"
 BEAM_ENABLED_NORMALIZED="$(printf '%s' "${JITO_BEAM_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')"
@@ -759,6 +796,44 @@ case "$LUNAR_LANDER_ENABLED_NORMALIZED" in
     fi
     if [[ -z "$JITO_LUNAR_LANDER_TIP_ACCOUNT" && -z "$JITO_LUNAR_LANDER_TIP_ACCOUNTS" ]]; then
       echo "JITO_LUNAR_LANDER_ENABLED requires JITO_LUNAR_LANDER_TIP_ACCOUNT or JITO_LUNAR_LANDER_TIP_ACCOUNTS" >&2
+      exit 1
+    fi
+    ;;
+esac
+case "$CIRCULAR_FAST_ENABLED_NORMALIZED" in
+  yes|true|1|on)
+    if [[ "$SEND_LANE_MODE_NORMALIZED" != "circular_fast_only" ]]; then
+      case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+        yes|true|1|on) ;;
+        *) echo "JITO_CIRCULAR_FAST_ENABLED requires JITO_SEND_FANOUT=YES unless JITO_SEND_LANE_MODE=circular_fast_only" >&2; exit 1 ;;
+      esac
+    fi
+    case "$(printf '%s' "$JITO_FAST_COPY_SEND" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_CIRCULAR_FAST_ENABLED requires JITO_FAST_COPY_SEND=YES" >&2; exit 1 ;;
+    esac
+    if [[ -z "$JITO_CIRCULAR_FAST_URLS" ]]; then
+      echo "JITO_CIRCULAR_FAST_ENABLED requires JITO_CIRCULAR_FAST_URLS" >&2
+      exit 1
+    fi
+    if [[ -z "$JITO_CIRCULAR_FAST_API_KEY" ]]; then
+      echo "JITO_CIRCULAR_FAST_ENABLED requires JITO_CIRCULAR_FAST_API_KEY" >&2
+      exit 1
+    fi
+    if [[ -z "$JITO_PRIORITY_FEE_MICRO_LAMPORTS" || "$JITO_PRIORITY_FEE_MICRO_LAMPORTS" == "0" ]]; then
+      echo "JITO_CIRCULAR_FAST_ENABLED requires JITO_PRIORITY_FEE_MICRO_LAMPORTS" >&2
+      exit 1
+    fi
+    if [[ -z "$JITO_CIRCULAR_FAST_TIP_LAMPORTS" || "$JITO_CIRCULAR_FAST_TIP_LAMPORTS" == "0" ]]; then
+      echo "JITO_CIRCULAR_FAST_ENABLED requires JITO_CIRCULAR_FAST_TIP_LAMPORTS" >&2
+      exit 1
+    fi
+    if (( JITO_CIRCULAR_FAST_TIP_LAMPORTS < 1000000 )); then
+      echo "JITO_CIRCULAR_FAST_TIP_LAMPORTS must be >= 1000000 lamports" >&2
+      exit 1
+    fi
+    if [[ -z "$JITO_CIRCULAR_FAST_TIP_ACCOUNT" && -z "$JITO_CIRCULAR_FAST_TIP_ACCOUNTS" ]]; then
+      echo "JITO_CIRCULAR_FAST_ENABLED requires JITO_CIRCULAR_FAST_TIP_ACCOUNT or JITO_CIRCULAR_FAST_TIP_ACCOUNTS" >&2
       exit 1
     fi
     ;;
@@ -1018,6 +1093,25 @@ else
   echo "  lunar lander tip accounts: unset"
 fi
 echo "  lunar lander mev protect: $JITO_LUNAR_LANDER_MEV_PROTECT"
+echo "  circular fast enabled: $JITO_CIRCULAR_FAST_ENABLED"
+echo "  circular fast urls: $(if [[ -n "$JITO_CIRCULAR_FAST_URLS" ]]; then printf '%s' "$JITO_CIRCULAR_FAST_URLS" | awk -F, '{print NF}'; else printf '0'; fi) configured"
+if [[ -n "$JITO_CIRCULAR_FAST_API_KEY" ]]; then
+  echo "  circular fast api key: configured"
+else
+  echo "  circular fast api key: unset"
+fi
+echo "  circular fast tip lamports: ${JITO_CIRCULAR_FAST_TIP_LAMPORTS:-0}"
+if [[ -n "$JITO_CIRCULAR_FAST_TIP_ACCOUNT" ]]; then
+  echo "  circular fast tip account: configured"
+else
+  echo "  circular fast tip account: unset"
+fi
+if [[ -n "${JITO_CIRCULAR_FAST_TIP_ACCOUNTS:-}" ]]; then
+  echo "  circular fast tip accounts: configured"
+else
+  echo "  circular fast tip accounts: unset"
+fi
+echo "  circular fast front-running protection: $JITO_CIRCULAR_FAST_FRONT_RUNNING_PROTECTION"
 echo "  erpc swqos enabled: $JITO_ERPC_SWQOS_ENABLED"
 echo "  erpc swqos urls: $(if [[ -n "$JITO_ERPC_SWQOS_URLS" ]]; then printf '%s' "$JITO_ERPC_SWQOS_URLS" | awk -F, '{print NF}'; else printf '0'; fi) configured"
 echo "  erpc leader slots enabled: $JITO_ERPC_LEADER_SLOTS_ENABLED"
@@ -1041,6 +1135,16 @@ if [[ -n "$JITO_ERPC_YELLOWSTONE_GRPC_X_TOKEN" ]]; then
   echo "  erpc yellowstone grpc x-token: configured"
 else
   echo "  erpc yellowstone grpc x-token: unset"
+fi
+if [[ -n "$JITO_SHREDER_FASTLANE_GRPC_URL" ]]; then
+  echo "  shreder fastlane grpc url: configured"
+else
+  echo "  shreder fastlane grpc url: unset"
+fi
+if [[ -n "$JITO_SHREDER_FASTLANE_GRPC_X_TOKEN" ]]; then
+  echo "  shreder fastlane grpc x-token: configured"
+else
+  echo "  shreder fastlane grpc x-token: unset"
 fi
 echo "  beam enabled: ${JITO_BEAM_ENABLED:-false}"
 if [[ -n "${JITO_BEAM_URL:-}" ]]; then
@@ -1082,6 +1186,13 @@ else
 fi
 if [[ -n "$JITO_TPU_JET_WS_URL" ]]; then
   echo "  tpu jet ws/grpc url: configured"
+  if [[ -n "$JITO_SHREDER_FASTLANE_GRPC_URL" && "$JITO_TPU_JET_WS_URL" == "$JITO_SHREDER_FASTLANE_GRPC_URL" ]]; then
+    echo "  tpu jet ws/grpc source: shreder fastlane"
+  elif [[ -n "$JITO_ERPC_YELLOWSTONE_GRPC_URL" && "$JITO_TPU_JET_WS_URL" == "$JITO_ERPC_YELLOWSTONE_GRPC_URL" ]]; then
+    echo "  tpu jet ws/grpc source: erpc yellowstone"
+  else
+    echo "  tpu jet ws/grpc source: direct tpu jet env"
+  fi
 else
   echo "  tpu jet ws/grpc url: unset"
 fi
@@ -1119,11 +1230,16 @@ echo "  isolate buy latency test: $JITO_ISOLATE_BUY_LATENCY_TEST"
 echo "  send max retries: $JITO_SEND_MAX_RETRIES"
 echo "  send http timeout ms: $JITO_SEND_HTTP_TIMEOUT_MS"
 echo "  copy wallet balance refresh/stale ms: $JITO_COPY_WALLET_BALANCE_REFRESH_MS/$JITO_COPY_WALLET_BALANCE_STALE_MS"
+echo "  balance cache rpc urls: $(if [[ -n "${JITO_BALANCE_CACHE_RPC_URLS:-}" ]]; then printf '%s' "$JITO_BALANCE_CACHE_RPC_URLS" | awk -F, '{print NF}'; else printf 'state fallback'; fi) configured"
 echo "  blockhash refresh/timeout/stale ms: $JITO_BLOCKHASH_REFRESH_MS/$JITO_BLOCKHASH_REFRESH_TIMEOUT_MS/$JITO_BLOCKHASH_STALE_MS"
+echo "  blockhash rpc urls: $(if [[ -n "${JITO_BLOCKHASH_RPC_URLS:-}" ]]; then printf '%s' "$JITO_BLOCKHASH_RPC_URLS" | awk -F, '{print NF}'; else printf 'state fallback'; fi) configured"
 echo "  priority fee micro lamports: ${JITO_PRIORITY_FEE_MICRO_LAMPORTS:-0}"
 echo "  max priority fee micro lamports: $JITO_MAX_PRIORITY_FEE_MICRO_LAMPORTS"
 echo "  dynamic priority fee enabled: $JITO_DYNAMIC_PRIORITY_FEE_ENABLED"
 echo "  dynamic priority baseline/aggressive/panic/max micro lamports: ${JITO_DYNAMIC_PRIORITY_FEE_BASELINE_MICRO_LAMPORTS:-0}/${JITO_DYNAMIC_PRIORITY_FEE_AGGRESSIVE_MICRO_LAMPORTS:-0}/${JITO_DYNAMIC_PRIORITY_FEE_PANIC_MICRO_LAMPORTS:-0}/${JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS:-0}"
+echo "  account priority fee enabled: $JITO_ACCOUNT_PRIORITY_FEE_ENABLED"
+echo "  account priority fee refresh/stale/percentile: $JITO_ACCOUNT_PRIORITY_FEE_REFRESH_MS/$JITO_ACCOUNT_PRIORITY_FEE_STALE_MS/$JITO_ACCOUNT_PRIORITY_FEE_PERCENTILE"
+echo "  priority fee rpc urls: $(if [[ -n "${JITO_PRIORITY_FEE_RPC_URLS:-}" ]]; then printf '%s' "$JITO_PRIORITY_FEE_RPC_URLS" | awk -F, '{print NF}'; else printf 'state fallback'; fi) configured"
 echo "  jito tip lamports: ${JITO_TIP_LAMPORTS:-0}"
 echo "  max jito tip lamports: $JITO_MAX_TIP_LAMPORTS"
 echo "  max provider tip lamports: ${JITO_MAX_PROVIDER_TIP_LAMPORTS:-0}"

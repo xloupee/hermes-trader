@@ -56,6 +56,8 @@ Canaries:
   helius-nozomi-astralane-stack Helius Sender plus Nozomi plus Astralane fanout
   lunar-lander-only Lunar Lander binary HTTP only with Lunar tip, for delivery-lane isolation
   helius-lunar-lander-stack Helius Sender plus Lunar Lander same-signature fanout
+  circular-fast-only Circular Fast JSON-RPC only with FAST tip, for delivery-lane isolation
+  helius-circular-fast-stack Helius Sender plus Circular Fast same-signature fanout
   erpc-swqos-only ERPC SWQoS JSON-RPC only, for delivery-lane isolation
   helius-erpc-swqos-stack Helius Sender plus ERPC SWQoS same-signature fanout
   beam-only     RPC Fast Beam only with Beam provider tip
@@ -159,6 +161,13 @@ canary_values() {
   CANARY_LUNAR_LANDER_TIP_ACCOUNT="${JITO_CANARY_LUNAR_LANDER_TIP_ACCOUNT:-${JITO_LUNAR_LANDER_TIP_ACCOUNT:-moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F}}"
   CANARY_LUNAR_LANDER_TIP_ACCOUNTS="${JITO_CANARY_LUNAR_LANDER_TIP_ACCOUNTS:-${JITO_LUNAR_LANDER_TIP_ACCOUNTS:-}}"
   CANARY_LUNAR_LANDER_MEV_PROTECT="${JITO_CANARY_LUNAR_LANDER_MEV_PROTECT:-${JITO_LUNAR_LANDER_MEV_PROTECT:-false}}"
+  CANARY_CIRCULAR_FAST_ENABLED="false"
+  CANARY_CIRCULAR_FAST_URLS="${JITO_CANARY_CIRCULAR_FAST_URLS:-${JITO_CIRCULAR_FAST_URLS:-https://fra.fast.circular.fi/transactions}}"
+  CANARY_CIRCULAR_FAST_API_KEY="${JITO_CANARY_CIRCULAR_FAST_API_KEY:-${JITO_CIRCULAR_FAST_API_KEY:-}}"
+  CANARY_CIRCULAR_FAST_TIP="${JITO_CANARY_CIRCULAR_FAST_TIP_LAMPORTS:-${JITO_CIRCULAR_FAST_TIP_LAMPORTS:-1000000}}"
+  CANARY_CIRCULAR_FAST_TIP_ACCOUNT="${JITO_CANARY_CIRCULAR_FAST_TIP_ACCOUNT:-${JITO_CIRCULAR_FAST_TIP_ACCOUNT:-FAST3dMFZvESiEipBvLSiXq3QCV51o3xuoHScqRU6cB6}}"
+  CANARY_CIRCULAR_FAST_TIP_ACCOUNTS="${JITO_CANARY_CIRCULAR_FAST_TIP_ACCOUNTS:-${JITO_CIRCULAR_FAST_TIP_ACCOUNTS:-}}"
+  CANARY_CIRCULAR_FAST_FRONT_RUNNING_PROTECTION="${JITO_CANARY_CIRCULAR_FAST_FRONT_RUNNING_PROTECTION:-${JITO_CIRCULAR_FAST_FRONT_RUNNING_PROTECTION:-false}}"
   CANARY_ERPC_SWQOS_ENABLED="false"
   CANARY_ERPC_SWQOS_URLS="${JITO_CANARY_ERPC_SWQOS_URLS:-${JITO_ERPC_SWQOS_URLS:-}}"
   CANARY_ERPC_LEADER_SLOTS_ENABLED="${JITO_CANARY_ERPC_LEADER_SLOTS_ENABLED:-${JITO_ERPC_LEADER_SLOTS_ENABLED:-false}}"
@@ -327,6 +336,32 @@ canary_values() {
       CANARY_BEAM_ENABLED="false"
       CANARY_ZERO_SLOT_ENABLED="false"
       CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_LUNAR_LANDER_STACK_MAX_PROVIDER_TIP_LAMPORTS:-1387500}"
+      CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
+      ;;
+    circular-fast-only)
+      CANARY_LANE_MODE="circular-fast-only"
+      CANARY_HELIUS_ENABLED="false"
+      CANARY_HELIUS_TIP=0
+      CANARY_HELIUS_TIP_ACCOUNT=""
+      CANARY_HELIUS_TIP_ACCOUNTS=""
+      CANARY_NOZOMI_ENABLED="false"
+      CANARY_ASTRALANE_ENABLED="false"
+      CANARY_LUNAR_LANDER_ENABLED="false"
+      CANARY_CIRCULAR_FAST_ENABLED="true"
+      CANARY_BEAM_ENABLED="false"
+      CANARY_ZERO_SLOT_ENABLED="false"
+      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_CIRCULAR_FAST_MAX_PROVIDER_TIP_LAMPORTS:-1000000}"
+      ;;
+    helius-circular-fast-stack)
+      CANARY_LANE_MODE="helius-circular-fast-stack"
+      CANARY_HELIUS_ENABLED="true"
+      CANARY_NOZOMI_ENABLED="false"
+      CANARY_ASTRALANE_ENABLED="false"
+      CANARY_LUNAR_LANDER_ENABLED="false"
+      CANARY_CIRCULAR_FAST_ENABLED="true"
+      CANARY_BEAM_ENABLED="false"
+      CANARY_ZERO_SLOT_ENABLED="false"
+      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_CIRCULAR_FAST_STACK_MAX_PROVIDER_TIP_LAMPORTS:-1387500}"
       CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
       ;;
     erpc-swqos-only)
@@ -514,6 +549,13 @@ CANARY_LUNAR_LANDER_TIP_LAMPORTS=${CANARY_LUNAR_LANDER_TIP:-}
 CANARY_LUNAR_LANDER_TIP_ACCOUNT_CONFIGURED=$([[ -n "${CANARY_LUNAR_LANDER_TIP_ACCOUNT:-}" ]] && echo true || echo false)
 CANARY_LUNAR_LANDER_TIP_ACCOUNTS_CONFIGURED=$([[ -n "${CANARY_LUNAR_LANDER_TIP_ACCOUNTS:-}" ]] && echo true || echo false)
 CANARY_LUNAR_LANDER_MEV_PROTECT=${CANARY_LUNAR_LANDER_MEV_PROTECT:-}
+CANARY_CIRCULAR_FAST_ENABLED=${CANARY_CIRCULAR_FAST_ENABLED:-}
+CANARY_CIRCULAR_FAST_URLS_CONFIGURED=$([[ -n "${CANARY_CIRCULAR_FAST_URLS:-}" ]] && echo true || echo false)
+CANARY_CIRCULAR_FAST_API_KEY_CONFIGURED=$([[ -n "${CANARY_CIRCULAR_FAST_API_KEY:-}" ]] && echo true || echo false)
+CANARY_CIRCULAR_FAST_TIP_LAMPORTS=${CANARY_CIRCULAR_FAST_TIP:-}
+CANARY_CIRCULAR_FAST_TIP_ACCOUNT_CONFIGURED=$([[ -n "${CANARY_CIRCULAR_FAST_TIP_ACCOUNT:-}" ]] && echo true || echo false)
+CANARY_CIRCULAR_FAST_TIP_ACCOUNTS_CONFIGURED=$([[ -n "${CANARY_CIRCULAR_FAST_TIP_ACCOUNTS:-}" ]] && echo true || echo false)
+CANARY_CIRCULAR_FAST_FRONT_RUNNING_PROTECTION=${CANARY_CIRCULAR_FAST_FRONT_RUNNING_PROTECTION:-}
 CANARY_ERPC_SWQOS_ENABLED=${CANARY_ERPC_SWQOS_ENABLED:-}
 CANARY_ERPC_SWQOS_URLS_CONFIGURED=$([[ -n "${CANARY_ERPC_SWQOS_URLS:-}" ]] && echo true || echo false)
 CANARY_ERPC_LEADER_SLOTS_ENABLED=${CANARY_ERPC_LEADER_SLOTS_ENABLED:-}
@@ -589,6 +631,13 @@ print_status() {
   echo "lunar_lander_tip_account=$([[ -n "${JITO_LUNAR_LANDER_TIP_ACCOUNT:-}" ]] && echo configured || echo empty)"
   echo "lunar_lander_tip_accounts=$([[ -n "${JITO_LUNAR_LANDER_TIP_ACCOUNTS:-}" ]] && echo configured || echo empty)"
   echo "lunar_lander_mev_protect=${JITO_LUNAR_LANDER_MEV_PROTECT:-}"
+  echo "circular_fast_enabled=${JITO_CIRCULAR_FAST_ENABLED:-}"
+  echo "circular_fast_urls=$([[ -n "${JITO_CIRCULAR_FAST_URLS:-}" ]] && echo configured || echo empty)"
+  echo "circular_fast_api_key=$([[ -n "${JITO_CIRCULAR_FAST_API_KEY:-}" ]] && echo configured || echo empty)"
+  echo "circular_fast_tip_lamports=${JITO_CIRCULAR_FAST_TIP_LAMPORTS:-}"
+  echo "circular_fast_tip_account=$([[ -n "${JITO_CIRCULAR_FAST_TIP_ACCOUNT:-}" ]] && echo configured || echo empty)"
+  echo "circular_fast_tip_accounts=$([[ -n "${JITO_CIRCULAR_FAST_TIP_ACCOUNTS:-}" ]] && echo configured || echo empty)"
+  echo "circular_fast_front_running_protection=${JITO_CIRCULAR_FAST_FRONT_RUNNING_PROTECTION:-}"
   echo "erpc_swqos_enabled=${JITO_ERPC_SWQOS_ENABLED:-}"
   echo "erpc_swqos_urls=$([[ -n "${JITO_ERPC_SWQOS_URLS:-}" ]] && echo configured || echo empty)"
   echo "erpc_leader_slots_enabled=${JITO_ERPC_LEADER_SLOTS_ENABLED:-}"
@@ -865,6 +914,30 @@ require_lunar_lander_ready() {
   fi
 }
 
+require_circular_fast_ready() {
+  local name="$1"
+  if [[ -z "${CANARY_CIRCULAR_FAST_URLS:-}" ]]; then
+    echo "$name requires JITO_CANARY_CIRCULAR_FAST_URLS or JITO_CIRCULAR_FAST_URLS in $WORKER_ENV_FILE or $APP_ENV_FILE" >&2
+    exit 2
+  fi
+  if [[ -z "${CANARY_CIRCULAR_FAST_API_KEY:-}" ]]; then
+    echo "$name requires JITO_CANARY_CIRCULAR_FAST_API_KEY or JITO_CIRCULAR_FAST_API_KEY" >&2
+    exit 2
+  fi
+  if [[ -z "${CANARY_CIRCULAR_FAST_TIP:-}" || ! "$CANARY_CIRCULAR_FAST_TIP" =~ ^[0-9]+$ ]]; then
+    echo "$name requires numeric JITO_CANARY_CIRCULAR_FAST_TIP_LAMPORTS or JITO_CIRCULAR_FAST_TIP_LAMPORTS" >&2
+    exit 2
+  fi
+  if (( CANARY_CIRCULAR_FAST_TIP < 1000000 )); then
+    echo "$name requires Circular Fast tip >= 1000000 lamports" >&2
+    exit 2
+  fi
+  if [[ -z "${CANARY_CIRCULAR_FAST_TIP_ACCOUNT:-}" && -z "${CANARY_CIRCULAR_FAST_TIP_ACCOUNTS:-}" ]]; then
+    echo "$name requires JITO_CANARY_CIRCULAR_FAST_TIP_ACCOUNT/JITO_CIRCULAR_FAST_TIP_ACCOUNT or JITO_CANARY_CIRCULAR_FAST_TIP_ACCOUNTS/JITO_CIRCULAR_FAST_TIP_ACCOUNTS" >&2
+    exit 2
+  fi
+}
+
 require_beam_ready() {
   local name="$1" provider mode
   if [[ -z "${CANARY_BEAM_URL:-}" ]]; then
@@ -988,6 +1061,11 @@ apply_canary() {
       require_lunar_lander_ready "$name"
       ;;
   esac
+  case "$CANARY_CIRCULAR_FAST_ENABLED" in
+    true)
+      require_circular_fast_ready "$name"
+      ;;
+  esac
   case "$CANARY_ERPC_SWQOS_ENABLED" in
     true)
       require_erpc_swqos_ready "$name"
@@ -1042,6 +1120,13 @@ apply_canary() {
   set_env_var "$WORKER_ENV_FILE" JITO_LUNAR_LANDER_TIP_ACCOUNT "$CANARY_LUNAR_LANDER_TIP_ACCOUNT"
   set_env_var "$WORKER_ENV_FILE" JITO_LUNAR_LANDER_TIP_ACCOUNTS "$CANARY_LUNAR_LANDER_TIP_ACCOUNTS"
   set_env_var "$WORKER_ENV_FILE" JITO_LUNAR_LANDER_MEV_PROTECT "$CANARY_LUNAR_LANDER_MEV_PROTECT"
+  set_env_var "$WORKER_ENV_FILE" JITO_CIRCULAR_FAST_ENABLED "$CANARY_CIRCULAR_FAST_ENABLED"
+  set_env_var "$WORKER_ENV_FILE" JITO_CIRCULAR_FAST_URLS "$CANARY_CIRCULAR_FAST_URLS"
+  set_env_var "$WORKER_ENV_FILE" JITO_CIRCULAR_FAST_API_KEY "$CANARY_CIRCULAR_FAST_API_KEY"
+  set_env_var "$WORKER_ENV_FILE" JITO_CIRCULAR_FAST_TIP_LAMPORTS "$CANARY_CIRCULAR_FAST_TIP"
+  set_env_var "$WORKER_ENV_FILE" JITO_CIRCULAR_FAST_TIP_ACCOUNT "$CANARY_CIRCULAR_FAST_TIP_ACCOUNT"
+  set_env_var "$WORKER_ENV_FILE" JITO_CIRCULAR_FAST_TIP_ACCOUNTS "$CANARY_CIRCULAR_FAST_TIP_ACCOUNTS"
+  set_env_var "$WORKER_ENV_FILE" JITO_CIRCULAR_FAST_FRONT_RUNNING_PROTECTION "$CANARY_CIRCULAR_FAST_FRONT_RUNNING_PROTECTION"
   set_env_var "$WORKER_ENV_FILE" JITO_ERPC_SWQOS_ENABLED "$CANARY_ERPC_SWQOS_ENABLED"
   set_env_var "$WORKER_ENV_FILE" JITO_ERPC_SWQOS_URLS "$CANARY_ERPC_SWQOS_URLS"
   set_env_var "$WORKER_ENV_FILE" JITO_ERPC_LEADER_SLOTS_ENABLED "$CANARY_ERPC_LEADER_SLOTS_ENABLED"
@@ -1112,6 +1197,8 @@ case "$command" in
     ;;
   mark)
     name="${2:-baseline}"
+    load_env_file "$APP_ENV_FILE"
+    load_env_file "$WORKER_ENV_FILE"
     canary_values "$name"
     write_marker "$name" "${3:-$(current_service_start_iso)}"
     print_status

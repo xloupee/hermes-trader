@@ -1,4 +1,7 @@
-use crate::event::now_ms;
+use crate::{
+    cache_rpc::{rpc_url_label, CacheRpcBackoff},
+    event::now_ms,
+};
 use arc_swap::ArcSwap;
 use reqwest::Client;
 use serde::Deserialize;
@@ -24,6 +27,7 @@ struct PriorityFeeCacheInner {
     percentile: u8,
     tracked: Mutex<HashMap<String, Vec<String>>>,
     entries: ArcSwap<HashMap<String, PriorityFeeEntry>>,
+    cache_rpc_backoff: CacheRpcBackoff,
 }
 
 #[derive(Clone, Debug)]
@@ -31,6 +35,7 @@ struct PriorityFeeEntry {
     priority_fee_micro_lamports: u64,
     fetched_at_ms: u128,
     sample_count: usize,
+    source_rpc: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -40,6 +45,7 @@ pub(crate) struct PriorityFeeLookup {
     pub(crate) fetched_at_ms: Option<u128>,
     pub(crate) age_ms: Option<u128>,
     pub(crate) sample_count: Option<usize>,
+    pub(crate) source_rpc: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +72,7 @@ impl PriorityFeeCache {
         stale_after_ms: u128,
         http_timeout_ms: u64,
         percentile: u8,
+        cache_rpc_backoff: CacheRpcBackoff,
     ) -> Self {
         Self {
             inner: Arc::new(PriorityFeeCacheInner {
@@ -77,6 +84,7 @@ impl PriorityFeeCache {
                 percentile: percentile.min(100),
                 tracked: Mutex::new(HashMap::new()),
                 entries: ArcSwap::from_pointee(HashMap::new()),
+                cache_rpc_backoff,
             }),
         }
     }
@@ -112,6 +120,7 @@ impl PriorityFeeCache {
                 fetched_at_ms: Some(entry.fetched_at_ms),
                 age_ms: Some(age_ms),
                 sample_count: Some(entry.sample_count),
+                source_rpc: Some(entry.source_rpc),
                 ..PriorityFeeLookup::default()
             };
         }
@@ -122,6 +131,7 @@ impl PriorityFeeCache {
             fetched_at_ms: Some(entry.fetched_at_ms),
             age_ms: Some(age_ms),
             sample_count: Some(entry.sample_count),
+            source_rpc: Some(entry.source_rpc),
         }
     }
 
@@ -198,20 +208,33 @@ impl PriorityFeeCacheInner {
     async fn refresh_account_set(&self, accounts: &[String]) -> Result<PriorityFeeEntry, String> {
         let mut errors = Vec::new();
         for rpc_url in &self.rpc_urls {
+            if !self.cache_rpc_backoff.is_available(rpc_url) {
+                errors.push(format!("{}: provider in backoff", rpc_url_label(rpc_url)));
+                continue;
+            }
             match self
                 .fetch_recent_prioritization_fees(rpc_url, accounts)
                 .await
             {
                 Ok(samples) => {
+                    self.cache_rpc_backoff.record_success(rpc_url);
                     let priority_fee_micro_lamports =
                         percentile_priority_fee(&samples, self.percentile);
                     return Ok(PriorityFeeEntry {
                         priority_fee_micro_lamports,
                         fetched_at_ms: now_ms(),
                         sample_count: samples.len(),
+                        source_rpc: rpc_url_label(rpc_url),
                     });
                 }
-                Err(error) => errors.push(format!("{}: {error}", rpc_url_label(rpc_url))),
+                Err(error) => {
+                    self.cache_rpc_backoff.record_failure(
+                        "getRecentPrioritizationFees",
+                        rpc_url,
+                        &error,
+                    );
+                    errors.push(format!("{}: {error}", rpc_url_label(rpc_url)));
+                }
             }
         }
         Err(format!(
@@ -298,16 +321,6 @@ fn percentile_priority_fee(samples: &[RecentPrioritizationFee], percentile: u8) 
     fees[index.min(fees.len().saturating_sub(1))]
 }
 
-fn rpc_url_label(url: &str) -> String {
-    url.split("://")
-        .nth(1)
-        .unwrap_or(url)
-        .split('/')
-        .next()
-        .unwrap_or(url)
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,8 +342,14 @@ mod tests {
     fn observe_writable_accounts_registers_sorted_unique_key_without_network() {
         let first = Pubkey::new_unique();
         let second = Pubkey::new_unique();
-        let cache =
-            PriorityFeeCache::new(vec!["http://127.0.0.1:8899".to_string()], 0, 5_000, 1, 75);
+        let cache = PriorityFeeCache::new(
+            vec!["http://127.0.0.1:8899".to_string()],
+            0,
+            5_000,
+            1,
+            75,
+            CacheRpcBackoff::default(),
+        );
 
         let lookup = cache.observe_writable_accounts(&[second, first, second]);
 
@@ -343,8 +362,14 @@ mod tests {
     fn observe_writable_accounts_uses_max_fresh_single_account_entry() {
         let first = Pubkey::new_unique();
         let second = Pubkey::new_unique();
-        let cache =
-            PriorityFeeCache::new(vec!["http://127.0.0.1:8899".to_string()], 0, 5_000, 1, 75);
+        let cache = PriorityFeeCache::new(
+            vec!["http://127.0.0.1:8899".to_string()],
+            0,
+            5_000,
+            1,
+            75,
+            CacheRpcBackoff::default(),
+        );
         let mut entries = HashMap::new();
         entries.insert(
             first.to_string(),
@@ -352,6 +377,7 @@ mod tests {
                 priority_fee_micro_lamports: 100,
                 fetched_at_ms: now_ms(),
                 sample_count: 2,
+                source_rpc: "first.rpc".to_string(),
             },
         );
         entries.insert(
@@ -360,6 +386,7 @@ mod tests {
                 priority_fee_micro_lamports: 250,
                 fetched_at_ms: now_ms(),
                 sample_count: 3,
+                source_rpc: "second.rpc".to_string(),
             },
         );
         cache.inner.entries.store(Arc::new(entries));
@@ -369,5 +396,6 @@ mod tests {
         assert_eq!(lookup.account_count, 2);
         assert_eq!(lookup.priority_fee_micro_lamports, Some(250));
         assert_eq!(lookup.sample_count, Some(3));
+        assert_eq!(lookup.source_rpc.as_deref(), Some("second.rpc"));
     }
 }

@@ -48,8 +48,13 @@ Canaries:
   blockhash-processed Baseline with JITO_BLOCKHASH_COMMITMENT=processed
   blockhash-confirmed Baseline with JITO_BLOCKHASH_COMMITMENT=confirmed
   account-priority-cache Baseline plus warm writable-account getRecentPrioritizationFees cache
+  helius-sender-max Helius Sender Max only, 1000000 lamport Sender tip
   nozomi-only   Nozomi JSON-RPC only with Nozomi tip, for delivery-lane isolation
   helius-nozomi-stack Helius Sender plus Nozomi same-signature fanout with both tips
+  nozomi-api-v2-only Nozomi API v2 only with Nozomi tip
+  helius-nozomi-api-v2-stack Helius Sender plus Nozomi API v2 fanout
+  nozomi-api-v2-regional-only Nozomi API v2 multi-region fanout only
+  helius-nozomi-api-v2-regional-stack Helius Sender plus Nozomi API v2 multi-region fanout
   astralane-only Astralane IrisB binary HTTP only with Astralane tip, for delivery-lane isolation
   helius-astralane-stack Helius Sender plus Astralane same-signature fanout
   helius-nozomi-astralane-stack Helius Sender plus Nozomi plus Astralane fanout
@@ -111,6 +116,107 @@ backup_env() {
   backup="$BACKUP_DIR/canary-$stamp/$(basename "$WORKER_ENV_FILE")"
   cp -a "$WORKER_ENV_FILE" "$backup"
   printf '%s\n' "$backup"
+}
+
+trim_value() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+csv_count() {
+  local values="$1" count=0 part
+  local -a parts
+  IFS=',' read -r -a parts <<< "$values"
+  for part in "${parts[@]:-}"; do
+    part="$(trim_value "$part")"
+    [[ -n "$part" ]] && count=$((count + 1))
+  done
+  printf '%s' "$count"
+}
+
+nozomi_api_v2_urls_from_urls() {
+  local values="$1" result="" part trimmed base query converted
+  local -a parts
+  IFS=',' read -r -a parts <<< "$values"
+  for part in "${parts[@]:-}"; do
+    trimmed="$(trim_value "$part")"
+    [[ -z "$trimmed" ]] && continue
+    query=""
+    if [[ "$trimmed" == *"?"* ]]; then
+      query="${trimmed#*\?}"
+      query="${query%%#*}"
+    fi
+    base="${trimmed%%\?*}"
+    base="${base%%#*}"
+    base="${base%/}"
+    if [[ "$base" == */api/sendTransaction2 ]]; then
+      converted="$trimmed"
+    else
+      converted="$base/api/sendTransaction2"
+      [[ -n "$query" ]] && converted="$converted?$query"
+    fi
+    if [[ -z "$result" ]]; then
+      result="$converted"
+    else
+      result="$result,$converted"
+    fi
+  done
+  printf '%s' "$result"
+}
+
+nozomi_first_query() {
+  local values="$1" part trimmed query
+  local -a parts
+  if [[ -n "${JITO_CANARY_NOZOMI_API_KEY:-}" ]]; then
+    printf 'c=%s' "$JITO_CANARY_NOZOMI_API_KEY"
+    return 0
+  fi
+  IFS=',' read -r -a parts <<< "$values"
+  for part in "${parts[@]:-}"; do
+    trimmed="$(trim_value "$part")"
+    [[ "$trimmed" == *"?"* ]] || continue
+    query="${trimmed#*\?}"
+    query="${query%%#*}"
+    if [[ -n "$query" ]]; then
+      printf '%s' "$query"
+      return 0
+    fi
+  done
+  return 0
+}
+
+nozomi_api_v2_region_urls() {
+  local query hosts result="" host base converted
+  local -a parts
+  query="$(nozomi_first_query "$CANARY_NOZOMI_URLS")"
+  [[ -n "$query" ]] || return 0
+  hosts="${JITO_CANARY_NOZOMI_API_V2_REGION_HOSTS:-ewr1.nozomi.temporal.xyz,ash1.nozomi.temporal.xyz,pit1.nozomi.temporal.xyz,edge.nozomi.temporal.xyz}"
+  IFS=',' read -r -a parts <<< "$hosts"
+  for host in "${parts[@]:-}"; do
+    host="$(trim_value "$host")"
+    [[ -z "$host" ]] && continue
+    base="${host%/}"
+    if [[ "$base" != *"://"* ]]; then
+      base="https://$base"
+    fi
+    converted="$base/api/sendTransaction2?$query"
+    if [[ -z "$result" ]]; then
+      result="$converted"
+    else
+      result="$result,$converted"
+    fi
+  done
+  printf '%s' "$result"
+}
+
+use_nozomi_api_v2_urls() {
+  CANARY_NOZOMI_URLS="${JITO_CANARY_NOZOMI_API_V2_URLS:-$(nozomi_api_v2_urls_from_urls "$CANARY_NOZOMI_URLS")}"
+}
+
+use_nozomi_api_v2_region_urls() {
+  CANARY_NOZOMI_URLS="${JITO_CANARY_NOZOMI_API_V2_REGION_URLS:-${JITO_CANARY_NOZOMI_API_V2_URLS:-$(nozomi_api_v2_region_urls)}}"
 }
 
 canary_values() {
@@ -215,6 +321,18 @@ canary_values() {
       CANARY_ACCOUNT_PRIORITY_FEE_STALE_MS="${JITO_CANARY_ACCOUNT_PRIORITY_FEE_STALE_MS:-5000}"
       CANARY_ACCOUNT_PRIORITY_FEE_PERCENTILE="${JITO_CANARY_ACCOUNT_PRIORITY_FEE_PERCENTILE:-75}"
       ;;
+    helius-sender-max)
+      CANARY_LANE_MODE="helius-sender-max"
+      CANARY_HELIUS_ENABLED="true"
+      CANARY_HELIUS_SWQOS_ONLY="false"
+      CANARY_HELIUS_TIP=1000000
+      CANARY_NOZOMI_ENABLED="false"
+      CANARY_ASTRALANE_ENABLED="false"
+      CANARY_BEAM_ENABLED="false"
+      CANARY_TPU_JET_ENABLED="false"
+      CANARY_TPU_QUIC_ENABLED="false"
+      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_HELIUS_SENDER_MAX_PROVIDER_TIP_LAMPORTS:-1000000}"
+      ;;
     nozomi-only)
       CANARY_LANE_MODE="nozomi-only"
       CANARY_HELIUS_ENABLED="false"
@@ -223,11 +341,43 @@ canary_values() {
       CANARY_HELIUS_TIP_ACCOUNTS=""
       CANARY_NOZOMI_ENABLED="true"
       ;;
+    nozomi-api-v2-only)
+      CANARY_LANE_MODE="nozomi-only"
+      CANARY_HELIUS_ENABLED="false"
+      CANARY_HELIUS_TIP=0
+      CANARY_HELIUS_TIP_ACCOUNT=""
+      CANARY_HELIUS_TIP_ACCOUNTS=""
+      CANARY_NOZOMI_ENABLED="true"
+      use_nozomi_api_v2_urls
+      ;;
+    nozomi-api-v2-regional-only)
+      CANARY_LANE_MODE="nozomi-only"
+      CANARY_HELIUS_ENABLED="false"
+      CANARY_HELIUS_TIP=0
+      CANARY_HELIUS_TIP_ACCOUNT=""
+      CANARY_HELIUS_TIP_ACCOUNTS=""
+      CANARY_NOZOMI_ENABLED="true"
+      use_nozomi_api_v2_region_urls
+      ;;
     helius-nozomi-stack)
       CANARY_LANE_MODE="helius-nozomi-stack"
       CANARY_HELIUS_ENABLED="true"
       CANARY_NOZOMI_ENABLED="true"
       CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
+      ;;
+    helius-nozomi-api-v2-stack)
+      CANARY_LANE_MODE="helius-nozomi-stack"
+      CANARY_HELIUS_ENABLED="true"
+      CANARY_NOZOMI_ENABLED="true"
+      CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
+      use_nozomi_api_v2_urls
+      ;;
+    helius-nozomi-api-v2-regional-stack)
+      CANARY_LANE_MODE="helius-nozomi-stack"
+      CANARY_HELIUS_ENABLED="true"
+      CANARY_NOZOMI_ENABLED="true"
+      CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
+      use_nozomi_api_v2_region_urls
       ;;
     astralane-only)
       CANARY_LANE_MODE="astralane-only"
@@ -368,9 +518,12 @@ CANARY_HELIUS_TIP_LAMPORTS=${CANARY_HELIUS_TIP:-}
 CANARY_PRIORITY_FEE_MICRO_LAMPORTS=${CANARY_PRIORITY:-}
 CANARY_SEND_MAX_RETRIES=${CANARY_RETRIES:-}
 CANARY_SEND_LANE_MODE=${CANARY_LANE_MODE:-}
+CANARY_HELIUS_SWQOS_ONLY=${CANARY_HELIUS_SWQOS_ONLY:-}
 CANARY_HELIUS_TIP_ACCOUNTS=${CANARY_HELIUS_TIP_ACCOUNTS:-}
 CANARY_NOZOMI_ENABLED=${CANARY_NOZOMI_ENABLED:-}
 CANARY_NOZOMI_URLS_CONFIGURED=$([[ -n "${CANARY_NOZOMI_URLS:-}" ]] && echo true || echo false)
+CANARY_NOZOMI_URL_COUNT=$(csv_count "${CANARY_NOZOMI_URLS:-}")
+CANARY_NOZOMI_API_V2=$([[ "${CANARY_NOZOMI_URLS:-}" == *"/api/sendTransaction2"* ]] && echo true || echo false)
 CANARY_NOZOMI_TIP_LAMPORTS=${CANARY_NOZOMI_TIP:-}
 CANARY_NOZOMI_TIP_ACCOUNT_CONFIGURED=$([[ -n "${CANARY_NOZOMI_TIP_ACCOUNT:-}" ]] && echo true || echo false)
 CANARY_NOZOMI_TIP_ACCOUNTS_CONFIGURED=$([[ -n "${CANARY_NOZOMI_TIP_ACCOUNTS:-}" ]] && echo true || echo false)

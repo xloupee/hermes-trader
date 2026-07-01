@@ -44,6 +44,7 @@ When `JITO_HELIUS_SENDER_ENABLED` is true, startup fails closed unless:
 Tip minimums:
 
 - Sender `/fast`: `200000` lamports
+- Sender Max `/fast`: `1000000` lamports
 - Sender `swqos_only`: `5000` lamports
 
 ## Runtime workflow
@@ -57,6 +58,8 @@ Tip minimums:
    - `rpc_only`: priority fee only, RPC endpoints.
    - `jito_only`: Jito tip only, Jito block-engine endpoints.
    - `helius_sender_only`: Sender tip only, Helius Sender endpoints.
+   - `helius_sender_max`: Sender tip only, Helius Sender `/fast` endpoints,
+     minimum 1000000 lamports, and `JITO_HELIUS_SENDER_SWQOS_ONLY=false`.
 6. The transaction builder emits one compatible transaction for the selected mode. If Jito and Sender are both active in `mixed` and use the same tip account, the transfer is merged to the larger lamport value.
 7. The same serialized transaction is fanned out to the selected lanes.
 8. Do not race lane-specific signed variants: different fee/tip instructions produce different signatures, and first ACK cannot retract already-submitted variants.

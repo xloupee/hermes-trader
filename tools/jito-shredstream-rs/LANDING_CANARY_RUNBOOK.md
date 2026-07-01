@@ -85,19 +85,25 @@ window does not meet the minimum scored-row and `txDelta` coverage thresholds.
 2. Helius Sender tip: `tip-250k`, then `tip-500k`.
 3. Priority fee: `priority-1453k`, then `priority-1938k`; keep retries at `0`.
 4. Retries: `retries-1` or `retries-3` only as rollback/diagnostic shapes.
-5. Nozomi delivery isolation, only after `JITO_NOZOMI_URLS` is configured with
+5. Helius Sender Max: `helius-sender-max`. This sets
+   `JITO_SEND_LANE_MODE=helius-sender-max`,
+   `JITO_HELIUS_SENDER_SWQOS_ONLY=false`, disables Nozomi/Astralane/Beam/TPU
+   lanes, and uses a 1000000 lamport Helius Sender tip. Judge it by landed
+   rate, same-slot rate, `txDelta`, submitted-not-landed, and configured tip
+   cost, not ACK speed.
+6. Nozomi delivery isolation, only after `JITO_NOZOMI_URLS` is configured with
    the API-keyed endpoint and the tip account is confirmed:
    `nozomi-only` applies `JITO_SEND_LANE_MODE=nozomi-only`,
    `JITO_NOZOMI_ENABLED=true`, and a Nozomi tip of at least `1000000`
    lamports. This is a lane test, not the final stack.
-6. Helius + Nozomi same-signature stack:
+7. Helius + Nozomi same-signature stack:
    `helius-nozomi-stack` applies `JITO_SEND_LANE_MODE=helius-nozomi-stack`,
    keeps Helius Sender enabled, enables Nozomi, signs one transaction containing
    the Helius tip and Nozomi tip, then fans out identical bytes to both
    providers. This costs both provider tips on every landed transaction, so
    judge it by landed rate, same-slot rate, `txDelta`, submitted-not-landed,
    and total configured tip cost.
-7. Astralane IrisB, only after `JITO_ASTRALANE_API_KEY`,
+8. Astralane IrisB, only after `JITO_ASTRALANE_API_KEY`,
    `JITO_ASTRALANE_URLS`, and the Astralane tip account(s) are configured.
    Start with `astralane-only` for delivery-lane isolation, then
    `helius-astralane-stack` as the first same-signature race, then
@@ -105,7 +111,7 @@ window does not meet the minimum scored-row and `txDelta` coverage thresholds.
    intentional. IrisB is binary HTTP, not QUIC: it returns ACK/signature/error
    telemetry, but the canary is still judged by landed rate, same-slot rate,
    `txDelta`, failed-on-chain, submitted-not-landed, and configured tip cost.
-8. RPC Fast Beam, only after `JITO_BEAM_TOKEN` and provider-specific
+9. RPC Fast Beam, only after `JITO_BEAM_TOKEN` and provider-specific
    `JITO_BEAM_TIP_ACCOUNTS` are configured. Start with `beam-only` for smoke,
    then `helius-beam-stack` as a Nozomi-replacement test, then
    `helius-nozomi-beam-stack` only when the higher tip cost is intentional.
@@ -114,14 +120,14 @@ window does not meet the minimum scored-row and `txDelta` coverage thresholds.
    The triple stack raises `JITO_MAX_PROVIDER_TIP_LAMPORTS` to `2500000` by
    default and must be judged by landing position and failed-on-chain rate, not
    ACK speed.
-9. All non-Beam stack: `all-non-beam-stack` applies Helius Sender + Nozomi,
+10. All non-Beam stack: `all-non-beam-stack` applies Helius Sender + Nozomi,
    and includes TPU Jet only if
    `JITO_CANARY_ALL_NON_BEAM_TPU_JET_ENABLED` or the existing
    `JITO_TPU_JET_ENABLED` is true. Astralane, Beam, and direct TPU QUIC are
    excluded. Use `helius-nozomi-astralane-stack` when Astralane cost is
    intentional. The default provider-tip cap is `1387500` lamports because the
    transaction pays every included provider tip if it lands.
-10. Yellowstone Jet sidecar, only after the sidecar build is deployed and
+11. Yellowstone Jet sidecar, only after the sidecar build is deployed and
    `JITO_TPU_JET_RPC_URL` / `JITO_TPU_JET_WS_URL` /
    `JITO_TPU_JET_SIDECAR_URL` are configured:
    `tpu-jet-fanout` applies `JITO_SEND_LANE_MODE=helius-tpu-jet` for Helius +
@@ -210,10 +216,54 @@ The canary helper also accepts `JITO_CANARY_NOZOMI_URLS`,
 `JITO_CANARY_NOZOMI_TIP_ACCOUNTS` so the Nozomi endpoint can be staged without
 changing the steady-state env first.
 
+Nozomi supports two submit transports in this worker:
+
+- JSON-RPC: `https://nozomi.temporal.xyz/?c=<api-key>` produces
+  `kind=nozomi_json_rpc` lane attribution.
+- API v2: `https://pit1.nozomi.temporal.xyz/api/sendTransaction2?c=<api-key>`
+  produces `kind=nozomi_api_v2` lane attribution and sends only the base64
+  transaction body with `Content-Type: text/plain`. API v2 does not return a
+  signature, so the worker records the already-known signed transaction
+  signature and sets `signatureReturned=false`.
+
+For a Nozomi-only improvement pass, keep one variable per window:
+
+1. JSON-RPC auto-routed only: `nozomi-only`, current baseline shape.
+2. API v2 auto-routed only: `nozomi-api-v2-only`. This derives
+   `/api/sendTransaction2` from `JITO_CANARY_NOZOMI_URLS` /
+   `JITO_NOZOMI_URLS`, or accepts explicit `JITO_CANARY_NOZOMI_API_V2_URLS`.
+3. API v2 regional fanout: `nozomi-api-v2-regional-only` or
+   `helius-nozomi-api-v2-regional-stack`. The default hosts are `ewr1`, `ash1`,
+   `pit1`, and `edge`; override with
+   `JITO_CANARY_NOZOMI_API_V2_REGION_HOSTS` or set explicit
+   `JITO_CANARY_NOZOMI_API_V2_REGION_URLS`. Nozomi says same-transaction
+   multi-region sends do not count against rate limit per region, but still
+   verify with fresh error rows.
+4. Tip-account isolation: set `JITO_CANARY_NOZOMI_TIP_ACCOUNTS` to the full
+   public list or private project tip accounts if available, then compare
+   write-lock skips, landed rate, same-slot rate, and `txDelta`.
+5. Tip-floor tracking: use Nozomi's public tip-floor stream as a control-plane
+   input only. Do not fetch it on signal. If adopted, refresh a cached tip target
+   out of band and require `JITO_MAX_PROVIDER_TIP_LAMPORTS` to cap total cost.
+
+Other Nozomi surfaces to evaluate only after the API v2/regional canaries:
+
+- TCP keep-alive: the worker already uses a pooled reqwest client, but a
+  low-frequency out-of-band `/ping` warmer may help if lane telemetry shows
+  first-submit reconnect spikes after idle windows.
+- Batch Send: not a first fit for single copy buys. Consider it only for
+  deliberately prebuilt multi-variant sends, and only with duplicate-land
+  safeguards.
+- Front-running protection: useful for privacy/adversarial-validator risk, but
+  it may narrow delivery paths. Benchmark separately from fastest-landing mode.
+- QoS priority: Nozomi discounts high-failure accounts, so fail-closed parsing,
+  fresh blockhashes, and high landed rate are part of Nozomi performance, not
+  only local hygiene.
+
 The Helius + Nozomi stack is not two signed variants. The worker builds one
 transaction with the current priority fee, the Helius Sender tip, the Nozomi
 tip, and the swap, signs once, serializes once, then sends those identical bytes
-to Helius Sender and Nozomi JSON-RPC. This avoids duplicate-buy risk from
+to Helius Sender and Nozomi. This avoids duplicate-buy risk from
 provider-specific signatures, but it increases transaction shape and tip cost.
 
 Guardrails for the stack:

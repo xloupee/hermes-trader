@@ -230,6 +230,15 @@ a send lane. If
   `JITO_SEND_FANOUT=YES` and `JITO_BLOCK_ENGINE_SEND_URLS`.
 - `helius_sender_only`: use Helius Sender endpoints and Sender tip only.
   Requires `JITO_HELIUS_SENDER_ENABLED=YES`.
+- `helius_sender_max`: use Helius Sender `/fast` endpoints with the Sender Max
+  tip floor. Requires `JITO_HELIUS_SENDER_ENABLED=YES`,
+  `JITO_HELIUS_SENDER_SWQOS_ONLY=false`, and a Sender tip of at least
+  `1000000` lamports.
+- `nozomi_only`: use Nozomi endpoints and a Nozomi tip only. `JITO_NOZOMI_URLS`
+  can contain standard JSON-RPC URLs or API v2 `/api/sendTransaction2` URLs.
+- `helius_nozomi_stack`: use Helius Sender plus Nozomi same-signature fanout.
+  The transaction contains both active provider tips, signs once, and sends the
+  identical serialized bytes to each configured lane.
 - `helius_tpu_jet`: use Helius Sender plus the local Yellowstone Jet sidecar
   lane. This is the canary mode for same-signature Helius + Jet fanout without
   adding RPC/Jito lanes.
@@ -250,6 +259,28 @@ a send lane. If
   2.2.1 dependency stack. Requires `JITO_TPU_QUIC_ENABLED=YES`,
   `JITO_TPU_QUIC_RPC_URL`, and `JITO_TPU_QUIC_WS_URL`. This mode does not
   include the Helius Sender tip and is reserved for the cheaper TPU-only canary.
+
+Nozomi is default-off:
+
+```bash
+JITO_NOZOMI_ENABLED=false
+JITO_NOZOMI_URLS=https://nozomi.temporal.xyz/?c=<api-key>
+JITO_NOZOMI_TIP_LAMPORTS=1000000
+JITO_NOZOMI_TIP_ACCOUNT=TEMPaMeCRFAS9EKF53Jd6KpHxgL47uWLcpFArU1Fanq
+```
+
+Nozomi API v2 URLs are detected from the path:
+
+```bash
+JITO_NOZOMI_URLS=https://pit1.nozomi.temporal.xyz/api/sendTransaction2?c=<api-key>
+```
+
+API v2 sends the base64 transaction bytes as `text/plain` and returns `200 OK`
+with no signature body, so the worker records the already-known signed
+transaction signature with `signatureReturned=false`. Use
+`landing-canary-control.sh` selectors such as `nozomi-api-v2-only`,
+`nozomi-api-v2-regional-only`, or `helius-nozomi-api-v2-regional-stack` to
+stage API v2 without changing the steady-state env first.
 
 Yellowstone Jet is default-off and runs through a local sidecar so the main
 worker does not link the Jet Solana 3.x dependency graph:

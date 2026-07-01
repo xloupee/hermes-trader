@@ -247,6 +247,9 @@ a send lane. If
 - `helius_lunar_lander_stack`: use Helius Sender plus Lunar Lander with the
   same signed bytes. Requires `JITO_SEND_FANOUT=YES`,
   `JITO_HELIUS_SENDER_ENABLED=YES`, and `JITO_LUNAR_LANDER_ENABLED=YES`.
+- `helius_nozomi_astralane_lunar_stack`: use Helius Sender, Nozomi, Astralane,
+  and Lunar Lander with the same signed bytes. Requires `JITO_SEND_FANOUT=YES`
+  and all four provider families enabled.
 - `circular_fast_only`: use Circular Fast `/transactions` JSON-RPC endpoints
   and FAST tip only. Requires `JITO_CIRCULAR_FAST_ENABLED=YES`,
   `JITO_CIRCULAR_FAST_API_KEY`, and a FAST tip account.
@@ -335,7 +338,7 @@ is configured.
 
 ```bash
 JITO_LUNAR_LANDER_ENABLED=false
-JITO_LUNAR_LANDER_URLS=https://fra.lunar-lander.hellomoon.io/send-bin
+JITO_LUNAR_LANDER_URLS=http://fra.lunar-lander.hellomoon.io/send-bin
 JITO_LUNAR_LANDER_API_KEY=
 JITO_LUNAR_LANDER_TIP_LAMPORTS=1000000
 JITO_LUNAR_LANDER_TIP_ACCOUNT=moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F

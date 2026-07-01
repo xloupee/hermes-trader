@@ -54,6 +54,7 @@ Canaries:
   astralane-only Astralane IrisB binary HTTP only with Astralane tip, for delivery-lane isolation
   helius-astralane-stack Helius Sender plus Astralane same-signature fanout
   helius-nozomi-astralane-stack Helius Sender plus Nozomi plus Astralane fanout
+  helius-nozomi-astralane-lunar-stack Helius Sender plus Nozomi plus Astralane plus Lunar Lander fanout
   lunar-lander-only Lunar Lander binary HTTP only with Lunar tip, for delivery-lane isolation
   helius-lunar-lander-stack Helius Sender plus Lunar Lander same-signature fanout
   circular-fast-only Circular Fast JSON-RPC only with FAST tip, for delivery-lane isolation
@@ -155,7 +156,7 @@ canary_values() {
   CANARY_ASTRALANE_MEV_PROTECT="${JITO_CANARY_ASTRALANE_MEV_PROTECT:-${JITO_ASTRALANE_MEV_PROTECT:-false}}"
   CANARY_ASTRALANE_SWQOS_ONLY="${JITO_CANARY_ASTRALANE_SWQOS_ONLY:-${JITO_ASTRALANE_SWQOS_ONLY:-false}}"
   CANARY_LUNAR_LANDER_ENABLED="false"
-  CANARY_LUNAR_LANDER_URLS="${JITO_CANARY_LUNAR_LANDER_URLS:-${JITO_LUNAR_LANDER_URLS:-https://fra.lunar-lander.hellomoon.io/send-bin}}"
+  CANARY_LUNAR_LANDER_URLS="${JITO_CANARY_LUNAR_LANDER_URLS:-${JITO_LUNAR_LANDER_URLS:-http://fra.lunar-lander.hellomoon.io/send-bin}}"
   CANARY_LUNAR_LANDER_API_KEY="${JITO_CANARY_LUNAR_LANDER_API_KEY:-${JITO_LUNAR_LANDER_API_KEY:-}}"
   CANARY_LUNAR_LANDER_TIP="${JITO_CANARY_LUNAR_LANDER_TIP_LAMPORTS:-${JITO_LUNAR_LANDER_TIP_LAMPORTS:-1000000}}"
   CANARY_LUNAR_LANDER_TIP_ACCOUNT="${JITO_CANARY_LUNAR_LANDER_TIP_ACCOUNT:-${JITO_LUNAR_LANDER_TIP_ACCOUNT:-moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F}}"
@@ -312,6 +313,17 @@ canary_values() {
       CANARY_BEAM_ENABLED="false"
       CANARY_ZERO_SLOT_ENABLED="false"
       CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_ASTRALANE_NOZOMI_STACK_MAX_PROVIDER_TIP_LAMPORTS:-2387500}"
+      CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
+      ;;
+    helius-nozomi-astralane-lunar-stack)
+      CANARY_LANE_MODE="helius-nozomi-astralane-lunar-stack"
+      CANARY_HELIUS_ENABLED="true"
+      CANARY_NOZOMI_ENABLED="true"
+      CANARY_ASTRALANE_ENABLED="true"
+      CANARY_LUNAR_LANDER_ENABLED="true"
+      CANARY_BEAM_ENABLED="false"
+      CANARY_ZERO_SLOT_ENABLED="false"
+      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_ASTRALANE_NOZOMI_LUNAR_STACK_MAX_PROVIDER_TIP_LAMPORTS:-3387500}"
       CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
       ;;
     lunar-lander-only)

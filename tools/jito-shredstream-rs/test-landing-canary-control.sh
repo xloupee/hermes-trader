@@ -136,6 +136,15 @@ assert_marker CANARY_BEAM_ENABLED false
 assert_marker CANARY_ZERO_SLOT_ENABLED false
 assert_marker CANARY_MAX_PROVIDER_TIP_LAMPORTS 2387500
 
+"$CONTROL" mark helius-nozomi-astralane-lunar-stack 2026-06-25T00:00:00Z >/dev/null 2>/dev/null
+assert_marker CANARY_SEND_LANE_MODE helius-nozomi-astralane-lunar-stack
+assert_marker CANARY_ASTRALANE_ENABLED true
+assert_marker CANARY_NOZOMI_ENABLED true
+assert_marker CANARY_LUNAR_LANDER_ENABLED true
+assert_marker CANARY_BEAM_ENABLED false
+assert_marker CANARY_ZERO_SLOT_ENABLED false
+assert_marker CANARY_MAX_PROVIDER_TIP_LAMPORTS 3387500
+
 "$CONTROL" mark lunar-lander-only 2026-06-25T00:00:00Z >/dev/null 2>/dev/null
 assert_marker CANARY_SEND_LANE_MODE lunar-lander-only
 assert_marker CANARY_LUNAR_LANDER_ENABLED true

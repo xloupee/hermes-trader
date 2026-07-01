@@ -89,7 +89,7 @@ export JITO_ASTRALANE_TIP_ACCOUNTS="${JITO_ASTRALANE_TIP_ACCOUNTS:-$JITO_ASTRALA
 export JITO_ASTRALANE_MEV_PROTECT="${JITO_ASTRALANE_MEV_PROTECT:-false}"
 export JITO_ASTRALANE_SWQOS_ONLY="${JITO_ASTRALANE_SWQOS_ONLY:-false}"
 export JITO_LUNAR_LANDER_ENABLED="${JITO_LUNAR_LANDER_ENABLED:-false}"
-export JITO_LUNAR_LANDER_URLS="${JITO_LUNAR_LANDER_URLS:-https://fra.lunar-lander.hellomoon.io/send-bin}"
+export JITO_LUNAR_LANDER_URLS="${JITO_LUNAR_LANDER_URLS:-http://fra.lunar-lander.hellomoon.io/send-bin}"
 export JITO_LUNAR_LANDER_API_KEY="${JITO_LUNAR_LANDER_API_KEY:-}"
 export JITO_LUNAR_LANDER_TIP_LAMPORTS="${JITO_LUNAR_LANDER_TIP_LAMPORTS:-1000000}"
 export JITO_LUNAR_LANDER_TIP_ACCOUNT="${JITO_LUNAR_LANDER_TIP_ACCOUNT:-moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F}"
@@ -328,11 +328,11 @@ esac
 
 SEND_LANE_MODE_NORMALIZED="$(printf '%s' "$JITO_SEND_LANE_MODE" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
 case "$SEND_LANE_MODE_NORMALIZED" in
-  mixed|rpc_only|jito_only|helius_sender_only|nozomi_only|helius_nozomi_stack|astralane_only|helius_astralane_stack|helius_nozomi_astralane_stack|lunar_lander_only|helius_lunar_lander_stack|circular_fast_only|helius_circular_fast_stack|erpc_swqos_only|helius_erpc_swqos_stack|beam_only|helius_beam_stack|helius_nozomi_beam_stack|zero_slot_only|helius_zero_slot_stack|helius_nozomi_zero_slot_stack|all_non_beam_stack|helius_tpu_jet|helius_tpu_quic|tpu_jet_helius_tip|tpu_quic_helius_tip|tpu_jet_only|tpu_quic_only)
+  mixed|rpc_only|jito_only|helius_sender_only|nozomi_only|helius_nozomi_stack|astralane_only|helius_astralane_stack|helius_nozomi_astralane_stack|helius_nozomi_astralane_lunar_stack|lunar_lander_only|helius_lunar_lander_stack|circular_fast_only|helius_circular_fast_stack|erpc_swqos_only|helius_erpc_swqos_stack|beam_only|helius_beam_stack|helius_nozomi_beam_stack|zero_slot_only|helius_zero_slot_stack|helius_nozomi_zero_slot_stack|all_non_beam_stack|helius_tpu_jet|helius_tpu_quic|tpu_jet_helius_tip|tpu_quic_helius_tip|tpu_jet_only|tpu_quic_only)
     export JITO_SEND_LANE_MODE="${SEND_LANE_MODE_NORMALIZED//_/-}"
     ;;
   *)
-    echo "JITO_SEND_LANE_MODE must be mixed, rpc_only/rpc-only, jito_only/jito-only, helius_sender_only/helius-sender-only, nozomi_only/nozomi-only, helius_nozomi_stack/helius-nozomi-stack, astralane_only/astralane-only, helius_astralane_stack/helius-astralane-stack, helius_nozomi_astralane_stack/helius-nozomi-astralane-stack, lunar_lander_only/lunar-lander-only, helius_lunar_lander_stack/helius-lunar-lander-stack, circular_fast_only/circular-fast-only, helius_circular_fast_stack/helius-circular-fast-stack, erpc_swqos_only/erpc-swqos-only, helius_erpc_swqos_stack/helius-erpc-swqos-stack, beam_only/beam-only, helius_beam_stack/helius-beam-stack, helius_nozomi_beam_stack/helius-nozomi-beam-stack, zero_slot_only/zero-slot-only, helius_zero_slot_stack/helius-zero-slot-stack, helius_nozomi_zero_slot_stack/helius-nozomi-zero-slot-stack, all_non_beam_stack/all-non-beam-stack, helius_tpu_jet/helius-tpu-jet, helius_tpu_quic/helius-tpu-quic, tpu_jet_helius_tip/tpu-jet-helius-tip, tpu_quic_helius_tip/tpu-quic-helius-tip, tpu_jet_only/tpu-jet-only, or tpu_quic_only/tpu-quic-only; got $JITO_SEND_LANE_MODE" >&2
+    echo "JITO_SEND_LANE_MODE must be mixed, rpc_only/rpc-only, jito_only/jito-only, helius_sender_only/helius-sender-only, nozomi_only/nozomi-only, helius_nozomi_stack/helius-nozomi-stack, astralane_only/astralane-only, helius_astralane_stack/helius-astralane-stack, helius_nozomi_astralane_stack/helius-nozomi-astralane-stack, helius_nozomi_astralane_lunar_stack/helius-nozomi-astralane-lunar-stack, lunar_lander_only/lunar-lander-only, helius_lunar_lander_stack/helius-lunar-lander-stack, circular_fast_only/circular-fast-only, helius_circular_fast_stack/helius-circular-fast-stack, erpc_swqos_only/erpc-swqos-only, helius_erpc_swqos_stack/helius-erpc-swqos-stack, beam_only/beam-only, helius_beam_stack/helius-beam-stack, helius_nozomi_beam_stack/helius-nozomi-beam-stack, zero_slot_only/zero-slot-only, helius_zero_slot_stack/helius-zero-slot-stack, helius_nozomi_zero_slot_stack/helius-nozomi-zero-slot-stack, all_non_beam_stack/all-non-beam-stack, helius_tpu_jet/helius-tpu-jet, helius_tpu_quic/helius-tpu-quic, tpu_jet_helius_tip/tpu-jet-helius-tip, tpu_quic_helius_tip/tpu-quic-helius-tip, tpu_jet_only/tpu-jet-only, or tpu_quic_only/tpu-quic-only; got $JITO_SEND_LANE_MODE" >&2
     exit 1
     ;;
 esac
@@ -428,6 +428,18 @@ case "$SEND_LANE_MODE_NORMALIZED" in
       yes|true|1|on) ;;
       *) echo "JITO_SEND_LANE_MODE=helius_nozomi_astralane_stack requires JITO_ASTRALANE_ENABLED=YES" >&2; exit 1 ;;
     esac
+    ;;
+  helius_nozomi_astralane_lunar_stack)
+    case "$(printf '%s' "$JITO_SEND_FANOUT" | tr '[:upper:]' '[:lower:]')" in
+      yes|true|1|on) ;;
+      *) echo "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_SEND_FANOUT=YES" >&2; exit 1 ;;
+    esac
+    for required in JITO_HELIUS_SENDER_ENABLED JITO_NOZOMI_ENABLED JITO_ASTRALANE_ENABLED JITO_LUNAR_LANDER_ENABLED; do
+      case "$(printf '%s' "${!required}" | tr '[:upper:]' '[:lower:]')" in
+        yes|true|1|on) ;;
+        *) echo "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires $required=YES" >&2; exit 1 ;;
+      esac
+    done
     ;;
   lunar_lander_only)
     case "$(printf '%s' "$JITO_LUNAR_LANDER_ENABLED" | tr '[:upper:]' '[:lower:]')" in

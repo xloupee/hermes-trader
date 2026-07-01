@@ -360,7 +360,7 @@ pub(crate) struct LiveOptions {
         long = "lunar-lander-url",
         env = "JITO_LUNAR_LANDER_URLS",
         value_delimiter = ',',
-        default_value = "https://fra.lunar-lander.hellomoon.io/send-bin"
+        default_value = "http://fra.lunar-lander.hellomoon.io/send-bin"
     )]
     pub(crate) lunar_lander_urls: Vec<String>,
 

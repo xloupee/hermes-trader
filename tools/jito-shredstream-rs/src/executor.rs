@@ -266,6 +266,7 @@ pub(crate) enum SendLaneMode {
     AstralaneOnly,
     HeliusAstralaneStack,
     HeliusNozomiAstralaneStack,
+    HeliusNozomiAstralaneLunarStack,
     LunarLanderOnly,
     HeliusLunarLanderStack,
     CircularFastOnly,
@@ -299,6 +300,7 @@ impl SendLaneMode {
             Self::AstralaneOnly => "astralane_only",
             Self::HeliusAstralaneStack => "helius_astralane_stack",
             Self::HeliusNozomiAstralaneStack => "helius_nozomi_astralane_stack",
+            Self::HeliusNozomiAstralaneLunarStack => "helius_nozomi_astralane_lunar_stack",
             Self::LunarLanderOnly => "lunar_lander_only",
             Self::HeliusLunarLanderStack => "helius_lunar_lander_stack",
             Self::CircularFastOnly => "circular_fast_only",
@@ -337,6 +339,7 @@ impl SendLaneMode {
                 | Self::HeliusNozomiStack
                 | Self::HeliusAstralaneStack
                 | Self::HeliusNozomiAstralaneStack
+                | Self::HeliusNozomiAstralaneLunarStack
                 | Self::HeliusLunarLanderStack
                 | Self::HeliusCircularFastStack
                 | Self::HeliusErpcSwqosStack
@@ -357,6 +360,7 @@ impl SendLaneMode {
                 | Self::NozomiOnly
                 | Self::HeliusNozomiStack
                 | Self::HeliusNozomiAstralaneStack
+                | Self::HeliusNozomiAstralaneLunarStack
                 | Self::HeliusNozomiBeamStack
                 | Self::HeliusNozomiZeroSlotStack
                 | Self::AllNonBeamStack
@@ -370,12 +374,20 @@ impl SendLaneMode {
     fn uses_astralane_lanes(self) -> bool {
         matches!(
             self,
-            Self::AstralaneOnly | Self::HeliusAstralaneStack | Self::HeliusNozomiAstralaneStack
+            Self::AstralaneOnly
+                | Self::HeliusAstralaneStack
+                | Self::HeliusNozomiAstralaneStack
+                | Self::HeliusNozomiAstralaneLunarStack
         )
     }
 
     fn uses_lunar_lander_lanes(self) -> bool {
-        matches!(self, Self::LunarLanderOnly | Self::HeliusLunarLanderStack)
+        matches!(
+            self,
+            Self::LunarLanderOnly
+                | Self::HeliusLunarLanderStack
+                | Self::HeliusNozomiAstralaneLunarStack
+        )
     }
 
     fn uses_circular_fast_lanes(self) -> bool {
@@ -429,6 +441,7 @@ impl SendLaneMode {
                 | Self::HeliusNozomiStack
                 | Self::HeliusAstralaneStack
                 | Self::HeliusNozomiAstralaneStack
+                | Self::HeliusNozomiAstralaneLunarStack
                 | Self::HeliusLunarLanderStack
                 | Self::HeliusCircularFastStack
                 | Self::HeliusErpcSwqosStack
@@ -451,6 +464,7 @@ impl SendLaneMode {
                 | Self::NozomiOnly
                 | Self::HeliusNozomiStack
                 | Self::HeliusNozomiAstralaneStack
+                | Self::HeliusNozomiAstralaneLunarStack
                 | Self::HeliusNozomiBeamStack
                 | Self::HeliusNozomiZeroSlotStack
                 | Self::AllNonBeamStack
@@ -460,12 +474,20 @@ impl SendLaneMode {
     fn uses_astralane_tip(self) -> bool {
         matches!(
             self,
-            Self::AstralaneOnly | Self::HeliusAstralaneStack | Self::HeliusNozomiAstralaneStack
+            Self::AstralaneOnly
+                | Self::HeliusAstralaneStack
+                | Self::HeliusNozomiAstralaneStack
+                | Self::HeliusNozomiAstralaneLunarStack
         )
     }
 
     fn uses_lunar_lander_tip(self) -> bool {
-        matches!(self, Self::LunarLanderOnly | Self::HeliusLunarLanderStack)
+        matches!(
+            self,
+            Self::LunarLanderOnly
+                | Self::HeliusLunarLanderStack
+                | Self::HeliusNozomiAstralaneLunarStack
+        )
     }
 
     fn uses_circular_fast_tip(self) -> bool {
@@ -1280,7 +1302,7 @@ const CIRCULAR_FAST_MIN_TIP_LAMPORTS: u64 = 1_000_000;
 const ASTRALANE_MIN_TIP_LAMPORTS: u64 = 1_000_000;
 const ASTRALANE_DEFAULT_URL: &str = "https://lim.gateway.astralane.io/irisb";
 const LUNAR_LANDER_MIN_TIP_LAMPORTS: u64 = 1_000_000;
-const LUNAR_LANDER_DEFAULT_URL: &str = "https://fra.lunar-lander.hellomoon.io/send-bin";
+const LUNAR_LANDER_DEFAULT_URL: &str = "http://fra.lunar-lander.hellomoon.io/send-bin";
 const ZERO_SLOT_MIN_TIP_LAMPORTS: u64 = 1_000_000;
 
 fn beam_provider(value: Option<&str>) -> Option<&'static str> {
@@ -6235,6 +6257,39 @@ impl CopyExecutionOptions {
                 }
                 Ok(())
             }
+            SendLaneMode::HeliusNozomiAstralaneLunarStack => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_SEND_FANOUT=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.nozomi_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_NOZOMI_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.astralane_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_ASTRALANE_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.lunar_lander_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_LUNAR_LANDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
             SendLaneMode::LunarLanderOnly => {
                 if !self.lunar_lander_enabled {
                     return Err(
@@ -11001,6 +11056,20 @@ mod tests {
             Some("helius+lunar_lander")
         );
 
+        options.send_lane_mode = SendLaneMode::HeliusNozomiAstralaneLunarStack;
+        let fee_config = options.tx_fee_config([9u8; 64]);
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+        );
+        assert_eq!(fee_config.nozomi_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.astralane_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.lunar_lander_tip_lamports, Some(1_000_000));
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+nozomi+astralane+lunar_lander")
+        );
+
         enable_zero_slot(&mut options);
         options.send_lane_mode = SendLaneMode::ZeroSlotOnly;
         let fee_config = options.tx_fee_config([5u8; 64]);
@@ -11086,6 +11155,23 @@ mod tests {
         );
 
         options.max_provider_tip_lamports = Some(1_200_000);
+        assert_eq!(provider_tip_guard_reason(&options, &fee_config), None);
+
+        options.send_lane_mode = SendLaneMode::HeliusNozomiAstralaneLunarStack;
+        let fee_config = options.tx_fee_config([10u8; 64]);
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+nozomi+astralane+lunar_lander")
+        );
+        assert_eq!(provider_tip_lamports(&fee_config), 3_200_000);
+
+        options.max_provider_tip_lamports = Some(3_199_999);
+        assert_eq!(
+            provider_tip_guard_reason(&options, &fee_config).as_deref(),
+            Some("provider tips 3200000 lamports exceed max provider tips 3199999 lamports")
+        );
+
+        options.max_provider_tip_lamports = Some(3_200_000);
         assert_eq!(provider_tip_guard_reason(&options, &fee_config), None);
     }
 
@@ -11287,7 +11373,7 @@ mod tests {
         assert_eq!(endpoint_kinds(&endpoints), vec!["lunar_lander_bin"]);
         assert_eq!(
             endpoints[0].url,
-            "https://fra.lunar-lander.hellomoon.io/send-bin?api-key=lunar-key"
+            "http://fra.lunar-lander.hellomoon.io/send-bin?api-key=lunar-key"
         );
         assert_eq!(endpoints[0].auth_token.as_deref(), Some("lunar-key"));
         assert_eq!(endpoints[0].sender_mode, Some("send_bin"));
@@ -11298,6 +11384,17 @@ mod tests {
         assert_eq!(
             endpoint_kinds(&options.selected_send_endpoints()),
             vec!["helius_sender", "lunar_lander_bin"]
+        );
+
+        options.send_lane_mode = SendLaneMode::HeliusNozomiAstralaneLunarStack;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec![
+                "helius_sender",
+                "nozomi_json_rpc",
+                "astralane_irisb",
+                "lunar_lander_bin"
+            ]
         );
 
         enable_zero_slot(&mut options);
@@ -11547,6 +11644,33 @@ mod tests {
         assert_eq!(
             options.validate_send_lane_mode().unwrap_err(),
             "JITO_SEND_LANE_MODE=helius_lunar_lander_stack requires JITO_LUNAR_LANDER_ENABLED=YES"
+        );
+
+        options = disabled_options();
+        options.send_lane_mode = SendLaneMode::HeliusNozomiAstralaneLunarStack;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_SEND_FANOUT=YES"
+        );
+        options.send_fanout = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+        );
+        options.helius_sender_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_NOZOMI_ENABLED=YES"
+        );
+        options.nozomi_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_ASTRALANE_ENABLED=YES"
+        );
+        options.astralane_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_LUNAR_LANDER_ENABLED=YES"
         );
 
         options = disabled_options();

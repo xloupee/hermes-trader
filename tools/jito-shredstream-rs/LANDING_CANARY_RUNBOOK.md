@@ -114,7 +114,9 @@ window does not meet the minimum scored-row and `txDelta` coverage thresholds.
 9. Lunar Lander, only after `JITO_LUNAR_LANDER_API_KEY`,
    `JITO_LUNAR_LANDER_URLS`, and the Lunar Lander tip account(s) are
    configured. Start with `lunar-lander-only` for delivery-lane isolation,
-   then `helius-lunar-lander-stack` as the first same-signature race. Lunar
+   then `helius-lunar-lander-stack` as the first same-signature race, then
+   `helius-nozomi-astralane-lunar-stack` when adding Lunar to the current
+   Helius + Nozomi + Astralane lane stack is intentional. Lunar
    Lander is binary HTTP at `/send-bin`, requires a provider tip of at least
    `1000000` lamports in the signed transaction, and should be judged by
    landed rate, same-slot rate, `txDelta`, submitted-not-landed, failed-on-chain,
@@ -270,7 +272,9 @@ provider tip:
 - `astralane-only`: IrisB only, Helius Sender and Nozomi disabled.
 - `helius-astralane-stack`: Helius Sender + IrisB, same signed bytes.
 - `helius-nozomi-astralane-stack`: Helius Sender + Nozomi + IrisB, same signed
-  bytes, highest configured provider-tip cost.
+  bytes.
+- `helius-nozomi-astralane-lunar-stack`: Helius Sender + Nozomi + IrisB +
+  Lunar Lander, same signed bytes, highest configured provider-tip cost.
 
 Do not treat IrisB as a TPU lane or a QUIC lane. It is an outbound send
 provider and should be scored by landed confirmation, not by first ACK alone.
@@ -280,7 +284,7 @@ provider and should be scored by landed confirmation, not by first ACK alone.
 Required env before applying a Lunar Lander canary:
 
 ```sh
-JITO_LUNAR_LANDER_URLS=https://fra.lunar-lander.hellomoon.io/send-bin
+JITO_LUNAR_LANDER_URLS=http://fra.lunar-lander.hellomoon.io/send-bin
 JITO_LUNAR_LANDER_API_KEY=<api-key>
 JITO_LUNAR_LANDER_TIP_LAMPORTS=1000000
 JITO_LUNAR_LANDER_TIP_ACCOUNT=moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F
@@ -288,10 +292,8 @@ JITO_LUNAR_LANDER_TIP_ACCOUNTS=moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F
 JITO_LUNAR_LANDER_MEV_PROTECT=false
 ```
 
-HelloMoon's docs show `http://` regional examples, but the HTTPS FRA `/ping`
-endpoint also responds and is the worker default. If HTTPS ever fails from the
-Droplet, override `JITO_LUNAR_LANDER_URLS` with the documented HTTP endpoint
-before canarying.
+Use the HTTP `/send-bin` endpoint on the Droplet; prior live probes showed the
+HTTPS `/send-bin` path returning `404`.
 
 The canary helper also accepts `JITO_CANARY_LUNAR_LANDER_URLS`,
 `JITO_CANARY_LUNAR_LANDER_API_KEY`,
@@ -306,6 +308,8 @@ provider tip:
 
 - `lunar-lander-only`: Lunar Lander `/send-bin` only, Helius Sender and Nozomi disabled.
 - `helius-lunar-lander-stack`: Helius Sender + Lunar Lander, same signed bytes.
+- `helius-nozomi-astralane-lunar-stack`: Helius Sender + Nozomi + Astralane +
+  Lunar Lander, same signed bytes.
 
 Do not hardcode API keys in scripts or checked-in env files. Use the Droplet env
 file or canary override env, then score by landed confirmation and `txDelta`.

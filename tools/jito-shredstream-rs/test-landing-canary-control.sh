@@ -35,6 +35,7 @@ export JITO_CANARY_CIRCULAR_FAST_TIP_LAMPORTS=1000000
 export JITO_CANARY_CIRCULAR_FAST_TIP_ACCOUNT="FAST3dMFZvESiEipBvLSiXq3QCV51o3xuoHScqRU6cB6"
 export JITO_CANARY_CIRCULAR_FAST_TIP_ACCOUNTS="FAST3dMFZvESiEipBvLSiXq3QCV51o3xuoHScqRU6cB6,FASTHPWR9bCUVZHJofp8Yr5rywxPgZnY6tDKZa2umHLB"
 export JITO_CANARY_HELIUS_REGION_URLS="http://fra-sender.helius-rpc.com?api-key=test,http://ams-sender.helius-rpc.com?api-key=test,http://lon-sender.helius-rpc.com?api-key=test,http://ewr-sender.helius-rpc.com?api-key=test,http://slc-sender.helius-rpc.com?api-key=test"
+export JITO_CANARY_NOZOMI_URLS="https://nozomi.example.com"
 export JITO_CANARY_ERPC_SWQOS_URLS="https://swqos.erpc.global"
 export JITO_CANARY_ERPC_API_KEY="test-erpc-key"
 
@@ -245,6 +246,29 @@ else
   exit 1
 fi
 
+"$CONTROL" mark fast 2026-06-25T00:00:00Z >/dev/null 2>/dev/null
+assert_marker CANARY_SEND_LANE_MODE fast
+assert_marker CANARY_HELIUS_URL_COUNT 5
+assert_marker CANARY_HELIUS_REGION_URLS_CONFIGURED true
+assert_marker CANARY_NOZOMI_ENABLED true
+assert_marker CANARY_ASTRALANE_ENABLED false
+assert_marker CANARY_LUNAR_LANDER_ENABLED false
+assert_marker CANARY_BEAM_ENABLED false
+assert_marker CANARY_ZERO_SLOT_ENABLED false
+assert_marker CANARY_MAX_PROVIDER_TIP_LAMPORTS 1387500
+
+"$CONTROL" mark turbo 2026-06-25T00:00:00Z >/dev/null 2>/dev/null
+assert_marker CANARY_SEND_LANE_MODE turbo
+assert_marker CANARY_HELIUS_URL_COUNT 5
+assert_marker CANARY_HELIUS_REGION_URLS_CONFIGURED true
+assert_marker CANARY_NOZOMI_ENABLED true
+assert_marker CANARY_ASTRALANE_ENABLED true
+assert_marker CANARY_LUNAR_LANDER_ENABLED true
+assert_marker CANARY_BEAM_ENABLED false
+assert_marker CANARY_ZERO_SLOT_ENABLED true
+assert_marker CANARY_TPU_JET_ENABLED true
+assert_marker CANARY_MAX_PROVIDER_TIP_LAMPORTS 4387500
+
 unset JITO_CANARY_HELIUS_REGION_URLS
 if "$CONTROL" mark helius-regional-fanout 2026-06-25T00:00:00Z >/dev/null 2>"$TMP_DIR/missing-helius-regions.err"; then
   echo "helius-regional-fanout should require JITO_CANARY_HELIUS_REGION_URLS" >&2
@@ -313,6 +337,16 @@ assert_env JITO_LUNAR_LANDER_ENABLED false
 assert_env JITO_CIRCULAR_FAST_ENABLED false
 assert_env JITO_BEAM_ENABLED false
 
+PATH="$MOCK_BIN:$PATH" JITO_CANARY_SKIP_BASELINE_GATE=YES "$CONTROL" apply fast >/dev/null
+assert_env JITO_SEND_LANE_MODE fast
+assert_env JITO_HELIUS_SENDER_ENABLED true
+assert_env JITO_HELIUS_SENDER_URLS "$JITO_CANARY_HELIUS_REGION_URLS"
+assert_env JITO_NOZOMI_ENABLED true
+assert_env JITO_ASTRALANE_ENABLED false
+assert_env JITO_LUNAR_LANDER_ENABLED false
+assert_env JITO_BEAM_ENABLED false
+assert_env JITO_ZERO_SLOT_ENABLED false
+
 PATH="$MOCK_BIN:$PATH" JITO_CANARY_SKIP_BASELINE_GATE=YES "$CONTROL" apply circular-fast-only >/dev/null
 assert_env JITO_SEND_LANE_MODE circular-fast-only
 assert_env JITO_HELIUS_SENDER_ENABLED false
@@ -341,6 +375,18 @@ export JITO_CANARY_CIRCULAR_FAST_API_KEY="test-circular-key"
 export JITO_TPU_JET_RPC_URL="https://rpc.example"
 export JITO_TPU_JET_WS_URL="http://grpc-fra1-burst.erpc.global"
 export JITO_TPU_JET_SIDECAR_URL="http://127.0.0.1:8787"
+PATH="$MOCK_BIN:$PATH" JITO_CANARY_SKIP_BASELINE_GATE=YES "$CONTROL" apply turbo >/dev/null
+assert_env JITO_SEND_LANE_MODE turbo
+assert_env JITO_HELIUS_SENDER_ENABLED true
+assert_env JITO_HELIUS_SENDER_URLS "$JITO_CANARY_HELIUS_REGION_URLS"
+assert_env JITO_NOZOMI_ENABLED true
+assert_env JITO_ASTRALANE_ENABLED true
+assert_env JITO_LUNAR_LANDER_ENABLED true
+assert_env JITO_BEAM_ENABLED false
+assert_env JITO_ZERO_SLOT_ENABLED true
+assert_env JITO_TPU_JET_ENABLED true
+assert_env JITO_MAX_PROVIDER_TIP_LAMPORTS 4387500
+
 PATH="$MOCK_BIN:$PATH" JITO_CANARY_SKIP_BASELINE_GATE=YES "$CONTROL" apply tpu-jet-fanout >/dev/null
 assert_env JITO_SEND_LANE_MODE helius-tpu-jet
 assert_env JITO_TPU_JET_ENABLED true

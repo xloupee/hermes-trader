@@ -35,7 +35,8 @@ export JITO_CANARY_CIRCULAR_FAST_TIP_LAMPORTS=1000000
 export JITO_CANARY_CIRCULAR_FAST_TIP_ACCOUNT="FAST3dMFZvESiEipBvLSiXq3QCV51o3xuoHScqRU6cB6"
 export JITO_CANARY_CIRCULAR_FAST_TIP_ACCOUNTS="FAST3dMFZvESiEipBvLSiXq3QCV51o3xuoHScqRU6cB6,FASTHPWR9bCUVZHJofp8Yr5rywxPgZnY6tDKZa2umHLB"
 export JITO_CANARY_HELIUS_REGION_URLS="http://fra-sender.helius-rpc.com?api-key=test,http://ams-sender.helius-rpc.com?api-key=test,http://lon-sender.helius-rpc.com?api-key=test,http://ewr-sender.helius-rpc.com?api-key=test,http://slc-sender.helius-rpc.com?api-key=test"
-export JITO_CANARY_NOZOMI_URLS="https://nozomi.example.com"
+export JITO_CANARY_NOZOMI_URLS="https://nozomi.example.com?c=test-key"
+export JITO_CANARY_NOZOMI_API_V2_REGION_HOSTS="ewr1.nozomi.temporal.xyz,pit1.nozomi.temporal.xyz"
 export JITO_CANARY_ERPC_SWQOS_URLS="https://swqos.erpc.global"
 export JITO_CANARY_ERPC_API_KEY="test-erpc-key"
 
@@ -86,6 +87,36 @@ assert_marker CANARY_SEND_LANE_MODE tpu-jet-helius-tip
 assert_marker CANARY_TPU_JET_ENABLED true
 assert_marker CANARY_TPU_JET_FANOUT_SLOTS 1
 assert_marker CANARY_TPU_JET_TIMEOUT_MS 30
+
+"$CONTROL" mark helius-sender-max 2026-06-25T00:00:00Z >/dev/null 2>/dev/null
+assert_marker CANARY_SEND_LANE_MODE helius-sender-max
+assert_marker CANARY_HELIUS_TIP_LAMPORTS 1000000
+assert_marker CANARY_HELIUS_SWQOS_ONLY false
+assert_marker CANARY_NOZOMI_ENABLED false
+assert_marker CANARY_ASTRALANE_ENABLED false
+assert_marker CANARY_LUNAR_LANDER_ENABLED false
+assert_marker CANARY_CIRCULAR_FAST_ENABLED false
+assert_marker CANARY_BEAM_ENABLED false
+assert_marker CANARY_ZERO_SLOT_ENABLED false
+assert_marker CANARY_TPU_JET_ENABLED false
+assert_marker CANARY_TPU_QUIC_ENABLED false
+assert_marker CANARY_MAX_PROVIDER_TIP_LAMPORTS 1000000
+
+"$CONTROL" mark nozomi-api-v2-only 2026-06-25T00:00:00Z >/dev/null 2>/dev/null
+assert_marker CANARY_SEND_LANE_MODE nozomi-only
+assert_marker CANARY_HELIUS_TIP_LAMPORTS 0
+assert_marker CANARY_NOZOMI_ENABLED true
+assert_marker CANARY_NOZOMI_URLS_CONFIGURED true
+assert_marker CANARY_NOZOMI_URL_COUNT 1
+assert_marker CANARY_NOZOMI_API_V2 true
+
+"$CONTROL" mark helius-nozomi-api-v2-regional-stack 2026-06-25T00:00:00Z >/dev/null 2>/dev/null
+assert_marker CANARY_SEND_LANE_MODE helius-nozomi-stack
+assert_marker CANARY_HELIUS_TIP_LAMPORTS 387500
+assert_marker CANARY_NOZOMI_ENABLED true
+assert_marker CANARY_NOZOMI_URLS_CONFIGURED true
+assert_marker CANARY_NOZOMI_URL_COUNT 2
+assert_marker CANARY_NOZOMI_API_V2 true
 
 "$CONTROL" mark beam-only 2026-06-25T00:00:00Z >/dev/null 2>/dev/null
 assert_marker CANARY_SEND_LANE_MODE beam-only

@@ -56,6 +56,7 @@ const SIGNATURE_FEE_LAMPORTS_ESTIMATE: u64 = 5_000;
 const ASSOCIATED_TOKEN_ACCOUNT_RENT_LAMPORTS_ESTIMATE: u64 = 2_100_000;
 const SEND_WARM_TIMEOUT_MS: u64 = 750;
 const HELIUS_SENDER_MIN_TIP_LAMPORTS: u64 = 200_000;
+const HELIUS_SENDER_MAX_TIP_LAMPORTS: u64 = 1_000_000;
 const HELIUS_SENDER_SWQOS_ONLY_MIN_TIP_LAMPORTS: u64 = 5_000;
 const AUTO_SELL_BALANCE_ATTEMPTS: usize = 8;
 const AUTO_SELL_BALANCE_RETRY_MS: u64 = 250;
@@ -263,6 +264,7 @@ pub(crate) enum SendLaneMode {
     RpcOnly,
     JitoOnly,
     HeliusSenderOnly,
+    HeliusSenderMax,
     NozomiOnly,
     HeliusNozomiStack,
     AstralaneOnly,
@@ -299,6 +301,7 @@ impl SendLaneMode {
             Self::RpcOnly => "rpc_only",
             Self::JitoOnly => "jito_only",
             Self::HeliusSenderOnly => "helius_sender_only",
+            Self::HeliusSenderMax => "helius_sender_max",
             Self::NozomiOnly => "nozomi_only",
             Self::HeliusNozomiStack => "helius_nozomi_stack",
             Self::AstralaneOnly => "astralane_only",
@@ -342,6 +345,7 @@ impl SendLaneMode {
                 | Self::Fast
                 | Self::Turbo
                 | Self::HeliusSenderOnly
+                | Self::HeliusSenderMax
                 | Self::HeliusNozomiStack
                 | Self::HeliusAstralaneStack
                 | Self::HeliusNozomiAstralaneStack
@@ -452,6 +456,7 @@ impl SendLaneMode {
                 | Self::Fast
                 | Self::Turbo
                 | Self::HeliusSenderOnly
+                | Self::HeliusSenderMax
                 | Self::HeliusNozomiStack
                 | Self::HeliusAstralaneStack
                 | Self::HeliusNozomiAstralaneStack
@@ -1298,6 +1303,7 @@ enum SendEndpointKind {
     Jito,
     HeliusSender,
     NozomiJsonRpc,
+    NozomiApiV2,
     AstralaneIrisB,
     LunarLanderBin,
     CircularFast,
@@ -5700,6 +5706,12 @@ impl CopyExecutionOptions {
         if self.helius_sender_urls.is_empty() {
             return Err("JITO_HELIUS_SENDER_ENABLED requires JITO_HELIUS_SENDER_URLS".to_string());
         }
+        if self.send_lane_mode == SendLaneMode::HeliusSenderMax && self.helius_sender_swqos_only {
+            return Err(
+                "JITO_SEND_LANE_MODE=helius_sender_max requires JITO_HELIUS_SENDER_SWQOS_ONLY=false"
+                    .to_string(),
+            );
+        }
         if self.priority_fee_micro_lamports.unwrap_or(0) == 0 {
             return Err(
                 "JITO_HELIUS_SENDER_ENABLED requires JITO_PRIORITY_FEE_MICRO_LAMPORTS".to_string(),
@@ -5710,7 +5722,8 @@ impl CopyExecutionOptions {
                 "JITO_HELIUS_SENDER_ENABLED requires JITO_HELIUS_SENDER_TIP_LAMPORTS".to_string(),
             );
         };
-        let min_tip = helius_sender_min_tip_lamports(self.helius_sender_swqos_only);
+        let min_tip =
+            helius_sender_min_tip_lamports(self.helius_sender_swqos_only, self.send_lane_mode);
         if tip_lamports < min_tip {
             return Err(format!(
                 "JITO_HELIUS_SENDER_TIP_LAMPORTS must be >= {min_tip} lamports"
@@ -6239,12 +6252,12 @@ impl CopyExecutionOptions {
                 }
                 Ok(())
             }
-            SendLaneMode::HeliusSenderOnly => {
+            SendLaneMode::HeliusSenderOnly | SendLaneMode::HeliusSenderMax => {
                 if !self.helius_sender_enabled {
-                    return Err(
-                        "JITO_SEND_LANE_MODE=helius_sender_only requires JITO_HELIUS_SENDER_ENABLED=YES"
-                            .to_string(),
-                    );
+                    return Err(format!(
+                        "JITO_SEND_LANE_MODE={} requires JITO_HELIUS_SENDER_ENABLED=YES",
+                        self.send_lane_mode.as_str()
+                    ));
                 }
                 Ok(())
             }
@@ -6981,10 +6994,11 @@ impl CopyExecutionOptions {
             }
             if self.nozomi_enabled && self.send_lane_mode.uses_nozomi_lanes() {
                 endpoints.extend(self.nozomi_urls.iter().enumerate().map(|(index, url)| {
+                    let kind = nozomi_send_endpoint_kind(url);
                     SendEndpoint {
-                        label: format!("nozomi-{}:{}", index + 1, rpc_url_label(url)),
+                        label: nozomi_send_endpoint_label(index, url, kind),
                         url: url.clone(),
-                        kind: SendEndpointKind::NozomiJsonRpc,
+                        kind,
                         auth_uuid: None,
                         auth_token: None,
                         sender_mode: None,
@@ -7103,10 +7117,11 @@ impl CopyExecutionOptions {
             });
         } else if self.nozomi_enabled && self.send_lane_mode == SendLaneMode::NozomiOnly {
             endpoints.extend(self.nozomi_urls.iter().enumerate().map(|(index, url)| {
+                let kind = nozomi_send_endpoint_kind(url);
                 SendEndpoint {
-                    label: format!("nozomi-{}:{}", index + 1, rpc_url_label(url)),
+                    label: nozomi_send_endpoint_label(index, url, kind),
                     url: url.clone(),
-                    kind: SendEndpointKind::NozomiJsonRpc,
+                    kind,
                     auth_uuid: None,
                     auth_token: None,
                     sender_mode: None,
@@ -7171,8 +7186,10 @@ impl CopyExecutionOptions {
     }
 }
 
-fn helius_sender_min_tip_lamports(swqos_only: bool) -> u64 {
-    if swqos_only {
+fn helius_sender_min_tip_lamports(swqos_only: bool, send_lane_mode: SendLaneMode) -> u64 {
+    if send_lane_mode == SendLaneMode::HeliusSenderMax {
+        HELIUS_SENDER_MAX_TIP_LAMPORTS
+    } else if swqos_only {
         HELIUS_SENDER_SWQOS_ONLY_MIN_TIP_LAMPORTS
     } else {
         HELIUS_SENDER_MIN_TIP_LAMPORTS
@@ -7302,6 +7319,42 @@ fn helius_sender_url(url: &str, swqos_only: bool) -> String {
         with_fast.push_str("swqos_only=true");
     }
     with_fast
+}
+
+fn nozomi_send_endpoint_kind(url: &str) -> SendEndpointKind {
+    if url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('/')
+        .ends_with("/api/sendTransaction2")
+    {
+        SendEndpointKind::NozomiApiV2
+    } else {
+        SendEndpointKind::NozomiJsonRpc
+    }
+}
+
+fn nozomi_send_endpoint_label(index: usize, url: &str, kind: SendEndpointKind) -> String {
+    let prefix = match kind {
+        SendEndpointKind::NozomiApiV2 => "nozomi-api-v2",
+        _ => "nozomi",
+    };
+    format!("{prefix}-{}:{}", index + 1, rpc_url_label(url))
+}
+
+fn nozomi_ping_url(url: &str) -> String {
+    let trimmed = url.trim();
+    let without_query = trimmed.split(['?', '#']).next().unwrap_or("").trim();
+    let (scheme, rest) = without_query
+        .split_once("://")
+        .unwrap_or(("https", without_query));
+    let host = rest.split('/').next().unwrap_or("").trim_end_matches('/');
+    if host.is_empty() {
+        "https://nozomi.temporal.xyz/ping".to_string()
+    } else {
+        format!("{scheme}://{host}/ping")
+    }
 }
 
 fn beam_send_url(url: Option<&str>, provider: &str, mode: &str) -> String {
@@ -7473,6 +7526,7 @@ fn send_endpoint_kind(endpoint: &SendEndpoint) -> &'static str {
         SendEndpointKind::Jito => "jito",
         SendEndpointKind::HeliusSender => "helius_sender",
         SendEndpointKind::NozomiJsonRpc => "nozomi_json_rpc",
+        SendEndpointKind::NozomiApiV2 => "nozomi_api_v2",
         SendEndpointKind::AstralaneIrisB => "astralane_irisb",
         SendEndpointKind::LunarLanderBin => "lunar_lander_bin",
         SendEndpointKind::CircularFast => "circular_fast",
@@ -7564,6 +7618,42 @@ async fn warm_send_endpoint(
             )
         })?
         .map_err(|error| format!("{} warmup request failed: {error}", endpoint.label))?;
+        let _ = response.bytes().await;
+        return Ok(SendRpcAttemptLine {
+            label: endpoint.label.clone(),
+            kind: send_endpoint_kind(endpoint),
+            mode: endpoint.sender_mode,
+            beam_provider: endpoint.beam_provider,
+            status: "warmed",
+            duration_ms: started_at.elapsed().as_millis(),
+            provider_tip_lamports: endpoint.provider_tip_lamports,
+            fanout_slots: None,
+            timeout_ms: None,
+            signature: None,
+            error_class: None,
+            error: None,
+        });
+    }
+    if matches!(endpoint.kind, SendEndpointKind::NozomiApiV2) {
+        let response = tokio::time::timeout(
+            Duration::from_millis(SEND_WARM_TIMEOUT_MS),
+            client.get(nozomi_ping_url(&endpoint.url)).send(),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "{} warmup timed out after {}ms",
+                endpoint.label, SEND_WARM_TIMEOUT_MS
+            )
+        })?
+        .map_err(|error| format!("{} warmup request failed: {error}", endpoint.label))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "{} warmup returned HTTP {}",
+                endpoint.label,
+                response.status().as_u16()
+            ));
+        }
         let _ = response.bytes().await;
         return Ok(SendRpcAttemptLine {
             label: endpoint.label.clone(),
@@ -7740,6 +7830,17 @@ async fn send_transaction_attempt(
         )
         .await;
     }
+    if matches!(endpoint.kind, SendEndpointKind::NozomiApiV2) {
+        return send_nozomi_api_v2_attempt(
+            client,
+            endpoint,
+            encoded_tx,
+            known_signature,
+            config,
+            started_at,
+        )
+        .await;
+    }
     if matches!(endpoint.kind, SendEndpointKind::CircularFast) {
         return send_circular_fast_attempt(
             client,
@@ -7808,6 +7909,95 @@ async fn send_transaction_attempt(
                 timeout_ms: None,
                 signature: None,
                 error_class: Some(send_error_class(&error)),
+                error: Some(sanitized.clone()),
+            };
+            if config.log_lanes {
+                eprintln!(
+                    "sendTransaction lane failed: label={} kind={} durationMs={} error={}",
+                    attempt.label, attempt.kind, attempt.duration_ms, sanitized
+                );
+            }
+            SendAttemptOutcome {
+                attempt,
+                finished_at_ms: now_ms(),
+                signature: None,
+                signature_returned: false,
+                error: Some(sanitized),
+            }
+        }
+    }
+}
+
+async fn send_nozomi_api_v2_attempt(
+    client: &reqwest::Client,
+    endpoint: &SendEndpoint,
+    encoded_tx: &str,
+    known_signature: &str,
+    config: SendConfig,
+    started_at: Instant,
+) -> SendAttemptOutcome {
+    let send = send_nozomi_api_v2_transaction(client, endpoint, encoded_tx);
+    let result = if config.http_timeout_ms > 0 {
+        match tokio::time::timeout(Duration::from_millis(config.http_timeout_ms), send).await {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "Nozomi API v2 sendTransaction timed out after {}ms",
+                config.http_timeout_ms
+            )),
+        }
+    } else {
+        send.await
+    };
+
+    match result {
+        Ok(()) => {
+            let attempt = SendRpcAttemptLine {
+                label: endpoint.label.clone(),
+                kind: send_endpoint_kind(endpoint),
+                mode: endpoint.sender_mode,
+                beam_provider: endpoint.beam_provider,
+                status: "submitted",
+                duration_ms: started_at.elapsed().as_millis(),
+                provider_tip_lamports: endpoint.provider_tip_lamports,
+                fanout_slots: None,
+                timeout_ms: None,
+                signature: Some(known_signature.to_string()),
+                error_class: None,
+                error: None,
+            };
+            if config.log_lanes {
+                eprintln!(
+                    "sendTransaction lane submitted: label={} kind={} durationMs={}",
+                    attempt.label, attempt.kind, attempt.duration_ms
+                );
+            }
+            SendAttemptOutcome {
+                attempt,
+                finished_at_ms: now_ms(),
+                signature: Some(known_signature.to_string()),
+                signature_returned: false,
+                error: None,
+            }
+        }
+        Err(error) => {
+            let sanitized = send_error_message(endpoint, &error);
+            let error_class = send_error_class(&error);
+            let attempt = SendRpcAttemptLine {
+                label: endpoint.label.clone(),
+                kind: send_endpoint_kind(endpoint),
+                mode: endpoint.sender_mode,
+                beam_provider: endpoint.beam_provider,
+                status: if error_class == "timeout" {
+                    "timeout"
+                } else {
+                    "failed"
+                },
+                duration_ms: started_at.elapsed().as_millis(),
+                provider_tip_lamports: endpoint.provider_tip_lamports,
+                fanout_slots: None,
+                timeout_ms: None,
+                signature: None,
+                error_class: Some(error_class),
                 error: Some(sanitized.clone()),
             };
             if config.log_lanes {
@@ -8453,6 +8643,23 @@ async fn send_astralane_irisb_transaction(
     }
 
     json_signature(&response).ok_or_else(|| "Astralane IrisB result missing".to_string())
+}
+
+async fn send_nozomi_api_v2_transaction(
+    client: &reqwest::Client,
+    endpoint: &SendEndpoint,
+    encoded_tx: &str,
+) -> Result<(), String> {
+    client
+        .post(&endpoint.url)
+        .header("Content-Type", "text/plain")
+        .body(encoded_tx.to_string())
+        .send()
+        .await
+        .map_err(|error| format!("send Nozomi API v2 request: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("Nozomi API v2 HTTP status: {error}"))?;
+    Ok(())
 }
 
 async fn send_lunar_lander_bin_transaction(
@@ -10970,6 +11177,21 @@ mod tests {
             Some(COPY_WALLET)
         );
 
+        options.send_lane_mode = SendLaneMode::HeliusSenderMax;
+        options.helius_sender_tip_lamports = Some(HELIUS_SENDER_MAX_TIP_LAMPORTS);
+        let fee_config = options.tx_fee_config([0u8; 64]);
+        assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
+        assert_eq!(fee_config.jito_tip_lamports, None);
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MAX_TIP_LAMPORTS)
+        );
+        assert_eq!(
+            fee_config.helius_sender_tip_account.as_deref(),
+            Some(COPY_WALLET)
+        );
+        options.helius_sender_tip_lamports = Some(HELIUS_SENDER_MIN_TIP_LAMPORTS);
+
         enable_nozomi(&mut options);
         options.send_lane_mode = SendLaneMode::Fast;
         let fee_config = options.tx_fee_config([0u8; 64]);
@@ -11376,6 +11598,38 @@ mod tests {
     }
 
     #[test]
+    fn nozomi_api_v2_url_uses_plain_text_submit_lane() {
+        let mut options = configured_multi_lane_options();
+        enable_nozomi(&mut options);
+        options.nozomi_urls = vec![
+            "https://nozomi.temporal.xyz/?c=key".to_string(),
+            "https://pit1.nozomi.temporal.xyz/api/sendTransaction2?c=key".to_string(),
+        ];
+        options.send_lane_mode = SendLaneMode::HeliusNozomiStack;
+
+        let endpoints = options.selected_send_endpoints();
+        assert_eq!(
+            endpoint_kinds(&endpoints),
+            vec!["helius_sender", "nozomi_json_rpc", "nozomi_api_v2"]
+        );
+        assert_eq!(endpoints[1].label, "nozomi-1:nozomi.temporal.xyz");
+        assert_eq!(
+            endpoints[2].label,
+            "nozomi-api-v2-2:pit1.nozomi.temporal.xyz"
+        );
+        assert_eq!(
+            nozomi_ping_url(&endpoints[2].url),
+            "https://pit1.nozomi.temporal.xyz/ping"
+        );
+
+        options.send_lane_mode = SendLaneMode::NozomiOnly;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["nozomi_json_rpc", "nozomi_api_v2"]
+        );
+    }
+
+    #[test]
     fn send_lane_mode_filters_endpoint_families() {
         let mut options = configured_multi_lane_options();
 
@@ -11400,6 +11654,11 @@ mod tests {
         );
 
         options.send_lane_mode = SendLaneMode::HeliusSenderOnly;
+        let endpoints = options.selected_send_endpoints();
+        assert_eq!(endpoint_kinds(&endpoints), vec!["helius_sender"]);
+        assert_eq!(endpoints[0].url, "https://sender.helius-rpc.com/fast");
+
+        options.send_lane_mode = SendLaneMode::HeliusSenderMax;
         let endpoints = options.selected_send_endpoints();
         assert_eq!(endpoint_kinds(&endpoints), vec!["helius_sender"]);
         assert_eq!(endpoints[0].url, "https://sender.helius-rpc.com/fast");
@@ -11656,6 +11915,11 @@ mod tests {
         assert_eq!(
             options.validate_send_lane_mode().unwrap_err(),
             "JITO_SEND_LANE_MODE=helius_sender_only requires JITO_HELIUS_SENDER_ENABLED=YES"
+        );
+        options.send_lane_mode = SendLaneMode::HeliusSenderMax;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_sender_max requires JITO_HELIUS_SENDER_ENABLED=YES"
         );
 
         options.send_fanout = false;
@@ -11970,6 +12234,33 @@ mod tests {
             options.validate_helius_sender().unwrap_err(),
             "JITO_HELIUS_SENDER_TIP_ACCOUNT must be a valid pubkey"
         );
+    }
+
+    #[test]
+    fn helius_sender_max_requires_max_tip_and_non_swqos_mode() {
+        let mut options = configured_multi_lane_options();
+        options.send_lane_mode = SendLaneMode::HeliusSenderMax;
+        options.helius_sender_swqos_only = false;
+        options.helius_sender_tip_lamports = Some(HELIUS_SENDER_MIN_TIP_LAMPORTS);
+        assert_eq!(
+            options.validate_helius_sender().unwrap_err(),
+            format!(
+                "JITO_HELIUS_SENDER_TIP_LAMPORTS must be >= {} lamports",
+                HELIUS_SENDER_MAX_TIP_LAMPORTS
+            )
+        );
+
+        options.helius_sender_tip_lamports = Some(HELIUS_SENDER_MAX_TIP_LAMPORTS);
+        options.helius_sender_swqos_only = true;
+        assert_eq!(
+            options.validate_helius_sender().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_sender_max requires JITO_HELIUS_SENDER_SWQOS_ONLY=false"
+        );
+
+        options.helius_sender_swqos_only = false;
+        options
+            .validate_helius_sender()
+            .expect("Sender Max should accept 1M lamports in non-SWQoS mode");
     }
 
     #[test]

@@ -247,6 +247,14 @@ a send lane. If
   `JITO_SEND_FANOUT=YES` and `JITO_BLOCK_ENGINE_SEND_URLS`.
 - `helius_sender_only`: use Helius Sender endpoints and Sender tip only.
   Requires `JITO_HELIUS_SENDER_ENABLED=YES`.
+- `helius_sender_max`: use Helius Sender `/fast` endpoints with the Sender Max
+  tip floor. Requires `JITO_HELIUS_SENDER_ENABLED=YES`,
+  `JITO_HELIUS_SENDER_SWQOS_ONLY=false`, and a Sender tip of at least
+  `1000000` lamports.
+- Nozomi endpoints in `JITO_NOZOMI_URLS` that end with
+  `/api/sendTransaction2` use Nozomi API v2: plain-text transaction bytes,
+  `/ping` warmup on the same host, and the same `nozomi_only` or
+  `helius_nozomi_stack` lane modes.
 - `lunar_lander_only`: use Lunar Lander `/send-bin` endpoints and Lunar Lander
   tip only. Requires `JITO_LUNAR_LANDER_ENABLED=YES`,
   `JITO_LUNAR_LANDER_API_KEY`, and a Lunar tip account.

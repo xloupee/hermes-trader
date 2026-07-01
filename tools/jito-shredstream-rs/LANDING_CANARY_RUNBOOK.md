@@ -91,19 +91,25 @@ window does not meet the minimum scored-row and `txDelta` coverage thresholds.
    `JITO_SEND_LANE_MODE=helius-sender-only`, disables Nozomi, Astralane, and
    Beam, preserves the baseline Helius tip, priority fee, and retries, and sends
    the same signed transaction bytes to multiple Helius Sender regions.
-6. Nozomi delivery isolation, only after `JITO_NOZOMI_URLS` is configured with
+6. Helius Sender Max: `helius-sender-max`. This sets
+   `JITO_SEND_LANE_MODE=helius-sender-max`,
+   `JITO_HELIUS_SENDER_SWQOS_ONLY=false`, disables Nozomi, Astralane, Lunar,
+   Circular, Beam, 0slot, and TPU lanes, and uses a 1000000 lamport Helius
+   Sender tip. Judge it by landed rate, same-slot rate, `txDelta`,
+   submitted-not-landed, and configured tip cost, not ACK speed.
+7. Nozomi delivery isolation, only after `JITO_NOZOMI_URLS` is configured with
    the API-keyed endpoint and the tip account is confirmed:
    `nozomi-only` applies `JITO_SEND_LANE_MODE=nozomi-only`,
    `JITO_NOZOMI_ENABLED=true`, and a Nozomi tip of at least `1000000`
    lamports. This is a lane test, not the final stack.
-7. Helius + Nozomi same-signature stack:
+8. Helius + Nozomi same-signature stack:
    `helius-nozomi-stack` applies `JITO_SEND_LANE_MODE=helius-nozomi-stack`,
    keeps Helius Sender enabled, enables Nozomi, signs one transaction containing
    the Helius tip and Nozomi tip, then fans out identical bytes to both
    providers. This costs both provider tips on every landed transaction, so
    judge it by landed rate, same-slot rate, `txDelta`, submitted-not-landed,
    and total configured tip cost.
-8. Astralane IrisB, only after `JITO_ASTRALANE_API_KEY`,
+9. Astralane IrisB, only after `JITO_ASTRALANE_API_KEY`,
    `JITO_ASTRALANE_URLS`, and the Astralane tip account(s) are configured.
    Start with `astralane-only` for delivery-lane isolation, then
    `helius-astralane-stack` as the first same-signature race, then
@@ -111,7 +117,7 @@ window does not meet the minimum scored-row and `txDelta` coverage thresholds.
    intentional. IrisB is binary HTTP, not QUIC: it returns ACK/signature/error
    telemetry, but the canary is still judged by landed rate, same-slot rate,
    `txDelta`, failed-on-chain, submitted-not-landed, and configured tip cost.
-9. Lunar Lander, only after `JITO_LUNAR_LANDER_API_KEY`,
+10. Lunar Lander, only after `JITO_LUNAR_LANDER_API_KEY`,
    `JITO_LUNAR_LANDER_URLS`, and the Lunar Lander tip account(s) are
    configured. Start with `lunar-lander-only` for delivery-lane isolation,
    then `helius-lunar-lander-stack` as the first same-signature race, then

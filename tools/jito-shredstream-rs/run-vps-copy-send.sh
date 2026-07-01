@@ -328,11 +328,11 @@ esac
 
 SEND_LANE_MODE_NORMALIZED="$(printf '%s' "$JITO_SEND_LANE_MODE" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
 case "$SEND_LANE_MODE_NORMALIZED" in
-  mixed|fast|turbo|rpc_only|jito_only|helius_sender_only|nozomi_only|helius_nozomi_stack|astralane_only|helius_astralane_stack|helius_nozomi_astralane_stack|helius_nozomi_astralane_lunar_stack|lunar_lander_only|helius_lunar_lander_stack|circular_fast_only|helius_circular_fast_stack|erpc_swqos_only|helius_erpc_swqos_stack|beam_only|helius_beam_stack|helius_nozomi_beam_stack|zero_slot_only|helius_zero_slot_stack|helius_nozomi_zero_slot_stack|all_non_beam_stack|helius_tpu_jet|helius_tpu_quic|tpu_jet_helius_tip|tpu_quic_helius_tip|tpu_jet_only|tpu_quic_only)
+  mixed|fast|turbo|rpc_only|jito_only|helius_sender_only|helius_sender_max|nozomi_only|helius_nozomi_stack|astralane_only|helius_astralane_stack|helius_nozomi_astralane_stack|helius_nozomi_astralane_lunar_stack|lunar_lander_only|helius_lunar_lander_stack|circular_fast_only|helius_circular_fast_stack|erpc_swqos_only|helius_erpc_swqos_stack|beam_only|helius_beam_stack|helius_nozomi_beam_stack|zero_slot_only|helius_zero_slot_stack|helius_nozomi_zero_slot_stack|all_non_beam_stack|helius_tpu_jet|helius_tpu_quic|tpu_jet_helius_tip|tpu_quic_helius_tip|tpu_jet_only|tpu_quic_only)
     export JITO_SEND_LANE_MODE="${SEND_LANE_MODE_NORMALIZED//_/-}"
     ;;
   *)
-    echo "JITO_SEND_LANE_MODE must be mixed, fast, turbo, rpc_only/rpc-only, jito_only/jito-only, helius_sender_only/helius-sender-only, nozomi_only/nozomi-only, helius_nozomi_stack/helius-nozomi-stack, astralane_only/astralane-only, helius_astralane_stack/helius-astralane-stack, helius_nozomi_astralane_stack/helius-nozomi-astralane-stack, helius_nozomi_astralane_lunar_stack/helius-nozomi-astralane-lunar-stack, lunar_lander_only/lunar-lander-only, helius_lunar_lander_stack/helius-lunar-lander-stack, circular_fast_only/circular-fast-only, helius_circular_fast_stack/helius-circular-fast-stack, erpc_swqos_only/erpc-swqos-only, helius_erpc_swqos_stack/helius-erpc-swqos-stack, beam_only/beam-only, helius_beam_stack/helius-beam-stack, helius_nozomi_beam_stack/helius-nozomi-beam-stack, zero_slot_only/zero-slot-only, helius_zero_slot_stack/helius-zero-slot-stack, helius_nozomi_zero_slot_stack/helius-nozomi-zero-slot-stack, all_non_beam_stack/all-non-beam-stack, helius_tpu_jet/helius-tpu-jet, helius_tpu_quic/helius-tpu-quic, tpu_jet_helius_tip/tpu-jet-helius-tip, tpu_quic_helius_tip/tpu-quic-helius-tip, tpu_jet_only/tpu-jet-only, or tpu_quic_only/tpu-quic-only; got $JITO_SEND_LANE_MODE" >&2
+    echo "JITO_SEND_LANE_MODE must be mixed, fast, turbo, rpc_only/rpc-only, jito_only/jito-only, helius_sender_only/helius-sender-only, helius_sender_max/helius-sender-max, nozomi_only/nozomi-only, helius_nozomi_stack/helius-nozomi-stack, astralane_only/astralane-only, helius_astralane_stack/helius-astralane-stack, helius_nozomi_astralane_stack/helius-nozomi-astralane-stack, helius_nozomi_astralane_lunar_stack/helius-nozomi-astralane-lunar-stack, lunar_lander_only/lunar-lander-only, helius_lunar_lander_stack/helius-lunar-lander-stack, circular_fast_only/circular-fast-only, helius_circular_fast_stack/helius-circular-fast-stack, erpc_swqos_only/erpc-swqos-only, helius_erpc_swqos_stack/helius-erpc-swqos-stack, beam_only/beam-only, helius_beam_stack/helius-beam-stack, helius_nozomi_beam_stack/helius-nozomi-beam-stack, zero_slot_only/zero-slot-only, helius_zero_slot_stack/helius-zero-slot-stack, helius_nozomi_zero_slot_stack/helius-nozomi-zero-slot-stack, all_non_beam_stack/all-non-beam-stack, helius_tpu_jet/helius-tpu-jet, helius_tpu_quic/helius-tpu-quic, tpu_jet_helius_tip/tpu-jet-helius-tip, tpu_quic_helius_tip/tpu-quic-helius-tip, tpu_jet_only/tpu-jet-only, or tpu_quic_only/tpu-quic-only; got $JITO_SEND_LANE_MODE" >&2
     exit 1
     ;;
 esac
@@ -365,10 +365,10 @@ case "$SEND_LANE_MODE_NORMALIZED" in
       exit 1
     fi
     ;;
-  helius_sender_only)
+  helius_sender_only|helius_sender_max)
     case "$(printf '%s' "$JITO_HELIUS_SENDER_ENABLED" | tr '[:upper:]' '[:lower:]')" in
       yes|true|1|on) ;;
-      *) echo "JITO_SEND_LANE_MODE=helius_sender_only requires JITO_HELIUS_SENDER_ENABLED=YES" >&2; exit 1 ;;
+      *) echo "JITO_SEND_LANE_MODE=$SEND_LANE_MODE_NORMALIZED requires JITO_HELIUS_SENDER_ENABLED=YES" >&2; exit 1 ;;
     esac
     ;;
   nozomi_only)
@@ -718,9 +718,17 @@ case "$HELIUS_SENDER_ENABLED_NORMALIZED" in
       echo "JITO_HELIUS_SENDER_ENABLED requires JITO_HELIUS_SENDER_TIP_LAMPORTS" >&2
       exit 1
     fi
+    if [[ "$SEND_LANE_MODE_NORMALIZED" == "helius_sender_max" ]]; then
+      case "$HELIUS_SENDER_SWQOS_NORMALIZED" in
+        yes|true|1|on) echo "JITO_SEND_LANE_MODE=helius_sender_max requires JITO_HELIUS_SENDER_SWQOS_ONLY=false" >&2; exit 1 ;;
+      esac
+    fi
     HELIUS_SENDER_MIN_TIP=200000
-    case "$HELIUS_SENDER_SWQOS_NORMALIZED" in
-      yes|true|1|on) HELIUS_SENDER_MIN_TIP=5000 ;;
+    case "$SEND_LANE_MODE_NORMALIZED" in
+      helius_sender_max) HELIUS_SENDER_MIN_TIP=1000000 ;;
+      *) case "$HELIUS_SENDER_SWQOS_NORMALIZED" in
+        yes|true|1|on) HELIUS_SENDER_MIN_TIP=5000 ;;
+      esac ;;
     esac
     if (( JITO_HELIUS_SENDER_TIP_LAMPORTS < HELIUS_SENDER_MIN_TIP )); then
       echo "JITO_HELIUS_SENDER_TIP_LAMPORTS must be >= $HELIUS_SENDER_MIN_TIP lamports" >&2

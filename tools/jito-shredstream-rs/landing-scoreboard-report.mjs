@@ -147,6 +147,11 @@ function effectiveTipLamports(row) {
       provider: "astralane",
       lamports: numberValue(row.astralaneTipLamports) ?? 0,
       account: stringValue(row.astralaneTipAccount)
+    },
+    {
+      provider: "zero_slot",
+      lamports: numberValue(row.zeroSlotTipLamports) ?? 0,
+      account: stringValue(row.zeroSlotTipAccount)
     }
   ];
   const byAccount = new Map();
@@ -169,6 +174,7 @@ function effectiveTipLamports(row) {
     heliusSenderTipLamports: tips[1].lamports,
     nozomiTipLamports: tips[2].lamports,
     astralaneTipLamports: tips[3].lamports,
+    zeroSlotTipLamports: tips[4].lamports,
     configuredTipLamports,
     mergedTipAccountCount: byAccount.size,
     duplicateTipAccountMerged: configuredTipLamports < tips.reduce((total, tip) => total + tip.lamports, 0)
@@ -189,7 +195,7 @@ function feeTipCost(row) {
     jitoTipLamports,
     heliusSenderTipLamports,
     nozomiTipLamports,
-    astralaneTipLamports,
+    zeroSlotTipLamports,
     configuredTipLamports,
     mergedTipAccountCount,
     duplicateTipAccountMerged
@@ -219,7 +225,7 @@ function feeTipCost(row) {
     jitoTipLamports,
     heliusSenderTipLamports,
     nozomiTipLamports,
-    astralaneTipLamports,
+    zeroSlotTipLamports,
     configuredTipLamports,
     mergedTipAccountCount,
     duplicateTipAccountMerged,
@@ -349,6 +355,8 @@ function copyBuyLandingRows(rows, { includeUnsent = true } = {}) {
         blockhashCommitment: stringValue(row.blockhashCommitment),
         blockhashContextSlot: numberValue(row.blockhashContextSlot),
         blockhashAgeMs: numberValue(row.blockhashAgeMs),
+        accountPriorityFeeSourceRpc: stringValue(row.accountPriorityFeeSourceRpc),
+        copyWalletBalanceSourceRpc: stringValue(row.copyWalletBalanceSourceRpc),
         observedToSignedMs: numberValue(row.observedToSignedMs),
         observedToSendSubmittedMs: numberValue(row.observedToSendSubmittedMs),
         observedToSignatureReturnedMs: numberValue(row.observedToSignatureReturnedMs),
@@ -1035,6 +1043,7 @@ function printTextReport(scoreboard, { path, limit }) {
         `idx=${formatNumber(row.targetTxIndex)}->${formatNumber(row.copyTxIndex)}`,
         `feeProfile=${row.feeProfileName}/${row.sourcePositionBucket}`,
         `acctFee=${formatNumber(row.accountPriorityFeeMicroLamports)}`,
+        `acctSrc=${short(row.accountPriorityFeeSourceRpc)}`,
         `acctApplied=${row.accountPriorityFeeApplied ? "yes" : "no"}`,
         `feeTip=${formatSol(row.feeTipCost.observedFeeTipSol ?? row.feeTipCost.configuredFeeTipSol)} SOL`,
         `route=${row.route ?? "n/a"}`,

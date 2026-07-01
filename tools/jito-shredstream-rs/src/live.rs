@@ -2,6 +2,7 @@ use crate::{
     address_lookup::AddressLookupTableCache,
     balance_cache::WalletBalanceCache,
     blockhash::spawn_blockhash_cache,
+    cache_rpc::CacheRpcBackoff,
     event::{
         normalized_event_from_raw, now_ms, print_json, wallet_mention_schema,
         NormalizedCopyTradeEvent, RejectionLine, ShadowSignalLine, WalletMentionLine,
@@ -60,19 +61,24 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
         .unwrap_or(fallback_target_wallet_pubkey_set.len());
     let telegram_runtime = Arc::new(ArcSwapOption::from(telegram_runtime.map(Arc::new)));
     let state_rpc_urls = options.normalized_state_rpc_urls();
+    let cache_rpc_backoff = CacheRpcBackoff::default();
     let address_lookup_tables =
         AddressLookupTableCache::load(&state_rpc_urls, &options.address_lookup_tables)
             .await
             .context("preload address lookup tables")?;
     let blockhash_cache = spawn_blockhash_cache(
-        state_rpc_urls.clone(),
+        options.normalized_blockhash_rpc_urls(),
         options.blockhash_refresh_ms,
         options.blockhash_refresh_timeout_ms,
         options.blockhash_commitment.trim().to_string(),
         options.stats,
+        cache_rpc_backoff.clone(),
     );
-    let wallet_balance_cache =
-        wallet_balance_cache_from_options(&options, telegram_runtime.load_full().as_deref());
+    let wallet_balance_cache = wallet_balance_cache_from_options(
+        &options,
+        telegram_runtime.load_full().as_deref(),
+        cache_rpc_backoff.clone(),
+    );
     if let Some(cache) = &wallet_balance_cache {
         cache.replace_wallets(active_copy_wallets(
             telegram_runtime.load_full().as_deref(),
@@ -87,7 +93,8 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
         }
         cache.spawn_refresh_loop();
     }
-    let account_priority_fee_cache = account_priority_fee_cache_from_options(&options);
+    let account_priority_fee_cache =
+        account_priority_fee_cache_from_options(&options, cache_rpc_backoff);
     if let Some(cache) = &account_priority_fee_cache {
         cache.spawn_refresh_loop();
     }
@@ -1091,11 +1098,12 @@ fn load_telegram_runtime(
 fn wallet_balance_cache_from_options(
     options: &LiveOptions,
     runtime: Option<&TelegramRuntimeConfig>,
+    cache_rpc_backoff: CacheRpcBackoff,
 ) -> Option<WalletBalanceCache> {
     if !options.copy_wallet_balance_guard {
         return None;
     }
-    let rpc_urls = options.normalized_state_rpc_urls();
+    let rpc_urls = options.normalized_balance_cache_rpc_urls();
     if rpc_urls.is_empty() {
         return None;
     }
@@ -1105,14 +1113,18 @@ fn wallet_balance_cache_from_options(
         options.copy_wallet_balance_stale_ms,
         options.send_http_timeout_ms,
         active_copy_wallets(runtime, options.copy_wallet.as_deref()),
+        cache_rpc_backoff,
     ))
 }
 
-fn account_priority_fee_cache_from_options(options: &LiveOptions) -> Option<PriorityFeeCache> {
+fn account_priority_fee_cache_from_options(
+    options: &LiveOptions,
+    cache_rpc_backoff: CacheRpcBackoff,
+) -> Option<PriorityFeeCache> {
     if !options.account_priority_fee_enabled {
         return None;
     }
-    let rpc_urls = options.normalized_state_rpc_urls();
+    let rpc_urls = options.normalized_priority_fee_rpc_urls();
     if rpc_urls.is_empty() {
         return None;
     }
@@ -1122,6 +1134,7 @@ fn account_priority_fee_cache_from_options(options: &LiveOptions) -> Option<Prio
         options.account_priority_fee_stale_ms,
         options.send_http_timeout_ms,
         options.account_priority_fee_percentile,
+        cache_rpc_backoff,
     ))
 }
 

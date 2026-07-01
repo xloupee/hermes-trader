@@ -158,6 +158,29 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) astralane_tip_accounts: Vec<String>,
     pub(crate) astralane_mev_protect: bool,
     pub(crate) astralane_swqos_only: bool,
+    pub(crate) lunar_lander_enabled: bool,
+    pub(crate) lunar_lander_urls: Vec<String>,
+    pub(crate) lunar_lander_api_key: Option<String>,
+    pub(crate) lunar_lander_tip_lamports: Option<u64>,
+    pub(crate) lunar_lander_tip_account: Option<String>,
+    pub(crate) lunar_lander_tip_accounts: Vec<String>,
+    pub(crate) lunar_lander_mev_protect: bool,
+    pub(crate) circular_fast_enabled: bool,
+    pub(crate) circular_fast_urls: Vec<String>,
+    pub(crate) circular_fast_api_key: Option<String>,
+    pub(crate) circular_fast_tip_lamports: Option<u64>,
+    pub(crate) circular_fast_tip_account: Option<String>,
+    pub(crate) circular_fast_tip_accounts: Vec<String>,
+    pub(crate) circular_fast_front_running_protection: bool,
+    pub(crate) erpc_swqos_enabled: bool,
+    pub(crate) erpc_swqos_urls: Vec<String>,
+    pub(crate) erpc_leader_slots_enabled: bool,
+    pub(crate) erpc_leader_slots_url: Option<String>,
+    pub(crate) erpc_api_key: Option<String>,
+    pub(crate) erpc_leader_slots_refresh_ms: u64,
+    pub(crate) erpc_leader_slots_stale_ms: u64,
+    pub(crate) erpc_yellowstone_grpc_url: Option<String>,
+    pub(crate) erpc_yellowstone_grpc_x_token: Option<String>,
     pub(crate) beam_enabled: bool,
     pub(crate) beam_url: Option<String>,
     pub(crate) beam_token: Option<String>,
@@ -165,6 +188,11 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) beam_mode: Option<String>,
     pub(crate) beam_tip_lamports: Option<u64>,
     pub(crate) beam_tip_accounts: Vec<String>,
+    pub(crate) zero_slot_enabled: bool,
+    pub(crate) zero_slot_urls: Vec<String>,
+    pub(crate) zero_slot_api_key: Option<String>,
+    pub(crate) zero_slot_tip_lamports: Option<u64>,
+    pub(crate) zero_slot_tip_accounts: Vec<String>,
     pub(crate) tpu_jet_enabled: bool,
     pub(crate) tpu_jet_rpc_url: Option<String>,
     pub(crate) tpu_jet_ws_url: Option<String>,
@@ -230,6 +258,8 @@ pub(crate) enum MigratedAmmSmallCopyMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum SendLaneMode {
     Mixed,
+    Fast,
+    Turbo,
     RpcOnly,
     JitoOnly,
     HeliusSenderOnly,
@@ -238,9 +268,19 @@ pub(crate) enum SendLaneMode {
     AstralaneOnly,
     HeliusAstralaneStack,
     HeliusNozomiAstralaneStack,
+    HeliusNozomiAstralaneLunarStack,
+    LunarLanderOnly,
+    HeliusLunarLanderStack,
+    CircularFastOnly,
+    HeliusCircularFastStack,
+    ErpcSwqosOnly,
+    HeliusErpcSwqosStack,
     BeamOnly,
     HeliusBeamStack,
     HeliusNozomiBeamStack,
+    ZeroSlotOnly,
+    HeliusZeroSlotStack,
+    HeliusNozomiZeroSlotStack,
     AllNonBeamStack,
     HeliusTpuJet,
     HeliusTpuQuic,
@@ -254,6 +294,8 @@ impl SendLaneMode {
     fn as_str(self) -> &'static str {
         match self {
             Self::Mixed => "mixed",
+            Self::Fast => "fast",
+            Self::Turbo => "turbo",
             Self::RpcOnly => "rpc_only",
             Self::JitoOnly => "jito_only",
             Self::HeliusSenderOnly => "helius_sender_only",
@@ -262,9 +304,19 @@ impl SendLaneMode {
             Self::AstralaneOnly => "astralane_only",
             Self::HeliusAstralaneStack => "helius_astralane_stack",
             Self::HeliusNozomiAstralaneStack => "helius_nozomi_astralane_stack",
+            Self::HeliusNozomiAstralaneLunarStack => "helius_nozomi_astralane_lunar_stack",
+            Self::LunarLanderOnly => "lunar_lander_only",
+            Self::HeliusLunarLanderStack => "helius_lunar_lander_stack",
+            Self::CircularFastOnly => "circular_fast_only",
+            Self::HeliusCircularFastStack => "helius_circular_fast_stack",
+            Self::ErpcSwqosOnly => "erpc_swqos_only",
+            Self::HeliusErpcSwqosStack => "helius_erpc_swqos_stack",
             Self::BeamOnly => "beam_only",
             Self::HeliusBeamStack => "helius_beam_stack",
             Self::HeliusNozomiBeamStack => "helius_nozomi_beam_stack",
+            Self::ZeroSlotOnly => "zero_slot_only",
+            Self::HeliusZeroSlotStack => "helius_zero_slot_stack",
+            Self::HeliusNozomiZeroSlotStack => "helius_nozomi_zero_slot_stack",
             Self::AllNonBeamStack => "all_non_beam_stack",
             Self::HeliusTpuJet => "helius_tpu_jet",
             Self::HeliusTpuQuic => "helius_tpu_quic",
@@ -287,12 +339,20 @@ impl SendLaneMode {
         matches!(
             self,
             Self::Mixed
+                | Self::Fast
+                | Self::Turbo
                 | Self::HeliusSenderOnly
                 | Self::HeliusNozomiStack
                 | Self::HeliusAstralaneStack
                 | Self::HeliusNozomiAstralaneStack
+                | Self::HeliusNozomiAstralaneLunarStack
+                | Self::HeliusLunarLanderStack
+                | Self::HeliusCircularFastStack
+                | Self::HeliusErpcSwqosStack
                 | Self::HeliusBeamStack
                 | Self::HeliusNozomiBeamStack
+                | Self::HeliusZeroSlotStack
+                | Self::HeliusNozomiZeroSlotStack
                 | Self::AllNonBeamStack
                 | Self::HeliusTpuJet
                 | Self::HeliusTpuQuic
@@ -303,25 +363,62 @@ impl SendLaneMode {
         matches!(
             self,
             Self::Mixed
+                | Self::Fast
+                | Self::Turbo
                 | Self::NozomiOnly
                 | Self::HeliusNozomiStack
                 | Self::HeliusNozomiAstralaneStack
+                | Self::HeliusNozomiAstralaneLunarStack
                 | Self::HeliusNozomiBeamStack
+                | Self::HeliusNozomiZeroSlotStack
                 | Self::AllNonBeamStack
         )
+    }
+
+    fn uses_erpc_swqos_lanes(self) -> bool {
+        matches!(self, Self::ErpcSwqosOnly | Self::HeliusErpcSwqosStack)
     }
 
     fn uses_astralane_lanes(self) -> bool {
         matches!(
             self,
-            Self::AstralaneOnly | Self::HeliusAstralaneStack | Self::HeliusNozomiAstralaneStack
+            Self::AstralaneOnly
+                | Self::Turbo
+                | Self::HeliusAstralaneStack
+                | Self::HeliusNozomiAstralaneStack
+                | Self::HeliusNozomiAstralaneLunarStack
         )
+    }
+
+    fn uses_lunar_lander_lanes(self) -> bool {
+        matches!(
+            self,
+            Self::LunarLanderOnly
+                | Self::Turbo
+                | Self::HeliusLunarLanderStack
+                | Self::HeliusNozomiAstralaneLunarStack
+        )
+    }
+
+    fn uses_circular_fast_lanes(self) -> bool {
+        matches!(self, Self::CircularFastOnly | Self::HeliusCircularFastStack)
     }
 
     fn uses_beam_lanes(self) -> bool {
         matches!(
             self,
             Self::BeamOnly | Self::HeliusBeamStack | Self::HeliusNozomiBeamStack
+        )
+    }
+
+    fn uses_zero_slot_lanes(self) -> bool {
+        matches!(
+            self,
+            Self::ZeroSlotOnly
+                | Self::Turbo
+                | Self::HeliusZeroSlotStack
+                | Self::HeliusNozomiZeroSlotStack
+                | Self::AllNonBeamStack
         )
     }
 
@@ -336,6 +433,7 @@ impl SendLaneMode {
         matches!(
             self,
             Self::Mixed
+                | Self::Turbo
                 | Self::HeliusTpuJet
                 | Self::TpuJetHeliusTip
                 | Self::TpuJetOnly
@@ -351,12 +449,20 @@ impl SendLaneMode {
         matches!(
             self,
             Self::Mixed
+                | Self::Fast
+                | Self::Turbo
                 | Self::HeliusSenderOnly
                 | Self::HeliusNozomiStack
                 | Self::HeliusAstralaneStack
                 | Self::HeliusNozomiAstralaneStack
+                | Self::HeliusNozomiAstralaneLunarStack
+                | Self::HeliusLunarLanderStack
+                | Self::HeliusCircularFastStack
+                | Self::HeliusErpcSwqosStack
                 | Self::HeliusBeamStack
                 | Self::HeliusNozomiBeamStack
+                | Self::HeliusZeroSlotStack
+                | Self::HeliusNozomiZeroSlotStack
                 | Self::AllNonBeamStack
                 | Self::HeliusTpuJet
                 | Self::HeliusTpuQuic
@@ -369,10 +475,14 @@ impl SendLaneMode {
         matches!(
             self,
             Self::Mixed
+                | Self::Fast
+                | Self::Turbo
                 | Self::NozomiOnly
                 | Self::HeliusNozomiStack
                 | Self::HeliusNozomiAstralaneStack
+                | Self::HeliusNozomiAstralaneLunarStack
                 | Self::HeliusNozomiBeamStack
+                | Self::HeliusNozomiZeroSlotStack
                 | Self::AllNonBeamStack
         )
     }
@@ -380,14 +490,43 @@ impl SendLaneMode {
     fn uses_astralane_tip(self) -> bool {
         matches!(
             self,
-            Self::AstralaneOnly | Self::HeliusAstralaneStack | Self::HeliusNozomiAstralaneStack
+            Self::AstralaneOnly
+                | Self::Turbo
+                | Self::HeliusAstralaneStack
+                | Self::HeliusNozomiAstralaneStack
+                | Self::HeliusNozomiAstralaneLunarStack
         )
+    }
+
+    fn uses_lunar_lander_tip(self) -> bool {
+        matches!(
+            self,
+            Self::LunarLanderOnly
+                | Self::Turbo
+                | Self::HeliusLunarLanderStack
+                | Self::HeliusNozomiAstralaneLunarStack
+        )
+    }
+
+    fn uses_circular_fast_tip(self) -> bool {
+        matches!(self, Self::CircularFastOnly | Self::HeliusCircularFastStack)
     }
 
     fn uses_beam_tip(self) -> bool {
         matches!(
             self,
             Self::BeamOnly | Self::HeliusBeamStack | Self::HeliusNozomiBeamStack
+        )
+    }
+
+    fn uses_zero_slot_tip(self) -> bool {
+        matches!(
+            self,
+            Self::ZeroSlotOnly
+                | Self::Turbo
+                | Self::HeliusZeroSlotStack
+                | Self::HeliusNozomiZeroSlotStack
+                | Self::AllNonBeamStack
         )
     }
 }
@@ -495,6 +634,8 @@ pub(crate) struct CopyExecutionLine {
     copy_wallet_balance_fetched_at_ms: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
     copy_wallet_balance_age_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_wallet_balance_source_rpc: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     copy_wallet_balance_reason: Option<String>,
     send_enabled: bool,
@@ -629,9 +770,21 @@ pub(crate) struct CopyExecutionLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     astralane_tip_account: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    lunar_lander_tip_lamports: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lunar_lander_tip_account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    circular_fast_tip_lamports: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    circular_fast_tip_account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     beam_tip_lamports: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     beam_tip_account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    zero_slot_tip_lamports: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    zero_slot_tip_account: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider_stack_name: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -655,6 +808,8 @@ pub(crate) struct CopyExecutionLine {
     account_priority_fee_age_ms: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
     account_priority_fee_sample_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_priority_fee_source_rpc: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     account_priority_fee_account_count: Option<usize>,
     #[serde(skip_serializing_if = "is_false")]
@@ -1144,7 +1299,11 @@ enum SendEndpointKind {
     HeliusSender,
     NozomiJsonRpc,
     AstralaneIrisB,
+    LunarLanderBin,
+    CircularFast,
+    ErpcSwqos,
     BeamHttp,
+    ZeroSlot,
     TpuJet,
     TpuQuic,
 }
@@ -1156,8 +1315,14 @@ const BEAM_MODE_FASTEST: &str = "fastest";
 const BEAM_MODE_MEV_PROTECT: &str = "mev_protect";
 const BEAM_DEFAULT_URL: &str = "https://beam.rpcfast.com";
 const BEAM_MIN_TIP_LAMPORTS: u64 = 1_000_000;
+const CIRCULAR_FAST_DEFAULT_URL: &str = "https://fra.fast.circular.fi/transactions";
+const CIRCULAR_FAST_DEFAULT_HEALTH_URL: &str = "https://fra.fast.circular.fi/health";
+const CIRCULAR_FAST_MIN_TIP_LAMPORTS: u64 = 1_000_000;
 const ASTRALANE_MIN_TIP_LAMPORTS: u64 = 1_000_000;
 const ASTRALANE_DEFAULT_URL: &str = "https://lim.gateway.astralane.io/irisb";
+const LUNAR_LANDER_MIN_TIP_LAMPORTS: u64 = 1_000_000;
+const LUNAR_LANDER_DEFAULT_URL: &str = "http://fra.lunar-lander.hellomoon.io/send-bin";
+const ZERO_SLOT_MIN_TIP_LAMPORTS: u64 = 1_000_000;
 
 fn beam_provider(value: Option<&str>) -> Option<&'static str> {
     match value?.trim().to_ascii_lowercase().as_str() {
@@ -1300,6 +1465,75 @@ impl CopyExecutor {
             ),
             astralane_mev_protect: options.astralane_mev_protect,
             astralane_swqos_only: options.astralane_swqos_only,
+            lunar_lander_enabled: options.lunar_lander_enabled,
+            lunar_lander_urls: normalized_send_rpc_urls(&options.lunar_lander_urls, None),
+            lunar_lander_api_key: options
+                .lunar_lander_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            lunar_lander_tip_lamports: positive_u64(options.lunar_lander_tip_lamports),
+            lunar_lander_tip_account: options
+                .lunar_lander_tip_account
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            lunar_lander_tip_accounts: normalized_tip_accounts(
+                &options.lunar_lander_tip_accounts,
+                options.lunar_lander_tip_account.as_deref(),
+            ),
+            lunar_lander_mev_protect: options.lunar_lander_mev_protect,
+            circular_fast_enabled: options.circular_fast_enabled,
+            circular_fast_urls: normalized_send_rpc_urls(&options.circular_fast_urls, None),
+            circular_fast_api_key: options
+                .circular_fast_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            circular_fast_tip_lamports: positive_u64(options.circular_fast_tip_lamports),
+            circular_fast_tip_account: options
+                .circular_fast_tip_account
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            circular_fast_tip_accounts: normalized_tip_accounts(
+                &options.circular_fast_tip_accounts,
+                options.circular_fast_tip_account.as_deref(),
+            ),
+            circular_fast_front_running_protection: options.circular_fast_front_running_protection,
+            erpc_swqos_enabled: options.erpc_swqos_enabled,
+            erpc_swqos_urls: normalized_send_rpc_urls(&options.erpc_swqos_urls, None),
+            erpc_leader_slots_enabled: options.erpc_leader_slots_enabled,
+            erpc_leader_slots_url: options
+                .erpc_leader_slots_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            erpc_api_key: options
+                .erpc_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            erpc_leader_slots_refresh_ms: options.erpc_leader_slots_refresh_ms,
+            erpc_leader_slots_stale_ms: options.erpc_leader_slots_stale_ms,
+            erpc_yellowstone_grpc_url: options
+                .erpc_yellowstone_grpc_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            erpc_yellowstone_grpc_x_token: options
+                .erpc_yellowstone_grpc_x_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
             beam_enabled: options.beam_enabled,
             beam_url: options
                 .beam_url
@@ -1327,6 +1561,16 @@ impl CopyExecutor {
                 .map(|value| value.to_ascii_lowercase()),
             beam_tip_lamports: positive_u64(options.beam_tip_lamports),
             beam_tip_accounts: normalized_tip_accounts(&options.beam_tip_accounts, None),
+            zero_slot_enabled: options.zero_slot_enabled,
+            zero_slot_urls: normalized_send_rpc_urls(&options.zero_slot_urls, None),
+            zero_slot_api_key: options
+                .zero_slot_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            zero_slot_tip_lamports: positive_u64(options.zero_slot_tip_lamports),
+            zero_slot_tip_accounts: normalized_tip_accounts(&options.zero_slot_tip_accounts, None),
             tpu_jet_enabled: options.tpu_jet_enabled,
             tpu_jet_rpc_url: options
                 .tpu_jet_rpc_url
@@ -1471,7 +1715,19 @@ impl CopyExecutor {
             .validate_astralane_sender()
             .map_err(anyhow::Error::msg)?;
         execution_options
+            .validate_lunar_lander_sender()
+            .map_err(anyhow::Error::msg)?;
+        execution_options
+            .validate_circular_fast_sender()
+            .map_err(anyhow::Error::msg)?;
+        execution_options
+            .validate_erpc_surfaces()
+            .map_err(anyhow::Error::msg)?;
+        execution_options
             .validate_beam_sender()
+            .map_err(anyhow::Error::msg)?;
+        execution_options
+            .validate_zero_slot_sender()
             .map_err(anyhow::Error::msg)?;
         execution_options
             .validate_tpu_quic_sender()
@@ -1948,6 +2204,7 @@ impl CopyExecutor {
                     lamports: None,
                     fetched_at_ms: None,
                     age_ms: None,
+                    source_rpc: None,
                     required_lamports: estimated_total_spend_lamports,
                     reason: Some("copy wallet balance cache unavailable".to_string()),
                 },
@@ -3382,8 +3639,14 @@ impl CopyExecutor {
             nozomi_tip_account: None,
             astralane_tip_lamports: None,
             astralane_tip_account: None,
+            lunar_lander_tip_lamports: None,
+            lunar_lander_tip_account: None,
+            circular_fast_tip_lamports: None,
+            circular_fast_tip_account: None,
             beam_tip_lamports: None,
             beam_tip_account: None,
+            zero_slot_tip_lamports: None,
+            zero_slot_tip_account: None,
         }
     }
 }
@@ -4122,7 +4385,10 @@ fn selected_tip_account(fee_config: &TxFeeConfig) -> Option<String> {
         .or_else(|| fee_config.jito_tip_account.clone())
         .or_else(|| fee_config.nozomi_tip_account.clone())
         .or_else(|| fee_config.astralane_tip_account.clone())
+        .or_else(|| fee_config.lunar_lander_tip_account.clone())
+        .or_else(|| fee_config.circular_fast_tip_account.clone())
         .or_else(|| fee_config.beam_tip_account.clone())
+        .or_else(|| fee_config.zero_slot_tip_account.clone())
 }
 
 fn selected_tip_accounts(fee_config: &TxFeeConfig) -> Vec<String> {
@@ -4132,7 +4398,10 @@ fn selected_tip_accounts(fee_config: &TxFeeConfig) -> Vec<String> {
         fee_config.helius_sender_tip_account.as_ref(),
         fee_config.nozomi_tip_account.as_ref(),
         fee_config.astralane_tip_account.as_ref(),
+        fee_config.lunar_lander_tip_account.as_ref(),
+        fee_config.circular_fast_tip_account.as_ref(),
         fee_config.beam_tip_account.as_ref(),
+        fee_config.zero_slot_tip_account.as_ref(),
     ]
     .into_iter()
     .flatten()
@@ -4158,8 +4427,17 @@ fn provider_stack_name(fee_config: &TxFeeConfig) -> Option<String> {
     if fee_config.astralane_tip_lamports.unwrap_or(0) > 0 {
         providers.push("astralane");
     }
+    if fee_config.lunar_lander_tip_lamports.unwrap_or(0) > 0 {
+        providers.push("lunar_lander");
+    }
+    if fee_config.circular_fast_tip_lamports.unwrap_or(0) > 0 {
+        providers.push("circular_fast");
+    }
     if fee_config.beam_tip_lamports.unwrap_or(0) > 0 {
         providers.push("beam");
+    }
+    if fee_config.zero_slot_tip_lamports.unwrap_or(0) > 0 {
+        providers.push("zero_slot");
     }
     if providers.is_empty() {
         None
@@ -4237,7 +4515,10 @@ fn provider_tip_lamports(fee_config: &TxFeeConfig) -> u64 {
         .saturating_add(fee_config.helius_sender_tip_lamports.unwrap_or(0))
         .saturating_add(fee_config.nozomi_tip_lamports.unwrap_or(0))
         .saturating_add(fee_config.astralane_tip_lamports.unwrap_or(0))
+        .saturating_add(fee_config.lunar_lander_tip_lamports.unwrap_or(0))
+        .saturating_add(fee_config.circular_fast_tip_lamports.unwrap_or(0))
         .saturating_add(fee_config.beam_tip_lamports.unwrap_or(0))
+        .saturating_add(fee_config.zero_slot_tip_lamports.unwrap_or(0))
 }
 
 fn provider_tip_guard_reason(
@@ -4372,6 +4653,7 @@ impl CopyExecutionLine {
             copy_wallet_balance_required_lamports: None,
             copy_wallet_balance_fetched_at_ms: None,
             copy_wallet_balance_age_ms: None,
+            copy_wallet_balance_source_rpc: None,
             copy_wallet_balance_reason: None,
             send_enabled: options.enable_copy_send,
             dry_run: options.dry_run,
@@ -4459,8 +4741,14 @@ impl CopyExecutionLine {
             nozomi_tip_account: fee_profile.tx_fee_config.nozomi_tip_account.clone(),
             astralane_tip_lamports: fee_profile.tx_fee_config.astralane_tip_lamports,
             astralane_tip_account: fee_profile.tx_fee_config.astralane_tip_account.clone(),
+            lunar_lander_tip_lamports: fee_profile.tx_fee_config.lunar_lander_tip_lamports,
+            lunar_lander_tip_account: fee_profile.tx_fee_config.lunar_lander_tip_account.clone(),
+            circular_fast_tip_lamports: fee_profile.tx_fee_config.circular_fast_tip_lamports,
+            circular_fast_tip_account: fee_profile.tx_fee_config.circular_fast_tip_account.clone(),
             beam_tip_lamports: fee_profile.tx_fee_config.beam_tip_lamports,
             beam_tip_account: fee_profile.tx_fee_config.beam_tip_account.clone(),
+            zero_slot_tip_lamports: fee_profile.tx_fee_config.zero_slot_tip_lamports,
+            zero_slot_tip_account: fee_profile.tx_fee_config.zero_slot_tip_account.clone(),
             provider_stack_name: provider_stack_name(&fee_profile.tx_fee_config),
             selected_tip_accounts: selected_tip_accounts(&fee_profile.tx_fee_config),
             selected_tip_account: selected_tip_account(&fee_profile.tx_fee_config),
@@ -4477,6 +4765,7 @@ impl CopyExecutionLine {
             account_priority_fee_micro_lamports: None,
             account_priority_fee_age_ms: None,
             account_priority_fee_sample_count: None,
+            account_priority_fee_source_rpc: None,
             account_priority_fee_account_count: None,
             account_priority_fee_applied: false,
             account_priority_fee_reason: None,
@@ -4516,8 +4805,15 @@ impl CopyExecutionLine {
         self.nozomi_tip_account = fee_profile.tx_fee_config.nozomi_tip_account.clone();
         self.astralane_tip_lamports = fee_profile.tx_fee_config.astralane_tip_lamports;
         self.astralane_tip_account = fee_profile.tx_fee_config.astralane_tip_account.clone();
+        self.lunar_lander_tip_lamports = fee_profile.tx_fee_config.lunar_lander_tip_lamports;
+        self.lunar_lander_tip_account = fee_profile.tx_fee_config.lunar_lander_tip_account.clone();
+        self.circular_fast_tip_lamports = fee_profile.tx_fee_config.circular_fast_tip_lamports;
+        self.circular_fast_tip_account =
+            fee_profile.tx_fee_config.circular_fast_tip_account.clone();
         self.beam_tip_lamports = fee_profile.tx_fee_config.beam_tip_lamports;
         self.beam_tip_account = fee_profile.tx_fee_config.beam_tip_account.clone();
+        self.zero_slot_tip_lamports = fee_profile.tx_fee_config.zero_slot_tip_lamports;
+        self.zero_slot_tip_account = fee_profile.tx_fee_config.zero_slot_tip_account.clone();
         self.provider_stack_name = provider_stack_name(&fee_profile.tx_fee_config);
         self.selected_tip_accounts = selected_tip_accounts(&fee_profile.tx_fee_config);
         self.selected_tip_account = selected_tip_account(&fee_profile.tx_fee_config);
@@ -4534,6 +4830,7 @@ impl CopyExecutionLine {
         self.account_priority_fee_micro_lamports = lookup.priority_fee_micro_lamports;
         self.account_priority_fee_age_ms = lookup.age_ms;
         self.account_priority_fee_sample_count = lookup.sample_count;
+        self.account_priority_fee_source_rpc = lookup.source_rpc;
         self.account_priority_fee_reason = Some(if lookup.priority_fee_micro_lamports.is_some() {
             "cache_hit"
         } else if lookup.fetched_at_ms.is_some() {
@@ -4576,6 +4873,7 @@ impl CopyExecutionLine {
         self.copy_wallet_balance_required_lamports = Some(check.required_lamports);
         self.copy_wallet_balance_fetched_at_ms = check.fetched_at_ms;
         self.copy_wallet_balance_age_ms = check.age_ms;
+        self.copy_wallet_balance_source_rpc = check.source_rpc;
         self.copy_wallet_balance_reason = check.reason;
     }
 
@@ -5191,12 +5489,42 @@ impl CopyExecutionOptions {
                     .or_else(|| self.astralane_tip_account.clone())
             })
             .flatten(),
+            lunar_lander_tip_lamports: (self.lunar_lander_enabled
+                && self.send_lane_mode.uses_lunar_lander_tip())
+            .then_some(self.lunar_lander_tip_lamports)
+            .flatten(),
+            lunar_lander_tip_account: (self.lunar_lander_enabled
+                && self.send_lane_mode.uses_lunar_lander_tip())
+            .then(|| {
+                select_tip_account(&self.lunar_lander_tip_accounts, signature, 4)
+                    .or_else(|| self.lunar_lander_tip_account.clone())
+            })
+            .flatten(),
+            circular_fast_tip_lamports: (self.circular_fast_enabled
+                && self.send_lane_mode.uses_circular_fast_tip())
+            .then_some(self.circular_fast_tip_lamports)
+            .flatten(),
+            circular_fast_tip_account: (self.circular_fast_enabled
+                && self.send_lane_mode.uses_circular_fast_tip())
+            .then(|| {
+                select_tip_account(&self.circular_fast_tip_accounts, signature, 5)
+                    .or_else(|| self.circular_fast_tip_account.clone())
+            })
+            .flatten(),
             beam_tip_lamports: (self.beam_enabled && self.send_lane_mode.uses_beam_tip())
                 .then_some(self.beam_tip_lamports)
                 .flatten(),
             beam_tip_account: (self.beam_enabled && self.send_lane_mode.uses_beam_tip())
-                .then(|| select_tip_account(&self.beam_tip_accounts, signature, 4))
+                .then(|| select_tip_account(&self.beam_tip_accounts, signature, 6))
                 .flatten(),
+            zero_slot_tip_lamports: (self.zero_slot_enabled
+                && self.send_lane_mode.uses_zero_slot_tip())
+            .then_some(self.zero_slot_tip_lamports)
+            .flatten(),
+            zero_slot_tip_account: (self.zero_slot_enabled
+                && self.send_lane_mode.uses_zero_slot_tip())
+            .then(|| select_tip_account(&self.zero_slot_tip_accounts, signature, 7))
+            .flatten(),
         }
     }
 
@@ -5339,8 +5667,14 @@ impl CopyExecutionOptions {
             nozomi_tip_account: None,
             astralane_tip_lamports: None,
             astralane_tip_account: None,
+            lunar_lander_tip_lamports: None,
+            lunar_lander_tip_account: None,
+            circular_fast_tip_lamports: None,
+            circular_fast_tip_account: None,
             beam_tip_lamports: None,
             beam_tip_account: None,
+            zero_slot_tip_lamports: None,
+            zero_slot_tip_account: None,
         }
     }
 
@@ -5482,6 +5816,181 @@ impl CopyExecutionOptions {
         Ok(())
     }
 
+    fn validate_lunar_lander_sender(&self) -> std::result::Result<(), String> {
+        if !self.lunar_lander_enabled {
+            return Ok(());
+        }
+        if !self.send_fanout && self.send_lane_mode != SendLaneMode::LunarLanderOnly {
+            return Err(
+                "JITO_LUNAR_LANDER_ENABLED requires JITO_SEND_FANOUT=YES unless lunar_lander_only"
+                    .to_string(),
+            );
+        }
+        if !self.fast_copy_send {
+            return Err("JITO_LUNAR_LANDER_ENABLED requires JITO_FAST_COPY_SEND=YES".to_string());
+        }
+        if self.lunar_lander_urls.is_empty() {
+            return Err("JITO_LUNAR_LANDER_ENABLED requires JITO_LUNAR_LANDER_URLS".to_string());
+        }
+        if self
+            .lunar_lander_api_key
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            return Err("JITO_LUNAR_LANDER_ENABLED requires JITO_LUNAR_LANDER_API_KEY".to_string());
+        }
+        let Some(tip_lamports) = self.lunar_lander_tip_lamports else {
+            return Err(
+                "JITO_LUNAR_LANDER_ENABLED requires JITO_LUNAR_LANDER_TIP_LAMPORTS".to_string(),
+            );
+        };
+        if tip_lamports < LUNAR_LANDER_MIN_TIP_LAMPORTS {
+            return Err(format!(
+                "JITO_LUNAR_LANDER_TIP_LAMPORTS must be >= {LUNAR_LANDER_MIN_TIP_LAMPORTS} lamports"
+            ));
+        }
+        if self.lunar_lander_tip_account.is_none() && self.lunar_lander_tip_accounts.is_empty() {
+            return Err(
+                "JITO_LUNAR_LANDER_ENABLED requires JITO_LUNAR_LANDER_TIP_ACCOUNT or JITO_LUNAR_LANDER_TIP_ACCOUNTS"
+                    .to_string(),
+            );
+        }
+        if let Some(tip_account) = self.lunar_lander_tip_account.as_deref() {
+            Pubkey::from_str(tip_account)
+                .map_err(|_| "JITO_LUNAR_LANDER_TIP_ACCOUNT must be a valid pubkey".to_string())?;
+        }
+        for tip_account in &self.lunar_lander_tip_accounts {
+            Pubkey::from_str(tip_account).map_err(|_| {
+                "JITO_LUNAR_LANDER_TIP_ACCOUNTS must contain only valid pubkeys".to_string()
+            })?;
+        }
+        Ok(())
+    }
+
+    fn validate_circular_fast_sender(&self) -> std::result::Result<(), String> {
+        if !self.circular_fast_enabled {
+            return Ok(());
+        }
+        if !self.send_fanout && self.send_lane_mode != SendLaneMode::CircularFastOnly {
+            return Err(
+                "JITO_CIRCULAR_FAST_ENABLED requires JITO_SEND_FANOUT=YES unless circular_fast_only"
+                    .to_string(),
+            );
+        }
+        if !self.fast_copy_send {
+            return Err("JITO_CIRCULAR_FAST_ENABLED requires JITO_FAST_COPY_SEND=YES".to_string());
+        }
+        if self.circular_fast_urls.is_empty() {
+            return Err("JITO_CIRCULAR_FAST_ENABLED requires JITO_CIRCULAR_FAST_URLS".to_string());
+        }
+        if self
+            .circular_fast_api_key
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            return Err(
+                "JITO_CIRCULAR_FAST_ENABLED requires JITO_CIRCULAR_FAST_API_KEY".to_string(),
+            );
+        }
+        if self.priority_fee_micro_lamports.unwrap_or(0) == 0 {
+            return Err(
+                "JITO_CIRCULAR_FAST_ENABLED requires JITO_PRIORITY_FEE_MICRO_LAMPORTS".to_string(),
+            );
+        }
+        let Some(tip_lamports) = self.circular_fast_tip_lamports else {
+            return Err(
+                "JITO_CIRCULAR_FAST_ENABLED requires JITO_CIRCULAR_FAST_TIP_LAMPORTS".to_string(),
+            );
+        };
+        if tip_lamports < CIRCULAR_FAST_MIN_TIP_LAMPORTS {
+            return Err(format!(
+                "JITO_CIRCULAR_FAST_TIP_LAMPORTS must be >= {CIRCULAR_FAST_MIN_TIP_LAMPORTS} lamports"
+            ));
+        }
+        if self.circular_fast_tip_account.is_none() && self.circular_fast_tip_accounts.is_empty() {
+            return Err(
+                "JITO_CIRCULAR_FAST_ENABLED requires JITO_CIRCULAR_FAST_TIP_ACCOUNT or JITO_CIRCULAR_FAST_TIP_ACCOUNTS"
+                    .to_string(),
+            );
+        }
+        if let Some(tip_account) = self.circular_fast_tip_account.as_deref() {
+            Pubkey::from_str(tip_account)
+                .map_err(|_| "JITO_CIRCULAR_FAST_TIP_ACCOUNT must be a valid pubkey".to_string())?;
+        }
+        for tip_account in &self.circular_fast_tip_accounts {
+            Pubkey::from_str(tip_account).map_err(|_| {
+                "JITO_CIRCULAR_FAST_TIP_ACCOUNTS must contain only valid pubkeys".to_string()
+            })?;
+        }
+        Ok(())
+    }
+
+    fn validate_erpc_surfaces(&self) -> std::result::Result<(), String> {
+        if self.erpc_swqos_enabled {
+            if !self.send_fanout && self.send_lane_mode != SendLaneMode::ErpcSwqosOnly {
+                return Err(
+                    "JITO_ERPC_SWQOS_ENABLED requires JITO_SEND_FANOUT=YES unless erpc_swqos_only"
+                        .to_string(),
+                );
+            }
+            if !self.fast_copy_send {
+                return Err("JITO_ERPC_SWQOS_ENABLED requires JITO_FAST_COPY_SEND=YES".to_string());
+            }
+            if self.erpc_swqos_urls.is_empty() {
+                return Err("JITO_ERPC_SWQOS_ENABLED requires JITO_ERPC_SWQOS_URLS".to_string());
+            }
+        }
+
+        if self.erpc_leader_slots_enabled {
+            if self
+                .erpc_leader_slots_url
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+            {
+                return Err(
+                    "JITO_ERPC_LEADER_SLOTS_ENABLED requires JITO_ERPC_LEADER_SLOTS_URL"
+                        .to_string(),
+                );
+            }
+            if self.erpc_api_key.as_deref().unwrap_or("").trim().is_empty() {
+                return Err("JITO_ERPC_LEADER_SLOTS_ENABLED requires JITO_ERPC_API_KEY".to_string());
+            }
+            if self.erpc_leader_slots_refresh_ms == 0 {
+                return Err("JITO_ERPC_LEADER_SLOTS_REFRESH_MS must be positive".to_string());
+            }
+            if self.erpc_leader_slots_stale_ms == 0 {
+                return Err("JITO_ERPC_LEADER_SLOTS_STALE_MS must be positive".to_string());
+            }
+        }
+
+        if !self
+            .erpc_yellowstone_grpc_x_token
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+            && self
+                .erpc_yellowstone_grpc_url
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+        {
+            return Err(
+                "JITO_ERPC_YELLOWSTONE_GRPC_X_TOKEN requires JITO_ERPC_YELLOWSTONE_GRPC_URL"
+                    .to_string(),
+            );
+        }
+
+        Ok(())
+    }
+
     fn validate_beam_sender(&self) -> std::result::Result<(), String> {
         if !self.beam_enabled {
             return Ok(());
@@ -5526,6 +6035,50 @@ impl CopyExecutionOptions {
         for account in &self.beam_tip_accounts {
             Pubkey::from_str(account)
                 .map_err(|_| "JITO_BEAM_TIP_ACCOUNTS must contain valid pubkeys".to_string())?;
+        }
+        Ok(())
+    }
+
+    fn validate_zero_slot_sender(&self) -> std::result::Result<(), String> {
+        if !self.zero_slot_enabled {
+            return Ok(());
+        }
+        if !self.send_fanout && self.send_lane_mode != SendLaneMode::ZeroSlotOnly {
+            return Err(
+                "JITO_ZERO_SLOT_ENABLED requires JITO_SEND_FANOUT=YES unless zero_slot_only"
+                    .to_string(),
+            );
+        }
+        if !self.fast_copy_send {
+            return Err("JITO_ZERO_SLOT_ENABLED requires JITO_FAST_COPY_SEND=YES".to_string());
+        }
+        if self.zero_slot_urls.is_empty() {
+            return Err("JITO_ZERO_SLOT_ENABLED requires JITO_ZERO_SLOT_URLS".to_string());
+        }
+        if self
+            .zero_slot_api_key
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            return Err("JITO_ZERO_SLOT_ENABLED requires JITO_ZERO_SLOT_API_KEY".to_string());
+        }
+        let Some(tip_lamports) = self.zero_slot_tip_lamports else {
+            return Err("JITO_ZERO_SLOT_ENABLED requires JITO_ZERO_SLOT_TIP_LAMPORTS".to_string());
+        };
+        if tip_lamports < ZERO_SLOT_MIN_TIP_LAMPORTS {
+            return Err(format!(
+                "JITO_ZERO_SLOT_TIP_LAMPORTS must be >= {ZERO_SLOT_MIN_TIP_LAMPORTS} lamports"
+            ));
+        }
+        if self.zero_slot_tip_accounts.is_empty() {
+            return Err("JITO_ZERO_SLOT_ENABLED requires JITO_ZERO_SLOT_TIP_ACCOUNTS".to_string());
+        }
+        for account in &self.zero_slot_tip_accounts {
+            Pubkey::from_str(account).map_err(|_| {
+                "JITO_ZERO_SLOT_TIP_ACCOUNTS must contain valid pubkeys".to_string()
+            })?;
         }
         Ok(())
     }
@@ -5604,6 +6157,65 @@ impl CopyExecutionOptions {
 
         match self.send_lane_mode {
             SendLaneMode::Mixed => Ok(()),
+            SendLaneMode::Fast => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=fast requires JITO_SEND_FANOUT=YES".to_string()
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=fast requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.nozomi_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=fast requires JITO_NOZOMI_ENABLED=YES".to_string()
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::Turbo => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=turbo requires JITO_SEND_FANOUT=YES".to_string()
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=turbo requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.nozomi_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=turbo requires JITO_NOZOMI_ENABLED=YES".to_string()
+                    );
+                }
+                if !self.astralane_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=turbo requires JITO_ASTRALANE_ENABLED=YES".to_string(),
+                    );
+                }
+                if !self.lunar_lander_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=turbo requires JITO_LUNAR_LANDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.zero_slot_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=turbo requires JITO_ZERO_SLOT_ENABLED=YES".to_string(),
+                    );
+                }
+                if !self.tpu_jet_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=turbo requires JITO_TPU_JET_ENABLED=YES".to_string(),
+                    );
+                }
+                Ok(())
+            }
             SendLaneMode::RpcOnly => {
                 if self.selected_send_rpc_urls().is_empty() {
                     return Err(
@@ -5723,6 +6335,129 @@ impl CopyExecutionOptions {
                 }
                 Ok(())
             }
+            SendLaneMode::HeliusNozomiAstralaneLunarStack => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_SEND_FANOUT=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.nozomi_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_NOZOMI_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.astralane_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_ASTRALANE_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.lunar_lander_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_LUNAR_LANDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::LunarLanderOnly => {
+                if !self.lunar_lander_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=lunar_lander_only requires JITO_LUNAR_LANDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::HeliusLunarLanderStack => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_lunar_lander_stack requires JITO_SEND_FANOUT=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_lunar_lander_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.lunar_lander_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_lunar_lander_stack requires JITO_LUNAR_LANDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::CircularFastOnly => {
+                if !self.circular_fast_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=circular_fast_only requires JITO_CIRCULAR_FAST_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::HeliusCircularFastStack => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_circular_fast_stack requires JITO_SEND_FANOUT=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_circular_fast_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.circular_fast_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_circular_fast_stack requires JITO_CIRCULAR_FAST_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::ErpcSwqosOnly => {
+                if !self.erpc_swqos_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=erpc_swqos_only requires JITO_ERPC_SWQOS_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::HeliusErpcSwqosStack => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_erpc_swqos_stack requires JITO_SEND_FANOUT=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_erpc_swqos_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.erpc_swqos_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_erpc_swqos_stack requires JITO_ERPC_SWQOS_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
             SendLaneMode::BeamOnly => {
                 if !self.beam_enabled {
                     return Err(
@@ -5779,6 +6514,63 @@ impl CopyExecutionOptions {
                 }
                 Ok(())
             }
+            SendLaneMode::ZeroSlotOnly => {
+                if !self.zero_slot_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=zero_slot_only requires JITO_ZERO_SLOT_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::HeliusZeroSlotStack => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_zero_slot_stack requires JITO_SEND_FANOUT=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_zero_slot_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.zero_slot_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_zero_slot_stack requires JITO_ZERO_SLOT_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::HeliusNozomiZeroSlotStack => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_zero_slot_stack requires JITO_SEND_FANOUT=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_zero_slot_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.nozomi_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_zero_slot_stack requires JITO_NOZOMI_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.zero_slot_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=helius_nozomi_zero_slot_stack requires JITO_ZERO_SLOT_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
             SendLaneMode::AllNonBeamStack => {
                 if !self.send_fanout {
                     return Err(
@@ -5795,6 +6587,12 @@ impl CopyExecutionOptions {
                 if !self.nozomi_enabled {
                     return Err(
                         "JITO_SEND_LANE_MODE=all_non_beam_stack requires JITO_NOZOMI_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.zero_slot_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=all_non_beam_stack requires JITO_ZERO_SLOT_ENABLED=YES"
                             .to_string(),
                     );
                 }
@@ -6001,6 +6799,110 @@ impl CopyExecutionOptions {
             .collect()
     }
 
+    fn selected_erpc_swqos_send_endpoints(&self) -> Vec<SendEndpoint> {
+        self.erpc_swqos_urls
+            .iter()
+            .enumerate()
+            .map(|(index, url)| SendEndpoint {
+                label: format!("erpc-swqos-{}:{}", index + 1, rpc_url_label(url)),
+                url: url.clone(),
+                kind: SendEndpointKind::ErpcSwqos,
+                auth_uuid: None,
+                auth_token: None,
+                sender_mode: Some("swqos"),
+                beam_provider: None,
+                provider_tip_lamports: None,
+                fanout_slots: None,
+                timeout_ms: None,
+            })
+            .collect()
+    }
+
+    fn selected_astralane_send_endpoints(&self) -> Vec<SendEndpoint> {
+        let Some(api_key) = self.astralane_api_key.clone() else {
+            return Vec::new();
+        };
+        self.astralane_urls
+            .iter()
+            .enumerate()
+            .map(|(index, url)| {
+                let url = astralane_irisb_send_url(
+                    Some(url),
+                    &api_key,
+                    self.astralane_mev_protect,
+                    self.astralane_swqos_only,
+                );
+                SendEndpoint {
+                    label: format!("astralane-irisb-{}:{}", index + 1, rpc_url_label(&url)),
+                    url,
+                    kind: SendEndpointKind::AstralaneIrisB,
+                    auth_uuid: None,
+                    auth_token: Some(api_key.clone()),
+                    sender_mode: Some("irisb"),
+                    beam_provider: None,
+                    provider_tip_lamports: self.astralane_tip_lamports,
+                    fanout_slots: None,
+                    timeout_ms: None,
+                }
+            })
+            .collect()
+    }
+
+    fn selected_lunar_lander_send_endpoints(&self) -> Vec<SendEndpoint> {
+        let Some(api_key) = self.lunar_lander_api_key.clone() else {
+            return Vec::new();
+        };
+        self.lunar_lander_urls
+            .iter()
+            .enumerate()
+            .map(|(index, url)| {
+                let url =
+                    lunar_lander_send_bin_url(Some(url), &api_key, self.lunar_lander_mev_protect);
+                SendEndpoint {
+                    label: format!("lunar-lander-{}:{}", index + 1, rpc_url_label(&url)),
+                    url,
+                    kind: SendEndpointKind::LunarLanderBin,
+                    auth_uuid: None,
+                    auth_token: Some(api_key.clone()),
+                    sender_mode: Some("send_bin"),
+                    beam_provider: None,
+                    provider_tip_lamports: self.lunar_lander_tip_lamports,
+                    fanout_slots: None,
+                    timeout_ms: None,
+                }
+            })
+            .collect()
+    }
+
+    fn selected_circular_fast_send_endpoints(&self) -> Vec<SendEndpoint> {
+        let Some(api_key) = self.circular_fast_api_key.clone() else {
+            return Vec::new();
+        };
+        self.circular_fast_urls
+            .iter()
+            .enumerate()
+            .map(|(index, url)| {
+                let url = circular_fast_transactions_url(Some(url));
+                SendEndpoint {
+                    label: format!("circular-fast-{}:{}", index + 1, rpc_url_label(&url)),
+                    url,
+                    kind: SendEndpointKind::CircularFast,
+                    auth_uuid: None,
+                    auth_token: Some(api_key.clone()),
+                    sender_mode: if self.circular_fast_front_running_protection {
+                        Some("jito_only")
+                    } else {
+                        Some("swqos_jito")
+                    },
+                    beam_provider: None,
+                    provider_tip_lamports: self.circular_fast_tip_lamports,
+                    fanout_slots: None,
+                    timeout_ms: None,
+                }
+            })
+            .collect()
+    }
+
     fn selected_sell_send_endpoints(&self) -> Vec<SendEndpoint> {
         if !normalized_send_rpc_urls(&self.sell_send_rpc_urls, None).is_empty() {
             return self.selected_sell_rpc_send_endpoints();
@@ -6094,28 +6996,16 @@ impl CopyExecutionOptions {
                 }));
             }
             if self.astralane_enabled && self.send_lane_mode.uses_astralane_lanes() {
-                if let Some(api_key) = self.astralane_api_key.clone() {
-                    endpoints.extend(self.astralane_urls.iter().enumerate().map(|(index, url)| {
-                        let url = astralane_irisb_send_url(
-                            Some(url),
-                            &api_key,
-                            self.astralane_mev_protect,
-                            self.astralane_swqos_only,
-                        );
-                        SendEndpoint {
-                            label: format!("astralane-irisb-{}:{}", index + 1, rpc_url_label(&url)),
-                            url,
-                            kind: SendEndpointKind::AstralaneIrisB,
-                            auth_uuid: None,
-                            auth_token: Some(api_key.clone()),
-                            sender_mode: Some("irisb"),
-                            beam_provider: None,
-                            provider_tip_lamports: self.astralane_tip_lamports,
-                            fanout_slots: None,
-                            timeout_ms: None,
-                        }
-                    }));
-                }
+                endpoints.extend(self.selected_astralane_send_endpoints());
+            }
+            if self.lunar_lander_enabled && self.send_lane_mode.uses_lunar_lander_lanes() {
+                endpoints.extend(self.selected_lunar_lander_send_endpoints());
+            }
+            if self.circular_fast_enabled && self.send_lane_mode.uses_circular_fast_lanes() {
+                endpoints.extend(self.selected_circular_fast_send_endpoints());
+            }
+            if self.erpc_swqos_enabled && self.send_lane_mode.uses_erpc_swqos_lanes() {
+                endpoints.extend(self.selected_erpc_swqos_send_endpoints());
             }
             if self.beam_enabled && self.send_lane_mode.uses_beam_lanes() {
                 if let (Some(provider), Some(mode), Some(token)) = (
@@ -6136,6 +7026,25 @@ impl CopyExecutionOptions {
                         fanout_slots: None,
                         timeout_ms: None,
                     });
+                }
+            }
+            if self.zero_slot_enabled && self.send_lane_mode.uses_zero_slot_lanes() {
+                if let Some(api_key) = self.zero_slot_api_key.clone() {
+                    endpoints.extend(self.zero_slot_urls.iter().enumerate().map(|(index, url)| {
+                        let url = zero_slot_send_url(url, &api_key);
+                        SendEndpoint {
+                            label: format!("zero-slot-{}:{}", index + 1, rpc_url_label(&url)),
+                            url,
+                            kind: SendEndpointKind::ZeroSlot,
+                            auth_uuid: None,
+                            auth_token: Some(api_key.clone()),
+                            sender_mode: None,
+                            beam_provider: None,
+                            provider_tip_lamports: self.zero_slot_tip_lamports,
+                            fanout_slots: None,
+                            timeout_ms: None,
+                        }
+                    }));
                 }
             }
             if self.tpu_jet_enabled && self.send_lane_mode.uses_tpu_jet_lanes() {
@@ -6208,28 +7117,16 @@ impl CopyExecutionOptions {
                 }
             }));
         } else if self.astralane_enabled && self.send_lane_mode == SendLaneMode::AstralaneOnly {
-            if let Some(api_key) = self.astralane_api_key.clone() {
-                endpoints.extend(self.astralane_urls.iter().enumerate().map(|(index, url)| {
-                    let url = astralane_irisb_send_url(
-                        Some(url),
-                        &api_key,
-                        self.astralane_mev_protect,
-                        self.astralane_swqos_only,
-                    );
-                    SendEndpoint {
-                        label: format!("astralane-irisb-{}:{}", index + 1, rpc_url_label(&url)),
-                        url,
-                        kind: SendEndpointKind::AstralaneIrisB,
-                        auth_uuid: None,
-                        auth_token: Some(api_key.clone()),
-                        sender_mode: Some("irisb"),
-                        beam_provider: None,
-                        provider_tip_lamports: self.astralane_tip_lamports,
-                        fanout_slots: None,
-                        timeout_ms: None,
-                    }
-                }));
-            }
+            endpoints.extend(self.selected_astralane_send_endpoints());
+        } else if self.lunar_lander_enabled && self.send_lane_mode == SendLaneMode::LunarLanderOnly
+        {
+            endpoints.extend(self.selected_lunar_lander_send_endpoints());
+        } else if self.circular_fast_enabled
+            && self.send_lane_mode == SendLaneMode::CircularFastOnly
+        {
+            endpoints.extend(self.selected_circular_fast_send_endpoints());
+        } else if self.erpc_swqos_enabled && self.send_lane_mode == SendLaneMode::ErpcSwqosOnly {
+            endpoints.extend(self.selected_erpc_swqos_send_endpoints());
         } else if self.beam_enabled && self.send_lane_mode == SendLaneMode::BeamOnly {
             if let (Some(provider), Some(mode), Some(token)) = (
                 beam_provider(self.beam_provider.as_deref()),
@@ -6249,6 +7146,24 @@ impl CopyExecutionOptions {
                     fanout_slots: None,
                     timeout_ms: None,
                 });
+            }
+        } else if self.zero_slot_enabled && self.send_lane_mode == SendLaneMode::ZeroSlotOnly {
+            if let Some(api_key) = self.zero_slot_api_key.clone() {
+                endpoints.extend(self.zero_slot_urls.iter().enumerate().map(|(index, url)| {
+                    let url = zero_slot_send_url(url, &api_key);
+                    SendEndpoint {
+                        label: format!("zero-slot-{}:{}", index + 1, rpc_url_label(&url)),
+                        url,
+                        kind: SendEndpointKind::ZeroSlot,
+                        auth_uuid: None,
+                        auth_token: Some(api_key.clone()),
+                        sender_mode: None,
+                        beam_provider: None,
+                        provider_tip_lamports: self.zero_slot_tip_lamports,
+                        fanout_slots: None,
+                        timeout_ms: None,
+                    }
+                }));
             }
         }
 
@@ -6453,6 +7368,75 @@ fn astralane_irisb_health_url(url: &str) -> String {
     }
 }
 
+fn lunar_lander_send_bin_url(url: Option<&str>, api_key: &str, mev_protect: bool) -> String {
+    let mut result = url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(LUNAR_LANDER_DEFAULT_URL)
+        .to_string();
+    let query = result.split_once('?').map(|(_, query)| query.to_string());
+    if let Some((base, _)) = result.split_once('?') {
+        result = base.to_string();
+    }
+    result = result.trim_end_matches('/').to_string();
+    if !result.ends_with("/send-bin") {
+        result.push_str("/send-bin");
+    }
+    if let Some(query) = query.filter(|value| !value.is_empty()) {
+        result.push('?');
+        result.push_str(&query);
+    }
+    append_query_param(&mut result, "api-key", api_key);
+    if mev_protect {
+        append_query_param(&mut result, "mev-protect", "true");
+    }
+    result
+}
+
+fn lunar_lander_ping_url(url: &str) -> String {
+    let base = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .trim_end_matches("/send-bin")
+        .trim_end_matches("/send")
+        .trim_end_matches('/');
+    format!("{base}/ping")
+}
+
+fn circular_fast_transactions_url(url: Option<&str>) -> String {
+    let base = url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(CIRCULAR_FAST_DEFAULT_URL)
+        .trim_end_matches('/');
+    if base.ends_with("/transactions") {
+        base.to_string()
+    } else {
+        format!("{base}/transactions")
+    }
+}
+
+fn circular_fast_health_url(url: &str) -> String {
+    let base = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .trim_end_matches("/transactions")
+        .trim_end_matches('/');
+    if base.is_empty() {
+        CIRCULAR_FAST_DEFAULT_HEALTH_URL.to_string()
+    } else {
+        format!("{base}/health")
+    }
+}
+
+fn zero_slot_send_url(url: &str, api_key: &str) -> String {
+    let base = url.trim();
+    let separator = if base.contains('?') { '&' } else { '?' };
+    format!("{base}{separator}api-key={api_key}")
+}
+
 fn tpu_jet_sidecar_send_url(url: Option<&str>) -> String {
     let base = url
         .map(str::trim)
@@ -6490,7 +7474,11 @@ fn send_endpoint_kind(endpoint: &SendEndpoint) -> &'static str {
         SendEndpointKind::HeliusSender => "helius_sender",
         SendEndpointKind::NozomiJsonRpc => "nozomi_json_rpc",
         SendEndpointKind::AstralaneIrisB => "astralane_irisb",
+        SendEndpointKind::LunarLanderBin => "lunar_lander_bin",
+        SendEndpointKind::CircularFast => "circular_fast",
+        SendEndpointKind::ErpcSwqos => "erpc_swqos",
         SendEndpointKind::BeamHttp => "beam_http",
+        SendEndpointKind::ZeroSlot => "zero_slot",
         SendEndpointKind::TpuJet => "tpu_jet",
         SendEndpointKind::TpuQuic => "tpu_quic",
     }
@@ -6509,6 +7497,11 @@ fn send_endpoint_post(
     if matches!(endpoint.kind, SendEndpointKind::BeamHttp) {
         if let Some(token) = endpoint.auth_token.as_deref() {
             request = request.header("X-Token", token);
+        }
+    }
+    if matches!(endpoint.kind, SendEndpointKind::CircularFast) {
+        if let Some(api_key) = endpoint.auth_token.as_deref() {
+            request = request.header("x-api-key", api_key);
         }
     }
     request
@@ -6531,9 +7524,7 @@ async fn warm_send_endpoint(
                 endpoint.label, SEND_WARM_TIMEOUT_MS
             )
         })?
-        .map_err(|error| {
-            send_error_message(endpoint, &format!("warmup request failed: {error}"))
-        })?;
+        .map_err(|error| format!("{} warmup request failed: {error}", endpoint.label))?;
         if !response.status().is_success() {
             return Err(format!(
                 "{} warmup returned HTTP {}",
@@ -6573,6 +7564,80 @@ async fn warm_send_endpoint(
             )
         })?
         .map_err(|error| format!("{} warmup request failed: {error}", endpoint.label))?;
+        let _ = response.bytes().await;
+        return Ok(SendRpcAttemptLine {
+            label: endpoint.label.clone(),
+            kind: send_endpoint_kind(endpoint),
+            mode: endpoint.sender_mode,
+            beam_provider: endpoint.beam_provider,
+            status: "warmed",
+            duration_ms: started_at.elapsed().as_millis(),
+            provider_tip_lamports: endpoint.provider_tip_lamports,
+            fanout_slots: None,
+            timeout_ms: None,
+            signature: None,
+            error_class: None,
+            error: None,
+        });
+    }
+    if matches!(endpoint.kind, SendEndpointKind::LunarLanderBin) {
+        let response = tokio::time::timeout(
+            Duration::from_millis(SEND_WARM_TIMEOUT_MS),
+            client.get(lunar_lander_ping_url(&endpoint.url)).send(),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "{} warmup timed out after {}ms",
+                endpoint.label, SEND_WARM_TIMEOUT_MS
+            )
+        })?
+        .map_err(|error| format!("{} warmup request failed: {error}", endpoint.label))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "{} warmup returned HTTP {}",
+                endpoint.label,
+                response.status().as_u16()
+            ));
+        }
+        let _ = response.bytes().await;
+        return Ok(SendRpcAttemptLine {
+            label: endpoint.label.clone(),
+            kind: send_endpoint_kind(endpoint),
+            mode: endpoint.sender_mode,
+            beam_provider: endpoint.beam_provider,
+            status: "warmed",
+            duration_ms: started_at.elapsed().as_millis(),
+            provider_tip_lamports: endpoint.provider_tip_lamports,
+            fanout_slots: None,
+            timeout_ms: None,
+            signature: None,
+            error_class: None,
+            error: None,
+        });
+    }
+    if matches!(endpoint.kind, SendEndpointKind::CircularFast) {
+        let mut request = client.get(circular_fast_health_url(&endpoint.url));
+        if let Some(api_key) = endpoint.auth_token.as_deref() {
+            request = request.header("x-api-key", api_key);
+        }
+        let response =
+            tokio::time::timeout(Duration::from_millis(SEND_WARM_TIMEOUT_MS), request.send())
+                .await
+                .map_err(|_| {
+                    format!(
+                        "{} warmup timed out after {}ms",
+                        endpoint.label, SEND_WARM_TIMEOUT_MS
+                    )
+                })?
+                .map_err(|error| format!("{} warmup request failed: {error}", endpoint.label))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "{} warmup returned HTTP {}",
+                endpoint.label,
+                response.status().as_u16()
+            ));
+        }
         let _ = response.bytes().await;
         return Ok(SendRpcAttemptLine {
             label: endpoint.label.clone(),
@@ -6664,6 +7729,28 @@ async fn send_transaction_attempt(
         )
         .await;
     }
+    if matches!(endpoint.kind, SendEndpointKind::LunarLanderBin) {
+        return send_lunar_lander_bin_attempt(
+            client,
+            endpoint,
+            wire_tx,
+            known_signature,
+            config,
+            started_at,
+        )
+        .await;
+    }
+    if matches!(endpoint.kind, SendEndpointKind::CircularFast) {
+        return send_circular_fast_attempt(
+            client,
+            endpoint,
+            encoded_tx,
+            known_signature,
+            config,
+            started_at,
+        )
+        .await;
+    }
     let send = send_transaction_to(client, endpoint, encoded_tx, config);
     let result = if config.http_timeout_ms > 0 {
         match tokio::time::timeout(Duration::from_millis(config.http_timeout_ms), send).await {
@@ -6709,23 +7796,18 @@ async fn send_transaction_attempt(
         }
         Err(error) => {
             let sanitized = send_error_message(endpoint, &error);
-            let error_class = send_error_class(&error);
             let attempt = SendRpcAttemptLine {
                 label: endpoint.label.clone(),
                 kind: send_endpoint_kind(endpoint),
                 mode: endpoint.sender_mode,
                 beam_provider: endpoint.beam_provider,
-                status: if error_class == "timeout" {
-                    "timeout"
-                } else {
-                    "failed"
-                },
+                status: "failed",
                 duration_ms: started_at.elapsed().as_millis(),
                 provider_tip_lamports: endpoint.provider_tip_lamports,
                 fanout_slots: None,
                 timeout_ms: None,
                 signature: None,
-                error_class: Some(error_class),
+                error_class: Some(send_error_class(&error)),
                 error: Some(sanitized.clone()),
             };
             if config.log_lanes {
@@ -6796,6 +7878,194 @@ async fn send_astralane_irisb_attempt(
                 } else {
                     signature
                 }),
+                signature_returned: true,
+                error: None,
+            }
+        }
+        Err(error) => {
+            let sanitized = send_error_message(endpoint, &error);
+            let error_class = send_error_class(&error);
+            let attempt = SendRpcAttemptLine {
+                label: endpoint.label.clone(),
+                kind: send_endpoint_kind(endpoint),
+                mode: endpoint.sender_mode,
+                beam_provider: endpoint.beam_provider,
+                status: if error_class == "timeout" {
+                    "timeout"
+                } else {
+                    "failed"
+                },
+                duration_ms: started_at.elapsed().as_millis(),
+                provider_tip_lamports: endpoint.provider_tip_lamports,
+                fanout_slots: None,
+                timeout_ms: None,
+                signature: None,
+                error_class: Some(error_class),
+                error: Some(sanitized.clone()),
+            };
+            if config.log_lanes {
+                eprintln!(
+                    "sendTransaction lane failed: label={} kind={} durationMs={} error={}",
+                    attempt.label, attempt.kind, attempt.duration_ms, sanitized
+                );
+            }
+            SendAttemptOutcome {
+                attempt,
+                finished_at_ms: now_ms(),
+                signature: None,
+                signature_returned: false,
+                error: Some(sanitized),
+            }
+        }
+    }
+}
+
+async fn send_lunar_lander_bin_attempt(
+    client: &reqwest::Client,
+    endpoint: &SendEndpoint,
+    wire_tx: &[u8],
+    known_signature: &str,
+    config: SendConfig,
+    started_at: Instant,
+) -> SendAttemptOutcome {
+    let send = send_lunar_lander_bin_transaction(client, endpoint, wire_tx);
+    let result = if config.http_timeout_ms > 0 {
+        match tokio::time::timeout(Duration::from_millis(config.http_timeout_ms), send).await {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "Lunar Lander send-bin timed out after {}ms",
+                config.http_timeout_ms
+            )),
+        }
+    } else {
+        send.await
+    };
+
+    match result {
+        Ok(signature) => {
+            let signature = if signature.is_empty() {
+                known_signature.to_string()
+            } else {
+                signature
+            };
+            let attempt = SendRpcAttemptLine {
+                label: endpoint.label.clone(),
+                kind: send_endpoint_kind(endpoint),
+                mode: endpoint.sender_mode,
+                beam_provider: endpoint.beam_provider,
+                status: "submitted",
+                duration_ms: started_at.elapsed().as_millis(),
+                provider_tip_lamports: endpoint.provider_tip_lamports,
+                fanout_slots: None,
+                timeout_ms: None,
+                signature: Some(signature.clone()),
+                error_class: None,
+                error: None,
+            };
+            if config.log_lanes {
+                eprintln!(
+                    "sendTransaction lane submitted: label={} kind={} durationMs={}",
+                    attempt.label, attempt.kind, attempt.duration_ms
+                );
+            }
+            SendAttemptOutcome {
+                attempt,
+                finished_at_ms: now_ms(),
+                signature: Some(signature),
+                signature_returned: true,
+                error: None,
+            }
+        }
+        Err(error) => {
+            let sanitized = send_error_message(endpoint, &error);
+            let error_class = send_error_class(&error);
+            let attempt = SendRpcAttemptLine {
+                label: endpoint.label.clone(),
+                kind: send_endpoint_kind(endpoint),
+                mode: endpoint.sender_mode,
+                beam_provider: endpoint.beam_provider,
+                status: if error_class == "timeout" {
+                    "timeout"
+                } else {
+                    "failed"
+                },
+                duration_ms: started_at.elapsed().as_millis(),
+                provider_tip_lamports: endpoint.provider_tip_lamports,
+                fanout_slots: None,
+                timeout_ms: None,
+                signature: None,
+                error_class: Some(error_class),
+                error: Some(sanitized.clone()),
+            };
+            if config.log_lanes {
+                eprintln!(
+                    "sendTransaction lane failed: label={} kind={} durationMs={} error={}",
+                    attempt.label, attempt.kind, attempt.duration_ms, sanitized
+                );
+            }
+            SendAttemptOutcome {
+                attempt,
+                finished_at_ms: now_ms(),
+                signature: None,
+                signature_returned: false,
+                error: Some(sanitized),
+            }
+        }
+    }
+}
+
+async fn send_circular_fast_attempt(
+    client: &reqwest::Client,
+    endpoint: &SendEndpoint,
+    encoded_tx: &str,
+    known_signature: &str,
+    config: SendConfig,
+    started_at: Instant,
+) -> SendAttemptOutcome {
+    let send = send_circular_fast_transaction(client, endpoint, encoded_tx);
+    let result = if config.http_timeout_ms > 0 {
+        match tokio::time::timeout(Duration::from_millis(config.http_timeout_ms), send).await {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "Circular Fast sendTransaction timed out after {}ms",
+                config.http_timeout_ms
+            )),
+        }
+    } else {
+        send.await
+    };
+
+    match result {
+        Ok(signature) => {
+            let signature = if signature.is_empty() {
+                known_signature.to_string()
+            } else {
+                signature
+            };
+            let attempt = SendRpcAttemptLine {
+                label: endpoint.label.clone(),
+                kind: send_endpoint_kind(endpoint),
+                mode: endpoint.sender_mode,
+                beam_provider: endpoint.beam_provider,
+                status: "submitted",
+                duration_ms: started_at.elapsed().as_millis(),
+                provider_tip_lamports: endpoint.provider_tip_lamports,
+                fanout_slots: None,
+                timeout_ms: None,
+                signature: Some(signature.clone()),
+                error_class: None,
+                error: None,
+            };
+            if config.log_lanes {
+                eprintln!(
+                    "sendTransaction lane submitted: label={} kind={} durationMs={}",
+                    attempt.label, attempt.kind, attempt.duration_ms
+                );
+            }
+            SendAttemptOutcome {
+                attempt,
+                finished_at_ms: now_ms(),
+                signature: Some(signature),
                 signature_returned: true,
                 error: None,
             }
@@ -7113,6 +8383,49 @@ async fn send_transaction_to(
         .ok_or_else(|| "sendTransaction result missing".to_string())
 }
 
+async fn send_circular_fast_transaction(
+    client: &reqwest::Client,
+    endpoint: &SendEndpoint,
+    encoded_tx: &str,
+) -> Result<String, String> {
+    let response = send_endpoint_post(client, endpoint)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendTransaction",
+            "params": [
+                encoded_tx,
+                {
+                    "frontRunningProtection": endpoint.sender_mode == Some("jito_only")
+                }
+            ]
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("send Circular Fast request: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("Circular Fast HTTP status: {error}"))?
+        .json::<RpcResponse<CircularFastResult>>()
+        .await
+        .map_err(|error| format!("decode Circular Fast response: {error}"))?;
+
+    circular_fast_signature_from_response(response)
+}
+
+fn circular_fast_signature_from_response(
+    response: RpcResponse<CircularFastResult>,
+) -> Result<String, String> {
+    if let Some(error) = response.error {
+        return Err(format!("Circular Fast RPC error: {}", error.message));
+    }
+
+    response
+        .result
+        .map(|result| result.signature)
+        .filter(|signature| !signature.trim().is_empty())
+        .ok_or_else(|| "Circular Fast result signature missing".to_string())
+}
+
 async fn send_astralane_irisb_transaction(
     client: &reqwest::Client,
     endpoint: &SendEndpoint,
@@ -7140,6 +8453,43 @@ async fn send_astralane_irisb_transaction(
     }
 
     json_signature(&response).ok_or_else(|| "Astralane IrisB result missing".to_string())
+}
+
+async fn send_lunar_lander_bin_transaction(
+    client: &reqwest::Client,
+    endpoint: &SendEndpoint,
+    wire_tx: &[u8],
+) -> Result<String, String> {
+    let response = client
+        .post(&endpoint.url)
+        .header("Content-Type", "application/octet-stream")
+        .body(wire_tx.to_vec())
+        .send()
+        .await
+        .map_err(|error| format!("send Lunar Lander send-bin request: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("Lunar Lander send-bin HTTP status: {error}"))?
+        .text()
+        .await
+        .map_err(|error| format!("decode Lunar Lander send-bin response: {error}"))?;
+
+    let trimmed = response.trim();
+    if trimmed.is_empty() {
+        return Err("Lunar Lander send-bin result missing".to_string());
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Some(error) = value.get("error") {
+            let message = error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| error.as_str())
+                .unwrap_or("unknown Lunar Lander error");
+            return Err(format!("Lunar Lander send-bin error: {message}"));
+        }
+        return json_signature(&value)
+            .ok_or_else(|| "Lunar Lander send-bin result missing".to_string());
+    }
+    Ok(trimmed.to_string())
 }
 
 fn send_error_message(endpoint: &SendEndpoint, error: &str) -> String {
@@ -7223,6 +8573,13 @@ struct RpcResponse<T> {
 #[derive(Debug, Deserialize)]
 struct RpcError {
     message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CircularFastResult {
+    signature: String,
+    #[allow(dead_code)]
+    uuid: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -7381,6 +8738,29 @@ mod tests {
             astralane_tip_accounts: Vec::new(),
             astralane_mev_protect: false,
             astralane_swqos_only: false,
+            lunar_lander_enabled: false,
+            lunar_lander_urls: Vec::new(),
+            lunar_lander_api_key: None,
+            lunar_lander_tip_lamports: None,
+            lunar_lander_tip_account: None,
+            lunar_lander_tip_accounts: Vec::new(),
+            lunar_lander_mev_protect: false,
+            circular_fast_enabled: false,
+            circular_fast_urls: Vec::new(),
+            circular_fast_api_key: None,
+            circular_fast_tip_lamports: None,
+            circular_fast_tip_account: None,
+            circular_fast_tip_accounts: Vec::new(),
+            circular_fast_front_running_protection: false,
+            erpc_swqos_enabled: false,
+            erpc_swqos_urls: Vec::new(),
+            erpc_leader_slots_enabled: false,
+            erpc_leader_slots_url: Some("https://edge.erpc.global".to_string()),
+            erpc_api_key: None,
+            erpc_leader_slots_refresh_ms: 5_000,
+            erpc_leader_slots_stale_ms: 15_000,
+            erpc_yellowstone_grpc_url: None,
+            erpc_yellowstone_grpc_x_token: None,
             beam_enabled: false,
             beam_url: Some(BEAM_DEFAULT_URL.to_string()),
             beam_token: None,
@@ -7388,11 +8768,16 @@ mod tests {
             beam_mode: Some(BEAM_MODE_FASTEST.to_string()),
             beam_tip_lamports: None,
             beam_tip_accounts: Vec::new(),
+            zero_slot_enabled: false,
+            zero_slot_urls: Vec::new(),
+            zero_slot_api_key: None,
+            zero_slot_tip_lamports: None,
+            zero_slot_tip_accounts: Vec::new(),
             tpu_jet_enabled: false,
             tpu_jet_rpc_url: None,
             tpu_jet_ws_url: None,
             tpu_jet_sidecar_url: Some("http://127.0.0.1:8787".to_string()),
-            tpu_jet_fanout_slots: 12,
+            tpu_jet_fanout_slots: 1,
             tpu_jet_timeout_ms: 30,
             tpu_quic_enabled: false,
             tpu_quic_rpc_url: None,
@@ -7873,8 +9258,14 @@ mod tests {
             nozomi_tip_account: None,
             astralane_tip_lamports: None,
             astralane_tip_account: None,
+            lunar_lander_tip_lamports: None,
+            lunar_lander_tip_account: None,
+            circular_fast_tip_lamports: None,
+            circular_fast_tip_account: None,
             beam_tip_lamports: None,
             beam_tip_account: None,
+            zero_slot_tip_lamports: None,
+            zero_slot_tip_account: None,
         };
         let build = crate::tx_builder::build_full_copy_unsigned_flashx_pump_with_fees_and_cache(
             Some(&route_context),
@@ -9045,6 +10436,230 @@ mod tests {
     }
 
     #[test]
+    fn circular_fast_sender_validation_fails_closed() {
+        let mut options = disabled_options();
+        options.circular_fast_enabled = true;
+        options.send_lane_mode = SendLaneMode::HeliusCircularFastStack;
+        assert_eq!(
+            options.validate_circular_fast_sender().unwrap_err(),
+            "JITO_CIRCULAR_FAST_ENABLED requires JITO_SEND_FANOUT=YES unless circular_fast_only"
+        );
+
+        options.send_lane_mode = SendLaneMode::CircularFastOnly;
+        assert_eq!(
+            options.validate_circular_fast_sender().unwrap_err(),
+            "JITO_CIRCULAR_FAST_ENABLED requires JITO_FAST_COPY_SEND=YES"
+        );
+
+        options.fast_copy_send = true;
+        assert_eq!(
+            options.validate_circular_fast_sender().unwrap_err(),
+            "JITO_CIRCULAR_FAST_ENABLED requires JITO_CIRCULAR_FAST_URLS"
+        );
+
+        options.circular_fast_urls = vec![CIRCULAR_FAST_DEFAULT_URL.to_string()];
+        assert_eq!(
+            options.validate_circular_fast_sender().unwrap_err(),
+            "JITO_CIRCULAR_FAST_ENABLED requires JITO_CIRCULAR_FAST_API_KEY"
+        );
+
+        options.circular_fast_api_key = Some("circular-key".to_string());
+        assert_eq!(
+            options.validate_circular_fast_sender().unwrap_err(),
+            "JITO_CIRCULAR_FAST_ENABLED requires JITO_PRIORITY_FEE_MICRO_LAMPORTS"
+        );
+
+        options.priority_fee_micro_lamports = Some(500_000);
+        assert_eq!(
+            options.validate_circular_fast_sender().unwrap_err(),
+            "JITO_CIRCULAR_FAST_ENABLED requires JITO_CIRCULAR_FAST_TIP_LAMPORTS"
+        );
+
+        options.circular_fast_tip_lamports = Some(999_999);
+        assert_eq!(
+            options.validate_circular_fast_sender().unwrap_err(),
+            "JITO_CIRCULAR_FAST_TIP_LAMPORTS must be >= 1000000 lamports"
+        );
+
+        options.circular_fast_tip_lamports = Some(1_000_000);
+        assert_eq!(
+            options.validate_circular_fast_sender().unwrap_err(),
+            "JITO_CIRCULAR_FAST_ENABLED requires JITO_CIRCULAR_FAST_TIP_ACCOUNT or JITO_CIRCULAR_FAST_TIP_ACCOUNTS"
+        );
+
+        options.circular_fast_tip_account = Some("not-a-pubkey".to_string());
+        assert_eq!(
+            options.validate_circular_fast_sender().unwrap_err(),
+            "JITO_CIRCULAR_FAST_TIP_ACCOUNT must be a valid pubkey"
+        );
+
+        options.circular_fast_tip_account = None;
+        options.circular_fast_tip_accounts = vec!["also-not-a-pubkey".to_string()];
+        assert_eq!(
+            options.validate_circular_fast_sender().unwrap_err(),
+            "JITO_CIRCULAR_FAST_TIP_ACCOUNTS must contain only valid pubkeys"
+        );
+
+        options.circular_fast_tip_accounts =
+            vec!["FAST3dMFZvESiEipBvLSiXq3QCV51o3xuoHScqRU6cB6".to_string()];
+        options
+            .validate_circular_fast_sender()
+            .expect("valid Circular Fast sender config");
+    }
+
+    #[test]
+    fn circular_fast_endpoint_and_response_shape_are_supported() {
+        let mut options = disabled_options();
+        options.send_lane_mode = SendLaneMode::CircularFastOnly;
+        options.fast_copy_send = true;
+        options.priority_fee_micro_lamports = Some(500_000);
+        enable_circular_fast(&mut options);
+
+        let endpoints = options.selected_send_endpoints();
+
+        assert_eq!(endpoint_kinds(&endpoints), vec!["circular_fast"]);
+        assert_eq!(
+            endpoints[0].url,
+            "https://fra.fast.circular.fi/transactions"
+        );
+        assert_eq!(endpoints[0].auth_token.as_deref(), Some("circular-key"));
+        assert_eq!(endpoints[0].sender_mode, Some("swqos_jito"));
+        assert_eq!(endpoints[0].provider_tip_lamports, Some(1_000_000));
+        assert_eq!(
+            circular_fast_transactions_url(Some("https://ams.fast.circular.fi")),
+            "https://ams.fast.circular.fi/transactions"
+        );
+        assert_eq!(
+            circular_fast_health_url("https://ny.fast.circular.fi/transactions"),
+            "https://ny.fast.circular.fi/health"
+        );
+
+        let response = RpcResponse {
+            result: Some(CircularFastResult {
+                signature: "sig123".to_string(),
+                uuid: Some("uuid123".to_string()),
+            }),
+            error: None,
+        };
+        assert_eq!(
+            circular_fast_signature_from_response(response).as_deref(),
+            Ok("sig123")
+        );
+    }
+
+    #[test]
+    fn helius_circular_fast_stack_fans_out_same_signed_bytes_with_both_tips() {
+        let mut options = configured_multi_lane_options();
+        options.send_lane_mode = SendLaneMode::HeliusCircularFastStack;
+        enable_circular_fast(&mut options);
+
+        let fee_config = options.tx_fee_config([42u8; 64]);
+        let endpoints = options.selected_send_endpoints();
+
+        assert_eq!(
+            endpoint_kinds(&endpoints),
+            vec!["helius_sender", "circular_fast"]
+        );
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+        );
+        assert_eq!(fee_config.circular_fast_tip_lamports, Some(1_000_000));
+        assert_eq!(provider_tip_lamports(&fee_config), 1_200_000);
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+circular_fast")
+        );
+    }
+
+    #[test]
+    fn helius_sender_regional_urls_preserve_query_and_do_not_double_fast() {
+        assert_eq!(
+            helius_sender_url("http://fra-sender.helius-rpc.com?api-key=secret", false),
+            "http://fra-sender.helius-rpc.com/fast?api-key=secret"
+        );
+        assert_eq!(
+            helius_sender_url(
+                "http://ams-sender.helius-rpc.com/fast?api-key=secret",
+                false
+            ),
+            "http://ams-sender.helius-rpc.com/fast?api-key=secret"
+        );
+    }
+
+    #[test]
+    fn erpc_swqos_validation_fails_closed() {
+        let mut options = disabled_options();
+        options.erpc_swqos_enabled = true;
+        options.send_lane_mode = SendLaneMode::HeliusErpcSwqosStack;
+        assert_eq!(
+            options.validate_erpc_surfaces().unwrap_err(),
+            "JITO_ERPC_SWQOS_ENABLED requires JITO_SEND_FANOUT=YES unless erpc_swqos_only"
+        );
+
+        options.send_fanout = true;
+        assert_eq!(
+            options.validate_erpc_surfaces().unwrap_err(),
+            "JITO_ERPC_SWQOS_ENABLED requires JITO_FAST_COPY_SEND=YES"
+        );
+
+        options.fast_copy_send = true;
+        assert_eq!(
+            options.validate_erpc_surfaces().unwrap_err(),
+            "JITO_ERPC_SWQOS_ENABLED requires JITO_ERPC_SWQOS_URLS"
+        );
+
+        options.erpc_swqos_urls = vec!["https://swqos.erpc.global".to_string()];
+        options
+            .validate_erpc_surfaces()
+            .expect("valid ERPC SWQoS config");
+    }
+
+    #[test]
+    fn erpc_leader_slot_validation_fails_closed_without_api_key() {
+        let mut options = disabled_options();
+        options.erpc_leader_slots_enabled = true;
+
+        assert_eq!(
+            options.validate_erpc_surfaces().unwrap_err(),
+            "JITO_ERPC_LEADER_SLOTS_ENABLED requires JITO_ERPC_API_KEY"
+        );
+
+        options.erpc_api_key = Some("secret".to_string());
+        options.erpc_leader_slots_refresh_ms = 0;
+        assert_eq!(
+            options.validate_erpc_surfaces().unwrap_err(),
+            "JITO_ERPC_LEADER_SLOTS_REFRESH_MS must be positive"
+        );
+
+        options.erpc_leader_slots_refresh_ms = 5_000;
+        options.erpc_leader_slots_stale_ms = 0;
+        assert_eq!(
+            options.validate_erpc_surfaces().unwrap_err(),
+            "JITO_ERPC_LEADER_SLOTS_STALE_MS must be positive"
+        );
+    }
+
+    #[test]
+    fn erpc_swqos_endpoints_are_selected_as_rpc_style_lanes() {
+        let mut options = configured_multi_lane_options();
+        enable_erpc_swqos(&mut options);
+
+        options.send_lane_mode = SendLaneMode::ErpcSwqosOnly;
+        let endpoints = options.selected_send_endpoints();
+        assert_eq!(endpoint_kinds(&endpoints), vec!["erpc_swqos"]);
+        assert_eq!(endpoints[0].label, "erpc-swqos-1:swqos.erpc.global");
+        assert_eq!(endpoints[0].sender_mode, Some("swqos"));
+
+        options.send_fanout = true;
+        options.send_lane_mode = SendLaneMode::HeliusErpcSwqosStack;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["helius_sender", "erpc_swqos"]
+        );
+    }
+
+    #[test]
     fn beam_sender_validation_fails_closed() {
         let mut options = disabled_options();
         options.beam_enabled = true;
@@ -9168,6 +10783,151 @@ mod tests {
     }
 
     #[test]
+    fn lunar_lander_sender_validation_fails_closed() {
+        let mut options = disabled_options();
+        options.lunar_lander_enabled = true;
+        options.send_lane_mode = SendLaneMode::HeliusLunarLanderStack;
+        options.fast_copy_send = true;
+
+        assert_eq!(
+            options.validate_lunar_lander_sender().unwrap_err(),
+            "JITO_LUNAR_LANDER_ENABLED requires JITO_SEND_FANOUT=YES unless lunar_lander_only"
+        );
+
+        options.send_lane_mode = SendLaneMode::LunarLanderOnly;
+        options.fast_copy_send = false;
+        assert_eq!(
+            options.validate_lunar_lander_sender().unwrap_err(),
+            "JITO_LUNAR_LANDER_ENABLED requires JITO_FAST_COPY_SEND=YES"
+        );
+
+        options.fast_copy_send = true;
+        assert_eq!(
+            options.validate_lunar_lander_sender().unwrap_err(),
+            "JITO_LUNAR_LANDER_ENABLED requires JITO_LUNAR_LANDER_URLS"
+        );
+
+        options.lunar_lander_urls = vec![LUNAR_LANDER_DEFAULT_URL.to_string()];
+        assert_eq!(
+            options.validate_lunar_lander_sender().unwrap_err(),
+            "JITO_LUNAR_LANDER_ENABLED requires JITO_LUNAR_LANDER_API_KEY"
+        );
+
+        options.lunar_lander_api_key = Some("lunar-key".to_string());
+        assert_eq!(
+            options.validate_lunar_lander_sender().unwrap_err(),
+            "JITO_LUNAR_LANDER_ENABLED requires JITO_LUNAR_LANDER_TIP_LAMPORTS"
+        );
+
+        options.lunar_lander_tip_lamports = Some(999_999);
+        assert_eq!(
+            options.validate_lunar_lander_sender().unwrap_err(),
+            "JITO_LUNAR_LANDER_TIP_LAMPORTS must be >= 1000000 lamports"
+        );
+
+        options.lunar_lander_tip_lamports = Some(1_000_000);
+        assert_eq!(
+            options.validate_lunar_lander_sender().unwrap_err(),
+            "JITO_LUNAR_LANDER_ENABLED requires JITO_LUNAR_LANDER_TIP_ACCOUNT or JITO_LUNAR_LANDER_TIP_ACCOUNTS"
+        );
+
+        options.lunar_lander_tip_account = Some("not-a-pubkey".to_string());
+        assert_eq!(
+            options.validate_lunar_lander_sender().unwrap_err(),
+            "JITO_LUNAR_LANDER_TIP_ACCOUNT must be a valid pubkey"
+        );
+
+        options.lunar_lander_tip_account = None;
+        options.lunar_lander_tip_accounts = vec!["also-not-a-pubkey".to_string()];
+        assert_eq!(
+            options.validate_lunar_lander_sender().unwrap_err(),
+            "JITO_LUNAR_LANDER_TIP_ACCOUNTS must contain only valid pubkeys"
+        );
+
+        options.lunar_lander_tip_accounts =
+            vec!["moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F".to_string()];
+        options
+            .validate_lunar_lander_sender()
+            .expect("valid Lunar Lander sender config");
+    }
+
+    #[test]
+    fn lunar_lander_url_and_error_paths_redact_api_key() {
+        let url = lunar_lander_send_bin_url(
+            Some("https://fra.lunar-lander.hellomoon.io"),
+            "super-secret-lunar-key",
+            true,
+        );
+        assert_eq!(
+            url,
+            "https://fra.lunar-lander.hellomoon.io/send-bin?api-key=super-secret-lunar-key&mev-protect=true"
+        );
+        assert_eq!(
+            lunar_lander_ping_url(&url),
+            "https://fra.lunar-lander.hellomoon.io/ping"
+        );
+
+        let endpoint = SendEndpoint {
+            label: format!("lunar-lander-1:{}", rpc_url_label(&url)),
+            url,
+            kind: SendEndpointKind::LunarLanderBin,
+            auth_uuid: None,
+            auth_token: Some("super-secret-lunar-key".to_string()),
+            sender_mode: Some("send_bin"),
+            beam_provider: None,
+            provider_tip_lamports: Some(1_000_000),
+            fanout_slots: None,
+            timeout_ms: None,
+        };
+        let message = send_error_message(
+            &endpoint,
+            "send request failed for api-key=super-secret-lunar-key",
+        );
+        assert!(message.contains("lunar-lander-1:fra.lunar-lander.hellomoon.io"));
+        assert!(!message.contains("super-secret-lunar-key"));
+    }
+
+    #[test]
+    fn zero_slot_sender_validation_fails_closed() {
+        let mut options = disabled_options();
+        options.zero_slot_enabled = true;
+        options.send_lane_mode = SendLaneMode::ZeroSlotOnly;
+        assert_eq!(
+            options.validate_zero_slot_sender().unwrap_err(),
+            "JITO_ZERO_SLOT_ENABLED requires JITO_FAST_COPY_SEND=YES"
+        );
+        options.fast_copy_send = true;
+        assert_eq!(
+            options.validate_zero_slot_sender().unwrap_err(),
+            "JITO_ZERO_SLOT_ENABLED requires JITO_ZERO_SLOT_URLS"
+        );
+        options.zero_slot_urls = vec!["https://ny.0slot.trade".to_string()];
+        assert_eq!(
+            options.validate_zero_slot_sender().unwrap_err(),
+            "JITO_ZERO_SLOT_ENABLED requires JITO_ZERO_SLOT_API_KEY"
+        );
+        options.zero_slot_api_key = Some("api-key".to_string());
+        assert_eq!(
+            options.validate_zero_slot_sender().unwrap_err(),
+            "JITO_ZERO_SLOT_ENABLED requires JITO_ZERO_SLOT_TIP_LAMPORTS"
+        );
+        options.zero_slot_tip_lamports = Some(999_999);
+        assert_eq!(
+            options.validate_zero_slot_sender().unwrap_err(),
+            "JITO_ZERO_SLOT_TIP_LAMPORTS must be >= 1000000 lamports"
+        );
+        options.zero_slot_tip_lamports = Some(1_000_000);
+        assert_eq!(
+            options.validate_zero_slot_sender().unwrap_err(),
+            "JITO_ZERO_SLOT_ENABLED requires JITO_ZERO_SLOT_TIP_ACCOUNTS"
+        );
+        options.zero_slot_tip_accounts = vec![COPY_WALLET.to_string()];
+        options
+            .validate_zero_slot_sender()
+            .expect("valid 0slot sender config");
+    }
+
+    #[test]
     fn send_lane_mode_filters_fee_tips_without_changing_priority_fee() {
         let mut options = configured_multi_lane_options();
 
@@ -9208,6 +10968,24 @@ mod tests {
         assert_eq!(
             fee_config.helius_sender_tip_account.as_deref(),
             Some(COPY_WALLET)
+        );
+
+        enable_nozomi(&mut options);
+        options.send_lane_mode = SendLaneMode::Fast;
+        let fee_config = options.tx_fee_config([0u8; 64]);
+        assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
+        assert_eq!(fee_config.jito_tip_lamports, None);
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+        );
+        assert_eq!(fee_config.nozomi_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.astralane_tip_lamports, None);
+        assert_eq!(fee_config.lunar_lander_tip_lamports, None);
+        assert_eq!(fee_config.zero_slot_tip_lamports, None);
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+nozomi")
         );
 
         options.send_lane_mode = SendLaneMode::HeliusTpuJet;
@@ -9286,7 +11064,6 @@ mod tests {
             Some("helius+beam")
         );
 
-        enable_nozomi(&mut options);
         options.send_lane_mode = SendLaneMode::HeliusNozomiBeamStack;
         let fee_config = options.tx_fee_config([3u8; 64]);
         assert_eq!(fee_config.nozomi_tip_lamports, Some(1_000_000));
@@ -9342,6 +11119,63 @@ mod tests {
             Some("helius+nozomi+astralane")
         );
 
+        enable_lunar_lander(&mut options);
+        options.send_lane_mode = SendLaneMode::LunarLanderOnly;
+        let fee_config = options.tx_fee_config([9u8; 64]);
+        assert_eq!(fee_config.helius_sender_tip_lamports, None);
+        assert_eq!(fee_config.nozomi_tip_lamports, None);
+        assert_eq!(fee_config.astralane_tip_lamports, None);
+        assert_eq!(fee_config.lunar_lander_tip_lamports, Some(1_000_000));
+        let lunar_tip_account = fee_config
+            .lunar_lander_tip_account
+            .as_deref()
+            .expect("selected Lunar Lander tip account");
+        assert!(options
+            .lunar_lander_tip_accounts
+            .iter()
+            .any(|account| account == lunar_tip_account));
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("lunar_lander")
+        );
+
+        options.send_lane_mode = SendLaneMode::HeliusLunarLanderStack;
+        let fee_config = options.tx_fee_config([9u8; 64]);
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+        );
+        assert_eq!(fee_config.lunar_lander_tip_lamports, Some(1_000_000));
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+lunar_lander")
+        );
+
+        options.send_lane_mode = SendLaneMode::HeliusNozomiAstralaneLunarStack;
+        let fee_config = options.tx_fee_config([9u8; 64]);
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+        );
+        assert_eq!(fee_config.nozomi_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.astralane_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.lunar_lander_tip_lamports, Some(1_000_000));
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+nozomi+astralane+lunar_lander")
+        );
+
+        enable_zero_slot(&mut options);
+        options.send_lane_mode = SendLaneMode::ZeroSlotOnly;
+        let fee_config = options.tx_fee_config([5u8; 64]);
+        assert_eq!(fee_config.helius_sender_tip_lamports, None);
+        assert_eq!(fee_config.nozomi_tip_lamports, None);
+        assert_eq!(fee_config.zero_slot_tip_lamports, Some(1_000_000));
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("zero_slot")
+        );
+
         options.send_lane_mode = SendLaneMode::AllNonBeamStack;
         let fee_config = options.tx_fee_config([5u8; 64]);
         assert_eq!(
@@ -9349,11 +11183,29 @@ mod tests {
             Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
         );
         assert_eq!(fee_config.nozomi_tip_lamports, Some(1_000_000));
-        assert_eq!(fee_config.astralane_tip_lamports, None);
+        assert_eq!(fee_config.zero_slot_tip_lamports, Some(1_000_000));
         assert_eq!(fee_config.beam_tip_lamports, None);
         assert_eq!(
             provider_stack_name(&fee_config).as_deref(),
-            Some("helius+nozomi")
+            Some("helius+nozomi+zero_slot")
+        );
+
+        options.tpu_jet_enabled = true;
+        options.send_lane_mode = SendLaneMode::Turbo;
+        let fee_config = options.tx_fee_config([11u8; 64]);
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+        );
+        assert_eq!(fee_config.nozomi_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.astralane_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.lunar_lander_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.zero_slot_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.beam_tip_lamports, None);
+        assert_eq!(fee_config.jito_tip_lamports, None);
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+nozomi+astralane+lunar_lander+zero_slot")
         );
     }
 
@@ -9361,23 +11213,25 @@ mod tests {
     fn provider_tip_guard_sums_paid_lane_tips_against_cap() {
         let mut options = configured_multi_lane_options();
         enable_nozomi(&mut options);
+        enable_zero_slot(&mut options);
         options.send_lane_mode = SendLaneMode::AllNonBeamStack;
 
         let fee_config = options.tx_fee_config([5u8; 64]);
 
         assert_eq!(
             provider_stack_name(&fee_config).as_deref(),
-            Some("helius+nozomi")
+            Some("helius+nozomi+zero_slot")
         );
-        assert_eq!(provider_tip_lamports(&fee_config), 1_200_000);
+        assert_eq!(fee_config.astralane_tip_lamports, None);
+        assert_eq!(provider_tip_lamports(&fee_config), 2_200_000);
 
-        options.max_provider_tip_lamports = Some(1_199_999);
+        options.max_provider_tip_lamports = Some(2_199_999);
         assert_eq!(
             provider_tip_guard_reason(&options, &fee_config).as_deref(),
-            Some("provider tips 1200000 lamports exceed max provider tips 1199999 lamports")
+            Some("provider tips 2200000 lamports exceed max provider tips 2199999 lamports")
         );
 
-        options.max_provider_tip_lamports = Some(1_200_000);
+        options.max_provider_tip_lamports = Some(2_200_000);
         assert_eq!(provider_tip_guard_reason(&options, &fee_config), None);
 
         enable_astralane(&mut options);
@@ -9396,6 +11250,60 @@ mod tests {
         );
 
         options.max_provider_tip_lamports = Some(2_200_000);
+        assert_eq!(provider_tip_guard_reason(&options, &fee_config), None);
+
+        enable_lunar_lander(&mut options);
+        options.send_lane_mode = SendLaneMode::HeliusLunarLanderStack;
+        let fee_config = options.tx_fee_config([9u8; 64]);
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+lunar_lander")
+        );
+        assert_eq!(provider_tip_lamports(&fee_config), 1_200_000);
+
+        options.max_provider_tip_lamports = Some(1_199_999);
+        assert_eq!(
+            provider_tip_guard_reason(&options, &fee_config).as_deref(),
+            Some("provider tips 1200000 lamports exceed max provider tips 1199999 lamports")
+        );
+
+        options.max_provider_tip_lamports = Some(1_200_000);
+        assert_eq!(provider_tip_guard_reason(&options, &fee_config), None);
+
+        options.send_lane_mode = SendLaneMode::HeliusNozomiAstralaneLunarStack;
+        let fee_config = options.tx_fee_config([10u8; 64]);
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+nozomi+astralane+lunar_lander")
+        );
+        assert_eq!(provider_tip_lamports(&fee_config), 3_200_000);
+
+        options.max_provider_tip_lamports = Some(3_199_999);
+        assert_eq!(
+            provider_tip_guard_reason(&options, &fee_config).as_deref(),
+            Some("provider tips 3200000 lamports exceed max provider tips 3199999 lamports")
+        );
+
+        options.max_provider_tip_lamports = Some(3_200_000);
+        assert_eq!(provider_tip_guard_reason(&options, &fee_config), None);
+
+        enable_zero_slot(&mut options);
+        options.tpu_jet_enabled = true;
+        options.send_lane_mode = SendLaneMode::Turbo;
+        let fee_config = options.tx_fee_config([11u8; 64]);
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+nozomi+astralane+lunar_lander+zero_slot")
+        );
+        assert_eq!(provider_tip_lamports(&fee_config), 4_200_000);
+
+        options.max_provider_tip_lamports = Some(4_199_999);
+        assert_eq!(
+            provider_tip_guard_reason(&options, &fee_config).as_deref(),
+            Some("provider tips 4200000 lamports exceed max provider tips 4199999 lamports")
+        );
+
+        options.max_provider_tip_lamports = Some(4_200_000);
         assert_eq!(provider_tip_guard_reason(&options, &fee_config), None);
     }
 
@@ -9496,6 +11404,26 @@ mod tests {
         assert_eq!(endpoint_kinds(&endpoints), vec!["helius_sender"]);
         assert_eq!(endpoints[0].url, "https://sender.helius-rpc.com/fast");
 
+        enable_nozomi(&mut options);
+        options.send_fanout = true;
+        options.send_lane_mode = SendLaneMode::Fast;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["helius_sender", "nozomi_json_rpc"]
+        );
+
+        enable_erpc_swqos(&mut options);
+        options.send_lane_mode = SendLaneMode::HeliusErpcSwqosStack;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["helius_sender", "erpc_swqos"]
+        );
+        options.send_lane_mode = SendLaneMode::ErpcSwqosOnly;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["erpc_swqos"]
+        );
+
         options.tpu_jet_enabled = true;
         options.tpu_jet_rpc_url = Some("https://jet-rpc.example.com".to_string());
         options.tpu_jet_ws_url = Some("https://jet-grpc.example.com".to_string());
@@ -9527,36 +11455,6 @@ mod tests {
             vec!["tpu_quic"]
         );
 
-        enable_astralane(&mut options);
-        options.send_lane_mode = SendLaneMode::AstralaneOnly;
-        let endpoints = options.selected_send_endpoints();
-        assert_eq!(endpoint_kinds(&endpoints), vec!["astralane_irisb"]);
-        assert_eq!(
-            endpoints[0].label,
-            "astralane-irisb-1:lim.gateway.astralane.io"
-        );
-        assert_eq!(
-            endpoints[0].url,
-            "https://lim.gateway.astralane.io/irisb?api-key=astralane-key&method=sendTransaction"
-        );
-        assert_eq!(endpoints[0].auth_token.as_deref(), Some("astralane-key"));
-        assert_eq!(endpoints[0].sender_mode, Some("irisb"));
-        assert_eq!(endpoints[0].provider_tip_lamports, Some(1_000_000));
-
-        options.send_fanout = true;
-        options.send_lane_mode = SendLaneMode::HeliusAstralaneStack;
-        assert_eq!(
-            endpoint_kinds(&options.selected_send_endpoints()),
-            vec!["helius_sender", "astralane_irisb"]
-        );
-
-        enable_nozomi(&mut options);
-        options.send_lane_mode = SendLaneMode::HeliusNozomiAstralaneStack;
-        assert_eq!(
-            endpoint_kinds(&options.selected_send_endpoints()),
-            vec!["helius_sender", "nozomi_json_rpc", "astralane_irisb"]
-        );
-
         enable_beam(&mut options);
         options.send_lane_mode = SendLaneMode::BeamOnly;
         let endpoints = options.selected_send_endpoints();
@@ -9577,19 +11475,96 @@ mod tests {
             vec!["helius_sender", "beam_http"]
         );
 
-        enable_nozomi(&mut options);
         options.send_lane_mode = SendLaneMode::HeliusNozomiBeamStack;
         assert_eq!(
             endpoint_kinds(&options.selected_send_endpoints()),
             vec!["helius_sender", "nozomi_json_rpc", "beam_http"]
         );
 
+        enable_astralane(&mut options);
+        options.send_lane_mode = SendLaneMode::AstralaneOnly;
+        let endpoints = options.selected_send_endpoints();
+        assert_eq!(endpoint_kinds(&endpoints), vec!["astralane_irisb"]);
+        assert_eq!(
+            endpoints[0].url,
+            "https://lim.gateway.astralane.io/irisb?api-key=astralane-key&method=sendTransaction"
+        );
+        assert_eq!(endpoints[0].auth_token.as_deref(), Some("astralane-key"));
+        assert_eq!(endpoints[0].sender_mode, Some("irisb"));
+        assert_eq!(endpoints[0].provider_tip_lamports, Some(1_000_000));
+
+        options.send_fanout = true;
+        options.send_lane_mode = SendLaneMode::HeliusAstralaneStack;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["helius_sender", "astralane_irisb"]
+        );
+
+        options.send_lane_mode = SendLaneMode::HeliusNozomiAstralaneStack;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["helius_sender", "nozomi_json_rpc", "astralane_irisb"]
+        );
+
+        enable_lunar_lander(&mut options);
+        options.send_lane_mode = SendLaneMode::LunarLanderOnly;
+        let endpoints = options.selected_send_endpoints();
+        assert_eq!(endpoint_kinds(&endpoints), vec!["lunar_lander_bin"]);
+        assert_eq!(
+            endpoints[0].url,
+            "http://fra.lunar-lander.hellomoon.io/send-bin?api-key=lunar-key"
+        );
+        assert_eq!(endpoints[0].auth_token.as_deref(), Some("lunar-key"));
+        assert_eq!(endpoints[0].sender_mode, Some("send_bin"));
+        assert_eq!(endpoints[0].provider_tip_lamports, Some(1_000_000));
+
+        options.send_fanout = true;
+        options.send_lane_mode = SendLaneMode::HeliusLunarLanderStack;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["helius_sender", "lunar_lander_bin"]
+        );
+
+        options.send_lane_mode = SendLaneMode::HeliusNozomiAstralaneLunarStack;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec![
+                "helius_sender",
+                "nozomi_json_rpc",
+                "astralane_irisb",
+                "lunar_lander_bin"
+            ]
+        );
+
+        enable_zero_slot(&mut options);
+        options.send_lane_mode = SendLaneMode::ZeroSlotOnly;
+        let endpoints = options.selected_send_endpoints();
+        assert_eq!(endpoint_kinds(&endpoints), vec!["zero_slot"]);
+        assert_eq!(
+            endpoints[0].url,
+            "https://ny.0slot.trade?api-key=zero-slot-key"
+        );
+        assert_eq!(endpoints[0].provider_tip_lamports, Some(1_000_000));
+
         options.tpu_jet_enabled = true;
         options.send_fanout = true;
         options.send_lane_mode = SendLaneMode::AllNonBeamStack;
         assert_eq!(
             endpoint_kinds(&options.selected_send_endpoints()),
-            vec!["helius_sender", "nozomi_json_rpc", "tpu_jet"]
+            vec!["helius_sender", "nozomi_json_rpc", "zero_slot", "tpu_jet"]
+        );
+
+        options.send_lane_mode = SendLaneMode::Turbo;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec![
+                "helius_sender",
+                "nozomi_json_rpc",
+                "astralane_irisb",
+                "lunar_lander_bin",
+                "zero_slot",
+                "tpu_jet"
+            ]
         );
     }
 
@@ -9646,7 +11621,7 @@ mod tests {
             .find(|endpoint| endpoint.kind == SendEndpointKind::TpuJet)
             .expect("tpu-jet endpoint");
         assert_eq!(jet.url, "http://127.0.0.1:8787/send");
-        assert_eq!(jet.fanout_slots, Some(12));
+        assert_eq!(jet.fanout_slots, Some(1));
 
         options.send_lane_mode = SendLaneMode::TpuJetOnly;
         assert_eq!(
@@ -9682,6 +11657,42 @@ mod tests {
             options.validate_send_lane_mode().unwrap_err(),
             "JITO_SEND_LANE_MODE=helius_sender_only requires JITO_HELIUS_SENDER_ENABLED=YES"
         );
+
+        options.send_fanout = false;
+        options.helius_sender_enabled = false;
+        options.nozomi_enabled = false;
+        options.send_lane_mode = SendLaneMode::Fast;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=fast requires JITO_SEND_FANOUT=YES"
+        );
+        options.send_fanout = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=fast requires JITO_HELIUS_SENDER_ENABLED=YES"
+        );
+        options.helius_sender_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=fast requires JITO_NOZOMI_ENABLED=YES"
+        );
+        options.nozomi_enabled = true;
+        assert!(options.validate_send_lane_mode().is_ok());
+
+        options = disabled_options();
+        options.send_lane_mode = SendLaneMode::ErpcSwqosOnly;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=erpc_swqos_only requires JITO_ERPC_SWQOS_ENABLED=YES"
+        );
+        options.erpc_swqos_enabled = true;
+        options.send_fanout = true;
+        options.send_lane_mode = SendLaneMode::HeliusErpcSwqosStack;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_erpc_swqos_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+        );
+        options.erpc_swqos_enabled = false;
 
         options.send_lane_mode = SendLaneMode::HeliusTpuJet;
         assert_eq!(
@@ -9783,6 +11794,108 @@ mod tests {
         assert_eq!(
             options.validate_send_lane_mode().unwrap_err(),
             "JITO_SEND_LANE_MODE=helius_nozomi_astralane_stack requires JITO_ASTRALANE_ENABLED=YES"
+        );
+
+        options = disabled_options();
+        options.send_lane_mode = SendLaneMode::LunarLanderOnly;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=lunar_lander_only requires JITO_LUNAR_LANDER_ENABLED=YES"
+        );
+
+        options.lunar_lander_enabled = true;
+        options.send_lane_mode = SendLaneMode::HeliusLunarLanderStack;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_lunar_lander_stack requires JITO_SEND_FANOUT=YES"
+        );
+        options.send_fanout = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_lunar_lander_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+        );
+        options.helius_sender_enabled = true;
+        options.lunar_lander_enabled = false;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_lunar_lander_stack requires JITO_LUNAR_LANDER_ENABLED=YES"
+        );
+
+        options = disabled_options();
+        options.send_lane_mode = SendLaneMode::HeliusNozomiAstralaneLunarStack;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_SEND_FANOUT=YES"
+        );
+        options.send_fanout = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_HELIUS_SENDER_ENABLED=YES"
+        );
+        options.helius_sender_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_NOZOMI_ENABLED=YES"
+        );
+        options.nozomi_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_ASTRALANE_ENABLED=YES"
+        );
+        options.astralane_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_LUNAR_LANDER_ENABLED=YES"
+        );
+
+        options = disabled_options();
+        options.send_lane_mode = SendLaneMode::Turbo;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=turbo requires JITO_SEND_FANOUT=YES"
+        );
+        options.send_fanout = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=turbo requires JITO_HELIUS_SENDER_ENABLED=YES"
+        );
+        options.helius_sender_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=turbo requires JITO_NOZOMI_ENABLED=YES"
+        );
+        options.nozomi_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=turbo requires JITO_ASTRALANE_ENABLED=YES"
+        );
+        options.astralane_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=turbo requires JITO_LUNAR_LANDER_ENABLED=YES"
+        );
+        options.lunar_lander_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=turbo requires JITO_ZERO_SLOT_ENABLED=YES"
+        );
+        options.zero_slot_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=turbo requires JITO_TPU_JET_ENABLED=YES"
+        );
+
+        options = disabled_options();
+        options.send_lane_mode = SendLaneMode::ZeroSlotOnly;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=zero_slot_only requires JITO_ZERO_SLOT_ENABLED=YES"
+        );
+        options.zero_slot_enabled = true;
+        options.send_lane_mode = SendLaneMode::HeliusZeroSlotStack;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=helius_zero_slot_stack requires JITO_SEND_FANOUT=YES"
         );
 
         options = disabled_options();
@@ -9972,13 +12085,42 @@ mod tests {
     }
 
     #[test]
-    fn json_signature_parsing_handles_supported_shapes() {
+    fn zero_slot_url_helper_and_signature_parsing_work() {
+        assert_eq!(
+            zero_slot_send_url("https://ny.0slot.trade", "secret-key"),
+            "https://ny.0slot.trade?api-key=secret-key"
+        );
         let direct = serde_json::json!({ "signature": "sig-direct" });
         let nested = serde_json::json!({ "result": { "signature": "sig-nested" } });
         let result = serde_json::json!({ "result": "sig-result" });
         assert_eq!(json_signature(&direct).as_deref(), Some("sig-direct"));
         assert_eq!(json_signature(&nested).as_deref(), Some("sig-nested"));
         assert_eq!(json_signature(&result).as_deref(), Some("sig-result"));
+    }
+
+    #[test]
+    fn send_error_message_redacts_zero_slot_api_key() {
+        let endpoint = SendEndpoint {
+            label: "zero-slot-1:ny.0slot.trade".to_string(),
+            url: "https://ny.0slot.trade?api-key=super-secret-zero-slot-key".to_string(),
+            kind: SendEndpointKind::ZeroSlot,
+            auth_uuid: None,
+            auth_token: Some("super-secret-zero-slot-key".to_string()),
+            sender_mode: None,
+            beam_provider: None,
+            provider_tip_lamports: Some(1_000_000),
+            fanout_slots: None,
+            timeout_ms: None,
+        };
+
+        let message = send_error_message(
+            &endpoint,
+            "send request failed for https://ny.0slot.trade?api-key=super-secret-zero-slot-key",
+        );
+
+        assert!(message.contains("zero-slot-1:ny.0slot.trade"));
+        assert!(!message.contains("super-secret-zero-slot-key"));
+        assert!(message.contains("<redacted"));
     }
 
     #[tokio::test]
@@ -10284,18 +12426,18 @@ mod tests {
                 error: None,
             },
             SendLaneAttemptAttribution {
-                label: "tpu-jet-sidecar:127.0.0.1".to_string(),
-                kind: "tpu_jet",
+                label: "zero-slot-1:ny.0slot.trade".to_string(),
+                kind: "zero_slot",
                 mode: None,
                 beam_provider: None,
-                status: "timeout",
+                status: "submitted",
                 duration_ms: 5,
-                provider_tip_lamports: None,
-                fanout_slots: Some(1),
-                timeout_ms: Some(30),
-                ack_at: None,
-                error_class: Some("timeout"),
-                error: Some("deadline exceeded".to_string()),
+                provider_tip_lamports: Some(1_000_000),
+                fanout_slots: None,
+                timeout_ms: None,
+                ack_at: Some(114),
+                error_class: None,
+                error: None,
             },
         ];
 
@@ -10319,17 +12461,12 @@ mod tests {
         assert_eq!(
             json.pointer("/allAttempts/1/kind")
                 .and_then(serde_json::Value::as_str),
-            Some("tpu_jet")
+            Some("zero_slot")
         );
         assert_eq!(
-            json.pointer("/allAttempts/1/fanoutSlots")
+            json.pointer("/allAttempts/1/providerTipLamports")
                 .and_then(serde_json::Value::as_u64),
-            Some(1)
-        );
-        assert_eq!(
-            json.pointer("/allAttempts/1/timeoutMs")
-                .and_then(serde_json::Value::as_u64),
-            Some(30)
+            Some(1_000_000)
         );
     }
 
@@ -10510,6 +12647,50 @@ mod tests {
         ];
     }
 
+    fn enable_zero_slot(options: &mut CopyExecutionOptions) {
+        options.zero_slot_enabled = true;
+        options.zero_slot_urls = vec!["https://ny.0slot.trade".to_string()];
+        options.zero_slot_api_key = Some("zero-slot-key".to_string());
+        options.zero_slot_tip_lamports = Some(1_000_000);
+        options.zero_slot_tip_accounts = vec![
+            "HWEoBxYs7ssKuudEjzjmpfJVX7Dvi7wescFsVx2L5yoY".to_string(),
+            "4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE".to_string(),
+        ];
+    }
+
+    fn enable_astralane(options: &mut CopyExecutionOptions) {
+        options.astralane_enabled = true;
+        options.astralane_urls = vec!["https://lim.gateway.astralane.io/irisb".to_string()];
+        options.astralane_api_key = Some("astralane-key".to_string());
+        options.astralane_tip_lamports = Some(1_000_000);
+        options.astralane_tip_accounts = vec![
+            "astra4uejePWneqNaJKuFFA8oonqCE1sqF6b45kDMZm".to_string(),
+            "FShdRLYyH9uBbA2fGgUe6PKTpJioo4k4ZL3y3LZk4wrd".to_string(),
+        ];
+    }
+
+    fn enable_lunar_lander(options: &mut CopyExecutionOptions) {
+        options.lunar_lander_enabled = true;
+        options.lunar_lander_urls = vec![LUNAR_LANDER_DEFAULT_URL.to_string()];
+        options.lunar_lander_api_key = Some("lunar-key".to_string());
+        options.lunar_lander_tip_lamports = Some(1_000_000);
+        options.lunar_lander_tip_accounts = vec![
+            "moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F".to_string(),
+            "moon26Sek222Md7ZydcAGxoKG832DK36CkLrS3PQY4c".to_string(),
+        ];
+    }
+
+    fn enable_circular_fast(options: &mut CopyExecutionOptions) {
+        options.circular_fast_enabled = true;
+        options.circular_fast_urls = vec![CIRCULAR_FAST_DEFAULT_URL.to_string()];
+        options.circular_fast_api_key = Some("circular-key".to_string());
+        options.circular_fast_tip_lamports = Some(1_000_000);
+        options.circular_fast_tip_accounts = vec![
+            "FAST3dMFZvESiEipBvLSiXq3QCV51o3xuoHScqRU6cB6".to_string(),
+            "FASTHPW6akdGh9PFSdhMTbCuGkCSX7LsUjjnaB2RTQ4v".to_string(),
+        ];
+    }
+
     fn enable_nozomi(options: &mut CopyExecutionOptions) {
         options.nozomi_enabled = true;
         options.nozomi_urls = vec!["https://nozomi.example.com".to_string()];
@@ -10520,16 +12701,10 @@ mod tests {
             vec!["TEMPaMeCRFAS9EKF53Jd6KpHxgL47uWLcpFArU1Fanq".to_string()];
     }
 
-    fn enable_astralane(options: &mut CopyExecutionOptions) {
-        options.astralane_enabled = true;
-        options.astralane_urls = vec!["https://lim.gateway.astralane.io/irisb".to_string()];
-        options.astralane_api_key = Some("astralane-key".to_string());
-        options.astralane_tip_lamports = Some(1_000_000);
-        options.astralane_tip_account = Some(COPY_WALLET.to_string());
-        options.astralane_tip_accounts = vec![
-            COPY_WALLET.to_string(),
-            "HWEoBxYs7ssKuudEjzjmpfJVX7Dvi7wescFsVx2L5yoY".to_string(),
-        ];
+    fn enable_erpc_swqos(options: &mut CopyExecutionOptions) {
+        options.erpc_swqos_enabled = true;
+        options.erpc_swqos_urls = vec!["https://swqos.erpc.global".to_string()];
+        options.fast_copy_send = true;
     }
 
     fn endpoint_kinds(endpoints: &[SendEndpoint]) -> Vec<&'static str> {

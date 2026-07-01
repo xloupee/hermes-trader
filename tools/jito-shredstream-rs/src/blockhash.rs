@@ -1,4 +1,7 @@
-use crate::event::now_ms;
+use crate::{
+    cache_rpc::{rpc_url_label, CacheRpcBackoff},
+    event::now_ms,
+};
 use serde::Deserialize;
 use solana_hash::Hash;
 use std::{
@@ -26,6 +29,7 @@ pub(crate) fn spawn_blockhash_cache(
     refresh_timeout_ms: u64,
     commitment: String,
     stats: bool,
+    cache_rpc_backoff: CacheRpcBackoff,
 ) -> Option<BlockhashCache> {
     if rpc_urls.is_empty() {
         return None;
@@ -41,8 +45,14 @@ pub(crate) fn spawn_blockhash_cache(
 
         loop {
             interval.tick().await;
-            match fetch_latest_blockhash_any(&client, &rpc_urls, &commitment, refresh_timeout_ms)
-                .await
+            match fetch_latest_blockhash_any(
+                &client,
+                &rpc_urls,
+                &commitment,
+                refresh_timeout_ms,
+                &cache_rpc_backoff,
+            )
+            .await
             {
                 Ok(blockhash) => {
                     last_error_log_ms = 0;
@@ -93,19 +103,30 @@ async fn fetch_latest_blockhash_any(
     rpc_urls: &[String],
     commitment: &str,
     timeout_ms: u64,
+    cache_rpc_backoff: &CacheRpcBackoff,
 ) -> Result<CachedBlockhash, String> {
     let mut errors = Vec::new();
     let mut best: Option<CachedBlockhash> = None;
     for rpc_url in rpc_urls {
+        if !cache_rpc_backoff.is_available(rpc_url) {
+            errors.push(format!("{}: provider in backoff", rpc_url_label(rpc_url)));
+            continue;
+        }
         match fetch_latest_blockhash(client, rpc_url, commitment, timeout_ms).await {
-            Ok(blockhash) => match (&best, blockhash.context_slot) {
-                (None, _) => best = Some(blockhash),
-                (Some(existing), Some(slot)) if existing.context_slot.unwrap_or(0) < slot => {
-                    best = Some(blockhash);
+            Ok(blockhash) => {
+                cache_rpc_backoff.record_success(rpc_url);
+                match (&best, blockhash.context_slot) {
+                    (None, _) => best = Some(blockhash),
+                    (Some(existing), Some(slot)) if existing.context_slot.unwrap_or(0) < slot => {
+                        best = Some(blockhash);
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
-            Err(error) => errors.push(format!("{}: {error}", rpc_url_label(rpc_url))),
+            }
+            Err(error) => {
+                cache_rpc_backoff.record_failure("getLatestBlockhash", rpc_url, &error);
+                errors.push(format!("{}: {error}", rpc_url_label(rpc_url)));
+            }
         }
     }
     if let Some(blockhash) = best {
@@ -218,16 +239,6 @@ struct RpcBlockhashValue {
 #[derive(Debug, Deserialize)]
 struct RpcError {
     message: String,
-}
-
-fn rpc_url_label(url: &str) -> String {
-    url.split("://")
-        .nth(1)
-        .unwrap_or(url)
-        .split('/')
-        .next()
-        .unwrap_or(url)
-        .to_string()
 }
 
 #[cfg(test)]

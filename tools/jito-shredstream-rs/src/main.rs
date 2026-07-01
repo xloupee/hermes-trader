@@ -5,6 +5,8 @@ use std::path::PathBuf;
 mod address_lookup;
 mod balance_cache;
 mod blockhash;
+mod cache_rpc;
+mod erpc;
 mod event;
 mod executor;
 mod live;
@@ -153,6 +155,13 @@ pub(crate) struct LiveOptions {
     pub(crate) blockhash_stale_ms: u128,
 
     #[arg(
+        long = "blockhash-rpc-url",
+        env = "JITO_BLOCKHASH_RPC_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) blockhash_rpc_urls: Vec<String>,
+
+    #[arg(
         long,
         env = "JITO_ACCOUNT_PRIORITY_FEE_ENABLED",
         default_value_t = false,
@@ -180,6 +189,20 @@ pub(crate) struct LiveOptions {
         default_value_t = 75
     )]
     pub(crate) account_priority_fee_percentile: u8,
+
+    #[arg(
+        long = "priority-fee-rpc-url",
+        env = "JITO_PRIORITY_FEE_RPC_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) priority_fee_rpc_urls: Vec<String>,
+
+    #[arg(
+        long = "balance-cache-rpc-url",
+        env = "JITO_BALANCE_CACHE_RPC_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) balance_cache_rpc_urls: Vec<String>,
 
     #[arg(long, env = "JITO_SIMULATE_COPY_TX", default_value_t = false)]
     pub(crate) simulate_copy_tx: bool,
@@ -327,6 +350,131 @@ pub(crate) struct LiveOptions {
 
     #[arg(
         long,
+        env = "JITO_LUNAR_LANDER_ENABLED",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) lunar_lander_enabled: bool,
+
+    #[arg(
+        long = "lunar-lander-url",
+        env = "JITO_LUNAR_LANDER_URLS",
+        value_delimiter = ',',
+        default_value = "http://fra.lunar-lander.hellomoon.io/send-bin"
+    )]
+    pub(crate) lunar_lander_urls: Vec<String>,
+
+    #[arg(long, env = "JITO_LUNAR_LANDER_API_KEY", hide_env_values = true)]
+    pub(crate) lunar_lander_api_key: Option<String>,
+
+    #[arg(long, env = "JITO_LUNAR_LANDER_TIP_LAMPORTS")]
+    pub(crate) lunar_lander_tip_lamports: Option<u64>,
+
+    #[arg(long, env = "JITO_LUNAR_LANDER_TIP_ACCOUNT")]
+    pub(crate) lunar_lander_tip_account: Option<String>,
+
+    #[arg(long, env = "JITO_LUNAR_LANDER_TIP_ACCOUNTS", value_delimiter = ',')]
+    pub(crate) lunar_lander_tip_accounts: Vec<String>,
+
+    #[arg(
+        long,
+        env = "JITO_LUNAR_LANDER_MEV_PROTECT",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) lunar_lander_mev_protect: bool,
+
+    #[arg(
+        long,
+        env = "JITO_CIRCULAR_FAST_ENABLED",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) circular_fast_enabled: bool,
+
+    #[arg(
+        long = "circular-fast-url",
+        env = "JITO_CIRCULAR_FAST_URLS",
+        value_delimiter = ',',
+        default_value = "https://fra.fast.circular.fi/transactions"
+    )]
+    pub(crate) circular_fast_urls: Vec<String>,
+
+    #[arg(long, env = "JITO_CIRCULAR_FAST_API_KEY", hide_env_values = true)]
+    pub(crate) circular_fast_api_key: Option<String>,
+
+    #[arg(long, env = "JITO_CIRCULAR_FAST_TIP_LAMPORTS")]
+    pub(crate) circular_fast_tip_lamports: Option<u64>,
+
+    #[arg(long, env = "JITO_CIRCULAR_FAST_TIP_ACCOUNT")]
+    pub(crate) circular_fast_tip_account: Option<String>,
+
+    #[arg(long, env = "JITO_CIRCULAR_FAST_TIP_ACCOUNTS", value_delimiter = ',')]
+    pub(crate) circular_fast_tip_accounts: Vec<String>,
+
+    #[arg(
+        long,
+        env = "JITO_CIRCULAR_FAST_FRONT_RUNNING_PROTECTION",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) circular_fast_front_running_protection: bool,
+
+    #[arg(
+        long,
+        env = "JITO_ERPC_SWQOS_ENABLED",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) erpc_swqos_enabled: bool,
+
+    #[arg(
+        long = "erpc-swqos-url",
+        env = "JITO_ERPC_SWQOS_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) erpc_swqos_urls: Vec<String>,
+
+    #[arg(
+        long,
+        env = "JITO_ERPC_LEADER_SLOTS_ENABLED",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) erpc_leader_slots_enabled: bool,
+
+    #[arg(
+        long,
+        env = "JITO_ERPC_LEADER_SLOTS_URL",
+        default_value = "https://edge.erpc.global"
+    )]
+    pub(crate) erpc_leader_slots_url: Option<String>,
+
+    #[arg(long, env = "JITO_ERPC_API_KEY", hide_env_values = true)]
+    pub(crate) erpc_api_key: Option<String>,
+
+    #[arg(
+        long,
+        env = "JITO_ERPC_LEADER_SLOTS_REFRESH_MS",
+        default_value_t = 5000
+    )]
+    pub(crate) erpc_leader_slots_refresh_ms: u64,
+
+    #[arg(long, env = "JITO_ERPC_LEADER_SLOTS_STALE_MS", default_value_t = 15000)]
+    pub(crate) erpc_leader_slots_stale_ms: u64,
+
+    #[arg(long, env = "JITO_ERPC_YELLOWSTONE_GRPC_URL")]
+    pub(crate) erpc_yellowstone_grpc_url: Option<String>,
+
+    #[arg(
+        long,
+        env = "JITO_ERPC_YELLOWSTONE_GRPC_X_TOKEN",
+        hide_env_values = true
+    )]
+    pub(crate) erpc_yellowstone_grpc_x_token: Option<String>,
+
+    #[arg(
+        long,
         env = "JITO_BEAM_ENABLED",
         default_value_t = false,
         value_parser = parse_boolish
@@ -357,6 +505,30 @@ pub(crate) struct LiveOptions {
 
     #[arg(
         long,
+        env = "JITO_ZERO_SLOT_ENABLED",
+        default_value_t = false,
+        value_parser = parse_boolish
+    )]
+    pub(crate) zero_slot_enabled: bool,
+
+    #[arg(
+        long = "zero-slot-url",
+        env = "JITO_ZERO_SLOT_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) zero_slot_urls: Vec<String>,
+
+    #[arg(long, env = "JITO_ZERO_SLOT_API_KEY", hide_env_values = true)]
+    pub(crate) zero_slot_api_key: Option<String>,
+
+    #[arg(long, env = "JITO_ZERO_SLOT_TIP_LAMPORTS")]
+    pub(crate) zero_slot_tip_lamports: Option<u64>,
+
+    #[arg(long, env = "JITO_ZERO_SLOT_TIP_ACCOUNTS", value_delimiter = ',')]
+    pub(crate) zero_slot_tip_accounts: Vec<String>,
+
+    #[arg(
+        long,
         env = "JITO_TPU_JET_ENABLED",
         default_value_t = false,
         value_parser = parse_boolish
@@ -376,7 +548,7 @@ pub(crate) struct LiveOptions {
     )]
     pub(crate) tpu_jet_sidecar_url: Option<String>,
 
-    #[arg(long, env = "JITO_TPU_JET_FANOUT_SLOTS", default_value_t = 12)]
+    #[arg(long, env = "JITO_TPU_JET_FANOUT_SLOTS", default_value_t = 1)]
     pub(crate) tpu_jet_fanout_slots: u64,
 
     #[arg(long, env = "JITO_TPU_JET_TIMEOUT_MS", default_value_t = 30)]
@@ -656,6 +828,35 @@ fn parse_boolish(value: &str) -> std::result::Result<bool, String> {
 impl LiveOptions {
     pub(crate) fn normalized_state_rpc_urls(&self) -> Vec<String> {
         normalized_rpc_urls(&self.state_rpc_urls, self.solana_rpc_url.as_deref())
+    }
+
+    pub(crate) fn normalized_blockhash_rpc_urls(&self) -> Vec<String> {
+        let state_urls = self.normalized_state_rpc_urls();
+        normalized_rpc_urls(&self.blockhash_rpc_urls, None).or_fallback(state_urls)
+    }
+
+    pub(crate) fn normalized_balance_cache_rpc_urls(&self) -> Vec<String> {
+        let state_urls = self.normalized_state_rpc_urls();
+        normalized_rpc_urls(&self.balance_cache_rpc_urls, None).or_fallback(state_urls)
+    }
+
+    pub(crate) fn normalized_priority_fee_rpc_urls(&self) -> Vec<String> {
+        let state_urls = self.normalized_state_rpc_urls();
+        normalized_rpc_urls(&self.priority_fee_rpc_urls, None).or_fallback(state_urls)
+    }
+}
+
+trait VecFallback {
+    fn or_fallback(self, fallback: Vec<String>) -> Vec<String>;
+}
+
+impl VecFallback for Vec<String> {
+    fn or_fallback(self, fallback: Vec<String>) -> Vec<String> {
+        if self.is_empty() {
+            fallback
+        } else {
+            self
+        }
     }
 }
 

@@ -903,6 +903,20 @@ async function buildRestRows(rows) {
 	      simulation_units_consumed: Number.isFinite(row.simulationUnitsConsumed)
 	        ? row.simulationUnitsConsumed
 	        : null,
+      copy_wallet_balance_lamports: Number.isFinite(row.copyWalletBalanceLamports)
+        ? row.copyWalletBalanceLamports
+        : null,
+      copy_wallet_balance_required_lamports: Number.isFinite(row.copyWalletBalanceRequiredLamports)
+        ? row.copyWalletBalanceRequiredLamports
+        : null,
+      copy_wallet_balance_fetched_at_ms: Number.isFinite(row.copyWalletBalanceFetchedAtMs)
+        ? row.copyWalletBalanceFetchedAtMs
+        : null,
+      copy_wallet_balance_age_ms: Number.isFinite(row.copyWalletBalanceAgeMs)
+        ? row.copyWalletBalanceAgeMs
+        : null,
+      copy_wallet_balance_source_rpc: row.copyWalletBalanceSourceRpc ?? null,
+      copy_wallet_balance_reason: row.copyWalletBalanceReason ?? null,
       fill_token_delta: report?.fillTokenDelta ?? null,
       copy_wallet_sol_delta: report?.copyWalletSolDelta ?? null,
       gross_copy_spend_sol: report?.grossCopySpendSol ?? null,
@@ -972,6 +986,7 @@ async function buildRestRows(rows) {
       account_priority_fee_sample_count: Number.isFinite(row.accountPriorityFeeSampleCount)
         ? row.accountPriorityFeeSampleCount
         : null,
+      account_priority_fee_source_rpc: row.accountPriorityFeeSourceRpc ?? null,
       account_priority_fee_account_count: Number.isFinite(row.accountPriorityFeeAccountCount)
         ? row.accountPriorityFeeAccountCount
         : null,
@@ -1047,9 +1062,16 @@ const OPTIONAL_REST_COLUMNS = new Set([
   "account_priority_fee_micro_lamports",
   "account_priority_fee_age_ms",
   "account_priority_fee_sample_count",
+  "account_priority_fee_source_rpc",
   "account_priority_fee_account_count",
   "account_priority_fee_applied",
   "account_priority_fee_reason",
+  "copy_wallet_balance_lamports",
+  "copy_wallet_balance_required_lamports",
+  "copy_wallet_balance_fetched_at_ms",
+  "copy_wallet_balance_age_ms",
+  "copy_wallet_balance_source_rpc",
+  "copy_wallet_balance_reason",
   "signed_tx_bytes",
   "writable_account_count",
   "compute_unit_limit",
@@ -1197,6 +1219,12 @@ async function buildSql(rows) {
     "blockhash_age_ms",
     "blockhash_selection_strategy",
     "simulation_units_consumed",
+    "copy_wallet_balance_lamports",
+    "copy_wallet_balance_required_lamports",
+    "copy_wallet_balance_fetched_at_ms",
+    "copy_wallet_balance_age_ms",
+    "copy_wallet_balance_source_rpc",
+    "copy_wallet_balance_reason",
     "fill_token_delta",
     "copy_wallet_sol_delta",
     "gross_copy_spend_sol",
@@ -1239,6 +1267,7 @@ async function buildSql(rows) {
     "account_priority_fee_micro_lamports",
     "account_priority_fee_age_ms",
     "account_priority_fee_sample_count",
+    "account_priority_fee_source_rpc",
     "account_priority_fee_account_count",
     "account_priority_fee_applied",
     "account_priority_fee_reason",
@@ -1331,6 +1360,12 @@ async function buildSql(rows) {
       sqlNumber(row.blockhashAgeMs),
       sqlString(row.blockhashSelectionStrategy),
       sqlNumber(row.simulationUnitsConsumed),
+      sqlNumber(row.copyWalletBalanceLamports),
+      sqlNumber(row.copyWalletBalanceRequiredLamports),
+      sqlNumber(row.copyWalletBalanceFetchedAtMs),
+      sqlNumber(row.copyWalletBalanceAgeMs),
+      sqlString(row.copyWalletBalanceSourceRpc),
+      sqlString(row.copyWalletBalanceReason),
       sqlNumber(report?.fillTokenDelta),
       sqlNumber(report?.copyWalletSolDelta),
       sqlNumber(report?.grossCopySpendSol),
@@ -1373,6 +1408,7 @@ async function buildSql(rows) {
       sqlNumber(row.accountPriorityFeeMicroLamports),
       sqlNumber(row.accountPriorityFeeAgeMs),
       sqlNumber(row.accountPriorityFeeSampleCount),
+      sqlString(row.accountPriorityFeeSourceRpc),
       sqlNumber(row.accountPriorityFeeAccountCount),
       sqlBoolean(row.accountPriorityFeeApplied),
       sqlString(row.accountPriorityFeeReason),

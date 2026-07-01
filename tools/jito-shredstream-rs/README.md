@@ -188,15 +188,26 @@ State RPC is separate from send lanes:
 
 ```bash
 JITO_STATE_RPC_URLS=https://state-rpc-a.example,https://state-rpc-b.example
+JITO_BLOCKHASH_RPC_URLS=https://blockhash-rpc-a.example,https://blockhash-rpc-b.example
+JITO_BALANCE_CACHE_RPC_URLS=https://balance-rpc-a.example,https://balance-rpc-b.example
+JITO_PRIORITY_FEE_RPC_URLS=https://fee-rpc-a.example,https://fee-rpc-b.example
 JITO_BLOCKHASH_STALE_MS=5000
 ```
 
-The state RPC pool is used for warm blockhash refreshes, copy-wallet balance
-refreshes, address lookup table preload, simulation, token/account reads, and
-post-submit confirmation checks. The buy hot path reads these warm caches in
-memory and fails closed if the blockhash or balance state is stale. If
-`JITO_STATE_RPC_URLS` is unset, the worker falls back to `SOLANA_RPC_URL` for
-backward compatibility.
+The state RPC pool is still used for address lookup table preload, simulation,
+token/account reads, and post-submit confirmation checks. Warm caches can use
+their own pools: `JITO_BLOCKHASH_RPC_URLS`, `JITO_BALANCE_CACHE_RPC_URLS`, and
+`JITO_PRIORITY_FEE_RPC_URLS`. Each cache-specific pool falls back to
+`JITO_STATE_RPC_URLS`, and `JITO_STATE_RPC_URLS` falls back to `SOLANA_RPC_URL`
+for backward compatibility. The buy hot path reads these warm caches in memory
+and fails closed if the blockhash or balance state is stale; it does not fetch
+blockhashes, balances, or priority fees on signal.
+
+Cache refreshers share a small provider backoff. HTTP 429, timeout, and 5xx
+refresh failures temporarily skip the failing provider and keep the last good
+cache value intact. Cache telemetry includes provider source labels such as
+`blockhashSourceRpc`, `copyWalletBalanceSourceRpc`, and
+`accountPriorityFeeSourceRpc`, with query strings/API keys stripped.
 
 Send fanout is default-off:
 
@@ -222,14 +233,35 @@ a send lane. If
 
 `JITO_SEND_LANE_MODE` is resolved at startup and never from per-signal IO:
 
-- `mixed`: current behavior. Build/sign one transaction with configured Jito and
-  Helius Sender tips, then fan out the same signed bytes to all enabled lane
-  families.
+- `mixed`: current behavior. Build/sign one transaction with configured Jito,
+  Helius Sender, and enabled paid-provider tips, then fan out the same signed
+  bytes to all enabled lane families.
+- `fast`: use Helius Sender plus Nozomi with the same signed bytes. Requires
+  `JITO_SEND_FANOUT=YES`, `JITO_HELIUS_SENDER_ENABLED=YES`, and
+  `JITO_NOZOMI_ENABLED=YES`.
+- `turbo`: use all current non-Beam provider lanes: Helius Sender, Nozomi,
+  Astralane, Lunar Lander, ZeroSlot, and TPU Jet. Requires
+  `JITO_SEND_FANOUT=YES` and all six provider families enabled.
 - `rpc_only`: use RPC endpoints and priority fee only.
 - `jito_only`: use Jito block-engine endpoints and Jito tip only. Requires
   `JITO_SEND_FANOUT=YES` and `JITO_BLOCK_ENGINE_SEND_URLS`.
 - `helius_sender_only`: use Helius Sender endpoints and Sender tip only.
   Requires `JITO_HELIUS_SENDER_ENABLED=YES`.
+- `lunar_lander_only`: use Lunar Lander `/send-bin` endpoints and Lunar Lander
+  tip only. Requires `JITO_LUNAR_LANDER_ENABLED=YES`,
+  `JITO_LUNAR_LANDER_API_KEY`, and a Lunar tip account.
+- `helius_lunar_lander_stack`: use Helius Sender plus Lunar Lander with the
+  same signed bytes. Requires `JITO_SEND_FANOUT=YES`,
+  `JITO_HELIUS_SENDER_ENABLED=YES`, and `JITO_LUNAR_LANDER_ENABLED=YES`.
+- `helius_nozomi_astralane_lunar_stack`: use Helius Sender, Nozomi, Astralane,
+  and Lunar Lander with the same signed bytes. Requires `JITO_SEND_FANOUT=YES`
+  and all four provider families enabled.
+- `circular_fast_only`: use Circular Fast `/transactions` JSON-RPC endpoints
+  and FAST tip only. Requires `JITO_CIRCULAR_FAST_ENABLED=YES`,
+  `JITO_CIRCULAR_FAST_API_KEY`, and a FAST tip account.
+- `helius_circular_fast_stack`: use Helius Sender plus Circular Fast with the
+  same signed bytes. Requires `JITO_SEND_FANOUT=YES`,
+  `JITO_HELIUS_SENDER_ENABLED=YES`, and `JITO_CIRCULAR_FAST_ENABLED=YES`.
 - `helius_tpu_jet`: use Helius Sender plus the local Yellowstone Jet sidecar
   lane. This is the canary mode for same-signature Helius + Jet fanout without
   adding RPC/Jito lanes.
@@ -257,11 +289,36 @@ worker does not link the Jet Solana 3.x dependency graph:
 ```bash
 JITO_TPU_JET_ENABLED=false
 JITO_TPU_JET_RPC_URL=https://rpc.example
-JITO_TPU_JET_WS_URL=https://yellowstone-grpc.example
+JITO_TPU_JET_WS_URL=http://grpc-fra1-burst.erpc.global
 JITO_TPU_JET_SIDECAR_URL=http://127.0.0.1:8787
-JITO_TPU_JET_FANOUT_SLOTS=12
+JITO_TPU_JET_FANOUT_SLOTS=1
 JITO_TPU_JET_TIMEOUT_MS=30
 ```
+
+For ERPC Burst trials, prefer the ERPC-specific aliases in the env file:
+
+```bash
+JITO_ERPC_YELLOWSTONE_GRPC_URL=http://grpc-fra1-burst.erpc.global
+JITO_ERPC_YELLOWSTONE_GRPC_X_TOKEN=
+```
+
+The sidecar launcher maps those to `JITO_TPU_JET_GRPC_URL` and
+`JITO_TPU_JET_GRPC_X_TOKEN`. Use the exact endpoint/token from the ERPC
+dashboard after registering the Droplet IP; the Frankfurt Burst public endpoint
+is the expected first choice for a Frankfurt Droplet.
+
+For Shreder Fastlane trials, keep the same Jet sidecar and set the
+Shreder-specific aliases instead of the ERPC aliases:
+
+```bash
+JITO_SHREDER_FASTLANE_GRPC_URL=<shreder-fastlane-yellowstone-url>
+JITO_SHREDER_FASTLANE_GRPC_X_TOKEN=<x-token-if-required>
+```
+
+The sidecar launcher maps those into `JITO_TPU_JET_GRPC_URL` and
+`JITO_TPU_JET_GRPC_X_TOKEN` when the direct `JITO_TPU_JET_*` values are unset.
+This only changes the Yellowstone/Geyser input used by the Jet sidecar; it does
+not create a Shreder transaction submission lane.
 
 The Droplet launcher is `run-tpu-jet-sidecar.sh`; the matching systemd template
 is `systemd/jito-tpu-jet-sidecar.service`.
@@ -280,6 +337,35 @@ When enabled in `mixed`, the worker sends the same signed wire transaction bytes
 to TPU Jet/QUIC alongside the HTTP lanes. TPU dispatch telemetry is local
 dispatch only; it is not treated as ACK or landing proof. Landing quality still
 comes from confirmation, `slotDelta`, and `txDelta`.
+
+Lunar Lander is default-off and uses binary HTTP with the API key in the
+request URL. Keep keys in env only; status output reports only whether the key
+is configured.
+
+```bash
+JITO_LUNAR_LANDER_ENABLED=false
+JITO_LUNAR_LANDER_URLS=http://fra.lunar-lander.hellomoon.io/send-bin
+JITO_LUNAR_LANDER_API_KEY=
+JITO_LUNAR_LANDER_TIP_LAMPORTS=1000000
+JITO_LUNAR_LANDER_TIP_ACCOUNT=moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F
+JITO_LUNAR_LANDER_TIP_ACCOUNTS=moon17L6BgxXRX5uHKudAmqVF96xia9h8ygcmG2sL3F
+JITO_LUNAR_LANDER_MEV_PROTECT=false
+```
+
+Circular Fast is default-off and uses JSON-RPC `sendTransaction` with the API
+key in the `x-api-key` header. Keep keys in env only; status output reports only
+whether the key is configured. The first canary uses a `1000000` lamport FAST
+tip for parity with the existing paid provider canaries.
+
+```bash
+JITO_CIRCULAR_FAST_ENABLED=false
+JITO_CIRCULAR_FAST_URLS=https://fra.fast.circular.fi/transactions
+JITO_CIRCULAR_FAST_API_KEY=
+JITO_CIRCULAR_FAST_TIP_LAMPORTS=1000000
+JITO_CIRCULAR_FAST_TIP_ACCOUNT=FAST3dMFZvESiEipBvLSiXq3QCV51o3xuoHScqRU6cB6
+JITO_CIRCULAR_FAST_TIP_ACCOUNTS=FAST3dMFZvESiEipBvLSiXq3QCV51o3xuoHScqRU6cB6
+JITO_CIRCULAR_FAST_FRONT_RUNNING_PROTECTION=false
+```
 
 Do not race lane-specific signed variants. Different fee/tip instructions
 produce different messages and signatures, so multiple variants can land as

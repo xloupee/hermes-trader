@@ -1,4 +1,7 @@
-use crate::event::now_ms;
+use crate::{
+    cache_rpc::{rpc_url_label, CacheRpcBackoff},
+    event::now_ms,
+};
 use arc_swap::ArcSwap;
 use reqwest::Client;
 use serde::Deserialize;
@@ -18,12 +21,14 @@ struct WalletBalanceCacheInner {
     http_timeout_ms: u64,
     wallets: ArcSwap<Vec<String>>,
     balances: ArcSwap<HashMap<String, WalletBalanceEntry>>,
+    cache_rpc_backoff: CacheRpcBackoff,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct WalletBalanceEntry {
     pub(crate) lamports: u64,
     pub(crate) fetched_at_ms: u128,
+    pub(crate) source_rpc: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +37,7 @@ pub(crate) struct WalletBalanceCheck {
     pub(crate) lamports: Option<u64>,
     pub(crate) fetched_at_ms: Option<u128>,
     pub(crate) age_ms: Option<u128>,
+    pub(crate) source_rpc: Option<String>,
     pub(crate) required_lamports: u64,
     pub(crate) reason: Option<String>,
 }
@@ -64,6 +70,7 @@ impl WalletBalanceCache {
         stale_after_ms: u128,
         http_timeout_ms: u64,
         initial_wallets: Vec<String>,
+        cache_rpc_backoff: CacheRpcBackoff,
     ) -> Self {
         Self {
             inner: Arc::new(WalletBalanceCacheInner {
@@ -74,6 +81,7 @@ impl WalletBalanceCache {
                 http_timeout_ms,
                 wallets: ArcSwap::from_pointee(normalized_wallets(initial_wallets)),
                 balances: ArcSwap::from_pointee(HashMap::new()),
+                cache_rpc_backoff,
             }),
         }
     }
@@ -114,6 +122,7 @@ impl WalletBalanceCache {
                 lamports: None,
                 fetched_at_ms: None,
                 age_ms: None,
+                source_rpc: None,
                 required_lamports,
                 reason: Some("copy wallet balance cache missing".to_string()),
             };
@@ -139,6 +148,7 @@ impl WalletBalanceCache {
             lamports: Some(entry.lamports),
             fetched_at_ms: Some(entry.fetched_at_ms),
             age_ms: Some(age_ms),
+            source_rpc: Some(entry.source_rpc),
             required_lamports,
             reason,
         }
@@ -168,13 +178,22 @@ impl WalletBalanceCacheInner {
 
         let mut errors = Vec::new();
         for rpc_url in &self.rpc_urls {
+            if !self.cache_rpc_backoff.is_available(rpc_url) {
+                errors.push(format!("{}: provider in backoff", rpc_url_label(rpc_url)));
+                continue;
+            }
             match self.refresh_once_from_rpc(rpc_url, wallets.as_ref()).await {
                 Ok(balances) => {
+                    self.cache_rpc_backoff.record_success(rpc_url);
                     let count = balances.len();
                     self.balances.store(Arc::new(balances));
                     return Ok(count);
                 }
-                Err(error) => errors.push(format!("{}: {error}", rpc_url_label(rpc_url))),
+                Err(error) => {
+                    self.cache_rpc_backoff
+                        .record_failure("getMultipleAccounts", rpc_url, &error);
+                    errors.push(format!("{}: {error}", rpc_url_label(rpc_url)));
+                }
             }
         }
 
@@ -232,6 +251,7 @@ impl WalletBalanceCacheInner {
         }
 
         let fetched_at_ms = now_ms();
+        let source_rpc = rpc_url_label(rpc_url);
         let values = response
             .result
             .ok_or_else(|| "getMultipleAccounts result missing".to_string())?
@@ -243,6 +263,7 @@ impl WalletBalanceCacheInner {
                 WalletBalanceEntry {
                     lamports: account.map(|account| account.lamports).unwrap_or(0),
                     fetched_at_ms,
+                    source_rpc: source_rpc.clone(),
                 },
             );
         }
@@ -261,16 +282,6 @@ fn normalized_wallets(wallets: Vec<String>) -> Vec<String> {
     wallets
 }
 
-fn rpc_url_label(url: &str) -> String {
-    url.split("://")
-        .nth(1)
-        .unwrap_or(url)
-        .split('/')
-        .next()
-        .unwrap_or(url)
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,6 +293,7 @@ mod tests {
             stale_after_ms,
             0,
             vec![wallet.to_string()],
+            CacheRpcBackoff::default(),
         )
     }
 
@@ -306,6 +318,7 @@ mod tests {
             WalletBalanceEntry {
                 lamports: 100,
                 fetched_at_ms: now_ms().saturating_sub(10),
+                source_rpc: "rpc.example.com".to_string(),
             },
         )])));
 
@@ -322,12 +335,14 @@ mod tests {
             WalletBalanceEntry {
                 lamports: 9,
                 fetched_at_ms: now_ms(),
+                source_rpc: "rpc.example.com".to_string(),
             },
         )])));
 
         let check = cache.check("wallet", 10);
 
         assert_eq!(check.lamports, Some(9));
+        assert_eq!(check.source_rpc.as_deref(), Some("rpc.example.com"));
         assert_eq!(
             check.reason,
             Some("copy wallet balance 9 lamports below required 10 lamports".to_string())
@@ -342,6 +357,7 @@ mod tests {
             WalletBalanceEntry {
                 lamports: 9,
                 fetched_at_ms: now_ms(),
+                source_rpc: "rpc.example.com".to_string(),
             },
         )])));
 

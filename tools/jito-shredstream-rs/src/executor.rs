@@ -258,6 +258,8 @@ pub(crate) enum MigratedAmmSmallCopyMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum SendLaneMode {
     Mixed,
+    Fast,
+    Turbo,
     RpcOnly,
     JitoOnly,
     HeliusSenderOnly,
@@ -292,6 +294,8 @@ impl SendLaneMode {
     fn as_str(self) -> &'static str {
         match self {
             Self::Mixed => "mixed",
+            Self::Fast => "fast",
+            Self::Turbo => "turbo",
             Self::RpcOnly => "rpc_only",
             Self::JitoOnly => "jito_only",
             Self::HeliusSenderOnly => "helius_sender_only",
@@ -335,6 +339,8 @@ impl SendLaneMode {
         matches!(
             self,
             Self::Mixed
+                | Self::Fast
+                | Self::Turbo
                 | Self::HeliusSenderOnly
                 | Self::HeliusNozomiStack
                 | Self::HeliusAstralaneStack
@@ -357,6 +363,8 @@ impl SendLaneMode {
         matches!(
             self,
             Self::Mixed
+                | Self::Fast
+                | Self::Turbo
                 | Self::NozomiOnly
                 | Self::HeliusNozomiStack
                 | Self::HeliusNozomiAstralaneStack
@@ -375,6 +383,7 @@ impl SendLaneMode {
         matches!(
             self,
             Self::AstralaneOnly
+                | Self::Turbo
                 | Self::HeliusAstralaneStack
                 | Self::HeliusNozomiAstralaneStack
                 | Self::HeliusNozomiAstralaneLunarStack
@@ -385,6 +394,7 @@ impl SendLaneMode {
         matches!(
             self,
             Self::LunarLanderOnly
+                | Self::Turbo
                 | Self::HeliusLunarLanderStack
                 | Self::HeliusNozomiAstralaneLunarStack
         )
@@ -405,6 +415,7 @@ impl SendLaneMode {
         matches!(
             self,
             Self::ZeroSlotOnly
+                | Self::Turbo
                 | Self::HeliusZeroSlotStack
                 | Self::HeliusNozomiZeroSlotStack
                 | Self::AllNonBeamStack
@@ -422,6 +433,7 @@ impl SendLaneMode {
         matches!(
             self,
             Self::Mixed
+                | Self::Turbo
                 | Self::HeliusTpuJet
                 | Self::TpuJetHeliusTip
                 | Self::TpuJetOnly
@@ -437,6 +449,8 @@ impl SendLaneMode {
         matches!(
             self,
             Self::Mixed
+                | Self::Fast
+                | Self::Turbo
                 | Self::HeliusSenderOnly
                 | Self::HeliusNozomiStack
                 | Self::HeliusAstralaneStack
@@ -461,6 +475,8 @@ impl SendLaneMode {
         matches!(
             self,
             Self::Mixed
+                | Self::Fast
+                | Self::Turbo
                 | Self::NozomiOnly
                 | Self::HeliusNozomiStack
                 | Self::HeliusNozomiAstralaneStack
@@ -475,6 +491,7 @@ impl SendLaneMode {
         matches!(
             self,
             Self::AstralaneOnly
+                | Self::Turbo
                 | Self::HeliusAstralaneStack
                 | Self::HeliusNozomiAstralaneStack
                 | Self::HeliusNozomiAstralaneLunarStack
@@ -485,6 +502,7 @@ impl SendLaneMode {
         matches!(
             self,
             Self::LunarLanderOnly
+                | Self::Turbo
                 | Self::HeliusLunarLanderStack
                 | Self::HeliusNozomiAstralaneLunarStack
         )
@@ -505,6 +523,7 @@ impl SendLaneMode {
         matches!(
             self,
             Self::ZeroSlotOnly
+                | Self::Turbo
                 | Self::HeliusZeroSlotStack
                 | Self::HeliusNozomiZeroSlotStack
                 | Self::AllNonBeamStack
@@ -6138,6 +6157,65 @@ impl CopyExecutionOptions {
 
         match self.send_lane_mode {
             SendLaneMode::Mixed => Ok(()),
+            SendLaneMode::Fast => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=fast requires JITO_SEND_FANOUT=YES".to_string()
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=fast requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.nozomi_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=fast requires JITO_NOZOMI_ENABLED=YES".to_string()
+                    );
+                }
+                Ok(())
+            }
+            SendLaneMode::Turbo => {
+                if !self.send_fanout {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=turbo requires JITO_SEND_FANOUT=YES".to_string()
+                    );
+                }
+                if !self.helius_sender_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=turbo requires JITO_HELIUS_SENDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.nozomi_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=turbo requires JITO_NOZOMI_ENABLED=YES".to_string()
+                    );
+                }
+                if !self.astralane_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=turbo requires JITO_ASTRALANE_ENABLED=YES".to_string(),
+                    );
+                }
+                if !self.lunar_lander_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=turbo requires JITO_LUNAR_LANDER_ENABLED=YES"
+                            .to_string(),
+                    );
+                }
+                if !self.zero_slot_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=turbo requires JITO_ZERO_SLOT_ENABLED=YES".to_string(),
+                    );
+                }
+                if !self.tpu_jet_enabled {
+                    return Err(
+                        "JITO_SEND_LANE_MODE=turbo requires JITO_TPU_JET_ENABLED=YES".to_string(),
+                    );
+                }
+                Ok(())
+            }
             SendLaneMode::RpcOnly => {
                 if self.selected_send_rpc_urls().is_empty() {
                     return Err(
@@ -10892,6 +10970,24 @@ mod tests {
             Some(COPY_WALLET)
         );
 
+        enable_nozomi(&mut options);
+        options.send_lane_mode = SendLaneMode::Fast;
+        let fee_config = options.tx_fee_config([0u8; 64]);
+        assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
+        assert_eq!(fee_config.jito_tip_lamports, None);
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+        );
+        assert_eq!(fee_config.nozomi_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.astralane_tip_lamports, None);
+        assert_eq!(fee_config.lunar_lander_tip_lamports, None);
+        assert_eq!(fee_config.zero_slot_tip_lamports, None);
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+nozomi")
+        );
+
         options.send_lane_mode = SendLaneMode::HeliusTpuJet;
         let fee_config = options.tx_fee_config([0u8; 64]);
         assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
@@ -10968,7 +11064,6 @@ mod tests {
             Some("helius+beam")
         );
 
-        enable_nozomi(&mut options);
         options.send_lane_mode = SendLaneMode::HeliusNozomiBeamStack;
         let fee_config = options.tx_fee_config([3u8; 64]);
         assert_eq!(fee_config.nozomi_tip_lamports, Some(1_000_000));
@@ -11094,6 +11189,24 @@ mod tests {
             provider_stack_name(&fee_config).as_deref(),
             Some("helius+nozomi+zero_slot")
         );
+
+        options.tpu_jet_enabled = true;
+        options.send_lane_mode = SendLaneMode::Turbo;
+        let fee_config = options.tx_fee_config([11u8; 64]);
+        assert_eq!(
+            fee_config.helius_sender_tip_lamports,
+            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+        );
+        assert_eq!(fee_config.nozomi_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.astralane_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.lunar_lander_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.zero_slot_tip_lamports, Some(1_000_000));
+        assert_eq!(fee_config.beam_tip_lamports, None);
+        assert_eq!(fee_config.jito_tip_lamports, None);
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+nozomi+astralane+lunar_lander+zero_slot")
+        );
     }
 
     #[test]
@@ -11172,6 +11285,25 @@ mod tests {
         );
 
         options.max_provider_tip_lamports = Some(3_200_000);
+        assert_eq!(provider_tip_guard_reason(&options, &fee_config), None);
+
+        enable_zero_slot(&mut options);
+        options.tpu_jet_enabled = true;
+        options.send_lane_mode = SendLaneMode::Turbo;
+        let fee_config = options.tx_fee_config([11u8; 64]);
+        assert_eq!(
+            provider_stack_name(&fee_config).as_deref(),
+            Some("helius+nozomi+astralane+lunar_lander+zero_slot")
+        );
+        assert_eq!(provider_tip_lamports(&fee_config), 4_200_000);
+
+        options.max_provider_tip_lamports = Some(4_199_999);
+        assert_eq!(
+            provider_tip_guard_reason(&options, &fee_config).as_deref(),
+            Some("provider tips 4200000 lamports exceed max provider tips 4199999 lamports")
+        );
+
+        options.max_provider_tip_lamports = Some(4_200_000);
         assert_eq!(provider_tip_guard_reason(&options, &fee_config), None);
     }
 
@@ -11272,6 +11404,14 @@ mod tests {
         assert_eq!(endpoint_kinds(&endpoints), vec!["helius_sender"]);
         assert_eq!(endpoints[0].url, "https://sender.helius-rpc.com/fast");
 
+        enable_nozomi(&mut options);
+        options.send_fanout = true;
+        options.send_lane_mode = SendLaneMode::Fast;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec!["helius_sender", "nozomi_json_rpc"]
+        );
+
         enable_erpc_swqos(&mut options);
         options.send_lane_mode = SendLaneMode::HeliusErpcSwqosStack;
         assert_eq!(
@@ -11335,7 +11475,6 @@ mod tests {
             vec!["helius_sender", "beam_http"]
         );
 
-        enable_nozomi(&mut options);
         options.send_lane_mode = SendLaneMode::HeliusNozomiBeamStack;
         assert_eq!(
             endpoint_kinds(&options.selected_send_endpoints()),
@@ -11413,6 +11552,19 @@ mod tests {
         assert_eq!(
             endpoint_kinds(&options.selected_send_endpoints()),
             vec!["helius_sender", "nozomi_json_rpc", "zero_slot", "tpu_jet"]
+        );
+
+        options.send_lane_mode = SendLaneMode::Turbo;
+        assert_eq!(
+            endpoint_kinds(&options.selected_send_endpoints()),
+            vec![
+                "helius_sender",
+                "nozomi_json_rpc",
+                "astralane_irisb",
+                "lunar_lander_bin",
+                "zero_slot",
+                "tpu_jet"
+            ]
         );
     }
 
@@ -11506,12 +11658,35 @@ mod tests {
             "JITO_SEND_LANE_MODE=helius_sender_only requires JITO_HELIUS_SENDER_ENABLED=YES"
         );
 
+        options.send_fanout = false;
+        options.helius_sender_enabled = false;
+        options.nozomi_enabled = false;
+        options.send_lane_mode = SendLaneMode::Fast;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=fast requires JITO_SEND_FANOUT=YES"
+        );
+        options.send_fanout = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=fast requires JITO_HELIUS_SENDER_ENABLED=YES"
+        );
+        options.helius_sender_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=fast requires JITO_NOZOMI_ENABLED=YES"
+        );
+        options.nozomi_enabled = true;
+        assert!(options.validate_send_lane_mode().is_ok());
+
+        options = disabled_options();
         options.send_lane_mode = SendLaneMode::ErpcSwqosOnly;
         assert_eq!(
             options.validate_send_lane_mode().unwrap_err(),
             "JITO_SEND_LANE_MODE=erpc_swqos_only requires JITO_ERPC_SWQOS_ENABLED=YES"
         );
         options.erpc_swqos_enabled = true;
+        options.send_fanout = true;
         options.send_lane_mode = SendLaneMode::HeliusErpcSwqosStack;
         assert_eq!(
             options.validate_send_lane_mode().unwrap_err(),
@@ -11671,6 +11846,43 @@ mod tests {
         assert_eq!(
             options.validate_send_lane_mode().unwrap_err(),
             "JITO_SEND_LANE_MODE=helius_nozomi_astralane_lunar_stack requires JITO_LUNAR_LANDER_ENABLED=YES"
+        );
+
+        options = disabled_options();
+        options.send_lane_mode = SendLaneMode::Turbo;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=turbo requires JITO_SEND_FANOUT=YES"
+        );
+        options.send_fanout = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=turbo requires JITO_HELIUS_SENDER_ENABLED=YES"
+        );
+        options.helius_sender_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=turbo requires JITO_NOZOMI_ENABLED=YES"
+        );
+        options.nozomi_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=turbo requires JITO_ASTRALANE_ENABLED=YES"
+        );
+        options.astralane_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=turbo requires JITO_LUNAR_LANDER_ENABLED=YES"
+        );
+        options.lunar_lander_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=turbo requires JITO_ZERO_SLOT_ENABLED=YES"
+        );
+        options.zero_slot_enabled = true;
+        assert_eq!(
+            options.validate_send_lane_mode().unwrap_err(),
+            "JITO_SEND_LANE_MODE=turbo requires JITO_TPU_JET_ENABLED=YES"
         );
 
         options = disabled_options();

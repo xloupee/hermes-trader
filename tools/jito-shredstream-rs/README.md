@@ -236,6 +236,12 @@ a send lane. If
 - `mixed`: current behavior. Build/sign one transaction with configured Jito,
   Helius Sender, and enabled paid-provider tips, then fan out the same signed
   bytes to all enabled lane families.
+- `fast`: use Helius Sender plus Nozomi with the same signed bytes. Requires
+  `JITO_SEND_FANOUT=YES`, `JITO_HELIUS_SENDER_ENABLED=YES`, and
+  `JITO_NOZOMI_ENABLED=YES`.
+- `turbo`: use all current non-Beam provider lanes: Helius Sender, Nozomi,
+  Astralane, Lunar Lander, ZeroSlot, and TPU Jet. Requires
+  `JITO_SEND_FANOUT=YES` and all six provider families enabled.
 - `rpc_only`: use RPC endpoints and priority fee only.
 - `jito_only`: use Jito block-engine endpoints and Jito tip only. Requires
   `JITO_SEND_FANOUT=YES` and `JITO_BLOCK_ENGINE_SEND_URLS`.

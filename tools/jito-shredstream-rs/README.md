@@ -209,13 +209,19 @@ cache value intact. Cache telemetry includes provider source labels such as
 `blockhashSourceRpc`, `copyWalletBalanceSourceRpc`, and
 `accountPriorityFeeSourceRpc`, with query strings/API keys stripped.
 
-Send fanout is default-off:
+The Droplet launcher defaults to the `fast` lane shape: Helius Sender Max plus
+Nozomi same-signature fanout. Endpoint URLs and tip accounts still come from
+env, and startup fails closed if they are missing.
 
 ```bash
 JITO_SEND_FANOUT=YES
-JITO_SEND_LANE_MODE=mixed
-JITO_SEND_RPC_URLS=https://rpc-a.example,https://rpc-b.example
-JITO_BLOCK_ENGINE_SEND_URLS=https://frankfurt.mainnet.block-engine.jito.wtf,https://london.mainnet.block-engine.jito.wtf
+JITO_SEND_LANE_MODE=fast
+JITO_HELIUS_SENDER_ENABLED=true
+JITO_HELIUS_SENDER_SWQOS_ONLY=false
+JITO_HELIUS_SENDER_TIP_LAMPORTS=1000000
+JITO_NOZOMI_ENABLED=true
+JITO_NOZOMI_TIP_LAMPORTS=1000000
+JITO_MAX_PROVIDER_TIP_LAMPORTS=2000000
 ```
 
 When fanout is enabled, the worker starts one send for every configured RPC
@@ -236,9 +242,11 @@ a send lane. If
 - `mixed`: current behavior. Build/sign one transaction with configured Jito,
   Helius Sender, and enabled paid-provider tips, then fan out the same signed
   bytes to all enabled lane families.
-- `fast`: use Helius Sender plus Nozomi with the same signed bytes. Requires
-  `JITO_SEND_FANOUT=YES`, `JITO_HELIUS_SENDER_ENABLED=YES`, and
-  `JITO_NOZOMI_ENABLED=YES`.
+- `fast`: use Helius Sender Max plus Nozomi with the same signed bytes.
+  Requires `JITO_SEND_FANOUT=YES`, `JITO_HELIUS_SENDER_ENABLED=YES`,
+  `JITO_HELIUS_SENDER_SWQOS_ONLY=false`, `JITO_NOZOMI_ENABLED=YES`, a Helius
+  Sender tip of at least `1000000` lamports, and enough provider-tip cap for
+  both the Helius and Nozomi tips.
 - `turbo`: use all current non-Beam provider lanes: Helius Sender, Nozomi,
   Astralane, Lunar Lander, ZeroSlot, and TPU Jet. Requires
   `JITO_SEND_FANOUT=YES` and all six provider families enabled.
@@ -286,7 +294,7 @@ a send lane. If
   `JITO_TPU_JET_WS_URL`, and `JITO_TPU_JET_SIDECAR_URL`. This mode does not
   include the Helius Sender tip and is reserved for the cheaper TPU-only canary.
 - `tpu_quic_only`: use the direct TPU QUIC lane only. This is the safe fallback
-  lane for the Yellowstone Jet spike because it stays on the worker's Solana
+  lane for Yellowstone TPU experiments because it stays on the worker's Solana
   2.2.1 dependency stack. Requires `JITO_TPU_QUIC_ENABLED=YES`,
   `JITO_TPU_QUIC_RPC_URL`, and `JITO_TPU_QUIC_WS_URL`. This mode does not
   include the Helius Sender tip and is reserved for the cheaper TPU-only canary.
@@ -328,8 +336,18 @@ The sidecar launcher maps those into `JITO_TPU_JET_GRPC_URL` and
 This only changes the Yellowstone/Geyser input used by the Jet sidecar; it does
 not create a Shreder transaction submission lane.
 
+Build the sidecar from `tools/jito-shredstream-rs` before using a Jet canary:
+
+```bash
+cargo build --release \
+  --manifest-path yellowstone-jet-sidecar/Cargo.toml \
+  --target-dir target/yellowstone-jet-sidecar \
+  --bin yellowstone-jet-sidecar
+```
+
 The Droplet launcher is `run-tpu-jet-sidecar.sh`; the matching systemd template
-is `systemd/jito-tpu-jet-sidecar.service`.
+is `systemd/jito-tpu-jet-sidecar.service`. By default the launcher expects the
+binary at `target/yellowstone-jet-sidecar/release/yellowstone-jet-sidecar`.
 
 Direct TPU QUIC is default-off:
 

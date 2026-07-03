@@ -50,7 +50,7 @@ Canaries:
   account-priority-cache Baseline plus warm writable-account getRecentPrioritizationFees cache
   helius-sender-max Helius Sender Max only, 1000000 lamport Sender tip
   helius-regional-fanout Helius Sender only, same fee shape, multiple regional Sender endpoints
-  fast Helius Sender regional fanout plus Nozomi
+  fast Helius Sender Max regional fanout plus Nozomi
   turbo Helius Sender regional fanout plus all non-Beam provider lanes
   nozomi-only   Nozomi JSON-RPC only with Nozomi tip, for delivery-lane isolation
   helius-nozomi-stack Helius Sender plus Nozomi same-signature fanout with both tips
@@ -388,13 +388,15 @@ canary_values() {
     fast)
       CANARY_LANE_MODE="fast"
       CANARY_HELIUS_ENABLED="true"
+      CANARY_HELIUS_SWQOS_ONLY="false"
+      CANARY_HELIUS_TIP=1000000
       CANARY_HELIUS_URLS="${JITO_CANARY_HELIUS_REGION_URLS:-}"
       CANARY_NOZOMI_ENABLED="true"
       CANARY_ASTRALANE_ENABLED="false"
       CANARY_LUNAR_LANDER_ENABLED="false"
       CANARY_BEAM_ENABLED="false"
       CANARY_ZERO_SLOT_ENABLED="false"
-      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_FAST_MAX_PROVIDER_TIP_LAMPORTS:-1387500}"
+      CANARY_MAX_PROVIDER_TIP_LAMPORTS="${JITO_CANARY_FAST_MAX_PROVIDER_TIP_LAMPORTS:-2000000}"
       CANARY_ACCOUNT_PRIORITY_FEE_ENABLED="${JITO_CANARY_STACK_ACCOUNT_PRIORITY_FEE_ENABLED:-false}"
       if [[ -z "$CANARY_HELIUS_URLS" ]]; then
         echo "fast requires JITO_CANARY_HELIUS_REGION_URLS" >&2

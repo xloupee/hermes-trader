@@ -102,13 +102,15 @@ window does not meet the minimum scored-row and `txDelta` coverage thresholds.
    `nozomi-only` applies `JITO_SEND_LANE_MODE=nozomi-only`,
    `JITO_NOZOMI_ENABLED=true`, and a Nozomi tip of at least `1000000`
    lamports. This is a lane test, not the final stack.
-8. Helius + Nozomi same-signature stack:
-   `helius-nozomi-stack` applies `JITO_SEND_LANE_MODE=helius-nozomi-stack`,
-   keeps Helius Sender enabled, enables Nozomi, signs one transaction containing
-   the Helius tip and Nozomi tip, then fans out identical bytes to both
-   providers. This costs both provider tips on every landed transaction, so
-   judge it by landed rate, same-slot rate, `txDelta`, submitted-not-landed,
-   and total configured tip cost.
+8. Helius Sender Max + Nozomi same-signature fast stack:
+   `fast` applies `JITO_SEND_LANE_MODE=fast`, keeps Helius Sender enabled,
+   forces `JITO_HELIUS_SENDER_SWQOS_ONLY=false`, enables Nozomi, signs one
+   transaction containing a 1000000 lamport Helius Sender tip and the Nozomi
+   tip, then fans out identical bytes to both providers. This costs both
+   provider tips on every landed transaction, so keep
+   `JITO_MAX_PROVIDER_TIP_LAMPORTS` high enough for both tips and judge it by
+   landed rate, same-slot rate, `txDelta`, submitted-not-landed, and total
+   configured tip cost.
 9. Astralane IrisB, only after `JITO_ASTRALANE_API_KEY`,
    `JITO_ASTRALANE_URLS`, and the Astralane tip account(s) are configured.
    Start with `astralane-only` for delivery-lane isolation, then
@@ -532,7 +534,10 @@ Build the sidecar on the Droplet from `/opt/jito-feed-probe-watch` before the
 Jet canary:
 
 ```bash
-cargo build --release --manifest-path spikes/yellowstone-jet-compat/Cargo.toml --bin yellowstone-jet-sidecar
+cargo build --release \
+  --manifest-path yellowstone-jet-sidecar/Cargo.toml \
+  --target-dir target/yellowstone-jet-sidecar \
+  --bin yellowstone-jet-sidecar
 ```
 
 Required env before starting the sidecar:

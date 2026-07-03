@@ -4,7 +4,7 @@ set -euo pipefail
 APP_ENV_FILE="${JITO_APP_ENV_FILE:-/opt/pumpfun-migration-bot/.env}"
 WORKER_ENV_FILE="${JITO_WORKER_ENV_FILE:-/etc/jito-copy-live.env}"
 WORKER_DIR="${JITO_WORKER_DIR:-/opt/jito-feed-probe-watch}"
-SIDECAR_BIN="${JITO_TPU_JET_SIDECAR_BIN:-$WORKER_DIR/spikes/yellowstone-jet-compat/target/release/yellowstone-jet-sidecar}"
+SIDECAR_BIN="${JITO_TPU_JET_SIDECAR_BIN:-$WORKER_DIR/target/yellowstone-jet-sidecar/release/yellowstone-jet-sidecar}"
 
 load_env_file() {
   local env_file="$1"

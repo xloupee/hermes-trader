@@ -279,6 +279,8 @@ fi
 
 "$CONTROL" mark fast 2026-06-25T00:00:00Z >/dev/null 2>/dev/null
 assert_marker CANARY_SEND_LANE_MODE fast
+assert_marker CANARY_HELIUS_TIP_LAMPORTS 1000000
+assert_marker CANARY_HELIUS_SWQOS_ONLY false
 assert_marker CANARY_HELIUS_URL_COUNT 5
 assert_marker CANARY_HELIUS_REGION_URLS_CONFIGURED true
 assert_marker CANARY_NOZOMI_ENABLED true
@@ -286,7 +288,7 @@ assert_marker CANARY_ASTRALANE_ENABLED false
 assert_marker CANARY_LUNAR_LANDER_ENABLED false
 assert_marker CANARY_BEAM_ENABLED false
 assert_marker CANARY_ZERO_SLOT_ENABLED false
-assert_marker CANARY_MAX_PROVIDER_TIP_LAMPORTS 1387500
+assert_marker CANARY_MAX_PROVIDER_TIP_LAMPORTS 2000000
 
 "$CONTROL" mark turbo 2026-06-25T00:00:00Z >/dev/null 2>/dev/null
 assert_marker CANARY_SEND_LANE_MODE turbo
@@ -371,6 +373,8 @@ assert_env JITO_BEAM_ENABLED false
 PATH="$MOCK_BIN:$PATH" JITO_CANARY_SKIP_BASELINE_GATE=YES "$CONTROL" apply fast >/dev/null
 assert_env JITO_SEND_LANE_MODE fast
 assert_env JITO_HELIUS_SENDER_ENABLED true
+assert_env JITO_HELIUS_SENDER_TIP_LAMPORTS 1000000
+assert_env JITO_HELIUS_SENDER_SWQOS_ONLY false
 assert_env JITO_HELIUS_SENDER_URLS "$JITO_CANARY_HELIUS_REGION_URLS"
 assert_env JITO_NOZOMI_ENABLED true
 assert_env JITO_ASTRALANE_ENABLED false

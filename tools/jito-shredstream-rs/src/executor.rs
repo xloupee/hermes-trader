@@ -476,6 +476,10 @@ impl SendLaneMode {
         )
     }
 
+    fn uses_helius_sender_max_tip(self) -> bool {
+        matches!(self, Self::Fast | Self::HeliusSenderMax)
+    }
+
     fn uses_nozomi_tip(self) -> bool {
         matches!(
             self,
@@ -5706,11 +5710,11 @@ impl CopyExecutionOptions {
         if self.helius_sender_urls.is_empty() {
             return Err("JITO_HELIUS_SENDER_ENABLED requires JITO_HELIUS_SENDER_URLS".to_string());
         }
-        if self.send_lane_mode == SendLaneMode::HeliusSenderMax && self.helius_sender_swqos_only {
-            return Err(
-                "JITO_SEND_LANE_MODE=helius_sender_max requires JITO_HELIUS_SENDER_SWQOS_ONLY=false"
-                    .to_string(),
-            );
+        if self.send_lane_mode.uses_helius_sender_max_tip() && self.helius_sender_swqos_only {
+            return Err(format!(
+                "JITO_SEND_LANE_MODE={} requires JITO_HELIUS_SENDER_SWQOS_ONLY=false",
+                self.send_lane_mode.as_str()
+            ));
         }
         if self.priority_fee_micro_lamports.unwrap_or(0) == 0 {
             return Err(
@@ -6970,8 +6974,12 @@ impl CopyExecutionOptions {
                         .iter()
                         .enumerate()
                         .map(|(index, url)| {
-                            let url = helius_sender_url(url, self.helius_sender_swqos_only);
-                            let mode = helius_sender_mode(self.helius_sender_swqos_only);
+                            let swqos_only = helius_sender_swqos_only_for_mode(
+                                self.helius_sender_swqos_only,
+                                self.send_lane_mode,
+                            );
+                            let url = helius_sender_url(url, swqos_only);
+                            let mode = helius_sender_mode(swqos_only);
                             SendEndpoint {
                                 label: format!(
                                     "helius-sender-{}-{}:{}",
@@ -7187,13 +7195,17 @@ impl CopyExecutionOptions {
 }
 
 fn helius_sender_min_tip_lamports(swqos_only: bool, send_lane_mode: SendLaneMode) -> u64 {
-    if send_lane_mode == SendLaneMode::HeliusSenderMax {
+    if send_lane_mode.uses_helius_sender_max_tip() {
         HELIUS_SENDER_MAX_TIP_LAMPORTS
     } else if swqos_only {
         HELIUS_SENDER_SWQOS_ONLY_MIN_TIP_LAMPORTS
     } else {
         HELIUS_SENDER_MIN_TIP_LAMPORTS
     }
+}
+
+fn helius_sender_swqos_only_for_mode(swqos_only: bool, send_lane_mode: SendLaneMode) -> bool {
+    swqos_only && !send_lane_mode.uses_helius_sender_max_tip()
 }
 
 fn helius_sender_mode(swqos_only: bool) -> &'static str {
@@ -11194,12 +11206,13 @@ mod tests {
 
         enable_nozomi(&mut options);
         options.send_lane_mode = SendLaneMode::Fast;
+        options.helius_sender_tip_lamports = Some(HELIUS_SENDER_MAX_TIP_LAMPORTS);
         let fee_config = options.tx_fee_config([0u8; 64]);
         assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
         assert_eq!(fee_config.jito_tip_lamports, None);
         assert_eq!(
             fee_config.helius_sender_tip_lamports,
-            Some(HELIUS_SENDER_MIN_TIP_LAMPORTS)
+            Some(HELIUS_SENDER_MAX_TIP_LAMPORTS)
         );
         assert_eq!(fee_config.nozomi_tip_lamports, Some(1_000_000));
         assert_eq!(fee_config.astralane_tip_lamports, None);
@@ -11211,6 +11224,7 @@ mod tests {
         );
 
         options.send_lane_mode = SendLaneMode::HeliusTpuJet;
+        options.helius_sender_tip_lamports = Some(HELIUS_SENDER_MIN_TIP_LAMPORTS);
         let fee_config = options.tx_fee_config([0u8; 64]);
         assert_eq!(fee_config.compute_unit_price_micro_lamports, Some(500_000));
         assert_eq!(fee_config.jito_tip_lamports, None);
@@ -11666,10 +11680,16 @@ mod tests {
         enable_nozomi(&mut options);
         options.send_fanout = true;
         options.send_lane_mode = SendLaneMode::Fast;
+        options.helius_sender_swqos_only = true;
         assert_eq!(
             endpoint_kinds(&options.selected_send_endpoints()),
             vec!["helius_sender", "nozomi_json_rpc"]
         );
+        assert_eq!(
+            options.selected_send_endpoints()[0].url,
+            "https://sender.helius-rpc.com/fast"
+        );
+        options.helius_sender_swqos_only = false;
 
         enable_erpc_swqos(&mut options);
         options.send_lane_mode = SendLaneMode::HeliusErpcSwqosStack;
@@ -12261,6 +12281,30 @@ mod tests {
         options
             .validate_helius_sender()
             .expect("Sender Max should accept 1M lamports in non-SWQoS mode");
+
+        enable_nozomi(&mut options);
+        options.send_fanout = true;
+        options.send_lane_mode = SendLaneMode::Fast;
+        options.helius_sender_tip_lamports = Some(HELIUS_SENDER_MIN_TIP_LAMPORTS);
+        assert_eq!(
+            options.validate_helius_sender().unwrap_err(),
+            format!(
+                "JITO_HELIUS_SENDER_TIP_LAMPORTS must be >= {} lamports",
+                HELIUS_SENDER_MAX_TIP_LAMPORTS
+            )
+        );
+
+        options.helius_sender_tip_lamports = Some(HELIUS_SENDER_MAX_TIP_LAMPORTS);
+        options.helius_sender_swqos_only = true;
+        assert_eq!(
+            options.validate_helius_sender().unwrap_err(),
+            "JITO_SEND_LANE_MODE=fast requires JITO_HELIUS_SENDER_SWQOS_ONLY=false"
+        );
+
+        options.helius_sender_swqos_only = false;
+        options
+            .validate_helius_sender()
+            .expect("fast should accept Sender Max Helius tip plus Nozomi");
     }
 
     #[test]

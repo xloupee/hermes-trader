@@ -29,7 +29,7 @@ JITO_HELIUS_SENDER_URLS=
 JITO_HELIUS_SENDER_SWQOS_ONLY=false
 JITO_HELIUS_SENDER_TIP_LAMPORTS=
 JITO_HELIUS_SENDER_TIP_ACCOUNT=
-JITO_SEND_LANE_MODE=mixed
+JITO_SEND_LANE_MODE=fast
 ```
 
 When `JITO_HELIUS_SENDER_ENABLED` is true, startup fails closed unless:
@@ -55,6 +55,9 @@ Tip minimums:
 4. On a watched-wallet buy, Rust decodes, matches, classifies, plans, builds, signs, serializes, and submits without Telegram, Supabase, filesystem, dashboard, or config network calls before submit.
 5. `JITO_SEND_LANE_MODE` selects fee transfers and endpoint families from warm startup config:
    - `mixed`: configured Jito and Sender tips, all enabled lane families.
+   - `fast`: Sender Max `/fast` tip plus Nozomi tip, same signed bytes,
+     minimum 1000000 Helius Sender lamports, and
+     `JITO_HELIUS_SENDER_SWQOS_ONLY=false`.
    - `rpc_only`: priority fee only, RPC endpoints.
    - `jito_only`: Jito tip only, Jito block-engine endpoints.
    - `helius_sender_only`: Sender tip only, Helius Sender endpoints.

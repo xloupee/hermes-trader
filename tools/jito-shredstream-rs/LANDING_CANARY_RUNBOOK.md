@@ -621,3 +621,33 @@ Do not promote from:
 - TPU dispatch success without landing improvement
 - any change that adds pre-submit Telegram, Supabase, DB, filesystem, metadata,
   price, or config lookups
+
+## Collected TPU QUIC Sample Override
+
+When operator intent is to make the collected TPU sample sufficient, lower only
+the scoring gate with `JITO_CANARY_MIN_SENT`; do not change the live hot path:
+
+```bash
+JITO_CANARY_MIN_SENT=5 ./landing-canary-control.sh score 2026-07-08T01:44:26Z 1
+JITO_CANARY_MIN_SENT=4 \
+  JITO_CANARY_COMPARE_MIN_POSITION_ELIGIBLE=1 \
+  JITO_CANARY_MIN_TX_DELTA_COVERAGE=0 \
+  ./landing-canary-control.sh compare 2026-07-08T01:34:18Z 2026-07-08T01:44:26Z
+```
+
+For the `tpu-quic-current-leader-fanout` sample collected on 2026-07-08, the
+sample gate passed but promotion still failed:
+
+- baseline: 4 sent, 100% landed, 50% same-slot, p50 `txDelta=236`, p90
+  `txDelta=689`
+- canary: 5 sent, 100% landed, 60% same-slot, p50 `txDelta=166`, p90
+  `txDelta=900`
+- TPU QUIC dispatched on 2 of 5 buys and timed out on 3 of 5 buys
+- first ACK remained Helius FRA for the collected buys
+- trailing sells landed in the sampled window
+
+Decision: do not promote generic TPU QUIC fanout from this sample. If continuing
+the generic TPU investigation, run `tpu-quic-current-leader-only` as an
+isolation canary with the same fee shape. If TPU-only does not improve landing
+position, stop tuning public QUIC and move to a separate default-off
+`swqos_quic_relay` lane backed by a real whitelisted relay/provider.

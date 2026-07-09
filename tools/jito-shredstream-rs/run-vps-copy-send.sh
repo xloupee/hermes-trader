@@ -5,6 +5,7 @@ APP_ENV_FILE="${JITO_APP_ENV_FILE:-/opt/pumpfun-migration-bot/.env}"
 WORKER_ENV_FILE="${JITO_WORKER_ENV_FILE:-/etc/jito-copy-live.env}"
 WORKER_DIR="${JITO_WORKER_DIR:-/opt/jito-feed-probe-watch}"
 WORKER_BIN="${JITO_WORKER_BIN:-$WORKER_DIR/target/release/jito-feed-probe}"
+UDP_PREPARE_SCRIPT="${JITO_SHREDSTREAM_UDP_PREPARE_SCRIPT:-$WORKER_DIR/prepare-shredstream-udp.sh}"
 
 load_env_file() {
   local env_file="$1"
@@ -191,7 +192,10 @@ export JITO_COPY_EXECUTIONS_PATH="${JITO_COPY_EXECUTIONS_PATH:-/var/log/jito-cop
 export JITO_COPY_EXECUTIONS_WRITE_QUEUE_CAPACITY="${JITO_COPY_EXECUTIONS_WRITE_QUEUE_CAPACITY:-1024}"
 export JITO_COPY_EXECUTIONS_FLUSH_INTERVAL_MS="${JITO_COPY_EXECUTIONS_FLUSH_INTERVAL_MS:-250}"
 export JITO_COPY_EXECUTION_CONCURRENCY="${JITO_COPY_EXECUTION_CONCURRENCY:-4}"
-export JITO_COPY_EXECUTION_QUEUE_CAPACITY="${JITO_COPY_EXECUTION_QUEUE_CAPACITY:-1024}"
+export JITO_COPY_EXECUTION_QUEUE_CAPACITY="${JITO_COPY_EXECUTION_QUEUE_CAPACITY:-64}"
+export JITO_DIRECT_PUMP_BUY_COMPUTE_UNIT_LIMIT="${JITO_DIRECT_PUMP_BUY_COMPUTE_UNIT_LIMIT:-400000}"
+export JITO_MIGRATED_AMM_BUY_COMPUTE_UNIT_LIMIT="${JITO_MIGRATED_AMM_BUY_COMPUTE_UNIT_LIMIT:-400000}"
+export JITO_SOURCE_PRIORITY_FEE_MULTIPLIER_BPS="${JITO_SOURCE_PRIORITY_FEE_MULTIPLIER_BPS:-0}"
 export JITO_ADDRESS_LOOKUP_TABLES="${JITO_ADDRESS_LOOKUP_TABLES:-4vX5U9XsiY11infmC13d6VFPjvUqtuRw744r4o94dyow}"
 export JITO_DISABLE_SIGNAL_OBSERVATIONS="${JITO_DISABLE_SIGNAL_OBSERVATIONS:-true}"
 export JITO_SIGNAL_OBSERVATION_QUEUE_CAPACITY="${JITO_SIGNAL_OBSERVATION_QUEUE_CAPACITY:-4096}"
@@ -226,6 +230,19 @@ validate_capped_int() {
   fi
 }
 
+validate_int_range() {
+  local name="$1"
+  local value="$2"
+  local minimum="$3"
+  local maximum="$4"
+
+  validate_nonnegative_int "$name" "$value"
+  if (( value < minimum || value > maximum )); then
+    echo "$name must be between $minimum and $maximum; got $value" >&2
+    exit 1
+  fi
+}
+
 if [[ ! -x "$WORKER_BIN" ]]; then
   echo "jito-feed-probe binary not found or not executable: $WORKER_BIN" >&2
   exit 1
@@ -235,6 +252,36 @@ if [[ ! -f "$JITO_COPY_KEYPAIR_PATH" ]]; then
   echo "copy keypair not found: $JITO_COPY_KEYPAIR_PATH" >&2
   exit 1
 fi
+
+# This is deliberately read-only. Kernel buffer changes are owned by the proxy
+# deployment and require an explicit prepare-shredstream-udp.sh apply command.
+UDP_PREFLIGHT_MODE="$(printf '%s' "${JITO_SHREDSTREAM_UDP_PREFLIGHT_MODE:-warn}" | tr '[:upper:]' '[:lower:]')"
+case "$UDP_PREFLIGHT_MODE" in
+  require)
+    if [[ ! -x "$UDP_PREPARE_SCRIPT" ]]; then
+      echo "ShredStream UDP preflight is required but missing: $UDP_PREPARE_SCRIPT" >&2
+      exit 1
+    fi
+    "$UDP_PREPARE_SCRIPT" check
+    ;;
+  warn)
+    if [[ ! -x "$UDP_PREPARE_SCRIPT" ]]; then
+      echo "warning: ShredStream UDP preflight is missing: $UDP_PREPARE_SCRIPT" >&2
+    elif ! "$UDP_PREPARE_SCRIPT" check; then
+      echo "warning: ShredStream UDP receive buffers are below the requested size" >&2
+    fi
+    ;;
+  off)
+    ;;
+  *)
+    echo "JITO_SHREDSTREAM_UDP_PREFLIGHT_MODE must be require, warn, or off; got $UDP_PREFLIGHT_MODE" >&2
+    exit 1
+    ;;
+esac
+
+validate_int_range JITO_DIRECT_PUMP_BUY_COMPUTE_UNIT_LIMIT "$JITO_DIRECT_PUMP_BUY_COMPUTE_UNIT_LIMIT" 50000 1400000
+validate_int_range JITO_MIGRATED_AMM_BUY_COMPUTE_UNIT_LIMIT "$JITO_MIGRATED_AMM_BUY_COMPUTE_UNIT_LIMIT" 50000 1400000
+validate_int_range JITO_SOURCE_PRIORITY_FEE_MULTIPLIER_BPS "$JITO_SOURCE_PRIORITY_FEE_MULTIPLIER_BPS" 0 100000
 
 validate_capped_int \
   JITO_PRIORITY_FEE_MICRO_LAMPORTS \

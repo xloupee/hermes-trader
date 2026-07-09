@@ -1,9 +1,11 @@
 import "dotenv/config";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { appendFile, chmod, mkdir, open, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
 import { Connection, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
+import bs58 from "bs58";
 import { buildMigrationReplyMarkup, escapeHtml, extractMigrationData, formatMigrationMessage, getEventId } from "./format.js";
 import { createTelegramCommandPoller } from "./commands.js";
 import {
@@ -1126,6 +1128,13 @@ function copyTradeSubmissionBlockedReason(provider: TradeExecutionProvider): str
   }
 
   return copyTradeLiveExecutionBlockedReason(copyTradeExecutionModeConfig());
+}
+
+function copyTradeBuySubmissionBlockedReason(provider: TradeExecutionProvider): string | null {
+  if (rustJitoSnapshotModeActive()) {
+    return "Rust/Jito snapshot mode owns copy buy execution";
+  }
+  return copyTradeSubmissionBlockedReason(provider);
 }
 
 function rustTrailingSellDirectExecutionGate(provider: TradeExecutionProvider): DirectExecutionGateConfig {
@@ -3126,7 +3135,7 @@ async function sendCopyTradeSimulationAlert(
       }
     }
 
-    const blockedReason = copyTradeSubmissionBlockedReason(executionProvider);
+    const blockedReason = copyTradeBuySubmissionBlockedReason(executionProvider);
     latencyTracker.mark("live_gate_checked", {
       status: blockedReason ? "blocked" : "ok",
       reason: blockedReason
@@ -3207,7 +3216,7 @@ async function sendCopyTradeSimulationAlert(
     }
     copyBuyReserved = true;
 
-    const finalBlockedReason = copyTradeSubmissionBlockedReason(executionProvider);
+    const finalBlockedReason = copyTradeBuySubmissionBlockedReason(executionProvider);
     if (finalBlockedReason) {
       if (durableCopyBuyClaimKey) {
         await safelyFailCopyTradeBuyIdempotency(copyTradeBuyIdempotency, durableCopyBuyClaimKey, finalBlockedReason);
@@ -6105,23 +6114,42 @@ function rustAsyncPlatformFeeCanaryBlockedReason({
 }
 
 async function processRustAsyncPlatformFeeCollectionRows(store: CashbackStore): Promise<void> {
-  const entries = await store.listPlatformFeeCollections({
-    statuses: ["pending", "submitted"],
-    limit: config.copyTradeRustAsyncPlatformFeeMaxRows
-  });
-
-  for (const entry of entries) {
+  const leaseDurationMs = Math.max(
+    config.copyTradeRustAsyncPlatformFeePollMs * 3,
+    config.copyTradeRustAsyncPlatformFeeConfirmationTimeoutMs + 10_000
+  );
+  for (let index = 0; index < config.copyTradeRustAsyncPlatformFeeMaxRows; index += 1) {
+    const leaseToken = `${process.pid}:${randomUUID()}`;
+    const [entry] = await store.claimPlatformFeeCollections({
+      statuses: ["pending", "submitted"],
+      leaseToken,
+      leaseDurationMs,
+      limit: 1
+    });
+    if (!entry) {
+      break;
+    }
     try {
-      await processRustAsyncPlatformFeeCollection(entry, store);
+      await processRustAsyncPlatformFeeCollection(entry, store, leaseToken);
     } catch (error) {
       console.warn(`Rust async platform fee cashback collection failed for ${entry.executionKey}: ${errorMessage(error)}`);
+      await store.updatePlatformFeeCollection({
+        executionKey: entry.executionKey,
+        collectionStatus: entry.platformFeeCollectionStatus || "pending",
+        errorText: errorMessage(error),
+        expectedLeaseToken: leaseToken,
+        releaseLease: true
+      }).catch((releaseError) => {
+        console.warn(`Could not release Rust async platform fee lease for ${entry.executionKey}: ${errorMessage(releaseError)}`);
+      });
     }
   }
 }
 
 async function processRustAsyncPlatformFeeCollection(
   entry: CashbackLedgerEntry,
-  store: CashbackStore
+  store: CashbackStore,
+  leaseToken: string
 ): Promise<void> {
   const collectionStatus = entry.platformFeeCollectionStatus || "not_required";
 
@@ -6131,12 +6159,27 @@ async function processRustAsyncPlatformFeeCollection(
         executionKey: entry.executionKey,
         collectionStatus: "failed",
         ledgerStatus: "voided",
-        errorText: "submitted platform fee collection is missing transfer signature"
+        errorText: "submitted platform fee collection is missing transfer signature",
+        expectedLeaseToken: leaseToken,
+        releaseLease: true
       });
       return;
     }
 
-    await confirmRustAsyncPlatformFeeTransfer(entry, store, entry.platformFeeTransferSignature);
+    if (entry.platformFeeTransactionBase64) {
+      const persistedTransfer: PreparedRustAsyncPlatformFeeTransfer = {
+        signature: entry.platformFeeTransferSignature,
+        transactionBase64: entry.platformFeeTransactionBase64,
+        recentBlockhash: entry.platformFeeRecentBlockhash || null,
+        lastValidBlockHeight: entry.platformFeeLastValidBlockHeight ?? null
+      };
+      // A prior broadcast may have been dropped after the RPC accepted our bytes. Rebroadcasting
+      // the exact persisted transaction is idempotent at the Solana signature level.
+      await broadcastRustAsyncPlatformFeeTransfer(persistedTransfer).catch((error) => {
+        console.warn(`Could not rebroadcast persisted platform fee transaction ${persistedTransfer.signature}: ${errorMessage(error)}`);
+      });
+    }
+    await confirmRustAsyncPlatformFeeTransfer(entry, store, entry.platformFeeTransferSignature, leaseToken);
     return;
   }
 
@@ -6151,7 +6194,9 @@ async function processRustAsyncPlatformFeeCollection(
       collectionStatus: "failed",
       ledgerStatus: "voided",
       errorText: `platform fee collection exceeded ${config.copyTradeRustAsyncPlatformFeeMaxAttempts} attempts`,
-      attempts
+      attempts,
+      expectedLeaseToken: leaseToken,
+      releaseLease: true
     });
     return;
   }
@@ -6163,22 +6208,48 @@ async function processRustAsyncPlatformFeeCollection(
       collectionStatus: "failed",
       ledgerStatus: "voided",
       errorText: `local trading wallet ${entry.tradingWalletPublicKey} is not available for async platform fee collection`,
-      attempts
+      attempts,
+      expectedLeaseToken: leaseToken,
+      releaseLease: true
     });
     return;
   }
 
   const nextAttempts = attempts + 1;
   try {
-    const signature = await sendRustAsyncPlatformFeeTransfer(entry, wallet);
+    const signedTransfer = entry.platformFeeTransactionBase64 && entry.platformFeeTransferSignature
+      ? {
+          signature: entry.platformFeeTransferSignature,
+          transactionBase64: entry.platformFeeTransactionBase64,
+          recentBlockhash: entry.platformFeeRecentBlockhash || null,
+          lastValidBlockHeight: entry.platformFeeLastValidBlockHeight ?? null
+        }
+      : await prepareRustAsyncPlatformFeeTransfer(entry, wallet);
+
+    const persisted = await store.updatePlatformFeeCollection({
+      executionKey: entry.executionKey,
+      collectionStatus: "pending",
+      transferSignature: signedTransfer.signature,
+      transactionBase64: signedTransfer.transactionBase64,
+      recentBlockhash: signedTransfer.recentBlockhash,
+      lastValidBlockHeight: signedTransfer.lastValidBlockHeight,
+      errorText: null,
+      expectedLeaseToken: leaseToken
+    });
+    if (!persisted) {
+      return;
+    }
+
+    const signature = await broadcastRustAsyncPlatformFeeTransfer(signedTransfer);
     await store.updatePlatformFeeCollection({
       executionKey: entry.executionKey,
       collectionStatus: "submitted",
       transferSignature: signature,
       errorText: null,
-      attempts: nextAttempts
+      attempts: nextAttempts,
+      expectedLeaseToken: leaseToken
     });
-    await confirmRustAsyncPlatformFeeTransfer(entry, store, signature);
+    await confirmRustAsyncPlatformFeeTransfer(entry, store, signature, leaseToken);
   } catch (error) {
     const text = errorMessage(error);
     const terminal = nextAttempts >= config.copyTradeRustAsyncPlatformFeeMaxAttempts ||
@@ -6188,15 +6259,24 @@ async function processRustAsyncPlatformFeeCollection(
       collectionStatus: terminal ? "failed" : "pending",
       ledgerStatus: terminal ? "voided" : undefined,
       errorText: text,
-      attempts: nextAttempts
+      attempts: nextAttempts,
+      expectedLeaseToken: leaseToken,
+      releaseLease: true
     });
   }
 }
 
-async function sendRustAsyncPlatformFeeTransfer(
+type PreparedRustAsyncPlatformFeeTransfer = {
+  signature: string;
+  transactionBase64: string;
+  recentBlockhash: string | null;
+  lastValidBlockHeight: number | null;
+};
+
+async function prepareRustAsyncPlatformFeeTransfer(
   entry: CashbackLedgerEntry,
   wallet: TradingWallet
-): Promise<string> {
+): Promise<PreparedRustAsyncPlatformFeeTransfer> {
   if (!entry.platformFeeTreasury) {
     throw new Error("platform fee treasury is missing on cashback ledger row");
   }
@@ -6220,18 +6300,44 @@ async function sendRustAsyncPlatformFeeTransfer(
     toPubkey: treasury,
     lamports: Number(entry.platformFeeLamports)
   }));
+  const blockhash = await directSolanaConnection.getLatestBlockhash("processed");
+  transaction.feePayer = signer.publicKey;
+  transaction.recentBlockhash = blockhash.blockhash;
+  transaction.sign(signer);
+  if (!transaction.signature) {
+    throw new Error("platform fee transaction did not produce a signature");
+  }
 
-  return directSolanaConnection.sendTransaction(transaction, [signer], {
+  return {
+    signature: bs58.encode(transaction.signature),
+    transactionBase64: transaction.serialize().toString("base64"),
+    recentBlockhash: blockhash.blockhash,
+    lastValidBlockHeight: blockhash.lastValidBlockHeight
+  };
+}
+
+async function broadcastRustAsyncPlatformFeeTransfer(
+  transfer: PreparedRustAsyncPlatformFeeTransfer
+): Promise<string> {
+  const signature = await directSolanaConnection.sendRawTransaction(
+    Buffer.from(transfer.transactionBase64, "base64"),
+    {
     skipPreflight: false,
     preflightCommitment: "processed",
     maxRetries: config.directExecutionMaxRetries
-  });
+    }
+  );
+  if (signature !== transfer.signature) {
+    throw new Error(`platform fee RPC returned unexpected signature ${signature}`);
+  }
+  return signature;
 }
 
 async function confirmRustAsyncPlatformFeeTransfer(
   entry: CashbackLedgerEntry,
   store: CashbackStore,
-  signature: string
+  signature: string,
+  leaseToken: string
 ): Promise<void> {
   const confirmation = await waitForSignatureConfirmationResult(
     signature,
@@ -6246,7 +6352,9 @@ async function confirmRustAsyncPlatformFeeTransfer(
       collectionStatus: "confirmed",
       ledgerStatus: "claimable",
       transferSignature: signature,
-      errorText: null
+      errorText: null,
+      expectedLeaseToken: leaseToken,
+      releaseLease: true
     });
     return;
   }
@@ -6256,7 +6364,9 @@ async function confirmRustAsyncPlatformFeeTransfer(
       executionKey: entry.executionKey,
       collectionStatus: "submitted",
       transferSignature: signature,
-      errorText: confirmation.errorText
+      errorText: confirmation.errorText,
+      expectedLeaseToken: leaseToken,
+      releaseLease: true
     });
     return;
   }
@@ -6266,7 +6376,9 @@ async function confirmRustAsyncPlatformFeeTransfer(
     collectionStatus: "failed",
     ledgerStatus: "voided",
     transferSignature: signature,
-    errorText: confirmation.errorText || "platform fee transfer failed"
+    errorText: confirmation.errorText || "platform fee transfer failed",
+    expectedLeaseToken: leaseToken,
+    releaseLease: true
   });
 }
 
@@ -6351,9 +6463,11 @@ function lamportsToSolNumber(lamports: number | null): number | null {
 }
 
 function rustCopyBuyExecutionLanded(row: RustCopyTradeLocalExecutionRow): boolean {
-  return stringValue(row.chain_report.status) === "landed" ||
-    stringValue(row.chain_report.buyStatus) === "buyLanded" ||
-    row.copy_slot !== null;
+  const explicitlySuccessful = Object.prototype.hasOwnProperty.call(row.chain_report, "err") &&
+    row.chain_report.err === null;
+  const confirmedLanded = stringValue(row.chain_report.status) === "landed" ||
+    stringValue(row.chain_report.buyStatus) === "buyLanded";
+  return confirmedLanded && explicitlySuccessful;
 }
 
 function tradeExecutionResultFromRustCopyBuyExecution(row: RustCopyTradeLocalExecutionRow): TradeExecutionResult {

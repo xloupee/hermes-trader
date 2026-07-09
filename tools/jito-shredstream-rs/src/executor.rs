@@ -1,6 +1,6 @@
 use crate::{
     address_lookup::AddressLookupTableCache,
-    balance_cache::{WalletBalanceCache, WalletBalanceCheck},
+    balance_cache::{WalletBalanceCache, WalletBalanceCheck, WalletBalanceReservation},
     blockhash::{cached_blockhash, BlockhashCache},
     event::now_ms,
     parser::{
@@ -51,6 +51,10 @@ use tokio::{
 };
 
 pub(crate) const DEFAULT_MIGRATED_AMM_MIN_COPY_SOL: f64 = 0.00099;
+pub(crate) const DEFAULT_BUY_COMPUTE_UNIT_LIMIT: u32 = 400_000;
+const MIN_BUY_COMPUTE_UNIT_LIMIT: u32 = 50_000;
+const MAX_BUY_COMPUTE_UNIT_LIMIT: u32 = 1_400_000;
+const MAX_SOURCE_PRIORITY_FEE_MULTIPLIER_BPS: u64 = 100_000;
 const LAMPORTS_PER_SOL: f64 = 1_000_000_000.0;
 const SIGNATURE_FEE_LAMPORTS_ESTIMATE: u64 = 5_000;
 const ASSOCIATED_TOKEN_ACCOUNT_RENT_LAMPORTS_ESTIMATE: u64 = 2_100_000;
@@ -64,6 +68,7 @@ const DIRECT_PUMP_CASHBACK_FLAG_OFFSET: usize = 82;
 const DIRECT_PUMP_SELL_CONTEXT_CACHE_CAPACITY: usize = 512;
 const TRAILING_SELL_MAX_STEPS: usize = 20;
 const BLOCK_POSITION_BACKFILL_DELAYS_MS: &[u64] = &[2_000, 5_000, 10_000, 20_000];
+const MAX_COPY_EXECUTOR_QUEUE_AGE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TrailingSellPlan {
@@ -233,6 +238,9 @@ pub(crate) struct CopyExecutionOptions {
     pub(crate) send_http_timeout_ms: u64,
     pub(crate) send_lane_logging: bool,
     pub(crate) priority_fee_micro_lamports: Option<u64>,
+    pub(crate) direct_pump_buy_compute_unit_limit: u32,
+    pub(crate) migrated_amm_buy_compute_unit_limit: u32,
+    pub(crate) source_priority_fee_multiplier_bps: u64,
     pub(crate) dynamic_priority_fee_enabled: bool,
     pub(crate) dynamic_priority_fee_baseline_micro_lamports: Option<u64>,
     pub(crate) dynamic_priority_fee_aggressive_micro_lamports: Option<u64>,
@@ -697,6 +705,8 @@ pub(crate) struct CopyExecutionLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     simulation_completed_at_ms: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    send_task_started_at_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     send_submitted_at_ms: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
     signature_returned_at_ms: Option<u128>,
@@ -704,6 +714,8 @@ pub(crate) struct CopyExecutionLine {
     observed_to_signed_ms: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
     observed_to_simulation_completed_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed_to_send_task_started_ms: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
     observed_to_send_submitted_ms: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1093,6 +1105,7 @@ pub(crate) struct RustTrailingSellLine {
 
 #[derive(Debug)]
 struct SendTransactionResult {
+    first_dispatch_started_at_ms: u128,
     signature: String,
     signature_returned: bool,
     rpc_url_count: usize,
@@ -1666,6 +1679,9 @@ impl CopyExecutor {
             send_http_timeout_ms: options.send_http_timeout_ms,
             send_lane_logging: options.stats,
             priority_fee_micro_lamports: positive_u64(options.priority_fee_micro_lamports),
+            direct_pump_buy_compute_unit_limit: options.direct_pump_buy_compute_unit_limit,
+            migrated_amm_buy_compute_unit_limit: options.migrated_amm_buy_compute_unit_limit,
+            source_priority_fee_multiplier_bps: options.source_priority_fee_multiplier_bps,
             dynamic_priority_fee_enabled: options.dynamic_priority_fee_enabled,
             dynamic_priority_fee_baseline_micro_lamports: positive_u64(
                 options.dynamic_priority_fee_baseline_micro_lamports,
@@ -1715,6 +1731,12 @@ impl CopyExecutor {
             copy_wallet_balance_guard: options.copy_wallet_balance_guard,
             account_priority_fee_enabled: options.account_priority_fee_enabled,
         };
+        execution_options
+            .validate_buy_compute_unit_limits()
+            .map_err(anyhow::Error::msg)?;
+        execution_options
+            .validate_source_priority_fee()
+            .map_err(anyhow::Error::msg)?;
         execution_options
             .validate_helius_sender()
             .map_err(anyhow::Error::msg)?;
@@ -1958,7 +1980,11 @@ impl CopyExecutor {
         timings: SignalTimings,
         copy_wallet_override: Option<Pubkey>,
     ) -> CopyExecutionLine {
-        let fee_profile = self.options.select_fee_profile(timings, request.signature);
+        let fee_profile = self.options.select_fee_profile_with_source(
+            timings,
+            request.signature,
+            request.source_compute_unit_price_micro_lamports,
+        );
         let mut line = CopyExecutionLine::new(request, &self.options, timings, &fee_profile);
         if let Some(copy_wallet) = copy_wallet_override.as_ref() {
             line.copy_wallet = Some(copy_wallet.to_string());
@@ -1983,22 +2009,34 @@ impl CopyExecutor {
         send_lane_attribution_tx: Option<mpsc::UnboundedSender<CopyExecutionOutput>>,
     ) -> CopyExecutionLine {
         let executor_started_at = Instant::now();
-        let mut fee_profile = self.options.select_fee_profile(timings, request.signature);
+        let mut fee_profile = self.options.select_fee_profile_with_source(
+            timings,
+            request.signature,
+            request.source_compute_unit_price_micro_lamports,
+        );
         let mut line = CopyExecutionLine::new(request, &self.options, timings, &fee_profile);
         if let Some(copy_wallet) = copy_wallet_override.as_ref() {
             line.copy_wallet = Some(copy_wallet.to_string());
-        }
-        if let Some(executor_enqueued_at) = executor_enqueued_at {
-            line.executor_queue_us = Some(
-                executor_started_at
-                    .duration_since(executor_enqueued_at)
-                    .as_micros(),
-            );
         }
         if let Some(queue_context) = queue_context {
             line.executor_queue_lane = Some(queue_context.lane);
             line.executor_queue_depth_at_enqueue = Some(queue_context.depth_at_enqueue);
             line.executor_worker_busy_at_enqueue = Some(queue_context.busy_workers_at_enqueue);
+        }
+        if let Some(executor_enqueued_at) = executor_enqueued_at {
+            let queue_age = executor_started_at.duration_since(executor_enqueued_at);
+            line.executor_queue_us = Some(queue_age.as_micros());
+            if queue_context
+                .as_ref()
+                .is_some_and(|context| context.lane == "copy_buy")
+                && queue_age > MAX_COPY_EXECUTOR_QUEUE_AGE
+            {
+                return line.skip(format!(
+                    "stale copy signal: executor queue age {}us exceeds {}us",
+                    queue_age.as_micros(),
+                    MAX_COPY_EXECUTOR_QUEUE_AGE.as_micros()
+                ));
+            }
         }
         let guards_started_at = Instant::now();
         macro_rules! skip_guard {
@@ -2206,18 +2244,22 @@ impl CopyExecutor {
             }
         }
 
+        let mut balance_reservation: Option<WalletBalanceReservation> = None;
         if self.options.copy_wallet_balance_guard {
-            let balance_check = match &self.wallet_balance_cache {
-                Some(cache) => cache.check(copy_wallet, estimated_total_spend_lamports),
-                None => WalletBalanceCheck {
-                    wallet: copy_wallet.to_string(),
-                    lamports: None,
-                    fetched_at_ms: None,
-                    age_ms: None,
-                    source_rpc: None,
-                    required_lamports: estimated_total_spend_lamports,
-                    reason: Some("copy wallet balance cache unavailable".to_string()),
-                },
+            let (balance_check, reservation) = match &self.wallet_balance_cache {
+                Some(cache) => cache.check_and_reserve(copy_wallet, estimated_total_spend_lamports),
+                None => (
+                    WalletBalanceCheck {
+                        wallet: copy_wallet.to_string(),
+                        lamports: None,
+                        fetched_at_ms: None,
+                        age_ms: None,
+                        source_rpc: None,
+                        required_lamports: estimated_total_spend_lamports,
+                        reason: Some("copy wallet balance cache unavailable".to_string()),
+                    },
+                    None,
+                ),
             };
             let balance_reason = balance_check.reason.clone();
             line.record_balance_check(balance_check);
@@ -2227,6 +2269,7 @@ impl CopyExecutor {
                 );
                 return line.skip(reason);
             }
+            balance_reservation = reservation;
         }
 
         let blockhash = cached_blockhash.hash;
@@ -2300,7 +2343,6 @@ impl CopyExecutor {
             if self.options.simulate_copy_tx && !simulation_ok {
                 return line.skip("simulation failed; send blocked");
             }
-            line.mark_send_submitted();
             let attribution_context = SendLaneAttributionContext {
                 observed_at_ms: line.observed_at_ms,
                 provider: line.provider,
@@ -2314,26 +2356,45 @@ impl CopyExecutor {
                 observed_signature: line.observed_signature,
                 send_lane_mode: self.options.send_lane_mode.as_str(),
             };
-            line.sent = true;
             line.send_signature = Some(signed_tx.signature.clone());
             line.send_rpc_url_count = self.send_endpoints.len();
-            line.decision = "sent";
-            if let Some(cache) = &self.wallet_balance_cache {
-                cache.optimistic_decrement(copy_wallet, estimated_total_spend_lamports);
-            }
             let tpu_quic_sender = self.tpu_quic_sender.get().map(Arc::clone);
-            spawn_copy_send_result_task(
+            line.mark_send_task_started();
+            // Once network fanout starts, conservatively keep the reservation until the
+            // periodic balance refresh reconciles it. A timeout is not proof that a submitted
+            // transaction did not land.
+            if let Some(reservation) = balance_reservation.take() {
+                reservation.commit();
+            }
+            match send_transaction_with(
                 self.client.clone(),
                 Arc::clone(&self.send_endpoints),
                 Arc::<str>::from(encoded_tx),
                 wire_tx,
+                Arc::<str>::from(signed_tx.signature.clone()),
                 tpu_quic_sender,
                 self.options.send_config(),
-                line.clone(),
-                attribution_context,
+                Some(attribution_context),
                 send_lane_attribution_tx,
-            );
-            line
+            )
+            .await
+            {
+                Ok(result) => {
+                    line.mark_send_submitted_at(result.first_dispatch_started_at_ms);
+                    if result.signature_returned {
+                        line.mark_signature_returned();
+                    }
+                    line.sent = true;
+                    line.decision = "sent";
+                    line.send_signature = Some(result.signature);
+                    line.send_rpc_url_count = result.rpc_url_count;
+                    line.send_rpc_winner = Some(result.rpc_winner);
+                    line.send_rpc_attempts = result.rpc_attempts;
+                    line.send_rpc_errors = result.rpc_errors;
+                    line
+                }
+                Err(error) => line.error(error),
+            }
         } else if self.options.simulate_copy_tx {
             if simulation_ok {
                 line.decision = "simulated";
@@ -3618,6 +3679,8 @@ impl CopyExecutor {
             compute_unit_price_micro_lamports: plan
                 .priority_fee_micro_lamports
                 .or(self.options.sell_priority_fee_micro_lamports),
+            direct_pump_buy_compute_unit_limit: None,
+            migrated_amm_buy_compute_unit_limit: None,
             jito_tip_lamports: self
                 .options
                 .send_lane_mode
@@ -3661,59 +3724,6 @@ impl CopyExecutor {
     }
 }
 
-fn spawn_copy_send_result_task(
-    client: reqwest::Client,
-    endpoints: Arc<Vec<SendEndpoint>>,
-    encoded_tx: Arc<str>,
-    wire_tx: Arc<[u8]>,
-    tpu_quic_sender: Option<Arc<TpuQuicSender>>,
-    send_config: SendConfig,
-    mut line: CopyExecutionLine,
-    attribution_context: SendLaneAttributionContext,
-    attribution_tx: Option<mpsc::UnboundedSender<CopyExecutionOutput>>,
-) {
-    let output_tx = attribution_tx.clone();
-    tokio::spawn(async move {
-        match send_transaction_with(
-            client,
-            endpoints,
-            encoded_tx,
-            wire_tx,
-            Arc::<str>::from(line.send_signature.clone().unwrap_or_default()),
-            tpu_quic_sender,
-            send_config,
-            Some(attribution_context),
-            attribution_tx,
-        )
-        .await
-        {
-            Ok(result) => {
-                if result.signature_returned {
-                    line.mark_signature_returned();
-                }
-                line.send_signature = Some(result.signature);
-                line.send_rpc_url_count = result.rpc_url_count;
-                line.send_rpc_winner = Some(result.rpc_winner);
-                line.send_rpc_attempts = result.rpc_attempts;
-                line.send_rpc_errors = result.rpc_errors;
-            }
-            Err(error) => {
-                line.sent = false;
-                line.decision = "error";
-                line.reason = Some(error);
-            }
-        }
-        if let Some(output_tx) = output_tx {
-            if output_tx
-                .send(CopyExecutionOutput::CopySendResult(line))
-                .is_err()
-            {
-                eprintln!("copy send result dropped; receiver closed");
-            }
-        }
-    });
-}
-
 async fn send_transaction_with(
     client: reqwest::Client,
     endpoints: Arc<Vec<SendEndpoint>>,
@@ -3745,6 +3755,9 @@ async fn send_transaction_with(
             send_config,
         )
         .await;
+        let first_dispatch_started_at_ms = outcome
+            .finished_at_ms
+            .saturating_sub(outcome.attempt.duration_ms);
         let attempts = vec![outcome.attempt];
         let Some(signature) = outcome.signature else {
             return Err(outcome
@@ -3773,6 +3786,7 @@ async fn send_transaction_with(
             );
         }
         return Ok(SendTransactionResult {
+            first_dispatch_started_at_ms,
             signature,
             signature_returned: outcome.signature_returned,
             rpc_url_count: 1,
@@ -3808,9 +3822,18 @@ async fn send_transaction_with(
     let mut errors: Vec<String> = Vec::new();
     let mut attempts = Vec::new();
     let mut dispatch_signature: Option<String> = None;
+    let mut first_dispatch_started_at_ms: Option<u128> = None;
     while let Some(result) = send_set.join_next().await {
         match result {
             Ok(outcome) => {
+                let attempt_started_at_ms = outcome
+                    .finished_at_ms
+                    .saturating_sub(outcome.attempt.duration_ms);
+                first_dispatch_started_at_ms = Some(
+                    first_dispatch_started_at_ms
+                        .map(|current| current.min(attempt_started_at_ms))
+                        .unwrap_or(attempt_started_at_ms),
+                );
                 let label = outcome.attempt.label.clone();
                 attempts.push(outcome.attempt);
                 if let Some(signature) = outcome.signature {
@@ -3840,6 +3863,8 @@ async fn send_transaction_with(
                         send_set.detach_all();
                     }
                     return Ok(SendTransactionResult {
+                        first_dispatch_started_at_ms: first_dispatch_started_at_ms
+                            .unwrap_or(outcome.finished_at_ms),
                         signature,
                         signature_returned: true,
                         rpc_url_count: endpoints.len(),
@@ -3874,6 +3899,7 @@ async fn send_transaction_with(
             );
         }
         return Ok(SendTransactionResult {
+            first_dispatch_started_at_ms: first_dispatch_started_at_ms.unwrap_or_else(now_ms),
             signature,
             signature_returned: false,
             rpc_url_count: endpoints.len(),
@@ -4704,10 +4730,12 @@ impl CopyExecutionLine {
             decision: "skip",
             signed_at_ms: None,
             simulation_completed_at_ms: None,
+            send_task_started_at_ms: None,
             send_submitted_at_ms: None,
             signature_returned_at_ms: None,
             observed_to_signed_ms: None,
             observed_to_simulation_completed_ms: None,
+            observed_to_send_task_started_ms: None,
             observed_to_send_submitted_ms: None,
             observed_to_signature_returned_ms: None,
             send_lane_ms: None,
@@ -4906,8 +4934,13 @@ impl CopyExecutionLine {
             Some(timestamp.saturating_sub(self.observed_at_ms));
     }
 
-    fn mark_send_submitted(&mut self) {
+    fn mark_send_task_started(&mut self) {
         let timestamp = now_ms();
+        self.send_task_started_at_ms = Some(timestamp);
+        self.observed_to_send_task_started_ms = Some(timestamp.saturating_sub(self.observed_at_ms));
+    }
+
+    fn mark_send_submitted_at(&mut self, timestamp: u128) {
         self.send_submitted_at_ms = Some(timestamp);
         self.observed_to_send_submitted_ms = Some(timestamp.saturating_sub(self.observed_at_ms));
     }
@@ -5455,6 +5488,8 @@ impl CopyExecutionOptions {
     fn tx_fee_config(&self, signature: [u8; 64]) -> TxFeeConfig {
         TxFeeConfig {
             compute_unit_price_micro_lamports: self.priority_fee_micro_lamports,
+            direct_pump_buy_compute_unit_limit: Some(self.direct_pump_buy_compute_unit_limit),
+            migrated_amm_buy_compute_unit_limit: Some(self.migrated_amm_buy_compute_unit_limit),
             jito_tip_lamports: self
                 .send_lane_mode
                 .uses_jito_tip()
@@ -5599,6 +5634,15 @@ impl CopyExecutionOptions {
     }
 
     fn select_fee_profile(&self, timings: SignalTimings, signature: [u8; 64]) -> FeeProfile {
+        self.select_fee_profile_with_source(timings, signature, None)
+    }
+
+    fn select_fee_profile_with_source(
+        &self,
+        timings: SignalTimings,
+        signature: [u8; 64],
+        source_priority_fee_micro_lamports: Option<u64>,
+    ) -> FeeProfile {
         let source_position_bucket = SourcePositionBucket::from_timings(timings);
         let baseline_priority_fee = self
             .dynamic_priority_fee_baseline_micro_lamports
@@ -5613,7 +5657,7 @@ impl CopyExecutionOptions {
             .or(aggressive_priority_fee)
             .or(baseline_priority_fee);
 
-        let (name, requested_priority_fee, reason) =
+        let (mut name, mut requested_priority_fee, mut reason) =
             if self.dynamic_priority_fee_enabled && source_position_bucket.uses_aggressive_fee() {
                 (
                     "aggressive",
@@ -5633,6 +5677,20 @@ impl CopyExecutionOptions {
                     "dynamic_priority_fee_disabled",
                 )
             };
+
+        if self.source_priority_fee_multiplier_bps > 0 {
+            if let Some(source_priority_fee) = source_priority_fee_micro_lamports {
+                let source_anchored = (source_priority_fee as u128)
+                    .saturating_mul(self.source_priority_fee_multiplier_bps as u128)
+                    / 10_000u128;
+                let source_anchored = source_anchored.min(u64::MAX as u128) as u64;
+                if source_anchored > requested_priority_fee.unwrap_or(0) {
+                    name = "source_anchored";
+                    requested_priority_fee = Some(source_anchored);
+                    reason = "source_compute_unit_price_multiplier";
+                }
+            }
+        }
 
         let capped_priority_fee = match (requested_priority_fee, max_priority_fee) {
             (Some(requested), Some(maximum)) if requested > maximum => Some(maximum),
@@ -5655,6 +5713,8 @@ impl CopyExecutionOptions {
     fn sell_tx_fee_config(&self) -> TxFeeConfig {
         TxFeeConfig {
             compute_unit_price_micro_lamports: self.sell_priority_fee_micro_lamports,
+            direct_pump_buy_compute_unit_limit: None,
+            migrated_amm_buy_compute_unit_limit: None,
             jito_tip_lamports: self
                 .send_lane_mode
                 .uses_jito_tip()
@@ -5695,6 +5755,44 @@ impl CopyExecutionOptions {
             http_timeout_ms: self.send_http_timeout_ms,
             log_lanes: self.send_lane_logging,
         }
+    }
+
+    fn validate_buy_compute_unit_limits(&self) -> std::result::Result<(), String> {
+        for (name, limit) in [
+            (
+                "JITO_DIRECT_PUMP_BUY_COMPUTE_UNIT_LIMIT",
+                self.direct_pump_buy_compute_unit_limit,
+            ),
+            (
+                "JITO_MIGRATED_AMM_BUY_COMPUTE_UNIT_LIMIT",
+                self.migrated_amm_buy_compute_unit_limit,
+            ),
+        ] {
+            if !(MIN_BUY_COMPUTE_UNIT_LIMIT..=MAX_BUY_COMPUTE_UNIT_LIMIT).contains(&limit) {
+                return Err(format!(
+                    "{name} must be between {MIN_BUY_COMPUTE_UNIT_LIMIT} and {MAX_BUY_COMPUTE_UNIT_LIMIT}; got {limit}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_source_priority_fee(&self) -> std::result::Result<(), String> {
+        if self.source_priority_fee_multiplier_bps > MAX_SOURCE_PRIORITY_FEE_MULTIPLIER_BPS {
+            return Err(format!(
+                "JITO_SOURCE_PRIORITY_FEE_MULTIPLIER_BPS must be <= {MAX_SOURCE_PRIORITY_FEE_MULTIPLIER_BPS}; got {}",
+                self.source_priority_fee_multiplier_bps
+            ));
+        }
+        if self.source_priority_fee_multiplier_bps > 0
+            && self.dynamic_priority_fee_max_micro_lamports.is_none()
+        {
+            return Err(
+                "JITO_SOURCE_PRIORITY_FEE_MULTIPLIER_BPS requires JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 
     fn validate_helius_sender(&self) -> std::result::Result<(), String> {
@@ -9031,6 +9129,9 @@ mod tests {
             send_http_timeout_ms: 0,
             send_lane_logging: false,
             priority_fee_micro_lamports: None,
+            direct_pump_buy_compute_unit_limit: DEFAULT_BUY_COMPUTE_UNIT_LIMIT,
+            migrated_amm_buy_compute_unit_limit: DEFAULT_BUY_COMPUTE_UNIT_LIMIT,
+            source_priority_fee_multiplier_bps: 0,
             dynamic_priority_fee_enabled: false,
             dynamic_priority_fee_baseline_micro_lamports: None,
             dynamic_priority_fee_aggressive_micro_lamports: None,
@@ -9370,6 +9471,36 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn stale_copy_buy_is_rejected_before_executor_guards_or_send() {
+        let executor = executor(disabled_options());
+        let plan = allowed_plan();
+        let request = CopyRuntimeRequest::from_execution_plan(&plan, Action::Buy, Some(0.0005));
+        let line = executor
+            .handle_with_executor_enqueued_at(
+                &request,
+                sample_timings(),
+                Instant::now() - Duration::from_millis(300),
+                CopyExecutorQueueContext {
+                    lane: "copy_buy",
+                    depth_at_enqueue: 4,
+                    busy_workers_at_enqueue: 2,
+                },
+                None,
+                None,
+            )
+            .await;
+
+        assert_eq!(line.decision, "skip");
+        assert!(!line.was_sent());
+        assert_eq!(line.executor_queue_lane, Some("copy_buy"));
+        assert_eq!(line.executor_queue_depth_at_enqueue, Some(4));
+        assert!(line
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("stale copy signal")));
+    }
+
     #[test]
     fn execution_line_defaults_to_safe_disabled_state() {
         let plan = allowed_plan();
@@ -9469,6 +9600,8 @@ mod tests {
         let route_context = flashx_context(FlashxPumpLayout::DirectPump, 1);
         let fee_config = TxFeeConfig {
             compute_unit_price_micro_lamports: Some(250_000),
+            direct_pump_buy_compute_unit_limit: None,
+            migrated_amm_buy_compute_unit_limit: None,
             jito_tip_lamports: Some(10_000),
             jito_tip_account: Some(Pubkey::new_unique().to_string()),
             helius_sender_tip_lamports: None,
@@ -9757,6 +9890,7 @@ mod tests {
         let parsed = crate::parser::ParsedTrade {
             target_wallet: dummy,
             action: Action::Sell,
+            copyable: false,
             mint: dummy,
             route: Route::FlashxPump,
             sol_amount: None,
@@ -10370,6 +10504,42 @@ mod tests {
     }
 
     #[test]
+    fn route_compute_unit_limits_fail_closed_outside_safe_bounds() {
+        let mut options = disabled_options();
+        assert!(options.validate_buy_compute_unit_limits().is_ok());
+
+        options.direct_pump_buy_compute_unit_limit = MIN_BUY_COMPUTE_UNIT_LIMIT - 1;
+        assert_eq!(
+            options.validate_buy_compute_unit_limits().unwrap_err(),
+            "JITO_DIRECT_PUMP_BUY_COMPUTE_UNIT_LIMIT must be between 50000 and 1400000; got 49999"
+        );
+
+        options.direct_pump_buy_compute_unit_limit = DEFAULT_BUY_COMPUTE_UNIT_LIMIT;
+        options.migrated_amm_buy_compute_unit_limit = MAX_BUY_COMPUTE_UNIT_LIMIT + 1;
+        assert_eq!(
+            options.validate_buy_compute_unit_limits().unwrap_err(),
+            "JITO_MIGRATED_AMM_BUY_COMPUTE_UNIT_LIMIT must be between 50000 and 1400000; got 1400001"
+        );
+    }
+
+    #[test]
+    fn source_priority_fee_requires_a_hard_cap() {
+        let mut options = disabled_options();
+        options.source_priority_fee_multiplier_bps = 10_000;
+        assert_eq!(
+            options.validate_source_priority_fee().unwrap_err(),
+            "JITO_SOURCE_PRIORITY_FEE_MULTIPLIER_BPS requires JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS"
+        );
+        options.dynamic_priority_fee_max_micro_lamports = Some(2_500_000);
+        assert!(options.validate_source_priority_fee().is_ok());
+        options.source_priority_fee_multiplier_bps = MAX_SOURCE_PRIORITY_FEE_MULTIPLIER_BPS + 1;
+        assert!(options
+            .validate_source_priority_fee()
+            .unwrap_err()
+            .contains("must be <= 100000"));
+    }
+
+    #[test]
     fn state_rpc_urls_are_read_pool_not_implicit_send_pool() {
         let options = CopyExecutionOptions {
             solana_rpc_url: Some("https://legacy.example.com".to_string()),
@@ -10439,6 +10609,26 @@ mod tests {
         assert_eq!(profile.name, "aggressive");
         assert_eq!(profile.priority_fee_micro_lamports, Some(2_500_000));
         assert!(profile.cap_hit);
+    }
+
+    #[test]
+    fn source_priority_fee_can_raise_but_not_escape_the_hard_cap() {
+        let mut options = disabled_options();
+        options.priority_fee_micro_lamports = Some(1_000_000);
+        options.source_priority_fee_multiplier_bps = 20_000;
+        options.dynamic_priority_fee_max_micro_lamports = Some(2_500_000);
+
+        let raised =
+            options.select_fee_profile_with_source(sample_timings(), [0u8; 64], Some(1_100_000));
+        assert_eq!(raised.name, "source_anchored");
+        assert_eq!(raised.reason, "source_compute_unit_price_multiplier");
+        assert_eq!(raised.priority_fee_micro_lamports, Some(2_200_000));
+        assert!(!raised.cap_hit);
+
+        let capped =
+            options.select_fee_profile_with_source(sample_timings(), [0u8; 64], Some(2_000_000));
+        assert_eq!(capped.priority_fee_micro_lamports, Some(2_500_000));
+        assert!(capped.cap_hit);
     }
 
     #[test]

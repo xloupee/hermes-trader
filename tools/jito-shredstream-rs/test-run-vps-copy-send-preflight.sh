@@ -23,13 +23,14 @@ base_env=(
   MOCK_WORKER_MODE_PATH="$TMP_DIR/mode.out"
   JITO_ARM_LIVE_COPY_SEND=YES
   JITO_COPY_KEYPAIR_PATH="$TMP_DIR/copy-keypair.json"
+  JITO_SHREDSTREAM_UDP_PREFLIGHT_MODE=off
   SOLANA_RPC_URL=https://rpc.example
   JITO_PRIORITY_FEE_MICRO_LAMPORTS=500000
   JITO_SEND_FANOUT=YES
   JITO_FAST_COPY_SEND=YES
   JITO_HELIUS_SENDER_ENABLED=YES
   JITO_HELIUS_SENDER_URLS=https://sender.helius-rpc.com
-  JITO_HELIUS_SENDER_TIP_LAMPORTS=200000
+  JITO_HELIUS_SENDER_TIP_LAMPORTS=1000000
   JITO_HELIUS_SENDER_TIP_ACCOUNT=FqhpPL63symHForRGfxPbGi4wDpe5jQqAVjntbbBqA5W
   JITO_NOZOMI_ENABLED=YES
   JITO_NOZOMI_URLS=https://nozomi.example.com
@@ -68,6 +69,55 @@ run_ok() {
 
 run_ok fast
 run_ok turbo
+
+cat > "$TMP_DIR/mock-udp-prepare" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" > "$MOCK_UDP_PREFLIGHT_PATH"
+SH
+chmod +x "$TMP_DIR/mock-udp-prepare"
+rm -f "$TMP_DIR/udp-preflight.out"
+env "${base_env[@]}" \
+  JITO_SEND_LANE_MODE=fast \
+  JITO_SHREDSTREAM_UDP_PREFLIGHT_MODE=require \
+  JITO_SHREDSTREAM_UDP_PREPARE_SCRIPT="$TMP_DIR/mock-udp-prepare" \
+  MOCK_UDP_PREFLIGHT_PATH="$TMP_DIR/udp-preflight.out" \
+  "$RUNNER" > /dev/null
+if [[ "$(cat "$TMP_DIR/udp-preflight.out")" != "check" ]]; then
+  echo "required UDP preflight should run in read-only check mode" >&2
+  exit 1
+fi
+
+if env "${base_env[@]}" JITO_SEND_LANE_MODE=fast \
+  JITO_SHREDSTREAM_UDP_PREFLIGHT_MODE=mutate "$RUNNER" \
+  > /dev/null 2> "$TMP_DIR/udp-mode.err"; then
+  echo "invalid UDP preflight mode should fail" >&2
+  exit 1
+fi
+grep -q 'must be require, warn, or off' "$TMP_DIR/udp-mode.err"
+
+if env "${base_env[@]}" JITO_SEND_LANE_MODE=fast \
+  JITO_DIRECT_PUMP_BUY_COMPUTE_UNIT_LIMIT=49999 "$RUNNER" \
+  > /dev/null 2> "$TMP_DIR/direct-cu.err"; then
+  echo "direct Pump compute limit below the safe range should fail" >&2
+  exit 1
+fi
+grep -q 'JITO_DIRECT_PUMP_BUY_COMPUTE_UNIT_LIMIT must be between 50000 and 1400000' "$TMP_DIR/direct-cu.err"
+
+if env "${base_env[@]}" JITO_SEND_LANE_MODE=fast \
+  JITO_MIGRATED_AMM_BUY_COMPUTE_UNIT_LIMIT=1400001 "$RUNNER" \
+  > /dev/null 2> "$TMP_DIR/migrated-cu.err"; then
+  echo "migrated AMM compute limit above the safe range should fail" >&2
+  exit 1
+fi
+grep -q 'JITO_MIGRATED_AMM_BUY_COMPUTE_UNIT_LIMIT must be between 50000 and 1400000' "$TMP_DIR/migrated-cu.err"
+
+if env "${base_env[@]}" JITO_SEND_LANE_MODE=fast \
+  JITO_SOURCE_PRIORITY_FEE_MULTIPLIER_BPS=100001 "$RUNNER" \
+  > /dev/null 2> "$TMP_DIR/source-fee.err"; then
+  echo "source priority fee multiplier above the safe range should fail" >&2
+  exit 1
+fi
+grep -q 'JITO_SOURCE_PRIORITY_FEE_MULTIPLIER_BPS must be between 0 and 100000' "$TMP_DIR/source-fee.err"
 
 if env "${base_env[@]}" JITO_SEND_LANE_MODE=fast JITO_NOZOMI_ENABLED=false "$RUNNER" >/dev/null 2>"$TMP_DIR/fast.err"; then
   echo "fast should require JITO_NOZOMI_ENABLED=YES" >&2

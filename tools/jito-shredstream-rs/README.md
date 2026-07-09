@@ -174,7 +174,7 @@ ShredStream proxy, without the Mac SSH tunnel:
 JITO_ARM_LIVE_COPY_SEND=YES /opt/jito-feed-probe-watch/run-vps-copy-send.sh
 ```
 
-The VPS launcher sources `/opt/pumpfun-migration-bot/.env`, then
+The Droplet launcher sources `/opt/pumpfun-migration-bot/.env`, then
 `/etc/jito-copy-live.env`, and runs the release `jito-feed-probe` binary. It
 keeps `JITO_MAX_COPY_SOL <= 0.001`, `JITO_FAST_COPY_SEND=YES`,
 `JITO_ONE_SHOT_COPY_SEND=false`, `JITO_SIMULATE_AUTO_SELL=false`, and
@@ -183,6 +183,40 @@ keeps `JITO_MAX_COPY_SOL <= 0.001`, `JITO_FAST_COPY_SEND=YES`,
 latency tests against a live env that has auto-sell enabled, set
 `JITO_ISOLATE_BUY_LATENCY_TEST=true`. Dashboard/report syncing should run as a
 separate post-submit service.
+
+The latency-sensitive executor queue defaults to 64 items and rejects copy buys
+that have waited more than 250 ms. Increasing the queue does not increase useful
+throughput during a burst; it only retains more signals that may already be
+economically stale.
+
+The launcher also performs a read-only UDP receive-buffer preflight in `warn`
+mode. Set `JITO_SHREDSTREAM_UDP_PREFLIGHT_MODE=require` to fail startup when the
+proxy host has not been prepared, or `off` only when the proxy is on another
+host. The launcher never changes sysctls. Proxy startup, explicit buffer setup,
+gRPC-only forwarding, and post-restart packet-loss checks are documented in
+[`docs/shredstream-grpc-notes.md`](../../docs/shredstream-grpc-notes.md).
+
+Buy compute limits can be canaried independently by route while remaining fully
+preloaded and network-free on the signal path. Both default to the historical
+`400000` until an adequately hydrated route sample justifies a lower limit:
+
+```bash
+JITO_DIRECT_PUMP_BUY_COMPUTE_UNIT_LIMIT=180000
+JITO_MIGRATED_AMM_BUY_COMPUTE_UNIT_LIMIT=220000
+```
+
+The launcher and worker reject limits outside `50000..=1400000`. Change one
+route at a time and score landed rate, same-slot rate, `slotDelta`, `txDelta`,
+compute failures, and fee cost rather than ACK latency.
+
+The watched transaction's already-parsed CU price can also be enabled as a
+network-free, capped fee floor. Basis points are relative to the source price
+(`10000` = 1x); `0` keeps the feature disabled. A hard maximum is mandatory:
+
+```bash
+JITO_SOURCE_PRIORITY_FEE_MULTIPLIER_BPS=15000
+JITO_DYNAMIC_PRIORITY_FEE_MAX_MICRO_LAMPORTS=2500000
+```
 
 State RPC is separate from send lanes:
 

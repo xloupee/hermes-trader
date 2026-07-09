@@ -2114,6 +2114,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "solana-address-lookup-table-interface",
  "solana-connection-cache",
  "solana-entry",

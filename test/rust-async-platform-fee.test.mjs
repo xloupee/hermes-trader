@@ -44,11 +44,13 @@ test("Rust async platform fee accrual uses planned copy spend and starts pending
 });
 
 test("Rust async platform fee bridge is default-off and post-submit only", async () => {
-  const [indexSource, typesSource, envExample, readme] = await Promise.all([
+  const [indexSource, typesSource, envExample, readme, cashbackSource, safetyMigration] = await Promise.all([
     readFile("src/index.ts", "utf8"),
     readFile("src/types.ts", "utf8"),
     readFile(".env.example", "utf8"),
-    readFile("README.md", "utf8")
+    readFile("README.md", "utf8"),
+    readFile("src/cashback.ts", "utf8"),
+    readFile("supabase/migrations/20260709191607_rust_async_platform_fee_delivery_safety.sql", "utf8")
   ]);
 
   assert.match(typesSource, /copyTradeRustAsyncPlatformFeeEnabled: boolean;/);
@@ -75,7 +77,7 @@ test("Rust async platform fee bridge is default-off and post-submit only", async
   );
   assert.match(
     indexSource,
-    /function rustCopyBuyExecutionLanded[\s\S]*row\.chain_report\.status[\s\S]*buyLanded/
+    /function rustCopyBuyExecutionLanded[\s\S]*hasOwnProperty\.call\(row\.chain_report, "err"\)[\s\S]*row\.chain_report\.err === null[\s\S]*buyLanded/
   );
   assert.match(
     indexSource,
@@ -83,12 +85,33 @@ test("Rust async platform fee bridge is default-off and post-submit only", async
   );
   assert.match(
     indexSource,
-    /sendRustAsyncPlatformFeeTransfer[\s\S]*new Transaction\(\)\.add\(SystemProgram\.transfer\([\s\S]*fromPubkey: signer\.publicKey[\s\S]*toPubkey: treasury/
+    /prepareRustAsyncPlatformFeeTransfer[\s\S]*new Transaction\(\)\.add\(SystemProgram\.transfer\([\s\S]*fromPubkey: signer\.publicKey[\s\S]*toPubkey: treasury/
   );
   assert.match(
     indexSource,
     /confirmRustAsyncPlatformFeeTransfer[\s\S]*collectionStatus: "confirmed"[\s\S]*ledgerStatus: "claimable"[\s\S]*collectionStatus: "failed"[\s\S]*ledgerStatus: "voided"/
   );
+  assert.match(indexSource, /claimPlatformFeeCollections\([\s\S]*leaseToken[\s\S]*leaseDurationMs/);
+  assert.match(
+    indexSource,
+    /prepareRustAsyncPlatformFeeTransfer[\s\S]*transaction\.sign\(signer\)[\s\S]*transaction\.serialize\(\)\.toString\("base64"\)/
+  );
+  assert.match(
+    indexSource,
+    /transactionBase64: signedTransfer\.transactionBase64[\s\S]*broadcastRustAsyncPlatformFeeTransfer\(signedTransfer\)/
+  );
+  assert.match(
+    indexSource,
+    /entry\.platformFeeTransactionBase64 && entry\.platformFeeTransferSignature[\s\S]*transactionBase64: entry\.platformFeeTransactionBase64/
+  );
+  assert.match(
+    indexSource,
+    /collectionStatus === "submitted"[\s\S]*entry\.platformFeeTransactionBase64[\s\S]*broadcastRustAsyncPlatformFeeTransfer\(persistedTransfer\)/
+  );
+  assert.match(cashbackSource, /expectedLeaseToken[\s\S]*platform_fee_lease_token/);
+  assert.match(safetyMigration, /platform_fee_lease_token text null/);
+  assert.match(safetyMigration, /platform_fee_transaction_base64 text null/);
+  assert.match(safetyMigration, /revoke all on table public\.telegram_cashback_ledger from anon, authenticated/);
 });
 
 test("Rust async platform fee accrual accepts snake_case raw execution field", () => {

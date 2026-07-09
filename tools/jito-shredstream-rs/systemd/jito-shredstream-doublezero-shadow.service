@@ -1,0 +1,26 @@
+[Unit]
+Description=DoubleZero Edge ShredStream shadow proxy (default off, no executor)
+Documentation=file:/opt/jito-feed-probe-watch/DOUBLEZERO_EDGE_SHADOW_RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=DOUBLEZERO_SHADOW_ENABLED=false
+Environment=DOUBLEZERO_SHADOW_ALLOW_EXECUTION=false
+Environment=DOUBLEZERO_SHADOW_CONSUMER_MODE=observer
+Environment=DOUBLEZERO_DEVICE=doublezero1
+Environment=DOUBLEZERO_SHADOW_GRPC_PORT=10099
+Environment=JITO_PRIMARY_GRPC_PORT=9999
+EnvironmentFile=-/etc/jito-shredstream-doublezero-shadow.env
+WorkingDirectory=/opt/jito-feed-probe-watch
+ExecStartPre=/opt/jito-feed-probe-watch/doublezero-edge-shadow-preflight.sh
+ExecStart=/opt/jito-feed-probe-watch/run-doublezero-edge-shadow.sh
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+User=root
+
+# Intentionally no [Install] section. This template cannot be enabled at boot.
+# An operator must install it, satisfy every gate, and start it explicitly.

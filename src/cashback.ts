@@ -65,6 +65,11 @@ export interface CashbackLedgerEntry {
   platformFeeCollectionError?: string | null;
   platformFeeCollectionAttempts?: number | null;
   platformFeeCollectionUpdatedAt?: string | null;
+  platformFeeLeaseToken?: string | null;
+  platformFeeLeaseExpiresAt?: string | null;
+  platformFeeTransactionBase64?: string | null;
+  platformFeeRecentBlockhash?: string | null;
+  platformFeeLastValidBlockHeight?: number | null;
   entryType?: CashbackLedgerEntryType;
   adjustmentReason?: string | null;
   adjustedBy?: string | null;
@@ -164,6 +169,12 @@ export interface CashbackStore {
     statuses: CashbackPlatformFeeCollectionStatus[];
     limit?: number;
   }) => Promise<CashbackLedgerEntry[]>;
+  claimPlatformFeeCollections: (input: {
+    statuses: CashbackPlatformFeeCollectionStatus[];
+    leaseToken: string;
+    leaseDurationMs: number;
+    limit?: number;
+  }) => Promise<CashbackLedgerEntry[]>;
   updatePlatformFeeCollection: (input: {
     executionKey: string;
     collectionStatus: CashbackPlatformFeeCollectionStatus;
@@ -171,7 +182,12 @@ export interface CashbackStore {
     transferSignature?: string | null;
     errorText?: string | null;
     attempts?: number | null;
-  }) => Promise<void>;
+    transactionBase64?: string | null;
+    recentBlockhash?: string | null;
+    lastValidBlockHeight?: number | null;
+    expectedLeaseToken?: string | null;
+    releaseLease?: boolean;
+  }) => Promise<boolean>;
   getSummary: (input: {
     chatId: TelegramChatId;
     tradingWalletPublicKey: string | null;
@@ -213,6 +229,11 @@ interface SupabaseCashbackLedgerRow {
   platform_fee_collection_error?: string | null;
   platform_fee_collection_attempts?: number | null;
   platform_fee_collection_updated_at?: string | null;
+  platform_fee_lease_token?: string | null;
+  platform_fee_lease_expires_at?: string | null;
+  platform_fee_transaction_base64?: string | null;
+  platform_fee_recent_blockhash?: string | null;
+  platform_fee_last_valid_block_height?: number | null;
   entry_type?: CashbackLedgerEntryType | null;
   adjustment_reason?: string | null;
   adjusted_by?: string | null;
@@ -277,6 +298,11 @@ function ledgerEntryFromRow(row: SupabaseCashbackLedgerRow): CashbackLedgerEntry
     platformFeeCollectionError: row.platform_fee_collection_error || null,
     platformFeeCollectionAttempts: row.platform_fee_collection_attempts ?? 0,
     platformFeeCollectionUpdatedAt: row.platform_fee_collection_updated_at || null,
+    platformFeeLeaseToken: row.platform_fee_lease_token || null,
+    platformFeeLeaseExpiresAt: row.platform_fee_lease_expires_at || null,
+    platformFeeTransactionBase64: row.platform_fee_transaction_base64 || null,
+    platformFeeRecentBlockhash: row.platform_fee_recent_blockhash || null,
+    platformFeeLastValidBlockHeight: row.platform_fee_last_valid_block_height ?? null,
     entryType: row.entry_type || "trade",
     adjustmentReason: row.adjustment_reason || null,
     adjustedBy: row.adjusted_by || null,
@@ -318,6 +344,11 @@ function ledgerRow(entry: CashbackLedgerEntry): SupabaseCashbackLedgerRow {
     platform_fee_collection_error: entry.platformFeeCollectionError || null,
     platform_fee_collection_attempts: entry.platformFeeCollectionAttempts ?? 0,
     platform_fee_collection_updated_at: entry.platformFeeCollectionUpdatedAt || null,
+    platform_fee_lease_token: entry.platformFeeLeaseToken || null,
+    platform_fee_lease_expires_at: entry.platformFeeLeaseExpiresAt || null,
+    platform_fee_transaction_base64: entry.platformFeeTransactionBase64 || null,
+    platform_fee_recent_blockhash: entry.platformFeeRecentBlockhash || null,
+    platform_fee_last_valid_block_height: entry.platformFeeLastValidBlockHeight ?? null,
     entry_type: entry.entryType || "trade",
     adjustment_reason: entry.adjustmentReason || null,
     adjusted_by: entry.adjustedBy || null,
@@ -884,13 +915,70 @@ export function createSupabaseCashbackStore({
 
       return ((data || []) as SupabaseCashbackLedgerRow[]).map(ledgerEntryFromRow);
     },
+    async claimPlatformFeeCollections({ statuses, leaseToken, leaseDurationMs, limit = 50 }) {
+      if (statuses.length === 0 || limit <= 0) {
+        return [];
+      }
+      if (!leaseToken.trim()) {
+        throw new Error("platform fee collection lease token is required");
+      }
+      if (!Number.isFinite(leaseDurationMs) || leaseDurationMs <= 0) {
+        throw new Error("platform fee collection lease duration must be positive");
+      }
+
+      const now = new Date();
+      const nowIso = now.toISOString();
+      const leaseExpiresAt = new Date(now.getTime() + leaseDurationMs).toISOString();
+      const { data: candidates, error: candidateError } = await client
+        .from("telegram_cashback_ledger")
+        .select("execution_key")
+        .in("platform_fee_collection_status", statuses)
+        .or(`platform_fee_lease_expires_at.is.null,platform_fee_lease_expires_at.lt.${nowIso}`)
+        .order("platform_fee_collection_updated_at", { ascending: true, nullsFirst: true })
+        .limit(limit);
+      const formattedCandidateError = formatSupabaseError(candidateError);
+      if (formattedCandidateError) {
+        throw formattedCandidateError;
+      }
+
+      const claimed: CashbackLedgerEntry[] = [];
+      for (const candidate of (candidates || []) as Array<{ execution_key: string }>) {
+        const { data, error } = await client
+          .from("telegram_cashback_ledger")
+          .update({
+            platform_fee_lease_token: leaseToken,
+            platform_fee_lease_expires_at: leaseExpiresAt,
+            platform_fee_collection_updated_at: nowIso,
+            updated_at: nowIso
+          })
+          .eq("execution_key", candidate.execution_key)
+          .in("platform_fee_collection_status", statuses)
+          .or(`platform_fee_lease_expires_at.is.null,platform_fee_lease_expires_at.lt.${nowIso}`)
+          .select("*")
+          .maybeSingle();
+        const formattedError = formatSupabaseError(error);
+        if (formattedError) {
+          throw formattedError;
+        }
+        if (data) {
+          claimed.push(ledgerEntryFromRow(data as SupabaseCashbackLedgerRow));
+        }
+      }
+
+      return claimed;
+    },
     async updatePlatformFeeCollection({
       executionKey,
       collectionStatus,
       ledgerStatus,
       transferSignature,
       errorText,
-      attempts
+      attempts,
+      transactionBase64,
+      recentBlockhash,
+      lastValidBlockHeight,
+      expectedLeaseToken,
+      releaseLease = false
     }) {
       const values: Record<string, unknown> = {
         platform_fee_collection_status: collectionStatus,
@@ -914,14 +1002,40 @@ export function createSupabaseCashbackStore({
         values.platform_fee_collection_attempts = attempts;
       }
 
-      const { error } = await client
+      if (transactionBase64 !== undefined) {
+        values.platform_fee_transaction_base64 = transactionBase64;
+      }
+
+      if (recentBlockhash !== undefined) {
+        values.platform_fee_recent_blockhash = recentBlockhash;
+      }
+
+      if (lastValidBlockHeight !== undefined) {
+        values.platform_fee_last_valid_block_height = lastValidBlockHeight;
+      }
+
+      if (releaseLease) {
+        values.platform_fee_lease_token = null;
+        values.platform_fee_lease_expires_at = null;
+      }
+
+      let query = client
         .from("telegram_cashback_ledger")
         .update(values)
         .eq("execution_key", executionKey);
+      if (expectedLeaseToken !== undefined) {
+        query = expectedLeaseToken === null
+          ? query.is("platform_fee_lease_token", null)
+          : query.eq("platform_fee_lease_token", expectedLeaseToken);
+      }
+      const { data, error } = await query
+        .select("execution_key")
+        .maybeSingle();
       const formattedError = formatSupabaseError(error);
       if (formattedError) {
         throw formattedError;
       }
+      return Boolean(data);
     },
     async getSummary({ chatId, tradingWalletPublicKey, payoutWalletPublicKey = null, config }) {
       const normalizedChatId = String(chatId);

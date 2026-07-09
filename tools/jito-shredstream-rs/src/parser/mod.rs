@@ -47,6 +47,7 @@ pub(crate) struct ParsedTrade {
     pub(crate) route: Route,
     pub(crate) sol_amount: Option<f64>,
     pub(crate) token_amount: Option<f64>,
+    pub(crate) copyable: bool,
     pub(crate) compute_budget: ComputeBudgetInfo,
     pub(crate) route_context: Option<SharedRouteContext>,
 }

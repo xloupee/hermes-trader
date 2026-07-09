@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync } from "node:fs";
+import { appendFile, open, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
@@ -10,6 +11,8 @@ const DEFAULT_REFRESH_INTERVAL_MS = 5000;
 const DEFAULT_REFRESH_RECENT_LIMIT = 1;
 const DEFAULT_REFRESH_PENDING_LIMIT = 25;
 const DEFAULT_NEW_ROW_BACKFILL = 20;
+const DEFAULT_MAX_BATCH_ROWS = 100;
+const DEFAULT_MAX_BATCH_BYTES = 1024 * 1024;
 const DEFAULT_RPC_TIMEOUT_MS = 5000;
 const DEFAULT_BLOCK_POSITION_RETRY_ATTEMPTS = 3;
 const DEFAULT_BLOCK_POSITION_RETRY_MS = 500;
@@ -61,6 +64,28 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const EXECUTION_SCHEMAS = new Set([
+  "copytrade.localExecution.v1",
+  "copytrade.sendLaneAttribution.v1",
+  "copytrade.transactionConfirmation.v1"
+]);
+
+function selectJsonlRows(parsedRows, { recentLimit = 0, pendingPositionLimit = 0 } = {}) {
+  const supportedRows = parsedRows.filter((row) => EXECUTION_SCHEMAS.has(row?.schema));
+  const scopedRows = scopeRowsForRecentLocalExecutions(supportedRows, recentLimit);
+  const recentRows = mergeSidecarRows(scopedRows);
+  if (pendingPositionLimit <= 0) {
+    return recentRows;
+  }
+
+  const pendingRows = pendingPositionRefreshRows(supportedRows, pendingPositionLimit);
+  if (recentLimit <= 0) {
+    return pendingRows;
+  }
+
+  return dedupeRows([...recentRows, ...pendingRows]);
+}
+
 function readJsonl(path, { recentLimit = 0, pendingPositionLimit = 0 } = {}) {
   if (!existsSync(path)) {
     return [];
@@ -76,23 +101,381 @@ function readJsonl(path, { recentLimit = 0, pendingPositionLimit = 0 } = {}) {
         throw new Error(`invalid JSONL at ${path}:${index + 1}: ${error.message}`);
       }
     })
-    .filter((row) =>
-      row.schema === "copytrade.localExecution.v1" ||
-      row.schema === "copytrade.sendLaneAttribution.v1" ||
-      row.schema === "copytrade.transactionConfirmation.v1"
-    );
-  const scopedRows = scopeRowsForRecentLocalExecutions(parsedRows, recentLimit);
-  const recentRows = mergeSidecarRows(scopedRows);
-  if (pendingPositionLimit <= 0) {
-    return recentRows;
+    .filter((row) => EXECUTION_SCHEMAS.has(row?.schema));
+  return selectJsonlRows(parsedRows, { recentLimit, pendingPositionLimit });
+}
+
+async function recentJsonlStartOffset(path, size, recentLines) {
+  if (recentLines <= 0 || size <= 0) {
+    return 0;
   }
 
-  const pendingRows = pendingPositionRefreshRows(parsedRows, pendingPositionLimit);
-  if (recentLimit <= 0) {
-    return pendingRows;
+  const handle = await open(path, "r");
+  try {
+    const blockSize = 64 * 1024;
+    let start = size;
+    let contents = Buffer.alloc(0);
+    while (start > 0) {
+      const length = Math.min(blockSize, start);
+      start -= length;
+      const block = Buffer.allocUnsafe(length);
+      await handle.read(block, 0, length, start);
+      contents = Buffer.concat([block, contents]);
+      let localExecutionCount = 0;
+      const firstNewline = contents.indexOf(0x0a);
+      let lineStart = start > 0
+        ? (firstNewline >= 0 ? firstNewline + 1 : contents.length)
+        : 0;
+      for (let index = lineStart; index < contents.length; index += 1) {
+        if (contents[index] !== 0x0a) {
+          continue;
+        }
+        try {
+          const row = JSON.parse(contents.subarray(lineStart, index).toString("utf8"));
+          if (row?.schema === "copytrade.localExecution.v1") {
+            localExecutionCount += 1;
+          }
+        } catch {
+          // Complete malformed records are skipped by the normal tail reader.
+        }
+        lineStart = index + 1;
+      }
+      if (localExecutionCount >= recentLines) {
+        break;
+      }
+    }
+
+    const localExecutionOffsets = [];
+    const firstNewline = contents.indexOf(0x0a);
+    let lineStart = start > 0
+      ? (firstNewline >= 0 ? firstNewline + 1 : contents.length)
+      : 0;
+    if (lineStart >= contents.length) {
+      return size;
+    }
+    for (let index = 0; index < contents.length; index += 1) {
+      if (index < lineStart || contents[index] !== 0x0a) {
+        continue;
+      }
+      try {
+        const row = JSON.parse(contents.subarray(lineStart, index).toString("utf8"));
+        if (row?.schema === "copytrade.localExecution.v1") {
+          localExecutionOffsets.push(lineStart);
+        }
+      } catch {
+        // The tail reader will report and advance past malformed complete lines.
+      }
+      lineStart = index + 1;
+    }
+    const selectedIndex = Math.max(0, localExecutionOffsets.length - recentLines);
+    return localExecutionOffsets.length > 0 ? start + localExecutionOffsets[selectedIndex] : size;
+  } finally {
+    await handle.close();
+  }
+}
+
+class DurableJsonlTail {
+  constructor(path, {
+    cursorPath = `${path}.sync-cursor.json`,
+    deadLetterPath = `${path}.sync-dead-letter.jsonl`,
+    maxBatchBytes = DEFAULT_MAX_BATCH_BYTES,
+    maxBatchRows = DEFAULT_MAX_BATCH_ROWS,
+    initialRecentLines = 0
+  } = {}) {
+    this.path = path;
+    this.cursorPath = cursorPath;
+    this.deadLetterPath = deadLetterPath;
+    this.maxBatchBytes = positiveInteger(maxBatchBytes, DEFAULT_MAX_BATCH_BYTES);
+    this.maxBatchRows = positiveInteger(maxBatchRows, DEFAULT_MAX_BATCH_ROWS);
+    this.initialRecentLines = nonNegativeInteger(initialRecentLines, 0);
+    this.cursor = null;
+    this.persistenceQueue = Promise.resolve();
   }
 
-  return dedupeRows([...recentRows, ...pendingRows]);
+  async initialize() {
+    let fileStat;
+    try {
+      fileStat = await stat(this.path);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        return false;
+      }
+      throw error;
+    }
+
+    let persisted = null;
+    try {
+      persisted = JSON.parse(await readFile(this.cursorPath, "utf8"));
+    } catch (error) {
+      if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) {
+        throw error;
+      }
+    }
+
+    const sameFile =
+      persisted?.version === 1 &&
+      persisted.path === this.path &&
+      persisted.dev === fileStat.dev &&
+      persisted.ino === fileStat.ino;
+    let offset;
+    if (sameFile && Number.isFinite(persisted.offset) && persisted.offset <= fileStat.size) {
+      offset = Math.max(0, persisted.offset);
+    } else if (persisted) {
+      // Rotation or truncation: consume the replacement file from its beginning.
+      offset = 0;
+    } else {
+      offset = await recentJsonlStartOffset(this.path, fileStat.size, this.initialRecentLines);
+    }
+    this.cursor = {
+      version: 1,
+      path: this.path,
+      dev: fileStat.dev,
+      ino: fileStat.ino,
+      offset,
+      anchor: sameFile && typeof persisted.anchor === "string" ? persisted.anchor : null,
+      discardingOversizedLine: sameFile && Boolean(persisted.discardingOversizedLine),
+      pendingEnrichmentRows: Array.isArray(persisted?.pendingEnrichmentRows)
+        ? persisted.pendingEnrichmentRows
+        : []
+    };
+    return true;
+  }
+
+  async readBatch() {
+    if (!this.cursor && !(await this.initialize())) {
+      return { rows: [], malformed: [], hasMore: false, partial: false, reset: false, cursor: null };
+    }
+
+    let fileStat;
+    try {
+      fileStat = await stat(this.path);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        return { rows: [], malformed: [], hasMore: false, partial: false, reset: false, cursor: null };
+      }
+      throw error;
+    }
+
+    let reset = false;
+    if (fileStat.dev !== this.cursor.dev || fileStat.ino !== this.cursor.ino) {
+      this.cursor = { ...this.cursor, dev: fileStat.dev, ino: fileStat.ino, offset: 0, anchor: null, discardingOversizedLine: false };
+      reset = true;
+    } else if (fileStat.size < this.cursor.offset) {
+      this.cursor = { ...this.cursor, offset: 0, anchor: null, discardingOversizedLine: false };
+      reset = true;
+    } else if (this.cursor.offset > 0 && this.cursor.anchor) {
+      const expectedAnchor = Buffer.from(this.cursor.anchor, "base64");
+      const actualAnchor = Buffer.allocUnsafe(expectedAnchor.length);
+      const anchorHandle = await open(this.path, "r");
+      let anchorBytesRead;
+      try {
+        ({ bytesRead: anchorBytesRead } = await anchorHandle.read(
+          actualAnchor,
+          0,
+          expectedAnchor.length,
+          this.cursor.offset - expectedAnchor.length
+        ));
+      } finally {
+        await anchorHandle.close();
+      }
+      if (
+        anchorBytesRead !== expectedAnchor.length ||
+        !actualAnchor.subarray(0, anchorBytesRead).equals(expectedAnchor)
+      ) {
+        this.cursor = { ...this.cursor, offset: 0, anchor: null, discardingOversizedLine: false };
+        reset = true;
+      }
+    }
+
+    const available = fileStat.size - this.cursor.offset;
+    if (available <= 0) {
+      return { rows: [], malformed: [], hasMore: false, partial: false, reset, cursor: null };
+    }
+
+    const length = Math.min(available, this.maxBatchBytes);
+    const buffer = Buffer.allocUnsafe(length);
+    const handle = await open(this.path, "r");
+    let bytesRead;
+    try {
+      ({ bytesRead } = await handle.read(buffer, 0, length, this.cursor.offset));
+    } finally {
+      await handle.close();
+    }
+
+    const rows = [];
+    const malformed = [];
+    let lineStart = 0;
+    let linesConsumed = 0;
+    let consumedBytes = 0;
+    if (this.cursor.discardingOversizedLine) {
+      const newlineIndex = buffer.subarray(0, bytesRead).indexOf(0x0a);
+      if (newlineIndex < 0) {
+        const nextCursor = {
+          ...this.cursor,
+          offset: this.cursor.offset + bytesRead,
+          anchor: buffer.subarray(Math.max(0, bytesRead - 64), bytesRead).toString("base64"),
+          discardingOversizedLine: true
+        };
+        return {
+          rows: [],
+          malformed: [],
+          hasMore: nextCursor.offset < fileStat.size,
+          partial: false,
+          reset,
+          cursor: nextCursor
+        };
+      }
+      lineStart = newlineIndex + 1;
+      consumedBytes = lineStart;
+      linesConsumed = 1;
+    }
+    for (let index = 0; index < bytesRead && linesConsumed < this.maxBatchRows; index += 1) {
+      if (index < lineStart) {
+        continue;
+      }
+      if (buffer[index] !== 0x0a) {
+        continue;
+      }
+      const lineBuffer = buffer.subarray(lineStart, index);
+      const line = lineBuffer.toString("utf8").replace(/\r$/, "");
+      linesConsumed += 1;
+      consumedBytes = index + 1;
+      lineStart = index + 1;
+      if (!line.trim()) {
+        continue;
+      }
+      try {
+        const row = JSON.parse(line);
+        if (EXECUTION_SCHEMAS.has(row?.schema)) {
+          rows.push(row);
+        }
+      } catch (error) {
+        malformed.push({
+          offset: this.cursor.offset + lineStart - lineBuffer.length - 1,
+          error: error.message,
+          rawBase64: lineBuffer.subarray(0, 4096).toString("base64"),
+          truncated: lineBuffer.length > 4096
+        });
+      }
+    }
+
+    if (consumedBytes === 0) {
+      if (available > bytesRead) {
+        const nextCursor = {
+          ...this.cursor,
+          offset: this.cursor.offset + bytesRead,
+          anchor: buffer.subarray(Math.max(0, bytesRead - 64), bytesRead).toString("base64"),
+          discardingOversizedLine: true
+        };
+        return {
+          rows: [],
+          malformed: [{
+            offset: this.cursor.offset,
+            error: `record exceeds max batch size of ${this.maxBatchBytes} bytes`,
+            rawBase64: buffer.subarray(0, Math.min(bytesRead, 4096)).toString("base64"),
+            truncated: bytesRead > 4096
+          }],
+          hasMore: true,
+          partial: false,
+          reset,
+          cursor: nextCursor
+        };
+      }
+      return {
+        rows: [],
+        malformed: [],
+        hasMore: available > bytesRead,
+        partial: true,
+        reset,
+        cursor: null
+      };
+    }
+
+    const anchorStart = Math.max(0, consumedBytes - 64);
+    const nextCursor = {
+      ...this.cursor,
+      offset: this.cursor.offset + consumedBytes,
+      anchor: buffer.subarray(anchorStart, consumedBytes).toString("base64"),
+      discardingOversizedLine: false
+    };
+    return {
+      rows,
+      malformed,
+      hasMore: nextCursor.offset < fileStat.size,
+      partial: consumedBytes < bytesRead,
+      reset,
+      cursor: nextCursor
+    };
+  }
+
+  async updateCursor(updater) {
+    // A transient cursor write failure must fail the current operation without permanently
+    // poisoning every later persistence attempt in this process.
+    this.persistenceQueue = this.persistenceQueue.catch(() => {}).then(async () => {
+      const cursor = updater(this.cursor);
+      const temporaryPath = `${this.cursorPath}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
+      await writeFile(temporaryPath, `${JSON.stringify(cursor)}\n`, { mode: 0o600 });
+      await rename(temporaryPath, this.cursorPath);
+      this.cursor = cursor;
+    });
+    await this.persistenceQueue;
+  }
+
+  async persistMalformed(batch) {
+    if (!batch?.malformed?.length) {
+      return;
+    }
+    const records = batch.malformed.map((malformed) => JSON.stringify({
+      schema: "copytrade.syncDeadLetter.v1",
+      sourcePath: this.path,
+      recordedAt: new Date().toISOString(),
+      ...malformed
+    })).join("\n");
+    await appendFile(this.deadLetterPath, `${records}\n`, { mode: 0o600 });
+  }
+
+  pendingEnrichmentRows() {
+    return this.cursor?.pendingEnrichmentRows ?? [];
+  }
+
+  async commit(batch, { pendingEnrichmentRows = [] } = {}) {
+    if (!batch?.cursor) {
+      return;
+    }
+    await this.updateCursor((current) => {
+      const pendingByKey = new Map(
+        (current?.pendingEnrichmentRows ?? []).map((row) => [executionKey(row), row])
+      );
+      for (const row of pendingEnrichmentRows) {
+        pendingByKey.set(executionKey(row), row);
+      }
+      return {
+        ...batch.cursor,
+        pendingEnrichmentRows: [...pendingByKey.values()]
+      };
+    });
+  }
+
+  async addPendingEnrichment(rows) {
+    if (!this.cursor || rows.length === 0) {
+      return;
+    }
+    await this.commit({ cursor: this.cursor }, { pendingEnrichmentRows: rows });
+  }
+
+  async acknowledgeEnrichment(rows) {
+    if (!this.cursor || rows.length === 0) {
+      return;
+    }
+    await this.updateCursor((current) => {
+      const acknowledged = new Map(rows.map((row) => [executionKey(row), JSON.stringify(row)]));
+      const remaining = (current?.pendingEnrichmentRows ?? []).filter((row) => {
+        const expected = acknowledged.get(executionKey(row));
+        return expected === undefined || expected !== JSON.stringify(row);
+      });
+      return { ...current, pendingEnrichmentRows: remaining };
+    });
+  }
 }
 
 function scopeRowsForRecentLocalExecutions(rows, recentLimit) {
@@ -826,10 +1209,29 @@ async function chainReportFromRustConfirmation(row, confirmation, rpcFn = rpc) {
   return report;
 }
 
-async function buildRestRows(rows) {
+const ENRICHMENT_REST_COLUMNS = [
+  "copy_slot",
+  "slot_delta_from_observed",
+  "target_slot",
+  "target_tx_index",
+  "copy_tx_index",
+  "same_slot_tx_delta",
+  "position_unavailable_reason",
+  "slot_delta",
+  "tx_delta",
+  "fill_token_delta",
+  "copy_wallet_sol_delta",
+  "gross_copy_spend_sol",
+  "network_fee_sol",
+  "extra_spend_beyond_observed_sol",
+  "extra_spend_beyond_observed_and_network_fee_sol",
+  "chain_report"
+];
+
+async function buildRestRows(rows, { enrich = true } = {}) {
   const records = [];
   for (const row of rows) {
-    const report = await chainReport(row);
+    const report = enrich ? await chainReport(row) : null;
     const chain = report
       ? {
           ...report,
@@ -842,7 +1244,7 @@ async function buildRestRows(rows) {
         }
       : {};
 
-    records.push({
+    const record = {
       created_at: timestampFromMs(row.observedAtMs),
       observed_at_ms: Number.isFinite(row.observedAtMs) ? row.observedAtMs : null,
       execution_at_ms: Number.isFinite(row.executionAtMs) ? row.executionAtMs : null,
@@ -1019,7 +1421,13 @@ async function buildRestRows(rows) {
         : null,
       raw_execution: row,
       chain_report: chain
-    });
+    };
+    if (!enrich) {
+      for (const column of ENRICHMENT_REST_COLUMNS) {
+        delete record[column];
+      }
+    }
+    records.push(record);
   }
 
   return records;
@@ -1122,7 +1530,7 @@ function stripOptionalRestColumns(records) {
   ));
 }
 
-async function postExecutionRecords(base, records) {
+async function postExecutionRecords(base, records, { mergeDuplicates = true } = {}) {
   return fetch(
     `${base}/rest/v1/copytrade_local_executions?on_conflict=provider,observed_signature,observed_wallet,copy_wallet,observed_action,mint`,
     {
@@ -1131,20 +1539,20 @@ async function postExecutionRecords(base, records) {
         apikey: process.env.SUPABASE_SERVICE_ROLE_KEY,
         authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
         "content-type": "application/json",
-        prefer: "resolution=merge-duplicates,return=minimal"
+        prefer: `resolution=${mergeDuplicates ? "merge-duplicates" : "ignore-duplicates"},return=minimal`
       },
       body: JSON.stringify(records)
     }
   );
 }
 
-async function syncViaSupabaseRest(records) {
+async function syncViaSupabaseRest(records, { mergeDuplicates = true } = {}) {
   if (records.length === 0) {
     return;
   }
 
   const base = process.env.SUPABASE_URL.trim().replace(/\/+$/, "");
-  const response = await postExecutionRecords(base, records);
+  const response = await postExecutionRecords(base, records, { mergeDuplicates });
 
   if (!response.ok) {
     const text = await response.text();
@@ -1153,7 +1561,9 @@ async function syncViaSupabaseRest(records) {
       console.warn(
         `Supabase REST schema is missing optional timing column ${missingColumn}; retrying with timing columns in raw_execution only`
       );
-      const retry = await postExecutionRecords(base, stripOptionalRestColumns(records));
+      const retry = await postExecutionRecords(base, stripOptionalRestColumns(records), {
+        mergeDuplicates
+      });
       if (retry.ok) {
         return;
       }
@@ -1466,6 +1876,34 @@ async function syncOnce(path, { recentLimit = 0, pendingPositionLimit = 0 } = {}
   return rows.length;
 }
 
+async function syncRows(rows, { enrich = true } = {}) {
+  const uniqueRows = dedupeRows(rows);
+  if (uniqueRows.length === 0) {
+    return 0;
+  }
+  if (hasSupabaseRestEnv()) {
+    const records = await buildRestRows(uniqueRows, { enrich });
+    // Raw rows omit chain-enrichment columns, so they insert-or-ignore. Only the enriched pass
+    // may merge an existing row and replace enrichment fields.
+    await syncViaSupabaseRest(records, { mergeDuplicates: enrich });
+    return uniqueRows.length;
+  }
+
+  // The CLI fallback remains compatible with installations that do not expose
+  // PostgREST credentials. It enriches before its single SQL upsert because the
+  // generated SQL intentionally owns the complete row shape.
+  const sql = await buildSql(uniqueRows);
+  const result = spawnSync("supabase", ["db", "query", "--linked", sql], {
+    cwd: supabaseCwd(),
+    env: { ...process.env, SUPABASE_TELEMETRY_DISABLED: "1" },
+    encoding: "utf8"
+  });
+  if (result.status !== 0) {
+    throw new Error((result.stderr || result.stdout || "supabase db query failed").trim());
+  }
+  return uniqueRows.length;
+}
+
 function syncLimitForCycle({
   hasNewRows,
   rowCount,
@@ -1525,47 +1963,125 @@ async function main() {
     true
   );
 
-  let lastSyncedCount = -1;
+  if (!watch) {
+    const synced = await syncOnce(path, { recentLimit });
+    console.error(`synced ${synced} unique local copy executions to Supabase`);
+    return;
+  }
+
+  const maxBatchRows = positiveInteger(
+    argValue("max-batch-rows", process.env.JITO_SYNC_MAX_BATCH_ROWS),
+    DEFAULT_MAX_BATCH_ROWS
+  );
+  const maxBatchBytes = positiveInteger(
+    argValue("max-batch-bytes", process.env.JITO_SYNC_MAX_BATCH_BYTES),
+    DEFAULT_MAX_BATCH_BYTES
+  );
+  const cursorPath = argValue(
+    "cursor",
+    process.env.JITO_SYNC_CURSOR_PATH || `${path}.sync-cursor.json`
+  );
+  const tail = new DurableJsonlTail(path, {
+    cursorPath,
+    maxBatchRows,
+    maxBatchBytes,
+    initialRecentLines: recentLimit
+  });
+  const contextLimit = Math.max(
+    100,
+    recentLimit * 4,
+    refreshPendingLimit * 4,
+    newRowBackfill * 4
+  );
+  let contextRows = [];
   let lastRefreshAtMs = 0;
-  do {
-    const rowCount = readJsonl(path).length;
-    const nowMs = Date.now();
-    const hasNewRows = rowCount !== lastSyncedCount;
-    const shouldRefreshRows =
-      watch && refreshSentRows && rowCount > 0 && nowMs - lastRefreshAtMs >= refreshIntervalMs;
-    if (hasNewRows || shouldRefreshRows) {
-      const syncRecentLimit = hasNewRows ? syncLimitForCycle({
-        hasNewRows,
-        rowCount,
-        lastSyncedCount,
-        recentLimit,
-        refreshRecentLimit,
-        newRowBackfill
-      }) : 0;
-      const pendingPositionLimit = shouldRefreshRows ? refreshPendingLimit : 0;
-      const synced = await syncOnce(path, { recentLimit: syncRecentLimit, pendingPositionLimit });
-      lastSyncedCount = rowCount;
-      if (shouldRefreshRows) {
-        lastRefreshAtMs = Date.now();
-      }
-      const scopes = [];
-      if (syncRecentLimit > 0) {
-        scopes.push(`last ${syncRecentLimit} rows`);
-      } else if (pendingPositionLimit <= 0) {
-        scopes.push("all rows");
-      }
-      if (pendingPositionLimit > 0) {
-        scopes.push(`pending position rows up to ${pendingPositionLimit}`);
-      }
-      const reason = hasNewRows && shouldRefreshRows
-        ? "new rows + refresh"
-        : hasNewRows
-          ? "new rows"
-          : "refresh";
-      console.error(`synced ${synced} unique local copy executions to Supabase (${scopes.join(" + ")}, ${reason})`);
+  let enrichmentQueue = Promise.resolve();
+
+  const enqueueEnrichment = (rows, reason) => {
+    if (rows.length === 0) {
+      return;
     }
-    if (watch) {
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    enrichmentQueue = enrichmentQueue
+      .then(async () => {
+        const enriched = await syncRows(rows, { enrich: true });
+        await tail.acknowledgeEnrichment(rows);
+        console.error(`enriched ${enriched} local copy executions (${reason})`);
+      })
+      .catch((error) => {
+        console.error(`copy execution enrichment failed (${reason}): ${error.message}`);
+      });
+  };
+
+  await tail.initialize();
+  enqueueEnrichment(tail.pendingEnrichmentRows(), "recovered pending rows");
+
+  do {
+    const batch = await tail.readBatch();
+    if (batch.reset) {
+      contextRows = [];
+      console.error("execution JSONL was rotated or truncated; reset durable tail cursor");
+    }
+    for (const malformed of batch.malformed) {
+      console.error(`skipping malformed JSONL record at byte ${malformed.offset}: ${malformed.error}`);
+    }
+    await tail.persistMalformed(batch);
+
+    if (batch.cursor) {
+      contextRows.push(...batch.rows);
+      if (contextRows.length > contextLimit) {
+        contextRows = contextRows.slice(-contextLimit);
+      }
+
+      const newLocalRows = batch.rows.filter((row) => row.schema === "copytrade.localExecution.v1").length;
+      const batchRecentLimit = recentLimit <= 0
+        ? 0
+        : Math.min(recentLimit, Math.max(1, newLocalRows + newRowBackfill));
+      const batchAttributionKeys = new Set(
+        batch.rows
+          .filter((row) => row.schema === "copytrade.sendLaneAttribution.v1")
+          .map(sendLaneAttributionKey)
+      );
+      const batchConfirmationKeys = new Set(
+        batch.rows
+          .filter((row) => row.schema === "copytrade.transactionConfirmation.v1")
+          .map(transactionConfirmationKey)
+      );
+      const sidecarAffectedRows = mergeSidecarRows(contextRows).filter((row) =>
+        batchAttributionKeys.has(sendLaneAttributionKey(row)) ||
+        batchConfirmationKeys.has(transactionConfirmationKey(row))
+      );
+      const rows = dedupeRows([
+        ...selectJsonlRows(contextRows, { recentLimit: batchRecentLimit }),
+        ...sidecarAffectedRows
+      ]);
+
+      if (hasSupabaseRestEnv()) {
+        const synced = await syncRows(rows, { enrich: false });
+        await tail.commit(batch, { pendingEnrichmentRows: rows });
+        enqueueEnrichment(rows, "new rows");
+        console.error(`synced ${synced} raw local copy executions to Supabase (new rows)`);
+      } else {
+        const synced = await syncRows(rows, { enrich: true });
+        await tail.commit(batch);
+        console.error(`synced ${synced} local copy executions to Supabase (new rows)`);
+      }
+    }
+
+    const nowMs = Date.now();
+    const shouldRefreshRows =
+      refreshSentRows && contextRows.length > 0 && nowMs - lastRefreshAtMs >= refreshIntervalMs;
+    if (shouldRefreshRows) {
+      const refreshRows = dedupeRows(selectJsonlRows(contextRows, {
+        recentLimit: refreshRecentLimit,
+        pendingPositionLimit: refreshPendingLimit
+      }));
+      await tail.addPendingEnrichment(refreshRows);
+      enqueueEnrichment(refreshRows, "position refresh");
+      lastRefreshAtMs = nowMs;
+    }
+
+    if (!batch.hasMore) {
+      await sleep(intervalMs);
     }
   } while (watch);
 }
@@ -1578,7 +2094,9 @@ export {
   buyStatus,
   chainReport,
   chainReportFromRustConfirmation,
+  buildRestRows,
   dedupeRows,
+  DurableJsonlTail,
   executionKey,
   fetchBlockSignatures,
   displayTxDelta,
@@ -1586,6 +2104,9 @@ export {
   needsBlockPositionRefresh,
   pendingPositionRefreshRows,
   readJsonl,
+  selectJsonlRows,
+  syncViaSupabaseRest,
+  syncRows,
   syncLimitForCycle,
   unknownChainReport,
   autoSellStatus

@@ -125,6 +125,7 @@ pub(crate) fn normalized_event(
         parsed.sol_amount,
         parsed.token_amount,
         parsed.compute_budget,
+        parsed.copyable,
     )
 }
 
@@ -141,6 +142,7 @@ pub(crate) fn normalized_event_from_raw(
     sol_amount: Option<f64>,
     token_amount: Option<f64>,
     compute_budget: ComputeBudgetInfo,
+    copyable: bool,
 ) -> NormalizedCopyTradeEvent {
     let target_wallet = target_wallet.to_string();
     let mint = mint.to_string();
@@ -183,7 +185,7 @@ pub(crate) fn normalized_event_from_raw(
         token_amount,
         input,
         output,
-        copyable: matches!(action, Action::Buy),
+        copyable,
         filters: vec!["jito-entry".to_string()],
         account_key_count,
         source_compute_unit_limit: compute_budget.compute_unit_limit,
@@ -199,7 +201,7 @@ pub(crate) fn shadow_signal_line(
     account_key_count: usize,
     parsed: &ParsedTrade,
 ) -> ShadowSignalLine {
-    let copyable = matches!(parsed.action, Action::Buy);
+    let copyable = parsed.copyable;
     ShadowSignalLine {
         schema: "copytrade.shadowSignal.v1",
         observed_at_ms,
@@ -218,6 +220,8 @@ pub(crate) fn shadow_signal_line(
         decision: if copyable { "wouldCopy" } else { "skip" },
         reason: if copyable {
             None
+        } else if parsed.action == Action::Buy {
+            Some("parsed buy layout is not supported for copy execution")
         } else {
             Some("shadow mode only copies buy actions")
         },
@@ -262,6 +266,7 @@ mod tests {
                 route: Route::FlashxPump,
                 sol_amount: Some(0.00099),
                 token_amount: None,
+                copyable: true,
                 compute_budget: Default::default(),
                 route_context: None,
             },
@@ -293,6 +298,7 @@ mod tests {
                 route: Route::FlashxPump,
                 sol_amount: None,
                 token_amount: Some(42.0),
+                copyable: false,
                 compute_budget: Default::default(),
                 route_context: None,
             },
@@ -306,6 +312,33 @@ mod tests {
         assert_eq!(value["tokenAmount"], 42.0);
         assert_eq!(value["reason"], "shadow mode only copies buy actions");
         assert!(value.get("solAmount").is_none());
+    }
+
+    #[test]
+    fn unsupported_buy_records_layout_specific_skip_reason() {
+        let line = shadow_signal_line(
+            123,
+            "http://127.0.0.1:9999".to_string(),
+            "sig".to_string(),
+            456,
+            12,
+            &ParsedTrade {
+                target_wallet: pubkey(TARGET_WALLET),
+                action: Action::Buy,
+                mint: pubkey(MINT),
+                route: Route::FlashxPump,
+                sol_amount: Some(0.001),
+                token_amount: None,
+                copyable: false,
+                compute_budget: Default::default(),
+                route_context: None,
+            },
+        );
+
+        assert_eq!(
+            line.reason,
+            Some("parsed buy layout is not supported for copy execution")
+        );
     }
 
     fn pubkey(value: &str) -> Pubkey {

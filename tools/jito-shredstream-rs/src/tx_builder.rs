@@ -10,6 +10,8 @@ use std::{collections::HashMap, str::FromStr, sync::Mutex};
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TxFeeConfig {
     pub(crate) compute_unit_price_micro_lamports: Option<u64>,
+    pub(crate) direct_pump_buy_compute_unit_limit: Option<u32>,
+    pub(crate) migrated_amm_buy_compute_unit_limit: Option<u32>,
     pub(crate) jito_tip_lamports: Option<u64>,
     pub(crate) jito_tip_account: Option<String>,
     pub(crate) helius_sender_tip_lamports: Option<u64>,
@@ -87,7 +89,6 @@ struct FlashxWrappedSolAccountKey {
 }
 
 const PUMP_FUN_BUY_EXACT_SOL_IN_DISCRIMINATOR: [u8; 8] = [56, 252, 116, 8, 158, 223, 205, 95];
-const PUMP_FUN_COPY_MIN_TOKENS_OUT: u64 = 1;
 const DIRECT_PUMP_COPY_MIN_SOL_OUT: u64 = 1;
 const MISSING_DIRECT_PUMP_ROUTE_ACCOUNT: &str = "missing direct-pump route account";
 const MISSING_MIGRATED_AMM_ROUTE_ACCOUNT: &str = "missing migrated-amm route account";
@@ -359,11 +360,12 @@ fn build_copy_unsigned_flashx_direct_pump(
         .ok_or(TxBuildError::InvalidInstruction(
             "missing flashx SOL amount",
         ))?;
+    let min_tokens_out = scaled_flashx_direct_min_tokens_out(&context.data, spendable_sol_in)?;
 
     let mut buy_data = Vec::with_capacity(25);
     buy_data.extend_from_slice(&PUMP_FUN_BUY_EXACT_SOL_IN_DISCRIMINATOR);
     buy_data.extend_from_slice(&spendable_sol_in.to_le_bytes());
-    buy_data.extend_from_slice(&PUMP_FUN_COPY_MIN_TOKENS_OUT.to_le_bytes());
+    buy_data.extend_from_slice(&min_tokens_out.to_le_bytes());
     buy_data.push(1);
 
     let accounts = vec![
@@ -396,6 +398,31 @@ fn build_copy_unsigned_flashx_direct_pump(
             data: buy_data,
         }],
     })
+}
+
+fn scaled_flashx_direct_min_tokens_out(
+    data: &[u8],
+    copy_spend_lamports: u64,
+) -> Result<u64, TxBuildError> {
+    let observed_spend_lamports = read_u64_le(data, 1).ok_or(TxBuildError::InvalidInstruction(
+        "missing flashx direct spend amount",
+    ))?;
+    let observed_min_tokens_out = read_u64_le(data, 9).ok_or(TxBuildError::InvalidInstruction(
+        "missing flashx direct minimum token amount",
+    ))?;
+    if copy_spend_lamports == 0 || observed_spend_lamports == 0 || observed_min_tokens_out == 0 {
+        return Err(TxBuildError::InvalidInstruction(
+            "missing positive flashx direct slippage floor",
+        ));
+    }
+    let scaled = (observed_min_tokens_out as u128).saturating_mul(copy_spend_lamports as u128)
+        / observed_spend_lamports as u128;
+    if scaled == 0 || scaled > u64::MAX as u128 {
+        return Err(TxBuildError::InvalidInstruction(
+            "invalid scaled flashx direct slippage floor",
+        ));
+    }
+    Ok(scaled as u64)
 }
 
 fn build_copy_unsigned_flashx_migrated_amm(
@@ -653,7 +680,12 @@ pub(crate) fn build_full_copy_unsigned_flashx_pump_with_fees_and_cache_and_spend
     let system_program = *system_program_id();
 
     let mut instructions = Vec::with_capacity(copy_build.instructions.len() + 4);
-    instructions.push(compute_unit_limit_instruction(400_000)?);
+    let compute_unit_limit = match context.layout {
+        FlashxPumpLayout::DirectPump => fee_config.direct_pump_buy_compute_unit_limit,
+        FlashxPumpLayout::MigratedAmm => fee_config.migrated_amm_buy_compute_unit_limit,
+    }
+    .unwrap_or(crate::executor::DEFAULT_BUY_COMPUTE_UNIT_LIMIT);
+    instructions.push(compute_unit_limit_instruction(compute_unit_limit)?);
     if let Some(micro_lamports) = fee_config
         .compute_unit_price_micro_lamports
         .filter(|v| *v > 0)
@@ -1340,6 +1372,8 @@ mod tests {
             .route_context
             .as_deref()
             .expect("direct Pump route context");
+        let observed_min_tokens_out = read_u64_le(&original_context.data, 9)
+            .expect("direct Pump fixture has minimum token output");
         let RouteContext::FlashxPump(cloned_context) = &*cloned_context;
         assert!(std::sync::Arc::ptr_eq(
             &original_context.accounts,
@@ -1381,7 +1415,7 @@ mod tests {
         );
         assert_eq!(
             &build.instructions[0].data[16..24],
-            &PUMP_FUN_COPY_MIN_TOKENS_OUT.to_le_bytes()
+            &observed_min_tokens_out.to_le_bytes()
         );
         assert_eq!(build.instructions[0].data[24], 1);
         assert_eq!(
@@ -1401,6 +1435,22 @@ mod tests {
             .iter()
             .any(|account| account.pubkey.to_string()
                 == "A6z9cMVt6RovLTYpLbkawnTDEGtFpLuEgE3t7BYHJCm2"));
+
+        let override_build = build_copy_unsigned_flashx_pump_with_cache_and_spend(
+            parsed.route_context.as_deref(),
+            COPY_WALLET,
+            &parsed.mint,
+            None,
+            Some(777_000),
+        )
+        .expect("direct Pump copy route should scale the observed slippage floor");
+        assert_eq!(
+            read_u64_le(&override_build.instructions[0].data, 16),
+            Some(
+                scaled_flashx_direct_min_tokens_out(&original_context.data, 777_000)
+                    .expect("scaled direct minimum should fit")
+            )
+        );
         assert!(!build.instructions[0]
             .accounts
             .iter()
@@ -1668,6 +1718,7 @@ mod tests {
             .expect("live direct Pump FLASHX buy should parse");
         let fee_config = TxFeeConfig {
             compute_unit_price_micro_lamports: Some(250_000),
+            direct_pump_buy_compute_unit_limit: Some(180_000),
             jito_tip_lamports: Some(1_000),
             jito_tip_account: Some("96gYZGLnUQYgE8MWWpYJw8yRjnvB51rAhbG1SogE3uSG".to_string()),
             helius_sender_tip_lamports: None,
@@ -1691,6 +1742,10 @@ mod tests {
         assert_eq!(
             build.instructions[0].program_id.to_string(),
             COMPUTE_BUDGET_PROGRAM_ID
+        );
+        assert_eq!(
+            build.instructions[0].data,
+            [vec![2], 180_000u32.to_le_bytes().to_vec()].concat()
         );
         assert_eq!(
             build.instructions[1].program_id.to_string(),
@@ -1965,10 +2020,15 @@ mod tests {
         let parsed = parse_trade(&transaction, &account_keys, &[TARGET_WALLET.to_string()])
             .expect("live migrated FLASHX buy should parse");
 
-        let build = build_full_copy_unsigned_flashx_pump(
+        let fee_config = TxFeeConfig {
+            migrated_amm_buy_compute_unit_limit: Some(220_000),
+            ..Default::default()
+        };
+        let build = build_full_copy_unsigned_flashx_pump_with_fees(
             parsed.route_context.as_deref(),
             COPY_WALLET,
             &parsed.mint.to_string(),
+            &fee_config,
         )
         .expect("full migrated AMM copy transaction shell should build");
 
@@ -1984,6 +2044,10 @@ mod tests {
         assert_eq!(
             build.instructions[0].program_id.to_string(),
             COMPUTE_BUDGET_PROGRAM_ID
+        );
+        assert_eq!(
+            build.instructions[0].data,
+            [vec![2], 220_000u32.to_le_bytes().to_vec()].concat()
         );
         assert_eq!(
             build.instructions[1].program_id.to_string(),

@@ -49,6 +49,7 @@ pub(crate) fn parse(
             route: Route::FlashxPump,
             sol_amount: Some(amount_in as f64 / LAMPORTS_PER_SOL),
             token_amount: None,
+            copyable: true,
             compute_budget: Default::default(),
             route_context: None,
         });
@@ -62,6 +63,7 @@ pub(crate) fn parse(
             route: Route::FlashxPump,
             sol_amount: None,
             token_amount: Some(amount_in as f64 / PUMP_FUN_TOKEN_DECIMALS),
+            copyable: false,
             compute_budget: Default::default(),
             route_context: None,
         });
@@ -95,6 +97,7 @@ fn parse_migrated_amm_layout(
             route: Route::FlashxPump,
             sol_amount: Some(amount_in as f64 / LAMPORTS_PER_SOL),
             token_amount: None,
+            copyable: true,
             compute_budget: Default::default(),
             route_context: None,
         }),
@@ -105,6 +108,7 @@ fn parse_migrated_amm_layout(
             route: Route::FlashxPump,
             sol_amount: None,
             token_amount: Some(amount_in as f64 / PUMP_FUN_TOKEN_DECIMALS),
+            copyable: false,
             compute_budget: Default::default(),
             route_context: None,
         }),
@@ -136,6 +140,7 @@ fn parse_long_v2_layout(
             route: Route::FlashxPump,
             sol_amount: Some(amount_in as f64 / LAMPORTS_PER_SOL),
             token_amount: None,
+            copyable: false,
             compute_budget: Default::default(),
             route_context: None,
         });
@@ -150,6 +155,7 @@ fn parse_long_v2_layout(
             route: Route::FlashxPump,
             sol_amount: None,
             token_amount: Some(amount_in as f64 / PUMP_FUN_TOKEN_DECIMALS),
+            copyable: false,
             compute_budget: Default::default(),
             route_context: None,
         });
@@ -273,6 +279,15 @@ fn is_direct_pump_buy_layout(
         && account_key_at(accounts, account_keys, 0)
             .is_some_and(|account| account == &parsed.target_wallet)
         && account_key_at(accounts, account_keys, 10).is_some_and(|account| account == &parsed.mint)
+        && account_key_at(accounts, account_keys, 4)
+            .is_some_and(|account| account == flashx_router_program_id())
+        && account_key_at(accounts, account_keys, 5)
+            .is_some_and(|account| account == pump_fun_program_id())
+        && account_key_at(accounts, account_keys, 15)
+            .is_some_and(|account| account == crate::parser::system_program_id())
+        && account_key_at(accounts, account_keys, 16).is_some_and(|account| {
+            account == token_program_id() || account == token_2022_program_id()
+        })
 }
 
 fn is_direct_pump_sell_layout(
@@ -711,7 +726,7 @@ mod tests {
                 mint: FLASHX_V2_MINT,
                 sol_amount: Some(0.00099),
                 token_amount: None,
-                copyable: true,
+                copyable: false,
             },
             ReplayCase {
                 signature: "2ww3fpS3SJmG6D1D8U9o8qpBGhhXEKLMxiPofTjJyqFttSrGEuXaiFqvWfqfbSn4JNaosAhLLVhLigTpMQUVaUav",

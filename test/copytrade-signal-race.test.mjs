@@ -280,6 +280,14 @@ test("index wires PumpPortal and Geyser through the shared signal race path", ()
   assert.match(indexSource, /copyTradeSignalRaceTracker\.claim\(trade, receivedAtMs\)/);
   assert.match(indexSource, /enabled: config\.geyserEnabled \|\| copyTradeSignalProviderAllows\(config\.copyTradeSignalProvider, "geyser"\)/);
   assert.match(indexSource, /enabled: config\.shredstreamWalletObserverEnabled/);
+  assert.match(
+    indexSource,
+    /function copyTradeBuySubmissionBlockedReason[\s\S]*Rust\/Jito snapshot mode owns copy buy execution/
+  );
+  assert.match(
+    indexSource,
+    /const blockedReason = copyTradeBuySubmissionBlockedReason\(executionProvider\)[\s\S]*const finalBlockedReason = copyTradeBuySubmissionBlockedReason\(executionProvider\)/
+  );
 });
 
 test("ShredStream copytrade hot path uses the dynamic active copytrade wallet set", () => {

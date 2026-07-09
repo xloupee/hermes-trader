@@ -3,10 +3,11 @@ use crate::executor::{
 };
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use solana_pubkey::Pubkey;
 use std::{
     collections::HashMap,
-    fs::File,
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -18,7 +19,7 @@ pub(crate) struct TelegramSnapshotConfig {
     targets: HashMap<Pubkey, Vec<CopyExecutionProfile>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CopyExecutionProfile {
     pub(crate) copy_wallet: Pubkey,
     pub(crate) signer_keypair_path: Option<PathBuf>,
@@ -49,7 +50,7 @@ struct SnapshotFile {
 #[serde(rename_all = "camelCase")]
 struct SnapshotRouting {
     #[serde(rename = "liveTradingEnabled")]
-    _live_trading_enabled: bool,
+    live_trading_enabled: bool,
     emergency_stopped: bool,
     #[serde(default)]
     default_slippage: Option<f64>,
@@ -118,10 +119,14 @@ impl TelegramSnapshotConfig {
             return Ok(None);
         };
 
-        let file = File::open(path)
-            .with_context(|| format!("open Telegram Jito snapshot {}", path.display()))?;
-        let snapshot: SnapshotFile = serde_json::from_reader(file)
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("read Telegram Jito snapshot {}", path.display()))?;
+        let value: Value = serde_json::from_slice(&bytes)
             .with_context(|| format!("parse Telegram Jito snapshot {}", path.display()))?;
+        validate_snapshot_checksum(&value)
+            .with_context(|| format!("validate Telegram Jito snapshot {}", path.display()))?;
+        let snapshot: SnapshotFile = serde_json::from_value(value)
+            .with_context(|| format!("decode Telegram Jito snapshot {}", path.display()))?;
 
         if snapshot.version != 1 {
             anyhow::bail!(
@@ -138,7 +143,7 @@ impl TelegramSnapshotConfig {
                 .is_some_and(|value| !value.is_empty())
         });
         let mut targets: HashMap<Pubkey, Vec<CopyExecutionProfile>> = HashMap::new();
-        if !snapshot.routing.emergency_stopped {
+        if snapshot.routing.live_trading_enabled && !snapshot.routing.emergency_stopped {
             for subscriber in snapshot.subscribers {
                 if !has_snapshot_signer_refs {
                     if let Some(copy_wallet) = copy_wallet {
@@ -192,15 +197,27 @@ impl TelegramSnapshotConfig {
                                 snapshot.routing.jito_tip_account.clone(),
                             )
                         });
-                    targets
-                        .entry(target_wallet)
-                        .or_default()
-                        .push(CopyExecutionProfile {
-                            copy_wallet: copy_wallet_pubkey,
-                            signer_keypair_path: signer_keypair_path.clone(),
-                            copy_amount_lamports,
-                            trailing_sell,
-                        });
+                    let profile = CopyExecutionProfile {
+                        copy_wallet: copy_wallet_pubkey,
+                        signer_keypair_path: signer_keypair_path.clone(),
+                        copy_amount_lamports,
+                        trailing_sell,
+                    };
+                    let profiles = targets.entry(target_wallet).or_default();
+                    if let Some(existing) = profiles
+                        .iter()
+                        .find(|existing| existing.copy_wallet == copy_wallet_pubkey)
+                    {
+                        if existing != &profile {
+                            anyhow::bail!(
+                                "conflicting duplicate copy profile for target {} and copy wallet {}",
+                                target_wallet,
+                                copy_wallet_pubkey
+                            );
+                        }
+                        continue;
+                    }
+                    profiles.push(profile);
                 }
             }
         }
@@ -278,6 +295,65 @@ impl TelegramSnapshotConfig {
     }
 }
 
+fn validate_snapshot_checksum(value: &Value) -> Result<()> {
+    let Some(object) = value.as_object() else {
+        anyhow::bail!("snapshot root must be an object");
+    };
+    let Some(provided) = object.get("checksum").and_then(Value::as_str) else {
+        anyhow::bail!("snapshot checksum is missing");
+    };
+    let expected = snapshot_checksum(value)?;
+    if provided != expected {
+        anyhow::bail!("snapshot checksum mismatch");
+    }
+    Ok(())
+}
+
+fn snapshot_checksum(value: &Value) -> Result<String> {
+    let mut body = value.clone();
+    let Some(object) = body.as_object_mut() else {
+        anyhow::bail!("snapshot root must be an object");
+    };
+    object.remove("checksum");
+    let canonical = stable_json_stringify(&body)?;
+    let digest = Sha256::digest(canonical.as_bytes());
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("sha256:{hex}"))
+}
+
+fn stable_json_stringify(value: &Value) -> Result<String> {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+            serde_json::to_string(value).context("serialize snapshot scalar")
+        }
+        Value::Array(values) => {
+            let values = values
+                .iter()
+                .map(stable_json_stringify)
+                .collect::<Result<Vec<_>>>()?;
+            Ok(format!("[{}]", values.join(",")))
+        }
+        Value::Object(object) => {
+            let mut keys = object.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            let fields = keys
+                .into_iter()
+                .map(|key| {
+                    Ok(format!(
+                        "{}:{}",
+                        serde_json::to_string(key).context("serialize snapshot key")?,
+                        stable_json_stringify(&object[key])?
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(format!("{{{}}}", fields.join(",")))
+        }
+    }
+}
+
 fn sol_to_lamports(value: f64) -> Option<u64> {
     if !value.is_finite() || value <= 0.0 {
         return None;
@@ -348,6 +424,7 @@ fn trailing_sell_plan_from_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -358,6 +435,28 @@ mod tests {
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
+    fn checksum_matches_node_stable_json_contract() {
+        let value = serde_json::json!({
+            "version": 1,
+            "sequence": 7,
+            "generatedAtMs": 1_783_620_000_000u64,
+            "routing": {
+                "liveTradingEnabled": true,
+                "emergencyStopped": false,
+                "defaultPriorityFee": 0.00005,
+                "priorityFeeMicroLamports": 968_750,
+                "allowedSources": ["shredstream"]
+            },
+            "subscribers": []
+        });
+
+        assert_eq!(
+            snapshot_checksum(&value).expect("snapshot checksum"),
+            "sha256:8f023c8c8b2c68d4e9fcebd3d6e9b0004d1300919f97946ea0d393e3618a6a7d"
+        );
+    }
+
+    #[test]
     fn loads_active_targets_for_the_configured_copy_wallet() {
         let path = write_snapshot(&format!(
             r#"{{
@@ -366,7 +465,7 @@ mod tests {
               "generatedAtMs": 1,
               "checksum": "ignored",
               "routing": {{
-                "liveTradingEnabled": false,
+                "liveTradingEnabled": true,
                 "emergencyStopped": false,
                 "defaultSlippage": 10,
                 "defaultPriorityFee": 0.00005,
@@ -523,6 +622,75 @@ mod tests {
     }
 
     #[test]
+    fn deduplicates_the_same_target_and_copy_wallet_profile() {
+        let path = write_snapshot(&format!(
+            r#"{{
+              "version": 1,
+              "sequence": 47,
+              "routing": {{
+                "liveTradingEnabled": true,
+                "emergencyStopped": false
+              }},
+              "subscribers": [
+                {{
+                  "chatId": "chat-1",
+                  "tradingWalletPublicKey": "{COPY_WALLET}",
+                  "signerKeypairPath": "/etc/jito-copy-wallets/{COPY_WALLET}.json",
+                  "copyAmountSol": 0.0007,
+                  "wallets": [{{ "address": "{TARGET_A}" }}]
+                }},
+                {{
+                  "chatId": "chat-2",
+                  "tradingWalletPublicKey": "{COPY_WALLET}",
+                  "signerKeypairPath": "/etc/jito-copy-wallets/{COPY_WALLET}.json",
+                  "copyAmountSol": 0.0007,
+                  "wallets": [{{ "address": "{TARGET_A}" }}]
+                }}
+              ]
+            }}"#
+        ));
+
+        let snapshot = TelegramSnapshotConfig::load(Some(path.as_path()), Some(COPY_WALLET))
+            .expect("snapshot loads")
+            .expect("snapshot config");
+
+        assert_eq!(snapshot.execution_profiles(TARGET_A).len(), 1);
+        assert_eq!(snapshot.active_profile_count(), 1);
+    }
+
+    #[test]
+    fn rejects_conflicting_duplicate_target_and_copy_wallet_profiles() {
+        let path = write_snapshot(&format!(
+            r#"{{
+              "version": 1,
+              "sequence": 48,
+              "routing": {{
+                "liveTradingEnabled": true,
+                "emergencyStopped": false
+              }},
+              "subscribers": [
+                {{
+                  "tradingWalletPublicKey": "{COPY_WALLET}",
+                  "copyAmountSol": 0.0007,
+                  "wallets": [{{ "address": "{TARGET_A}" }}]
+                }},
+                {{
+                  "tradingWalletPublicKey": "{COPY_WALLET}",
+                  "copyAmountSol": 0.001,
+                  "wallets": [{{ "address": "{TARGET_A}" }}]
+                }}
+              ]
+            }}"#
+        ));
+
+        let error = TelegramSnapshotConfig::load(Some(path.as_path()), Some(COPY_WALLET))
+            .expect_err("conflicting duplicate must fail closed");
+        assert!(error
+            .to_string()
+            .contains("conflicting duplicate copy profile"));
+    }
+
+    #[test]
     fn emergency_stop_exports_no_active_targets() {
         let path = write_snapshot(&format!(
             r#"{{
@@ -549,6 +717,60 @@ mod tests {
         assert!(snapshot.target_wallets().is_empty());
     }
 
+    #[test]
+    fn live_trading_disabled_exports_no_active_targets() {
+        let path = write_snapshot(&format!(
+            r#"{{
+              "version": 1,
+              "sequence": 45,
+              "routing": {{
+                "liveTradingEnabled": false,
+                "emergencyStopped": false
+              }},
+              "subscribers": [
+                {{
+                  "tradingWalletPublicKey": "{COPY_WALLET}",
+                  "copyAmountSol": 0.0007,
+                  "wallets": [{{ "address": "{TARGET_A}" }}]
+                }}
+              ]
+            }}"#
+        ));
+
+        let snapshot = TelegramSnapshotConfig::load(Some(path.as_path()), Some(COPY_WALLET))
+            .expect("snapshot loads")
+            .expect("snapshot config");
+
+        assert!(snapshot.target_wallets().is_empty());
+    }
+
+    #[test]
+    fn rejects_tampered_snapshot_checksum() {
+        let path = write_snapshot(&format!(
+            r#"{{
+              "version": 1,
+              "sequence": 46,
+              "routing": {{
+                "liveTradingEnabled": true,
+                "emergencyStopped": false
+              }},
+              "subscribers": [
+                {{
+                  "tradingWalletPublicKey": "{COPY_WALLET}",
+                  "copyAmountSol": 0.0007,
+                  "wallets": [{{ "address": "{TARGET_A}" }}]
+                }}
+              ]
+            }}"#
+        ));
+        let body = std::fs::read_to_string(&path).expect("read snapshot");
+        std::fs::write(&path, body.replace("0.0007", "0.0008")).expect("tamper snapshot");
+
+        let error = TelegramSnapshotConfig::load(Some(path.as_path()), Some(COPY_WALLET))
+            .expect_err("tampered snapshot must fail closed");
+        assert!(format!("{error:#}").contains("checksum mismatch"));
+    }
+
     fn write_snapshot(body: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
             "jito-telegram-snapshot-test-{}-{}-{}.json",
@@ -556,9 +778,15 @@ mod tests {
             crate::event::now_ms(),
             TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
+        let mut value: Value = serde_json::from_str(body).expect("parse snapshot fixture");
+        let checksum = snapshot_checksum(&value).expect("checksum snapshot fixture");
+        value
+            .as_object_mut()
+            .expect("snapshot fixture object")
+            .insert("checksum".to_string(), Value::String(checksum));
+        let encoded = serde_json::to_vec(&value).expect("serialize snapshot fixture");
         let mut file = File::create(&path).expect("create temp snapshot");
-        file.write_all(body.as_bytes())
-            .expect("write temp snapshot");
+        file.write_all(&encoded).expect("write temp snapshot");
         path
     }
 }

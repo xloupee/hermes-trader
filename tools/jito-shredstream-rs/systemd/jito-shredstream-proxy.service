@@ -1,0 +1,20 @@
+[Unit]
+Description=Jito ShredStream Proxy (gRPC only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/jito-shredstream-proxy.env
+Environment=JITO_SHREDSTREAM_GRPC_ONLY=true
+Environment=JITO_SHREDSTREAM_UDP_RCVBUF_BYTES=8388608
+Environment=JITO_SHREDSTREAM_UDP_PREFLIGHT_MODE=require
+WorkingDirectory=/opt/jito-feed-probe-watch
+ExecStartPre=/opt/jito-feed-probe-watch/prepare-shredstream-udp.sh check
+ExecStart=/opt/jito-feed-probe-watch/run-shredstream-proxy.sh
+Restart=always
+RestartSec=2
+User=root
+
+[Install]
+WantedBy=multi-user.target

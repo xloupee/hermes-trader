@@ -40,6 +40,8 @@ use std::{
 };
 use tokio::sync::{mpsc, Notify};
 
+const MAX_COPY_EXECUTION_RESULTS_PER_DRAIN: usize = 32;
+
 struct TelegramRuntimeConfig {
     snapshot: TelegramSnapshotConfig,
     target_wallet_pubkey_set: HashSet<Pubkey>,
@@ -400,6 +402,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                         let target_wallet = parsed.target_wallet;
                         let mint = parsed.mint;
                         let observed_action = parsed.action;
+                        let copyable = parsed.copyable;
                         let observed_sol_amount = parsed.sol_amount;
                         let token_amount = parsed.token_amount;
                         let route = parsed.route;
@@ -590,6 +593,7 @@ pub(crate) async fn run(options: LiveOptions) -> Result<()> {
                             observed_sol_amount,
                             token_amount,
                             Default::default(),
+                            copyable,
                         );
                         enqueue_signal_side_effect(&signal_side_effect_tx, event, timings);
                         emitted += 1;
@@ -775,12 +779,24 @@ impl CopyExecutionRequestQueue {
     ) -> bool {
         let lane = copy_execution_queue_lane(&runtime_request);
         let Ok(mut state) = self.state.lock() else {
-            eprintln!("copy execution request dropped; queue lock poisoned");
+            log_copy_execution_queue_drop(
+                &runtime_request,
+                lane,
+                "queue_lock_poisoned",
+                0,
+                self.capacity,
+            );
             return false;
         };
         let queued = state.high_priority.len() + state.low_priority.len();
         if queued >= self.capacity {
-            eprintln!("copy execution request dropped; worker closed or queue full");
+            log_copy_execution_queue_drop(
+                &runtime_request,
+                lane,
+                "queue_full",
+                queued,
+                self.capacity,
+            );
             return false;
         }
         let request = CopyExecutionRequest {
@@ -833,6 +849,29 @@ impl CopyExecutionRequestQueue {
             state.busy_workers = state.busy_workers.saturating_sub(1);
         }
     }
+}
+
+fn log_copy_execution_queue_drop(
+    request: &CopyRuntimeRequest,
+    lane: &'static str,
+    reason: &'static str,
+    depth: usize,
+    capacity: usize,
+) {
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "schema": "copytrade.executorQueueDrop.v1",
+            "observedAtMs": request.observed_at_ms,
+            "loggedAtMs": now_ms(),
+            "signature": signature_bytes_to_string(request.signature),
+            "slot": request.slot,
+            "lane": lane,
+            "reason": reason,
+            "depth": depth,
+            "capacity": capacity,
+        })
+    );
 }
 
 fn spawn_copy_execution_workers(
@@ -1220,7 +1259,10 @@ fn drain_copy_execution_results(
     copy_execution_tx: &mpsc::UnboundedSender<CopyExecutionOutput>,
     one_shot_copy_send: bool,
 ) -> Result<bool> {
-    while let Ok(copy_execution) = copy_execution_rx.try_recv() {
+    for _ in 0..MAX_COPY_EXECUTION_RESULTS_PER_DRAIN {
+        let Ok(copy_execution) = copy_execution_rx.try_recv() else {
+            break;
+        };
         if handle_copy_execution_result(
             copy_execution_writer_tx,
             copy_execution,
@@ -1829,6 +1871,7 @@ mod tests {
             route: Route::Pump,
             mint: Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap(),
             observed_action: Action::Buy,
+            copyable: true,
             observed_sol_amount: Some(0.001),
             token_amount: None,
             account_key_count: 1,

@@ -1,13 +1,227 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import {
+  buildRestRows,
   buildSql,
-  readJsonl
+  DurableJsonlTail,
+  readJsonl,
+  syncRows,
+  syncViaSupabaseRest
 } from "../tools/jito-shredstream-rs/sync-local-copy-executions-to-supabase.mjs";
+
+function executionRow(observedSignature) {
+  return {
+    schema: "copytrade.localExecution.v1",
+    provider: "shredstream",
+    observedSignature,
+    observedWallet: "wallet",
+    copyWallet: "copy-wallet",
+    observedAction: "buy",
+    mint: `mint-${observedSignature}`
+  };
+}
+
+test("durable JSONL tail resumes from committed byte offset and waits for partial lines", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "jito-copy-tail-"));
+  const path = join(dir, "executions.jsonl");
+  const cursorPath = join(dir, "cursor.json");
+  try {
+    const first = JSON.stringify(executionRow("first"));
+    const second = JSON.stringify(executionRow("second"));
+    await writeFile(path, `${first}\n${second.slice(0, 20)}`);
+
+    const tail = new DurableJsonlTail(path, { cursorPath, initialRecentLines: 0 });
+    const firstBatch = await tail.readBatch();
+    assert.deepEqual(firstBatch.rows.map((row) => row.observedSignature), ["first"]);
+    assert.equal(firstBatch.partial, true);
+    await tail.commit(firstBatch);
+
+    const restarted = new DurableJsonlTail(path, { cursorPath, initialRecentLines: 0 });
+    const partialBatch = await restarted.readBatch();
+    assert.equal(partialBatch.rows.length, 0);
+    assert.equal(partialBatch.partial, true);
+
+    await appendFile(path, `${second.slice(20)}\n`);
+    const completedBatch = await restarted.readBatch();
+    assert.deepEqual(completedBatch.rows.map((row) => row.observedSignature), ["second"]);
+    await restarted.commit(completedBatch);
+
+    const cursor = JSON.parse(await readFile(cursorPath, "utf8"));
+    assert.equal(cursor.offset, Buffer.byteLength(`${first}\n${second}\n`));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("durable JSONL tail bootstrap limit counts local executions rather than sidecars", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "jito-copy-tail-"));
+  const path = join(dir, "executions.jsonl");
+  try {
+    const rows = [
+      executionRow("old"),
+      { schema: "copytrade.transactionConfirmation.v1", observedSignature: "old", transactionRole: "copy_buy" },
+      executionRow("new"),
+      { schema: "copytrade.transactionConfirmation.v1", observedSignature: "new", transactionRole: "copy_buy" }
+    ];
+    await writeFile(path, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
+    const tail = new DurableJsonlTail(path, { initialRecentLines: 1 });
+    const batch = await tail.readBatch();
+    assert.deepEqual(batch.rows.map((row) => row.observedSignature), ["new", "new"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+    await rm(`${path}.sync-cursor.json`, { force: true });
+  }
+});
+
+test("durable JSONL tail bounds batches and skips malformed complete records", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "jito-copy-tail-"));
+  const path = join(dir, "executions.jsonl");
+  const cursorPath = join(dir, "cursor.json");
+  const deadLetterPath = join(dir, "dead-letter.jsonl");
+  try {
+    const rows = [executionRow("one"), executionRow("two"), executionRow("three")];
+    await writeFile(path, `${JSON.stringify(rows[0])}\nnot-json\n${JSON.stringify(rows[1])}\n${JSON.stringify(rows[2])}\n`);
+    const tail = new DurableJsonlTail(path, {
+      cursorPath,
+      deadLetterPath,
+      initialRecentLines: 0,
+      maxBatchRows: 2
+    });
+
+    const firstBatch = await tail.readBatch();
+    assert.deepEqual(firstBatch.rows.map((row) => row.observedSignature), ["one"]);
+    assert.equal(firstBatch.malformed.length, 1);
+    assert.equal(firstBatch.hasMore, true);
+    await tail.persistMalformed(firstBatch);
+    await tail.commit(firstBatch);
+    const [deadLetter] = (await readFile(deadLetterPath, "utf8")).trim().split("\n").map(JSON.parse);
+    assert.equal(deadLetter.schema, "copytrade.syncDeadLetter.v1");
+    assert.equal(Buffer.from(deadLetter.rawBase64, "base64").toString("utf8"), "not-json");
+
+    const secondBatch = await tail.readBatch();
+    assert.deepEqual(secondBatch.rows.map((row) => row.observedSignature), ["two", "three"]);
+    await tail.commit(secondBatch);
+    assert.equal((await tail.readBatch()).rows.length, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("durable JSONL tail advances past an oversized malformed record", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "jito-copy-tail-"));
+  const path = join(dir, "executions.jsonl");
+  const cursorPath = join(dir, "cursor.json");
+  try {
+    await writeFile(path, `${"x".repeat(512)}\n${JSON.stringify(executionRow("after-oversized"))}\n`);
+    const tail = new DurableJsonlTail(path, {
+      cursorPath,
+      initialRecentLines: 0,
+      maxBatchBytes: 256
+    });
+    const seen = [];
+    let malformed = 0;
+    for (let attempt = 0; attempt < 10 && seen.length === 0; attempt += 1) {
+      const batch = await tail.readBatch();
+      malformed += batch.malformed.length;
+      seen.push(...batch.rows.map((row) => row.observedSignature));
+      await tail.commit(batch);
+    }
+    assert.equal(malformed, 1);
+    assert.deepEqual(seen, ["after-oversized"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("durable JSONL tail recovers enrichment work committed after the raw upsert", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "jito-copy-tail-"));
+  const path = join(dir, "executions.jsonl");
+  const cursorPath = join(dir, "cursor.json");
+  try {
+    const row = executionRow("pending");
+    await writeFile(path, `${JSON.stringify(row)}\n`);
+    const tail = new DurableJsonlTail(path, { cursorPath, initialRecentLines: 0 });
+    const batch = await tail.readBatch();
+    await tail.commit(batch, { pendingEnrichmentRows: batch.rows });
+
+    const restarted = new DurableJsonlTail(path, { cursorPath, initialRecentLines: 0 });
+    await restarted.initialize();
+    assert.deepEqual(
+      restarted.pendingEnrichmentRows().map((pending) => pending.observedSignature),
+      ["pending"]
+    );
+    await restarted.acknowledgeEnrichment(batch.rows);
+    assert.equal(restarted.pendingEnrichmentRows().length, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("durable JSONL tail resets safely on truncation and rotation", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "jito-copy-tail-"));
+  const path = join(dir, "executions.jsonl");
+  const cursorPath = join(dir, "cursor.json");
+  try {
+    await writeFile(path, `${JSON.stringify(executionRow("before"))}\n`);
+    const tail = new DurableJsonlTail(path, { cursorPath, initialRecentLines: 0 });
+    const initial = await tail.readBatch();
+    await tail.commit(initial);
+
+    await writeFile(path, `${JSON.stringify(executionRow("truncated"))}\n`);
+    const truncated = await tail.readBatch();
+    assert.equal(truncated.reset, true);
+    assert.deepEqual(truncated.rows.map((row) => row.observedSignature), ["truncated"]);
+    await tail.commit(truncated);
+
+    await rename(path, `${path}.1`);
+    await writeFile(path, `${JSON.stringify(executionRow("rotated"))}\n`);
+    const rotated = await tail.readBatch();
+    assert.equal(rotated.reset, true);
+    assert.deepEqual(rotated.rows.map((row) => row.observedSignature), ["rotated"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("raw REST rows preserve base execution fields without overwriting enrichment columns", async () => {
+  const [record] = await buildRestRows([executionRow("raw")], { enrich: false });
+  assert.equal(record.observed_signature, "raw");
+  assert.equal(record.raw_execution.observedSignature, "raw");
+  for (const column of ["copy_slot", "tx_delta", "chain_report", "gross_copy_spend_sol"]) {
+    assert.equal(Object.hasOwn(record, column), false);
+  }
+});
+
+test("raw REST writes ignore duplicates while enriched writes merge duplicates", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.SUPABASE_URL;
+  const originalKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const preferences = [];
+  process.env.SUPABASE_URL = "https://example.supabase.co";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role";
+  globalThis.fetch = async (_url, init) => {
+    preferences.push(init.headers.prefer);
+    return new Response(null, { status: 204 });
+  };
+  try {
+    await syncRows([executionRow("raw")], { enrich: false });
+    await syncViaSupabaseRest([{ observed_signature: "enriched" }], { mergeDuplicates: true });
+    assert.deepEqual(preferences, [
+      "resolution=ignore-duplicates,return=minimal",
+      "resolution=merge-duplicates,return=minimal"
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.SUPABASE_URL;
+    else process.env.SUPABASE_URL = originalUrl;
+    if (originalKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    else process.env.SUPABASE_SERVICE_ROLE_KEY = originalKey;
+  }
+});
 
 test("sync recent limit counts local execution rows after filtering auxiliary rows", async () => {
   const dir = await mkdtemp(join(tmpdir(), "jito-copy-sync-"));

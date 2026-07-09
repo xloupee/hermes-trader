@@ -5,7 +5,11 @@ use crate::{
 use arc_swap::ArcSwap;
 use reqwest::Client;
 use serde::Deserialize;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct WalletBalanceCache {
@@ -20,7 +24,8 @@ struct WalletBalanceCacheInner {
     stale_after_ms: u128,
     http_timeout_ms: u64,
     wallets: ArcSwap<Vec<String>>,
-    balances: ArcSwap<HashMap<String, WalletBalanceEntry>>,
+    balances: Mutex<HashMap<String, WalletBalanceEntry>>,
+    reservations: Mutex<HashMap<String, WalletBalanceReservationEntry>>,
     cache_rpc_backoff: CacheRpcBackoff,
 }
 
@@ -30,6 +35,16 @@ pub(crate) struct WalletBalanceEntry {
     pub(crate) fetched_at_ms: u128,
     pub(crate) source_rpc: String,
 }
+
+#[derive(Clone, Copy, Debug)]
+struct WalletBalanceReservationEntry {
+    lamports: u64,
+    expires_at_ms: u128,
+}
+
+// Longer than the normal recent-blockhash validity window, so a slow or ambiguous submit cannot
+// become spendable again while the original transaction could still land.
+const RESERVATION_RECONCILE_MS: u128 = 120_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WalletBalanceCheck {
@@ -80,7 +95,8 @@ impl WalletBalanceCache {
                 stale_after_ms,
                 http_timeout_ms,
                 wallets: ArcSwap::from_pointee(normalized_wallets(initial_wallets)),
-                balances: ArcSwap::from_pointee(HashMap::new()),
+                balances: Mutex::new(HashMap::new()),
+                reservations: Mutex::new(HashMap::new()),
                 cache_rpc_backoff,
             }),
         }
@@ -116,7 +132,10 @@ impl WalletBalanceCache {
 
     pub(crate) fn check(&self, copy_wallet: &str, required_lamports: u64) -> WalletBalanceCheck {
         let wallet = copy_wallet.to_string();
-        let Some(entry) = self.inner.balances.load().get(copy_wallet).cloned() else {
+        let Ok(balances) = self.inner.balances.lock() else {
+            return unavailable_balance_check(wallet, required_lamports, "lock poisoned");
+        };
+        let Some(entry) = balances.get(copy_wallet).cloned() else {
             return WalletBalanceCheck {
                 wallet,
                 lamports: None,
@@ -128,16 +147,22 @@ impl WalletBalanceCache {
             };
         };
 
-        let age_ms = now_ms().saturating_sub(entry.fetched_at_ms);
+        let now = now_ms();
+        let age_ms = now.saturating_sub(entry.fetched_at_ms);
+        let reserved_lamports = match self.active_reserved_lamports(copy_wallet, now) {
+            Ok(value) => value,
+            Err(detail) => return unavailable_balance_check(wallet, required_lamports, detail),
+        };
+        let available_lamports = entry.lamports.saturating_sub(reserved_lamports);
         let reason = if age_ms > self.inner.stale_after_ms {
             Some(format!(
                 "copy wallet balance cache stale: age {}ms exceeds {}ms",
                 age_ms, self.inner.stale_after_ms
             ))
-        } else if entry.lamports < required_lamports {
+        } else if available_lamports < required_lamports {
             Some(format!(
                 "copy wallet balance {} lamports below required {} lamports",
-                entry.lamports, required_lamports
+                available_lamports, required_lamports
             ))
         } else {
             None
@@ -145,7 +170,7 @@ impl WalletBalanceCache {
 
         WalletBalanceCheck {
             wallet,
-            lamports: Some(entry.lamports),
+            lamports: Some(available_lamports),
             fetched_at_ms: Some(entry.fetched_at_ms),
             age_ms: Some(age_ms),
             source_rpc: Some(entry.source_rpc),
@@ -154,17 +179,160 @@ impl WalletBalanceCache {
         }
     }
 
-    pub(crate) fn optimistic_decrement(&self, copy_wallet: &str, spent_lamports: u64) {
-        if spent_lamports == 0 {
-            return;
+    /// Checks and reserves against the last fetched on-chain balance. Reservations live in a
+    /// separate ledger so a concurrent RPC refresh cannot restore spendable balance. Committed
+    /// reservations remain conservative until the next reconciliation window expires.
+    pub(crate) fn check_and_reserve(
+        &self,
+        copy_wallet: &str,
+        required_lamports: u64,
+    ) -> (WalletBalanceCheck, Option<WalletBalanceReservation>) {
+        let wallet = copy_wallet.to_string();
+        let Ok(balances) = self.inner.balances.lock() else {
+            return (
+                unavailable_balance_check(wallet, required_lamports, "lock poisoned"),
+                None,
+            );
+        };
+        let Some(entry) = balances.get(copy_wallet) else {
+            return (
+                unavailable_balance_check(wallet, required_lamports, "missing"),
+                None,
+            );
+        };
+
+        let now = now_ms();
+        let age_ms = now.saturating_sub(entry.fetched_at_ms);
+        let Ok(mut reservations) = self.inner.reservations.lock() else {
+            return (
+                unavailable_balance_check(wallet, required_lamports, "reservation lock poisoned"),
+                None,
+            );
+        };
+        prune_expired_reservations(&mut reservations, now);
+        let reserved_lamports = reservations
+            .get(copy_wallet)
+            .map(|reservation| reservation.lamports)
+            .unwrap_or_default();
+        let available_lamports = entry.lamports.saturating_sub(reserved_lamports);
+        let reason = if age_ms > self.inner.stale_after_ms {
+            Some(format!(
+                "copy wallet balance cache stale: age {}ms exceeds {}ms",
+                age_ms, self.inner.stale_after_ms
+            ))
+        } else if available_lamports < required_lamports {
+            Some(format!(
+                "copy wallet balance {} lamports below required {} lamports",
+                available_lamports, required_lamports
+            ))
+        } else {
+            None
+        };
+        let check = WalletBalanceCheck {
+            wallet: wallet.clone(),
+            lamports: Some(available_lamports),
+            fetched_at_ms: Some(entry.fetched_at_ms),
+            age_ms: Some(age_ms),
+            source_rpc: Some(entry.source_rpc.clone()),
+            required_lamports,
+            reason,
+        };
+        if check.reason.is_some() {
+            return (check, None);
         }
 
-        let mut balances = self.inner.balances.load().as_ref().clone();
-        let Some(entry) = balances.get_mut(copy_wallet) else {
+        let reservation =
+            reservations
+                .entry(copy_wallet.to_string())
+                .or_insert(WalletBalanceReservationEntry {
+                    lamports: 0,
+                    expires_at_ms: now.saturating_add(RESERVATION_RECONCILE_MS),
+                });
+        reservation.lamports = reservation.lamports.saturating_add(required_lamports);
+        reservation.expires_at_ms = reservation
+            .expires_at_ms
+            .max(now.saturating_add(RESERVATION_RECONCILE_MS));
+        (
+            check,
+            Some(WalletBalanceReservation {
+                cache: self.clone(),
+                wallet,
+                lamports: required_lamports,
+                committed: false,
+            }),
+        )
+    }
+
+    fn release_reservation(&self, copy_wallet: &str, lamports: u64) {
+        if lamports == 0 {
             return;
-        };
-        entry.lamports = entry.lamports.saturating_sub(spent_lamports);
-        self.inner.balances.store(Arc::new(balances));
+        }
+        if let Ok(mut reservations) = self.inner.reservations.lock() {
+            if let Some(entry) = reservations.get_mut(copy_wallet) {
+                entry.lamports = entry.lamports.saturating_sub(lamports);
+                if entry.lamports == 0 {
+                    reservations.remove(copy_wallet);
+                }
+            }
+        }
+    }
+
+    fn active_reserved_lamports(&self, copy_wallet: &str, now: u128) -> Result<u64, &'static str> {
+        let mut reservations = self
+            .inner
+            .reservations
+            .lock()
+            .map_err(|_| "reservation lock poisoned")?;
+        prune_expired_reservations(&mut reservations, now);
+        Ok(reservations
+            .get(copy_wallet)
+            .map(|reservation| reservation.lamports)
+            .unwrap_or_default())
+    }
+}
+
+fn prune_expired_reservations(
+    reservations: &mut HashMap<String, WalletBalanceReservationEntry>,
+    now: u128,
+) {
+    reservations.retain(|_, reservation| reservation.expires_at_ms > now);
+}
+
+#[derive(Debug)]
+pub(crate) struct WalletBalanceReservation {
+    cache: WalletBalanceCache,
+    wallet: String,
+    lamports: u64,
+    committed: bool,
+}
+
+impl WalletBalanceReservation {
+    pub(crate) fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for WalletBalanceReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.cache.release_reservation(&self.wallet, self.lamports);
+        }
+    }
+}
+
+fn unavailable_balance_check(
+    wallet: String,
+    required_lamports: u64,
+    detail: &str,
+) -> WalletBalanceCheck {
+    WalletBalanceCheck {
+        wallet,
+        lamports: None,
+        fetched_at_ms: None,
+        age_ms: None,
+        source_rpc: None,
+        required_lamports,
+        reason: Some(format!("copy wallet balance cache {detail}")),
     }
 }
 
@@ -172,7 +340,11 @@ impl WalletBalanceCacheInner {
     async fn refresh_once(&self) -> Result<usize, String> {
         let wallets = self.wallets.load_full();
         if wallets.is_empty() {
-            self.balances.store(Arc::new(HashMap::new()));
+            *self
+                .balances
+                .lock()
+                .map_err(|_| "copy wallet balance cache lock poisoned".to_string())? =
+                HashMap::new();
             return Ok(0);
         }
 
@@ -186,7 +358,11 @@ impl WalletBalanceCacheInner {
                 Ok(balances) => {
                     self.cache_rpc_backoff.record_success(rpc_url);
                     let count = balances.len();
-                    self.balances.store(Arc::new(balances));
+                    *self
+                        .balances
+                        .lock()
+                        .map_err(|_| "copy wallet balance cache lock poisoned".to_string())? =
+                        balances;
                     return Ok(count);
                 }
                 Err(error) => {
@@ -297,6 +473,17 @@ mod tests {
         )
     }
 
+    fn seed_balance(cache: &WalletBalanceCache, wallet: &str, lamports: u64) {
+        cache.inner.balances.lock().expect("balance lock").insert(
+            wallet.to_string(),
+            WalletBalanceEntry {
+                lamports,
+                fetched_at_ms: now_ms(),
+                source_rpc: "rpc.example.com".to_string(),
+            },
+        );
+    }
+
     #[test]
     fn check_fails_closed_when_balance_missing() {
         let cache = cache_with_wallet("wallet", 5_000);
@@ -313,14 +500,15 @@ mod tests {
     #[test]
     fn check_blocks_stale_balance() {
         let cache = cache_with_wallet("wallet", 0);
-        cache.inner.balances.store(Arc::new(HashMap::from([(
-            "wallet".to_string(),
-            WalletBalanceEntry {
-                lamports: 100,
-                fetched_at_ms: now_ms().saturating_sub(10),
-                source_rpc: "rpc.example.com".to_string(),
-            },
-        )])));
+        seed_balance(&cache, "wallet", 100);
+        cache
+            .inner
+            .balances
+            .lock()
+            .expect("balance lock")
+            .get_mut("wallet")
+            .expect("wallet")
+            .fetched_at_ms = now_ms().saturating_sub(10);
 
         let check = cache.check("wallet", 10);
 
@@ -330,14 +518,7 @@ mod tests {
     #[test]
     fn check_blocks_insufficient_balance() {
         let cache = cache_with_wallet("wallet", 5_000);
-        cache.inner.balances.store(Arc::new(HashMap::from([(
-            "wallet".to_string(),
-            WalletBalanceEntry {
-                lamports: 9,
-                fetched_at_ms: now_ms(),
-                source_rpc: "rpc.example.com".to_string(),
-            },
-        )])));
+        seed_balance(&cache, "wallet", 9);
 
         let check = cache.check("wallet", 10);
 
@@ -350,19 +531,67 @@ mod tests {
     }
 
     #[test]
-    fn optimistic_decrement_saturates_cached_balance() {
+    fn reservation_decrements_and_commit_keeps_cached_balance() {
         let cache = cache_with_wallet("wallet", 5_000);
-        cache.inner.balances.store(Arc::new(HashMap::from([(
-            "wallet".to_string(),
-            WalletBalanceEntry {
-                lamports: 9,
-                fetched_at_ms: now_ms(),
-                source_rpc: "rpc.example.com".to_string(),
-            },
-        )])));
+        seed_balance(&cache, "wallet", 10);
 
-        cache.optimistic_decrement("wallet", 10);
+        let (check, reservation) = cache.check_and_reserve("wallet", 10);
+        assert!(check.reason.is_none());
+        reservation.expect("reserved").commit();
 
         assert_eq!(cache.check("wallet", 0).lamports, Some(0));
+    }
+
+    #[test]
+    fn dropped_reservation_refunds_cached_balance() {
+        let cache = cache_with_wallet("wallet", 5_000);
+        seed_balance(&cache, "wallet", 10);
+
+        let (_, reservation) = cache.check_and_reserve("wallet", 7);
+        drop(reservation);
+
+        assert_eq!(cache.check("wallet", 0).lamports, Some(10));
+    }
+
+    #[test]
+    fn refresh_cannot_erase_committed_reservation() {
+        let cache = cache_with_wallet("wallet", 5_000);
+        seed_balance(&cache, "wallet", 10);
+        let (_, reservation) = cache.check_and_reserve("wallet", 7);
+        reservation.expect("reserved").commit();
+
+        seed_balance(&cache, "wallet", 10);
+
+        assert_eq!(cache.check("wallet", 0).lamports, Some(3));
+    }
+
+    #[test]
+    fn concurrent_reservations_cannot_overspend_same_wallet() {
+        let cache = cache_with_wallet("wallet", 5_000);
+        seed_balance(&cache, "wallet", 10);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let cache = cache.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let (check, reservation) = cache.check_and_reserve("wallet", 7);
+                (check.reason.is_none(), reservation)
+            }));
+        }
+        barrier.wait();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("reservation thread"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(results.iter().filter(|(ok, _)| *ok).count(), 1);
+        let committed = results
+            .into_iter()
+            .find_map(|(ok, reservation)| ok.then_some(reservation).flatten())
+            .expect("one reservation succeeds");
+        committed.commit();
+        assert_eq!(cache.check("wallet", 0).lamports, Some(3));
     }
 }

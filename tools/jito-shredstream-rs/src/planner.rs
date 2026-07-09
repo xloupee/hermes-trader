@@ -28,6 +28,7 @@ pub(crate) struct CopyRuntimeRequest {
     pub(crate) route: Route,
     pub(crate) mint: Pubkey,
     pub(crate) observed_action: Action,
+    pub(crate) copyable: bool,
     pub(crate) observed_sol_amount: Option<f64>,
     pub(crate) token_amount: Option<f64>,
     pub(crate) account_key_count: usize,
@@ -235,10 +236,11 @@ impl CopyRuntimeRequest {
             route,
             sol_amount,
             token_amount,
+            copyable,
             compute_budget,
             route_context,
         } = parsed;
-        let decision = copy_runtime_decision(action, route, sol_amount, options);
+        let decision = copy_runtime_decision(copyable, action, route, sol_amount, options);
         Self {
             observed_at_ms,
             planned_at_ms,
@@ -248,6 +250,7 @@ impl CopyRuntimeRequest {
             route,
             mint,
             observed_action: action,
+            copyable,
             observed_sol_amount: sol_amount,
             token_amount,
             account_key_count,
@@ -275,6 +278,7 @@ impl CopyRuntimeRequest {
             route: execution_plan.route,
             mint: Pubkey::from_str(&execution_plan.mint).unwrap_or_default(),
             observed_action,
+            copyable: execution_plan.shadow_decision == "wouldCopy",
             observed_sol_amount,
             token_amount: None,
             account_key_count: 0,
@@ -289,7 +293,7 @@ impl CopyRuntimeRequest {
     }
 
     pub(crate) fn shadow_decision(&self) -> &'static str {
-        if self.observed_action == Action::Buy {
+        if self.copyable {
             "wouldCopy"
         } else {
             "skip"
@@ -297,8 +301,10 @@ impl CopyRuntimeRequest {
     }
 
     pub(crate) fn shadow_reason(&self) -> Option<&'static str> {
-        if self.observed_action == Action::Buy {
+        if self.copyable {
             None
+        } else if self.observed_action == Action::Buy {
+            Some("parsed buy layout is not supported for copy execution")
         } else {
             Some("shadow mode only copies buy actions")
         }
@@ -327,7 +333,7 @@ impl CopyRuntimeRequest {
             route: self.route,
             sol_amount: self.observed_sol_amount,
             token_amount: self.token_amount,
-            copyable: self.observed_action == Action::Buy,
+            copyable: self.copyable,
             decision: self.shadow_decision(),
             reason: self.shadow_reason(),
             account_key_count: self.account_key_count,
@@ -399,6 +405,7 @@ fn plan_decision(signal: &ShadowSignalLine, options: PlannerOptions) -> PlanDeci
 }
 
 fn copy_runtime_decision(
+    copyable: bool,
     observed_action: Action,
     route: Route,
     observed_sol_amount: Option<f64>,
@@ -406,6 +413,10 @@ fn copy_runtime_decision(
 ) -> PlanDecision {
     if observed_action != Action::Buy {
         return skipped("shadow signal is not copyable");
+    }
+
+    if !copyable {
+        return skipped("parsed trade is not copyable");
     }
 
     if route != Route::FlashxPump {
@@ -932,6 +943,7 @@ mod tests {
             route: Route::FlashxPump,
             sol_amount: (action == Action::Buy).then_some(0.00099),
             token_amount: (action == Action::Sell).then_some(42.0),
+            copyable: action == Action::Buy,
             compute_budget: Default::default(),
             route_context: None,
         }

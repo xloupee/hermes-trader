@@ -69,15 +69,81 @@ The sidecar pins Solana crates to `=2.2.1`, matching the current Jito proxy work
 
 ## Proxy Runtime Sketch
 
-The docs show the proxy needs block engine/auth/region and UDP destination settings, for example:
+The proxy needs block engine/auth/region settings. This deployment consumes the
+local gRPC service only, so it deliberately does **not** configure a raw UDP
+destination:
 
 ```text
 BLOCK_ENGINE_URL=https://mainnet.block-engine.jito.wtf
 AUTH_KEYPAIR=my_keypair.json
 DESIRED_REGIONS=ny
 SRC_BIND_PORT=20000
-DEST_IP_PORTS=<host>:8001
 GRPC_SERVICE_PORT=9999
 ```
 
 Firewall/NAT must allow UDP on `SRC_BIND_PORT`; the docs suggest checking packet arrival with `tcpdump` on that UDP port.
+
+Do not set `DEST_IP_PORTS=127.0.0.1:8001` unless a real raw-shred consumer is
+bound there. Sending every shred to an unbound loopback port creates UDP
+`NoPorts` and ICMP churn without helping the Rust worker. The managed wrapper
+defaults `JITO_SHREDSTREAM_GRPC_ONLY=true`, unsets `DEST_IP_PORTS`, and rejects
+`--dest-ip-ports` arguments. Set `JITO_SHREDSTREAM_GRPC_ONLY=false` only for an
+intentional, verified raw-shred consumer.
+
+## Droplet UDP receive-buffer preparation
+
+The proxy has bursty UDP ingress. Its systemd template requires both
+`net.core.rmem_default` and `net.core.rmem_max` to be at least 8 MiB before it
+starts. Check the values without changing the host:
+
+```bash
+cd /opt/jito-feed-probe-watch
+JITO_SHREDSTREAM_UDP_RCVBUF_BYTES=8388608 \
+  ./prepare-shredstream-udp.sh check
+```
+
+Applying the settings is a separate, explicit root action. Inspect the current
+Droplet values and newest live service definition first, then run:
+
+```bash
+sudo JITO_SHREDSTREAM_ALLOW_SYSCTL_APPLY=YES \
+  JITO_SHREDSTREAM_UDP_RCVBUF_BYTES=8388608 \
+  /opt/jito-feed-probe-watch/prepare-shredstream-udp.sh apply
+```
+
+This command changes only the runtime sysctls. Persist them through the
+Droplet's normal sysctl configuration management after the canary proves the
+chosen size; the script does not silently edit `/etc/sysctl.d`.
+
+Install the reviewed proxy unit only after reconciling it with the newest live
+unit and environment:
+
+```bash
+sudo install -m 0644 \
+  /opt/jito-feed-probe-watch/systemd/jito-shredstream-proxy.service \
+  /etc/systemd/system/jito-shredstream-proxy.service
+sudo systemctl daemon-reload
+sudo systemctl restart jito-shredstream-proxy.service
+```
+
+The unit uses `/etc/jito-shredstream-proxy.env` for the existing Jito auth,
+region, source-port, and gRPC-port variables. The wrapper never prints those
+values.
+
+## Read-only post-restart health gate
+
+After restart, sample kernel counters and recent proxy logs:
+
+```bash
+sudo JITO_SHREDSTREAM_HEALTH_INTERVAL_SECONDS=10 \
+  /opt/jito-feed-probe-watch/check-shredstream-feed-health.sh
+```
+
+The gate fails if the sample observes any new `UdpRcvbufErrors`, UDP `NoPorts`,
+or missed-FEC log lines since the proxy's current `ActiveEnterTimestamp`. The
+totals are host-wide kernel counters, so investigate
+another UDP service before attributing an unexpected delta to ShredStream. For
+a deliberately shared host, the three thresholds are configurable through
+`JITO_SHREDSTREAM_MAX_RCVBUF_ERROR_DELTA`,
+`JITO_SHREDSTREAM_MAX_NO_PORTS_DELTA`, and
+`JITO_SHREDSTREAM_MAX_FEC_MISSES`.

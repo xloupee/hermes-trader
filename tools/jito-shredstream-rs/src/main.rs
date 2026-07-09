@@ -650,11 +650,7 @@ pub(crate) struct LiveOptions {
     #[arg(long, env = "JITO_COPY_EXECUTION_CONCURRENCY", default_value_t = 4)]
     pub(crate) copy_execution_concurrency: usize,
 
-    #[arg(
-        long,
-        env = "JITO_COPY_EXECUTION_QUEUE_CAPACITY",
-        default_value_t = 1024
-    )]
+    #[arg(long, env = "JITO_COPY_EXECUTION_QUEUE_CAPACITY", default_value_t = 64)]
     pub(crate) copy_execution_queue_capacity: usize,
 
     #[arg(long, env = "JITO_AUTO_SELL_AFTER_BUY", default_value_t = false)]
@@ -717,6 +713,27 @@ pub(crate) struct LiveOptions {
 
     #[arg(long, env = "JITO_PRIORITY_FEE_MICRO_LAMPORTS")]
     pub(crate) priority_fee_micro_lamports: Option<u64>,
+
+    #[arg(
+        long,
+        env = "JITO_DIRECT_PUMP_BUY_COMPUTE_UNIT_LIMIT",
+        default_value_t = executor::DEFAULT_BUY_COMPUTE_UNIT_LIMIT
+    )]
+    pub(crate) direct_pump_buy_compute_unit_limit: u32,
+
+    #[arg(
+        long,
+        env = "JITO_MIGRATED_AMM_BUY_COMPUTE_UNIT_LIMIT",
+        default_value_t = executor::DEFAULT_BUY_COMPUTE_UNIT_LIMIT
+    )]
+    pub(crate) migrated_amm_buy_compute_unit_limit: u32,
+
+    #[arg(
+        long,
+        env = "JITO_SOURCE_PRIORITY_FEE_MULTIPLIER_BPS",
+        default_value_t = 0
+    )]
+    pub(crate) source_priority_fee_multiplier_bps: u64,
 
     #[arg(
         long,

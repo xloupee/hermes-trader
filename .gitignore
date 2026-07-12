@@ -7,6 +7,7 @@ data/
 dist/
 supabase/.temp/
 target/
+.runtime/
 tools/copy-rs/target/
 jito-shredstream-keypair.json
 tools/shredstream-rs/target/

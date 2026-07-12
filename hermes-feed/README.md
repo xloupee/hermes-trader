@@ -1,5 +1,16 @@
 # Hermes feed probe
 
+The NOXA-specific sparse Uniswap V3 observer and paper trader is implemented
+as the separate `hermes-noxa` binary. See
+[NOXA_LOW_LATENCY.md](NOXA_LOW_LATENCY.md) for the verified contract semantics,
+trigger research, architecture, live pause status, commands, and promotion
+gates. It shares the narrow, live-cross-checked Nitro decoder but does not alter
+the V2 runtime. That decoder still has the differential-testing gate described
+below before it may authorize a value-bearing trader.
+The `ops/start-noxa-observer.sh`, `status-noxa-observer.sh`, and
+`stop-noxa-observer.sh` scripts use a separate `.runtime/hermes-noxa` state
+directory and run only the no-key/no-sender observer.
+
 `hermes-feed` is the measurement-first Robinhood Chain component. It reads a
 Nitro sequencer feed, verifies contiguous sequence numbers, decodes only the
 L2 message kinds needed for signed Ethereum transactions, filters router

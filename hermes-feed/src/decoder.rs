@@ -45,6 +45,14 @@ pub struct TransactionFingerprint {
     pub tx_hash: B256,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct TransactionContext<'a> {
+    pub sequence_number: u64,
+    pub l1_block_number: u64,
+    pub l1_timestamp: u64,
+    pub transaction: &'a TxEnvelope,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DecodeReport {
     pub messages: usize,
@@ -102,6 +110,20 @@ impl FeedDecoder {
     }
 
     pub fn decode(&mut self, feed: &BroadcastMessage) -> Result<DecodeReport, DecodeError> {
+        self.decode_with(feed, |_| {})
+    }
+
+    /// Decode and visit transactions. The visitor must remain side-effect-free:
+    /// a later malformed child can still make the containing batch fail. Act on
+    /// collected values only after this method returns `Ok`.
+    pub fn decode_with<F>(
+        &mut self,
+        feed: &BroadcastMessage,
+        mut visitor: F,
+    ) -> Result<DecodeReport, DecodeError>
+    where
+        F: for<'a> FnMut(TransactionContext<'a>),
+    {
         if feed.version != 1 {
             return Err(DecodeError::UnsupportedFeedVersion(feed.version));
         }
@@ -111,16 +133,38 @@ impl FeedDecoder {
             ..DecodeReport::default()
         };
         for message in &feed.messages {
-            self.decode_message(message, &mut report)?;
+            self.decode_message_inner(message, &mut report, &mut visitor)?;
         }
         Ok(report)
     }
 
-    fn decode_message(
+    /// Decode one feed message. As with [`Self::decode_with`], defer external
+    /// effects until the method has returned successfully.
+    pub fn decode_message_with<F>(
+        &mut self,
+        feed_message: &BroadcastFeedMessage,
+        mut visitor: F,
+    ) -> Result<DecodeReport, DecodeError>
+    where
+        F: for<'a> FnMut(TransactionContext<'a>),
+    {
+        let mut report = DecodeReport {
+            messages: 1,
+            ..DecodeReport::default()
+        };
+        self.decode_message_inner(feed_message, &mut report, &mut visitor)?;
+        Ok(report)
+    }
+
+    fn decode_message_inner<F>(
         &mut self,
         feed_message: &BroadcastFeedMessage,
         report: &mut DecodeReport,
-    ) -> Result<(), DecodeError> {
+        visitor: &mut F,
+    ) -> Result<(), DecodeError>
+    where
+        F: for<'a> FnMut(TransactionContext<'a>),
+    {
         let incoming = &feed_message.message.message;
         if incoming.header.kind != L1_MESSAGE_TYPE_L2_MESSAGE {
             report.unsupported_l1_messages += 1;
@@ -146,18 +190,29 @@ impl FeedDecoder {
         }
 
         let started = Instant::now();
-        Self::decode_l2(&self.filter, &self.base64_buffer, feed_message, 0, report)?;
+        Self::decode_l2(
+            &self.filter,
+            &self.base64_buffer,
+            feed_message,
+            0,
+            report,
+            visitor,
+        )?;
         report.l2_walk_ns = report.l2_walk_ns.saturating_add(elapsed_ns(started));
         Ok(())
     }
 
-    fn decode_l2(
+    fn decode_l2<F>(
         filter: &Filter,
         bytes: &[u8],
         feed_message: &BroadcastFeedMessage,
         depth: usize,
         report: &mut DecodeReport,
-    ) -> Result<(), DecodeError> {
+        visitor: &mut F,
+    ) -> Result<(), DecodeError>
+    where
+        F: for<'a> FnMut(TransactionContext<'a>),
+    {
         let Some((&kind, payload)) = bytes.split_first() else {
             return Err(DecodeError::EmptyL2Message {
                 sequence: feed_message.sequence_number,
@@ -165,14 +220,16 @@ impl FeedDecoder {
         };
 
         match kind {
-            L2_MESSAGE_KIND_SIGNED_TX => Self::decode_signed(filter, payload, feed_message, report),
+            L2_MESSAGE_KIND_SIGNED_TX => {
+                Self::decode_signed(filter, payload, feed_message, report, visitor)
+            }
             L2_MESSAGE_KIND_BATCH => {
                 if depth >= MAX_BATCH_DEPTH {
                     return Err(DecodeError::BatchTooDeep {
                         sequence: feed_message.sequence_number,
                     });
                 }
-                Self::decode_batch(filter, payload, feed_message, depth + 1, report)
+                Self::decode_batch(filter, payload, feed_message, depth + 1, report, visitor)
             }
             _ => {
                 report.unsupported_l2_messages += 1;
@@ -181,13 +238,17 @@ impl FeedDecoder {
         }
     }
 
-    fn decode_batch(
+    fn decode_batch<F>(
         filter: &Filter,
         mut payload: &[u8],
         feed_message: &BroadcastFeedMessage,
         depth: usize,
         report: &mut DecodeReport,
-    ) -> Result<(), DecodeError> {
+        visitor: &mut F,
+    ) -> Result<(), DecodeError>
+    where
+        F: for<'a> FnMut(TransactionContext<'a>),
+    {
         while !payload.is_empty() {
             if payload.len() < 8 {
                 return Err(DecodeError::TruncatedBatchLength {
@@ -203,18 +264,22 @@ impl FeedDecoder {
                 });
             }
             let (child, remaining) = payload.split_at(length);
-            Self::decode_l2(filter, child, feed_message, depth, report)?;
+            Self::decode_l2(filter, child, feed_message, depth, report, visitor)?;
             payload = remaining;
         }
         Ok(())
     }
 
-    fn decode_signed(
+    fn decode_signed<F>(
         filter: &Filter,
         payload: &[u8],
         feed_message: &BroadcastFeedMessage,
         report: &mut DecodeReport,
-    ) -> Result<(), DecodeError> {
+        visitor: &mut F,
+    ) -> Result<(), DecodeError>
+    where
+        F: for<'a> FnMut(TransactionContext<'a>),
+    {
         let started = Instant::now();
         let tx = TxEnvelope::decode_2718_exact(payload).map_err(|error| {
             DecodeError::InvalidTransaction {
@@ -240,6 +305,13 @@ impl FeedDecoder {
                     tx_hash: *tx.tx_hash(),
                 });
         }
+
+        visitor(TransactionContext {
+            sequence_number: feed_message.sequence_number,
+            l1_block_number: feed_message.message.message.header.block_number,
+            l1_timestamp: feed_message.message.message.header.timestamp,
+            transaction: &tx,
+        });
 
         // An empty router allowlist is decode-only mode. It deliberately avoids
         // recovering every signer on the chain.
@@ -360,6 +432,34 @@ mod tests {
 
         assert_eq!(report.signed_transactions, 1);
         assert_eq!(report.recovered_signers, 0);
+    }
+
+    #[test]
+    fn visitor_observes_target_without_signer_recovery() {
+        let raw = hex::decode(LEGACY_TX).unwrap();
+        let mut l2 = vec![L2_MESSAGE_KIND_SIGNED_TX];
+        l2.extend_from_slice(&raw);
+        let mut decoder = FeedDecoder::new(Filter::default());
+        let mut observed = Vec::new();
+        let report = decoder
+            .decode_with(&feed_with_l2(&l2), |context| {
+                observed.push((
+                    context.sequence_number,
+                    context.l1_block_number,
+                    context.l1_timestamp,
+                    context.transaction.to(),
+                    *context.transaction.tx_hash(),
+                ));
+            })
+            .unwrap();
+
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].0, 42);
+        assert_eq!(observed[0].1, 9);
+        assert_eq!(observed[0].2, 10);
+        assert_eq!(observed[0].3, Some(Address::ZERO));
+        assert_eq!(report.recovered_signers, 0);
+        assert!(report.candidates.is_empty());
     }
 
     #[test]

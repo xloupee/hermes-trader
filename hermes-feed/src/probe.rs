@@ -11,7 +11,7 @@ pub struct SequenceObservation {
 
 impl SequenceObservation {
     pub fn is_contiguous(self) -> bool {
-        self.gaps == 0 && self.missing == 0
+        self.gaps == 0 && self.missing == 0 && self.duplicates_or_reordered == 0
     }
 }
 
@@ -103,5 +103,17 @@ mod tests {
         tracker.observe(10);
         let observation = tracker.observe(11);
         assert!(observation.is_contiguous());
+    }
+
+    #[test]
+    fn duplicate_or_reordered_feed_is_not_candidate_eligible() {
+        let mut tracker = SequenceTracker::default();
+        tracker.observe(10);
+        tracker.observe(11);
+        let observation = tracker.observe(11);
+        assert_eq!(observation.gaps, 0);
+        assert_eq!(observation.missing, 0);
+        assert_eq!(observation.duplicates_or_reordered, 1);
+        assert!(!observation.is_contiguous());
     }
 }

@@ -12,7 +12,8 @@ use clap::{Args, Parser, Subcommand};
 use futures_util::StreamExt;
 use hermes_feed::feed::BroadcastMessage;
 use hermes_feed::{
-    Candidate, FeedDecoder, Filter, FrameReport, PaperPolicy, SequenceObservation, SequenceTracker,
+    Candidate, FeedDecoder, Filter, FrameReport, PairSnapshot, PaperPolicy, ReserveBook,
+    SequenceObservation, SequenceTracker, V2SnapshotClient,
 };
 use serde::{Deserialize, Serialize};
 use tokio::fs::{File, OpenOptions};
@@ -37,8 +38,37 @@ enum Command {
     Compare(CompareArgs),
     /// Evaluate captured V2 candidates without signing or submitting transactions.
     Paper(PaperArgs),
+    /// Fetch a block-consistent V2 reserve snapshot for one token path.
+    Snapshot(SnapshotArgs),
+    /// Apply a block-consistent reserve snapshot to captured paper candidates.
+    Simulate(SimulateArgs),
     /// Summarize one probe log, excluding warmup frames.
     Summarize(SummarizeArgs),
+}
+
+#[derive(Debug, Args)]
+struct SimulateArgs {
+    #[arg(long)]
+    input: PathBuf,
+    #[arg(long)]
+    snapshot: PathBuf,
+    #[arg(long)]
+    max_amount_in: String,
+    #[arg(long, default_value_t = 3)]
+    max_path_len: usize,
+    #[arg(long, default_value_t = 2)]
+    deadline_grace_seconds: u64,
+}
+
+#[derive(Debug, Args)]
+struct SnapshotArgs {
+    #[arg(long, default_value = "https://rpc.mainnet.chain.robinhood.com")]
+    rpc_url: String,
+    #[arg(long, default_value = "0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f")]
+    factory: String,
+    /// Token address in path order. Repeat for every token.
+    #[arg(long = "token", required = true)]
+    path: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -145,6 +175,12 @@ struct CandidateRecord {
     record_type: String,
     source: String,
     candidate: Candidate,
+}
+
+#[derive(Debug, Deserialize)]
+struct SnapshotRecord {
+    record_type: String,
+    pairs: Vec<PairSnapshot>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -305,8 +341,89 @@ async fn main() -> Result<()> {
         Command::Replay(args) => replay(args).await,
         Command::Compare(args) => compare(args),
         Command::Paper(args) => paper(args),
+        Command::Snapshot(args) => snapshot(args).await,
+        Command::Simulate(args) => simulate(args),
         Command::Summarize(args) => summarize(args),
     }
+}
+
+fn simulate(args: SimulateArgs) -> Result<()> {
+    let max_amount_in = parse_u256(&args.max_amount_in)
+        .with_context(|| format!("invalid --max-amount-in {}", args.max_amount_in))?;
+    if max_amount_in == U256::ZERO {
+        anyhow::bail!("--max-amount-in must be greater than zero");
+    }
+    let snapshot_file = std::fs::File::open(&args.snapshot)
+        .with_context(|| format!("open reserve snapshot {}", args.snapshot.display()))?;
+    let snapshot: SnapshotRecord = serde_json::from_reader(snapshot_file)
+        .with_context(|| format!("decode reserve snapshot {}", args.snapshot.display()))?;
+    if snapshot.record_type != "v2_reserve_snapshot" {
+        anyhow::bail!("snapshot input is not a v2_reserve_snapshot record");
+    }
+    let minimum_snapshot_block = snapshot
+        .pairs
+        .iter()
+        .map(|pair| pair.block_number)
+        .min()
+        .context("reserve snapshot has no pairs")?;
+    let reserves = ReserveBook::from_snapshots(snapshot.pairs)?;
+    let policy = PaperPolicy {
+        max_amount_in,
+        max_path_len: args.max_path_len,
+        deadline_grace_seconds: args.deadline_grace_seconds,
+    };
+    let input = std::fs::File::open(&args.input)
+        .with_context(|| format!("open simulation input {}", args.input.display()))?;
+    for (index, line) in std::io::BufReader::new(input).lines().enumerate() {
+        let line = line?;
+        let value: serde_json::Value = serde_json::from_str(&line)
+            .with_context(|| format!("parse JSON at simulation input line {}", index + 1))?;
+        if value.get("record_type").and_then(|kind| kind.as_str()) != Some("candidate") {
+            continue;
+        }
+        let record: CandidateRecord = serde_json::from_value(value)
+            .with_context(|| format!("decode candidate at simulation input line {}", index + 1))?;
+        let decision = policy.evaluate_with_reserves(
+            record.candidate.v2_swap.as_ref(),
+            record.candidate.l1_timestamp,
+            &reserves,
+            minimum_snapshot_block,
+        );
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "record_type": "reserve_paper_decision",
+                "source": record.source,
+                "sequence_number": record.candidate.sequence_number,
+                "observed_tx_hash": record.candidate.tx_hash,
+                "decision": decision,
+            }))?
+        );
+    }
+    Ok(())
+}
+
+async fn snapshot(args: SnapshotArgs) -> Result<()> {
+    let factory = Address::from_str(&args.factory)
+        .with_context(|| format!("invalid --factory {}", args.factory))?;
+    let path: Vec<_> = args
+        .path
+        .iter()
+        .map(|token| Address::from_str(token).with_context(|| format!("invalid --token {token}")))
+        .collect::<Result<_>>()?;
+    let snapshots = V2SnapshotClient::new(args.rpc_url)?
+        .fetch_path(factory, &path)
+        .await?;
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "record_type": "v2_reserve_snapshot",
+            "factory": factory,
+            "path": path,
+            "pairs": snapshots,
+        }))?
+    );
+    Ok(())
 }
 
 fn paper(args: PaperArgs) -> Result<()> {

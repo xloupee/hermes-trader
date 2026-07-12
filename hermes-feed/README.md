@@ -136,6 +136,33 @@ rejects missing typed intents, zero amounts, zero minimum output, stale
 deadlines, arithmetic overflow, scaled minimums that round to zero, and paths
 longer than the configured limit.
 
+Fetch a block-consistent reserve snapshot for a path using the official public
+RPC and canonical V2 factory defaults:
+
+```bash
+hermes-feed snapshot \
+  --token 0xTOKEN_IN \
+  --token 0xTOKEN_OUT \
+  > reserve-snapshot.json
+```
+
+Apply the leader swap first and then quote the follower against the resulting
+reserves:
+
+```bash
+hermes-feed simulate \
+  --input candidate.jsonl \
+  --snapshot reserve-snapshot.json \
+  --max-amount-in 10000000000000000
+```
+
+`snapshot` validates chain ID 4663 and pins factory discovery, token ordering,
+and reserve reads to one L2 block. `simulate` journals every hop's before-state
+and both leader and follower outputs. This is intentionally separate from the
+feed hot path: live validation found on-demand public-RPC snapshots too slow to
+use after a signal, so the next runtime stage is a continuously refreshed
+pre-signal reserve cache. See [RESERVE_SIMULATION.md](RESERVE_SIMULATION.md).
+
 The `ops/start-paper-live.sh`, `status-paper-live.sh`, and
 `stop-paper-live.sh` scripts run this pipeline as an isolated, resource-limited
 paper observer. Runtime state is stored under the ignored

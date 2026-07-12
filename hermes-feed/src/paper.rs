@@ -2,6 +2,7 @@ use alloy_primitives::U256;
 use serde::Serialize;
 
 use crate::uniswap_v2::V2SwapIntent;
+use crate::v2_simulator::{OrderedCopyQuote, ReserveBook};
 
 #[derive(Debug, Clone)]
 pub struct PaperPolicy {
@@ -32,6 +33,26 @@ pub enum PaperRejectReason {
     ArithmeticOverflow,
     PathTooLong,
     Expired,
+    ReserveQuoteFailed,
+    QuotedOutputBelowMinimum,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "decision")]
+pub enum ReservePaperDecision {
+    Follow {
+        proportional_amount_out_min: U256,
+        quote: OrderedCopyQuote,
+    },
+    Reject {
+        reason: PaperRejectReason,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        quoted_amount_out: Option<U256>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        minimum_amount_out: Option<U256>,
+    },
 }
 
 impl PaperPolicy {
@@ -82,6 +103,60 @@ impl PaperPolicy {
         PaperDecision::Follow {
             amount_in,
             proportional_amount_out_min,
+        }
+    }
+
+    pub fn evaluate_with_reserves(
+        &self,
+        intent: Option<&V2SwapIntent>,
+        observed_unix_seconds: u64,
+        reserves: &ReserveBook,
+        minimum_snapshot_block: u64,
+    ) -> ReservePaperDecision {
+        let policy = self.evaluate(intent, observed_unix_seconds);
+        let PaperDecision::Follow {
+            amount_in,
+            proportional_amount_out_min,
+        } = policy
+        else {
+            let PaperDecision::Reject { reason } = policy else {
+                unreachable!("paper decision variants are exhaustive")
+            };
+            return ReservePaperDecision::Reject {
+                reason,
+                detail: None,
+                quoted_amount_out: None,
+                minimum_amount_out: None,
+            };
+        };
+        let intent = intent.expect("follow requires a typed intent");
+        let quote = match reserves.simulate_leader_then_follower(
+            &intent.path,
+            intent.amount_in,
+            amount_in,
+            minimum_snapshot_block,
+        ) {
+            Ok(quote) => quote,
+            Err(error) => {
+                return ReservePaperDecision::Reject {
+                    reason: PaperRejectReason::ReserveQuoteFailed,
+                    detail: Some(error.to_string()),
+                    quoted_amount_out: None,
+                    minimum_amount_out: Some(proportional_amount_out_min),
+                };
+            }
+        };
+        if quote.follower_amount_out < proportional_amount_out_min {
+            return ReservePaperDecision::Reject {
+                reason: PaperRejectReason::QuotedOutputBelowMinimum,
+                detail: None,
+                quoted_amount_out: Some(quote.follower_amount_out),
+                minimum_amount_out: Some(proportional_amount_out_min),
+            };
+        }
+        ReservePaperDecision::Follow {
+            proportional_amount_out_min,
+            quote,
         }
     }
 }
@@ -157,5 +232,51 @@ mod tests {
                 reason: PaperRejectReason::ScaledMinimumOutputIsZero,
             }
         );
+    }
+
+    #[test]
+    fn reserve_policy_quotes_follower_after_leader() {
+        use crate::v2_simulator::PairSnapshot;
+
+        let value = intent();
+        let reserves = ReserveBook::from_snapshots([PairSnapshot {
+            pair: Address::with_last_byte(9),
+            token0: value.path[0],
+            token1: value.path[1],
+            reserve0: U256::from(1_000),
+            reserve1: U256::from(1_000),
+            block_number: 50,
+        }])
+        .unwrap();
+        let decision = policy().evaluate_with_reserves(Some(&value), 1_000, &reserves, 50);
+        let ReservePaperDecision::Follow { quote, .. } = decision else {
+            panic!("expected reserve-aware follow");
+        };
+        assert_eq!(quote.leader_amount_out, U256::from(90));
+        assert_eq!(quote.follower_amount_out, U256::from(20));
+    }
+
+    #[test]
+    fn reserve_policy_rejects_quote_below_scaled_minimum() {
+        use crate::v2_simulator::PairSnapshot;
+
+        let mut value = intent();
+        value.amount_out_min = U256::from(100);
+        let reserves = ReserveBook::from_snapshots([PairSnapshot {
+            pair: Address::with_last_byte(9),
+            token0: value.path[0],
+            token1: value.path[1],
+            reserve0: U256::from(1_000),
+            reserve1: U256::from(1_000),
+            block_number: 50,
+        }])
+        .unwrap();
+        assert!(matches!(
+            policy().evaluate_with_reserves(Some(&value), 1_000, &reserves, 50),
+            ReservePaperDecision::Reject {
+                reason: PaperRejectReason::QuotedOutputBelowMinimum,
+                ..
+            }
+        ));
     }
 }

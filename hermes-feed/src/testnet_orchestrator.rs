@@ -1,5 +1,5 @@
 use alloy_consensus::transaction::SignerRecoverable;
-use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
+use alloy_consensus::{SignableTransaction, Transaction, TxEip1559, TxEnvelope};
 use alloy_eips::eip2718::{Decodable2718, Encodable2718};
 use alloy_primitives::{Address, B256, Signature, TxKind, U256, keccak256};
 use k256::ecdsa::signature::hazmat::PrehashSigner;
@@ -341,12 +341,60 @@ pub enum CanaryError {
     InvalidGas,
     #[error("canary value exceeds its explicit maximum")]
     ValueLimit,
+    #[error("signed canary is not pinned to Robinhood testnet")]
+    WrongChain,
+    #[error("signed canary must be a data-free self-transfer")]
+    NotSelfTransfer,
     #[error("canary signing failed")]
     Signing,
     #[error("canary signer does not match the self-transfer account")]
     SignerMismatch,
     #[error("signed canary failed round-trip validation")]
     RoundTrip,
+}
+
+/// Metadata recovered from externally signed bytes after enforcing the
+/// deliberately narrow testnet canary envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ValidatedTestnetCanary {
+    #[serde(skip)]
+    pub raw: Vec<u8>,
+    pub hash: B256,
+    pub signer: Address,
+    pub nonce: u64,
+    pub gas_limit: u64,
+    pub max_fee_per_gas: u128,
+    pub max_priority_fee_per_gas: u128,
+    pub value: U256,
+}
+
+pub fn validate_signed_testnet_canary(
+    raw: &[u8],
+    maximum_value: U256,
+) -> Result<ValidatedTestnetCanary, CanaryError> {
+    let envelope = TxEnvelope::decode_2718_exact(raw).map_err(|_| CanaryError::RoundTrip)?;
+    if envelope.chain_id() != Some(TESTNET_CHAIN_ID) {
+        return Err(CanaryError::WrongChain);
+    }
+    let signer = envelope
+        .recover_signer()
+        .map_err(|_| CanaryError::RoundTrip)?;
+    if envelope.to() != Some(signer) || !envelope.input().is_empty() {
+        return Err(CanaryError::NotSelfTransfer);
+    }
+    if envelope.value() > maximum_value {
+        return Err(CanaryError::ValueLimit);
+    }
+    Ok(ValidatedTestnetCanary {
+        raw: raw.to_vec(),
+        hash: keccak256(raw),
+        signer,
+        nonce: envelope.nonce(),
+        gas_limit: envelope.gas_limit(),
+        max_fee_per_gas: envelope.max_fee_per_gas(),
+        max_priority_fee_per_gas: envelope.max_priority_fee_per_gas().unwrap_or_default(),
+        value: envelope.value(),
+    })
 }
 
 impl TestnetCanaryPlan {
@@ -547,6 +595,10 @@ mod tests {
         let prepared = plan.sign(&key).unwrap();
         assert_eq!(prepared.signer, account);
         assert_eq!(prepared.hash, keccak256(&prepared.raw));
+        let validated = validate_signed_testnet_canary(&prepared.raw, U256::from(1)).unwrap();
+        assert_eq!(validated.signer, account);
+        assert_eq!(validated.nonce, 2);
+        assert_eq!(validated.value, U256::from(1));
     }
 
     #[test]

@@ -47,8 +47,8 @@ pub use sequencer::{
 pub use testnet_orchestrator::{
     CanaryError, ConditionalRetryDecision, ConditionalRetryState, DedicatedNonceManager,
     NonceError, NonceLease, NonceLeaseState, PreflightError, RiskError, RiskLedger, RiskLimits,
-    RiskReservation, RiskStatus, TestnetCanaryPlan, TradePreflightInput,
-    evaluate_testnet_preflight,
+    RiskReservation, RiskStatus, TestnetCanaryPlan, TradePreflightInput, ValidatedTestnetCanary,
+    evaluate_testnet_preflight, validate_signed_testnet_canary,
 };
 pub use uniswap_v2::{V2SwapIntent, V2SwapKind, decode_v2_exact_input};
 pub use v2_simulator::{

@@ -40,7 +40,7 @@ produced a valid hop journal, but the three-sequence delay means the snapshot
 could already include the leader. This proves that on-demand RPC belongs only
 in validation and cold-cache recovery—not in the copy-trading hot path.
 
-## Required hot-path design
+## Implemented hot-path design
 
 The runtime must maintain reserves before a signal arrives:
 
@@ -53,5 +53,6 @@ factory pair registry -> confirmed Sync-log updater -> in-memory reserve cache
                                                     -> paper journal
 ```
 
-The currently deployed observer has not been upgraded; it continues using the
-previous keyless policy binary while this cache stage is developed and tested.
+The original policy observer remains unchanged. A separate reserve-aware shadow
+now runs alongside it, tails the same feed journal, and uses an immutable cache
+binary. No wallet, signer, nonce manager, or transaction sender is present.

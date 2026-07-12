@@ -163,12 +163,41 @@ feed hot path: live validation found on-demand public-RPC snapshots too slow to
 use after a signal, so the next runtime stage is a continuously refreshed
 pre-signal reserve cache. See [RESERVE_SIMULATION.md](RESERVE_SIMULATION.md).
 
+Bootstrap and maintain the complete confirmed cache:
+
+```bash
+hermes-feed cache \
+  --checkpoint reserve-cache.json \
+  --confirmations 2
+```
+
+Join an existing probe stream to that cache without candidate-time RPC:
+
+```bash
+hermes-feed probe ... \
+| hermes-feed shadow \
+    --input - \
+    --checkpoint reserve-cache.json \
+    --max-amount-in 10000000000000000
+```
+
+Factory reads are collapsed through the deterministic Multicall3 deployment.
+The cache polls confirmed `Sync` log ranges, rejects skipped ranges, verifies
+the checkpoint block hash on restart, writes checkpoints atomically, and loads
+new factory pairs incrementally. See [CACHE_VALIDATION.md](CACHE_VALIDATION.md).
+
 The `ops/start-paper-live.sh`, `status-paper-live.sh`, and
 `stop-paper-live.sh` scripts run this pipeline as an isolated, resource-limited
 paper observer. Runtime state is stored under the ignored
 `.runtime/hermes-live` directory. Set `HERMES_WATCH_ADDRESS` before starting to
 restrict copying to one sender; when unset, every supported V2 sender is
 observed. No wallet or live sender is supported by these scripts.
+
+The reserve-aware shadow is managed separately with
+`ops/start-shadow-live.sh`, `status-shadow-live.sh`, and
+`stop-shadow-live.sh`. It tails the existing feed journal, maintains a
+two-confirmation reserve cache, loads new factory pairs incrementally, and
+records leader-then-follower decisions. It has no signer or sender.
 
 The summary excludes warmup frames and reports duration, sequence rate,
 sequence health, reconnect/error counts, unsupported message kinds, average

@@ -35,6 +35,7 @@ pub enum PaperRejectReason {
     Expired,
     ReserveQuoteFailed,
     QuotedOutputBelowMinimum,
+    ReserveCacheStale,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

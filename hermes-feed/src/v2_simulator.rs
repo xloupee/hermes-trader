@@ -80,6 +80,14 @@ pub struct ReserveCache {
 }
 
 impl ReserveCache {
+    pub fn len(&self) -> usize {
+        self.book.pairs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.book.pairs.is_empty()
+    }
+
     pub fn upsert_snapshot(&mut self, snapshot: PairSnapshot) -> Result<bool, QuoteError> {
         if snapshot.token0 == Address::ZERO
             || snapshot.token1 == Address::ZERO
@@ -153,6 +161,12 @@ impl ReserveCache {
             }
         }
         ReserveBook::from_snapshots(snapshots)
+    }
+
+    pub fn snapshots(&self) -> Vec<PairSnapshot> {
+        let mut snapshots: Vec<_> = self.book.pairs.values().cloned().collect();
+        snapshots.sort_by_key(|snapshot| snapshot.pair);
+        snapshots
     }
 }
 

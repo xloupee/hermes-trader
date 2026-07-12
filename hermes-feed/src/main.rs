@@ -12,7 +12,8 @@ use clap::{Args, Parser, Subcommand};
 use futures_util::StreamExt;
 use hermes_feed::feed::BroadcastMessage;
 use hermes_feed::{
-    Candidate, FeedDecoder, Filter, FrameReport, PairSnapshot, PaperPolicy, ReserveBook,
+    CacheCheckpoint, Candidate, ConfirmedReserveCache, FeedDecoder, Filter, FrameReport,
+    PairSnapshot, PaperPolicy, PaperRejectReason, ReserveBook, ReservePaperDecision,
     SequenceObservation, SequenceTracker, V2SnapshotClient,
 };
 use serde::{Deserialize, Serialize};
@@ -42,8 +43,79 @@ enum Command {
     Snapshot(SnapshotArgs),
     /// Apply a block-consistent reserve snapshot to captured paper candidates.
     Simulate(SimulateArgs),
+    /// Bootstrap the canonical V2 factory registry at one pinned block.
+    Registry(RegistryArgs),
+    /// Maintain a confirmed V2 reserve cache and atomic restart checkpoint.
+    Cache(CacheArgs),
+    /// Join the confirmed reserve cache to feed candidates in shadow mode.
+    Shadow(ShadowArgs),
     /// Summarize one probe log, excluding warmup frames.
     Summarize(SummarizeArgs),
+}
+
+#[derive(Debug, Args)]
+struct ShadowArgs {
+    /// Probe JSONL, or `-` for standard input.
+    #[arg(long, default_value = "-")]
+    input: PathBuf,
+    #[arg(long)]
+    checkpoint: PathBuf,
+    #[arg(long, default_value = "https://rpc.mainnet.chain.robinhood.com")]
+    rpc_url: String,
+    #[arg(long, default_value = "0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f")]
+    factory: String,
+    #[arg(long)]
+    max_amount_in: String,
+    #[arg(long, default_value_t = 2)]
+    confirmations: u64,
+    #[arg(long, default_value_t = 5)]
+    max_cache_lag_blocks: u64,
+    #[arg(long, default_value_t = 250)]
+    poll_ms: u64,
+    #[arg(long, default_value_t = 100)]
+    max_blocks_per_request: u64,
+    #[arg(long, default_value_t = 10_000)]
+    checkpoint_ms: u64,
+    #[arg(long, default_value_t = 3)]
+    max_path_len: usize,
+    #[arg(long, default_value_t = 2)]
+    deadline_grace_seconds: u64,
+}
+
+#[derive(Debug, Args)]
+struct CacheArgs {
+    #[arg(long, default_value = "https://rpc.mainnet.chain.robinhood.com")]
+    rpc_url: String,
+    #[arg(long, default_value = "0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f")]
+    factory: String,
+    #[arg(long)]
+    checkpoint: PathBuf,
+    #[arg(long, default_value_t = 2)]
+    confirmations: u64,
+    #[arg(long, default_value_t = 300)]
+    batch_size: usize,
+    #[arg(long, default_value_t = 100)]
+    max_blocks_per_request: u64,
+    #[arg(long, default_value_t = 250)]
+    poll_ms: u64,
+    #[arg(long, default_value_t = 10_000)]
+    checkpoint_ms: u64,
+    /// Stop after this many seconds; omit for continuous operation.
+    #[arg(long)]
+    run_seconds: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+struct RegistryArgs {
+    #[arg(long, default_value = "https://rpc.mainnet.chain.robinhood.com")]
+    rpc_url: String,
+    #[arg(long, default_value = "0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f")]
+    factory: String,
+    /// Limit pair count for canaries; omit to load the entire factory.
+    #[arg(long)]
+    limit: Option<usize>,
+    #[arg(long, default_value_t = 90)]
+    batch_size: usize,
 }
 
 #[derive(Debug, Args)]
@@ -343,8 +415,367 @@ async fn main() -> Result<()> {
         Command::Paper(args) => paper(args),
         Command::Snapshot(args) => snapshot(args).await,
         Command::Simulate(args) => simulate(args),
+        Command::Registry(args) => registry(args).await,
+        Command::Cache(args) => cache(args).await,
+        Command::Shadow(args) => shadow(args).await,
         Command::Summarize(args) => summarize(args),
     }
+}
+
+async fn cache(args: CacheArgs) -> Result<()> {
+    if args.batch_size == 0 || args.max_blocks_per_request == 0 {
+        anyhow::bail!("batch and block range sizes must be greater than zero");
+    }
+    let factory = Address::from_str(&args.factory)
+        .with_context(|| format!("invalid --factory {}", args.factory))?;
+    let client = V2SnapshotClient::new(args.rpc_url)?;
+    let mut state = if args.checkpoint.exists() {
+        let encoded = tokio::fs::read(&args.checkpoint)
+            .await
+            .with_context(|| format!("read checkpoint {}", args.checkpoint.display()))?;
+        let checkpoint: CacheCheckpoint = serde_json::from_slice(&encoded)
+            .with_context(|| format!("decode checkpoint {}", args.checkpoint.display()))?;
+        if checkpoint.chain_id != 4_663 {
+            anyhow::bail!("checkpoint is for chain ID {}", checkpoint.chain_id);
+        }
+        let checkpoint_factory = Address::from_str(&checkpoint.factory)
+            .context("checkpoint contains invalid factory address")?;
+        if checkpoint_factory != factory {
+            anyhow::bail!("checkpoint factory does not match --factory");
+        }
+        let state = ConfirmedReserveCache::from_checkpoint(checkpoint)?;
+        let canonical_hash = client.block_hash(state.block_number).await?;
+        state.verify_checkpoint_hash(&canonical_hash)?;
+        state
+    } else {
+        bootstrap_confirmed_cache(&client, factory, args.confirmations, args.batch_size).await?
+    };
+    write_cache_checkpoint(&args.checkpoint, &state, factory).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "record_type": "reserve_cache_ready",
+            "block_number": state.block_number,
+            "pairs": state.reserves.len(),
+        }))?
+    );
+
+    let started = Instant::now();
+    let mut last_registry_check = Instant::now();
+    let mut last_checkpoint = Instant::now();
+    loop {
+        if args
+            .run_seconds
+            .is_some_and(|seconds| started.elapsed().as_secs() >= seconds)
+        {
+            break;
+        }
+        if last_registry_check.elapsed() >= std::time::Duration::from_secs(60) {
+            let tail = client
+                .fetch_factory_tail(
+                    factory,
+                    state.reserves.len(),
+                    state.block_number,
+                    args.batch_size,
+                )
+                .await?;
+            if tail.loaded_pairs > 0 {
+                let loaded_pairs = tail.loaded_pairs;
+                state.extend_registry(tail)?;
+                write_cache_checkpoint(&args.checkpoint, &state, factory).await?;
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "record_type": "reserve_cache_registry_tail",
+                        "block_number": state.block_number,
+                        "pairs": state.reserves.len(),
+                        "loaded_pairs": loaded_pairs,
+                    }))?
+                );
+            }
+            last_registry_check = Instant::now();
+        }
+        let head = client.block_number().await?;
+        let target = head.saturating_sub(args.confirmations);
+        while state.block_number < target {
+            let from = state.block_number + 1;
+            let to = target.min(from.saturating_add(args.max_blocks_per_request - 1));
+            let updates = client.sync_updates(from, to).await?;
+            let block_hash = client.block_hash(to).await?;
+            let report = state.apply_range(from, to, block_hash, &updates)?;
+            if last_checkpoint.elapsed() >= std::time::Duration::from_millis(args.checkpoint_ms) {
+                write_cache_checkpoint(&args.checkpoint, &state, factory).await?;
+                last_checkpoint = Instant::now();
+            }
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "record_type": "reserve_cache_update",
+                    "report": report,
+                    "pairs": state.reserves.len(),
+                    "head": head,
+                    "confirmed_target": target,
+                }))?
+            );
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(args.poll_ms)) => {},
+            _ = shutdown_signal() => break,
+        }
+    }
+    write_cache_checkpoint(&args.checkpoint, &state, factory).await?;
+    Ok(())
+}
+
+async fn shadow(args: ShadowArgs) -> Result<()> {
+    if args.max_blocks_per_request == 0 {
+        anyhow::bail!("--max-blocks-per-request must be greater than zero");
+    }
+    if !args.checkpoint.exists() {
+        anyhow::bail!("shadow mode requires an existing confirmed cache checkpoint");
+    }
+    let factory = Address::from_str(&args.factory)
+        .with_context(|| format!("invalid --factory {}", args.factory))?;
+    let max_amount_in = parse_u256(&args.max_amount_in)
+        .with_context(|| format!("invalid --max-amount-in {}", args.max_amount_in))?;
+    if max_amount_in == U256::ZERO {
+        anyhow::bail!("--max-amount-in must be greater than zero");
+    }
+    let policy = PaperPolicy {
+        max_amount_in,
+        max_path_len: args.max_path_len,
+        deadline_grace_seconds: args.deadline_grace_seconds,
+    };
+    let client = V2SnapshotClient::new(args.rpc_url)?;
+    let mut state = load_cache_checkpoint(&client, &args.checkpoint, factory).await?;
+    let mut head = client.block_number().await?;
+    let mut last_checkpoint = Instant::now();
+    let mut last_registry_check = Instant::now();
+    let mut poll = tokio::time::interval(std::time::Duration::from_millis(args.poll_ms));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let input: Box<dyn tokio::io::AsyncBufRead + Unpin> = if args.input == Path::new("-") {
+        Box::new(BufReader::new(tokio::io::stdin()))
+    } else {
+        Box::new(BufReader::new(File::open(&args.input).await.with_context(
+            || format!("open shadow input {}", args.input.display()),
+        )?))
+    };
+    let mut lines = input.lines();
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "record_type": "shadow_ready",
+            "cache_block": state.block_number,
+            "head": head,
+            "pairs": state.reserves.len(),
+        }))?
+    );
+
+    loop {
+        tokio::select! {
+            _ = poll.tick() => {
+                head = client.block_number().await?;
+                let target = head.saturating_sub(args.confirmations);
+                while state.block_number < target {
+                    let from = state.block_number + 1;
+                    let to = target.min(from.saturating_add(args.max_blocks_per_request - 1));
+                    let updates = client.sync_updates(from, to).await?;
+                    let block_hash = client.block_hash(to).await?;
+                    let report = state.apply_range(from, to, block_hash, &updates)?;
+                    println!(
+                        "{}",
+                        serde_json::to_string(&serde_json::json!({
+                            "record_type": "shadow_cache_update",
+                            "report": report,
+                            "head": head,
+                            "confirmed_target": target,
+                        }))?
+                    );
+                }
+                if last_registry_check.elapsed() >= std::time::Duration::from_secs(10) {
+                    let tail = client
+                        .fetch_factory_tail(
+                            factory,
+                            state.reserves.len(),
+                            state.block_number,
+                            300,
+                        )
+                        .await?;
+                    if tail.loaded_pairs > 0 {
+                        let loaded_pairs = tail.loaded_pairs;
+                        state.extend_registry(tail)?;
+                        println!(
+                            "{}",
+                            serde_json::to_string(&serde_json::json!({
+                                "record_type": "shadow_registry_tail",
+                                "loaded_pairs": loaded_pairs,
+                                "pairs": state.reserves.len(),
+                                "cache_block": state.block_number,
+                            }))?
+                        );
+                    }
+                    last_registry_check = Instant::now();
+                }
+                if last_checkpoint.elapsed() >= std::time::Duration::from_millis(args.checkpoint_ms) {
+                    write_cache_checkpoint(&args.checkpoint, &state, factory).await?;
+                    last_checkpoint = Instant::now();
+                }
+            }
+            line = lines.next_line() => {
+                let Some(line) = line? else { break };
+                let value: serde_json::Value = serde_json::from_str(&line)
+                    .context("parse shadow JSON input")?;
+                if value.get("record_type").and_then(|kind| kind.as_str()) != Some("candidate") {
+                    continue;
+                }
+                let record: CandidateRecord = serde_json::from_value(value)
+                    .context("decode shadow candidate")?;
+                let started = Instant::now();
+                let cache_lag_blocks = head.saturating_sub(state.block_number);
+                let allowed_lag = args.confirmations.saturating_add(args.max_cache_lag_blocks);
+                let decision = if cache_lag_blocks > allowed_lag {
+                    ReservePaperDecision::Reject {
+                        reason: PaperRejectReason::ReserveCacheStale,
+                        detail: Some(format!("cache lag {cache_lag_blocks} blocks exceeds {allowed_lag}")),
+                        quoted_amount_out: None,
+                        minimum_amount_out: None,
+                    }
+                } else if let Some(intent) = record.candidate.v2_swap.as_ref() {
+                    match state.reserves.path_book(&intent.path, 0) {
+                        Ok(book) => policy.evaluate_with_reserves(
+                            Some(intent),
+                            record.candidate.l1_timestamp,
+                            &book,
+                            0,
+                        ),
+                        Err(error) => ReservePaperDecision::Reject {
+                            reason: PaperRejectReason::ReserveQuoteFailed,
+                            detail: Some(error.to_string()),
+                            quoted_amount_out: None,
+                            minimum_amount_out: None,
+                        },
+                    }
+                } else {
+                    policy.evaluate_with_reserves(
+                        None,
+                        record.candidate.l1_timestamp,
+                        &ReserveBook::default(),
+                        0,
+                    )
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "record_type": "shadow_paper_decision",
+                        "source": record.source,
+                        "sequence_number": record.candidate.sequence_number,
+                        "observed_tx_hash": record.candidate.tx_hash,
+                        "cache_block": state.block_number,
+                        "head": head,
+                        "cache_lag_blocks": cache_lag_blocks,
+                        "decision_ns": started.elapsed().as_nanos(),
+                        "decision": decision,
+                    }))?
+                );
+            }
+            _ = shutdown_signal() => break,
+        }
+    }
+    write_cache_checkpoint(&args.checkpoint, &state, factory).await?;
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = terminate.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+async fn load_cache_checkpoint(
+    client: &V2SnapshotClient,
+    path: &Path,
+    factory: Address,
+) -> Result<ConfirmedReserveCache> {
+    let encoded = tokio::fs::read(path)
+        .await
+        .with_context(|| format!("read checkpoint {}", path.display()))?;
+    let checkpoint: CacheCheckpoint = serde_json::from_slice(&encoded)
+        .with_context(|| format!("decode checkpoint {}", path.display()))?;
+    if checkpoint.chain_id != 4_663 {
+        anyhow::bail!("checkpoint is for chain ID {}", checkpoint.chain_id);
+    }
+    let checkpoint_factory = Address::from_str(&checkpoint.factory)
+        .context("checkpoint contains invalid factory address")?;
+    if checkpoint_factory != factory {
+        anyhow::bail!("checkpoint factory does not match --factory");
+    }
+    let state = ConfirmedReserveCache::from_checkpoint(checkpoint)?;
+    let canonical_hash = client.block_hash(state.block_number).await?;
+    state.verify_checkpoint_hash(&canonical_hash)?;
+    Ok(state)
+}
+
+async fn bootstrap_confirmed_cache(
+    client: &V2SnapshotClient,
+    factory: Address,
+    confirmations: u64,
+    batch_size: usize,
+) -> Result<ConfirmedReserveCache> {
+    let head = client.block_number().await?;
+    let pinned_block = head.saturating_sub(confirmations);
+    let bootstrap = client
+        .bootstrap_factory(factory, Some(pinned_block), None, batch_size)
+        .await?;
+    ConfirmedReserveCache::from_bootstrap(bootstrap).map_err(Into::into)
+}
+
+async fn write_cache_checkpoint(
+    path: &Path,
+    state: &ConfirmedReserveCache,
+    factory: Address,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("create checkpoint directory {}", parent.display()))?;
+    }
+    let temporary = path.with_extension("tmp");
+    let encoded = serde_json::to_vec(&state.checkpoint(factory.to_string()))?;
+    tokio::fs::write(&temporary, encoded)
+        .await
+        .with_context(|| format!("write checkpoint temporary file {}", temporary.display()))?;
+    tokio::fs::rename(&temporary, path)
+        .await
+        .with_context(|| format!("replace checkpoint {}", path.display()))?;
+    Ok(())
+}
+
+async fn registry(args: RegistryArgs) -> Result<()> {
+    let factory = Address::from_str(&args.factory)
+        .with_context(|| format!("invalid --factory {}", args.factory))?;
+    let bootstrap = V2SnapshotClient::new(args.rpc_url)?
+        .bootstrap_factory(factory, None, args.limit, args.batch_size)
+        .await?;
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "record_type": "v2_factory_registry",
+            "factory": factory,
+            "bootstrap": bootstrap,
+        }))?
+    );
+    Ok(())
 }
 
 fn simulate(args: SimulateArgs) -> Result<()> {

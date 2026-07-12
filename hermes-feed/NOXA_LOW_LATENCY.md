@@ -287,7 +287,8 @@ hermes-noxa observe --run-seconds 60
 # Parent-head to Robinhood-feed boundary measurement
 hermes-noxa calibrate-boundary \
   --l1-ws-url wss://YOUR_ETHEREUM_PROVIDER \
-  --samples 100
+  --samples 100 \
+  --run-seconds 7200
 ```
 
 `observe` distinguishes unverified factory calls, reverted launch attempts, and

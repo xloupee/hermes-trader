@@ -133,6 +133,9 @@ struct CalibrateBoundaryArgs {
     warmup_seconds: u64,
     #[arg(long, default_value_t = 100)]
     samples: usize,
+    /// Stop cleanly after this many seconds even if the sample target is not met.
+    #[arg(long)]
+    run_seconds: Option<u64>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -606,6 +609,9 @@ async fn calibrate_boundary(args: CalibrateBoundaryArgs) -> Result<()> {
         .await
         .context("subscribe to parent Ethereum newHeads")?;
     let started = Instant::now();
+    let stop_at = args
+        .run_seconds
+        .map(|seconds| Instant::now() + Duration::from_secs(seconds));
     let warmup = Duration::from_secs(args.warmup_seconds);
     let mut sequences = SequenceTracker::default();
     let mut head_arrivals: BTreeMap<u64, (Instant, u128)> = BTreeMap::new();
@@ -620,7 +626,14 @@ async fn calibrate_boundary(args: CalibrateBoundaryArgs) -> Result<()> {
         "metric": "parent_new_head_arrival_to_post_execution_nitro_feed",
     }))?;
     while samples.len() < args.samples {
+        if stop_at.is_some_and(|deadline| Instant::now() >= deadline) {
+            break;
+        }
+        let deadline = stop_at.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
         tokio::select! {
+            _ = tokio::time::sleep_until(deadline.into()) => {
+                break;
+            }
             message = l1_read.next() => {
                 let Some(message) = message else {
                     bail!("parent Ethereum websocket closed");
@@ -710,6 +723,9 @@ async fn calibrate_boundary(args: CalibrateBoundaryArgs) -> Result<()> {
         "p99_ns": percentile(&samples, 99),
         "min_ns": samples.first(),
         "max_ns": samples.last(),
+        "target_samples": args.samples,
+        "run_seconds": args.run_seconds,
+        "stopped_by_duration": samples.len() < args.samples && args.run_seconds.is_some(),
         "warning": "This measures the post-execution feed, not the safe earliest send time; predictive submission still needs testnet canaries and an explicit risk budget.",
     }))
 }

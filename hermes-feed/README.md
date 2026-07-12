@@ -10,6 +10,9 @@ below before it may authorize a value-bearing trader.
 The `ops/start-noxa-observer.sh`, `status-noxa-observer.sh`, and
 `stop-noxa-observer.sh` scripts use a separate `.runtime/hermes-noxa` state
 directory and run only the no-key/no-sender observer.
+The matching `start-noxa-measurement.sh` workflow runs a bounded two-hour
+parent-head/feed calibration and 30-second factory-status polling in its own
+`.runtime/hermes-noxa-measurement` directory.
 
 `hermes-feed` is the measurement-first Robinhood Chain component. It reads a
 Nitro sequencer feed, verifies contiguous sequence numbers, decodes only the

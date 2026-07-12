@@ -32,7 +32,14 @@ for _ in {1..50}; do
   sleep 0.1
 done
 if pid_record_is_live "$PID" "$PGID" "$STARTTIME"; then
-  echo "Hermes NOXA measurement PID $PID did not stop; retaining $PID_FILE" >&2
+  kill -KILL -- "-$PGID"
+  for _ in {1..20}; do
+    pid_record_is_live "$PID" "$PGID" "$STARTTIME" || break
+    sleep 0.1
+  done
+fi
+if pid_record_is_live "$PID" "$PGID" "$STARTTIME"; then
+  echo "Hermes NOXA measurement PID $PID survived TERM and KILL; retaining $PID_FILE" >&2
   exit 1
 fi
 rm -f -- "$PID_FILE"

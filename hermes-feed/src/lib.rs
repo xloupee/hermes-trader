@@ -34,7 +34,7 @@ pub use noxa_policy::{
 };
 pub use noxa_rpc::{
     FactoryStatus, NoxaReceipt, NoxaRpcClient, ObservedLaunchLog, RobinhoodBlock,
-    RobinhoodTransaction, TokenRestrictionSnapshot,
+    RobinhoodTransaction, RpcMetricsSnapshot, TokenRestrictionSnapshot,
 };
 pub use noxa_trade::{PreparedRawTransaction, TradePlanError, TradeTransactionPlan};
 pub use paper::{PaperDecision, PaperPolicy, PaperRejectReason, ReservePaperDecision};

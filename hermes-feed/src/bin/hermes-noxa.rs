@@ -110,6 +110,8 @@ struct ObserveArgs {
     feed_url: String,
     #[arg(long, default_value_t = 10)]
     warmup_seconds: u64,
+    #[arg(long, default_value_t = 10)]
+    health_interval_seconds: u64,
     /// Stop after this many seconds; omit to keep watching.
     #[arg(long)]
     run_seconds: Option<u64>,
@@ -437,6 +439,9 @@ async fn observe(args: ObserveArgs) -> Result<()> {
     if args.slippage_bps >= 10_000 {
         bail!("--slippage-bps must be below 10000");
     }
+    if args.health_interval_seconds == 0 {
+        bail!("--health-interval-seconds must be non-zero");
+    }
     let amount_in = parse_u256(&args.amount_in)?;
     if amount_in == U256::ZERO {
         bail!("--amount-in must be non-zero");
@@ -461,6 +466,7 @@ async fn observe(args: ObserveArgs) -> Result<()> {
         "feed_semantics": "post_execution_soft_confirmation",
         "candidate_emission": "warmup_and_gap_fail_closed",
         "receipt_verification": "asynchronous_bounded",
+        "health_interval_seconds": args.health_interval_seconds,
     }))?;
     let stop_at = args
         .run_seconds
@@ -471,6 +477,10 @@ async fn observe(args: ObserveArgs) -> Result<()> {
     let mut backoff = Duration::from_millis(250);
     let verifier_slots = Arc::new(Semaphore::new(32));
     let mut verifiers: JoinSet<Result<()>> = JoinSet::new();
+    let health_interval = Duration::from_secs(args.health_interval_seconds);
+    let mut last_health = Instant::now();
+    let mut health_feed_messages = 0_u64;
+    let mut health_signed_transactions = 0_u64;
     'observer: loop {
         if stop_at.is_some_and(|deadline| Instant::now() >= deadline) {
             break;
@@ -583,6 +593,9 @@ async fn observe(args: ObserveArgs) -> Result<()> {
                     };
                     launches.push((*tx.tx_hash(), header));
                 })?;
+                health_feed_messages = health_feed_messages.saturating_add(1);
+                health_signed_transactions =
+                    health_signed_transactions.saturating_add(report.signed_transactions as u64);
                 for (tx_hash, header) in launches {
                     if emission_enabled {
                         write_json(json!({
@@ -649,6 +662,21 @@ async fn observe(args: ObserveArgs) -> Result<()> {
                 while let Some(joined) = verifiers.try_join_next() {
                     joined.context("NOXA receipt verifier task panicked")??;
                 }
+                if last_health.elapsed() >= health_interval {
+                    write_json(json!({
+                        "record_type": "noxa_feed_health",
+                        "received_unix_ns": unix_ns(),
+                        "sequence": sequences.current(),
+                        "reconnects": reconnects,
+                        "feed_messages_since_last_health": health_feed_messages,
+                        "signed_transactions_since_last_health": health_signed_transactions,
+                        "verifier_slots_available": verifier_slots.available_permits(),
+                        "rpc": rpc.metrics(),
+                    }))?;
+                    last_health = Instant::now();
+                    health_feed_messages = 0;
+                    health_signed_transactions = 0;
+                }
             }
         }
         reconnects = reconnects.saturating_add(1);
@@ -657,6 +685,8 @@ async fn observe(args: ObserveArgs) -> Result<()> {
             "state": "disconnected",
             "reconnects": reconnects,
             "received_unix_ns": unix_ns(),
+            "sequence": sequences.current(),
+            "rpc": rpc.metrics(),
         }))?;
     }
     drain_verifiers(&mut verifiers).await

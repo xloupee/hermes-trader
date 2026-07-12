@@ -4,6 +4,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::noxa_abi::ReceiptLog;
 use crate::robinhood::{CHAIN_ID, NOXA_LAUNCH_FACTORY, PUBLIC_RPC_URL};
@@ -34,6 +36,27 @@ const RPC_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 pub struct NoxaRpcClient {
     client: Client,
     url: String,
+    metrics: Arc<RpcMetrics>,
+}
+
+#[derive(Default)]
+struct RpcMetrics {
+    logical_requests: AtomicU64,
+    http_attempts: AtomicU64,
+    retries: AtomicU64,
+    rate_limited: AtomicU64,
+    server_errors: AtomicU64,
+    transport_errors: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RpcMetricsSnapshot {
+    pub logical_requests: u64,
+    pub http_attempts: u64,
+    pub retries: u64,
+    pub rate_limited: u64,
+    pub server_errors: u64,
+    pub transport_errors: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -115,7 +138,19 @@ impl NoxaRpcClient {
         Ok(Self {
             client,
             url: url.into(),
+            metrics: Arc::new(RpcMetrics::default()),
         })
+    }
+
+    pub fn metrics(&self) -> RpcMetricsSnapshot {
+        RpcMetricsSnapshot {
+            logical_requests: self.metrics.logical_requests.load(Ordering::Relaxed),
+            http_attempts: self.metrics.http_attempts.load(Ordering::Relaxed),
+            retries: self.metrics.retries.load(Ordering::Relaxed),
+            rate_limited: self.metrics.rate_limited.load(Ordering::Relaxed),
+            server_errors: self.metrics.server_errors.load(Ordering::Relaxed),
+            transport_errors: self.metrics.transport_errors.load(Ordering::Relaxed),
+        }
     }
 
     pub async fn factory_status(&self) -> Result<FactoryStatus> {
@@ -339,8 +374,12 @@ impl NoxaRpcClient {
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        self.metrics
+            .logical_requests
+            .fetch_add(1, Ordering::Relaxed);
         let mut backoff = std::time::Duration::from_millis(100);
         for attempt in 0..RPC_ATTEMPTS {
+            self.metrics.http_attempts.fetch_add(1, Ordering::Relaxed);
             let response = match self
                 .client
                 .post(&self.url)
@@ -355,10 +394,17 @@ impl NoxaRpcClient {
             {
                 Ok(response) => response,
                 Err(_) if attempt + 1 < RPC_ATTEMPTS => {
+                    self.metrics
+                        .transport_errors
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.metrics.retries.fetch_add(1, Ordering::Relaxed);
                     sleep_before_retry(&mut backoff).await;
                     continue;
                 }
                 Err(error) => {
+                    self.metrics
+                        .transport_errors
+                        .fetch_add(1, Ordering::Relaxed);
                     return Err(error)
                         .with_context(|| format!("send {method} to Robinhood RPC after retries"));
                 }
@@ -367,10 +413,17 @@ impl NoxaRpcClient {
             let bytes = match response.bytes().await {
                 Ok(bytes) => bytes,
                 Err(_) if attempt + 1 < RPC_ATTEMPTS => {
+                    self.metrics
+                        .transport_errors
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.metrics.retries.fetch_add(1, Ordering::Relaxed);
                     sleep_before_retry(&mut backoff).await;
                     continue;
                 }
                 Err(error) => {
+                    self.metrics
+                        .transport_errors
+                        .fetch_add(1, Ordering::Relaxed);
                     return Err(error)
                         .with_context(|| format!("read {method} RPC body after retries"));
                 }
@@ -378,9 +431,22 @@ impl NoxaRpcClient {
             match classify_rpc_response(status, &bytes) {
                 RpcResponse::Result(value) => return Ok(value),
                 RpcResponse::Retryable(_) if attempt + 1 < RPC_ATTEMPTS => {
+                    if response_is_rate_limited(status, &bytes) {
+                        self.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if status.is_server_error() {
+                        self.metrics.server_errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                    self.metrics.retries.fetch_add(1, Ordering::Relaxed);
                     sleep_before_retry(&mut backoff).await;
                 }
                 RpcResponse::Retryable(reason) => {
+                    if response_is_rate_limited(status, &bytes) {
+                        self.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if status.is_server_error() {
+                        self.metrics.server_errors.fetch_add(1, Ordering::Relaxed);
+                    }
                     bail!("{method} remained retryable after {RPC_ATTEMPTS} attempts: {reason}");
                 }
                 RpcResponse::Fatal(reason) => bail!("{method} {reason}"),
@@ -388,6 +454,16 @@ impl NoxaRpcClient {
         }
         unreachable!("bounded RPC retry loop always returns")
     }
+}
+
+fn response_is_rate_limited(status: StatusCode, bytes: &[u8]) -> bool {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return true;
+    }
+    serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .and_then(|value| value.pointer("/error/code").and_then(Value::as_i64))
+        .is_some_and(|code| code == 429 || code == -32_005)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -673,6 +749,14 @@ mod tests {
                 br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"rate limited"}}"#,
             ),
             RpcResponse::Retryable(reason) if reason.contains("rate limit")
+        ));
+        assert!(response_is_rate_limited(
+            StatusCode::OK,
+            br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"rate limited"}}"#,
+        ));
+        assert!(response_is_rate_limited(
+            StatusCode::TOO_MANY_REQUESTS,
+            b"slow down",
         ));
     }
 

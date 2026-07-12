@@ -39,7 +39,9 @@ cleanup() {
   fi
   remove_owned_pid_record "$PID_FILE"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 status_loop() {
   while (( $(date +%s) < END_EPOCH )); do

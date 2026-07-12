@@ -297,6 +297,11 @@ matches the reported initial buy, quotes locally, reads the token's own limits
 at the receipt block, and emits a paper router/trigger plan. A policy decision
 requires a recipient so its exact balance can be read; otherwise policy is
 reported as not evaluated. It never loads a key, signs, or submits.
+Every ten seconds it also emits cumulative sequence gaps, missing or reordered
+messages, throughput, reconnects, verifier capacity, and shared RPC
+request/retry/rate-limit/server/transport counters. The bounded measurement
+runner combines these journals with parent-head/feed samples and 30-second
+`launchEnabled()` snapshots.
 
 ## Testnet-only orchestration
 

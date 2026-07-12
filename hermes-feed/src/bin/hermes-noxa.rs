@@ -974,6 +974,7 @@ fn start_json_writer() -> Result<JoinHandle<Result<()>>> {
                 JsonOutput::Record(value) => {
                     serde_json::to_writer(&mut output, &value)?;
                     output.write_all(b"\n")?;
+                    output.flush()?;
                 }
                 JsonOutput::Shutdown => {
                     output.flush()?;

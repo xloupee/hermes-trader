@@ -301,7 +301,8 @@ Every ten seconds it also emits cumulative sequence gaps, missing or reordered
 messages, throughput, reconnects, verifier capacity, and shared RPC
 request/retry/rate-limit/server/transport counters. The bounded measurement
 runner combines these journals with parent-head/feed samples and 30-second
-`launchEnabled()` snapshots.
+`launchEnabled()` snapshots. The persistent observer independently continues
+the same 30-second factory watch after a bounded measurement finishes.
 
 ## Testnet-only orchestration
 

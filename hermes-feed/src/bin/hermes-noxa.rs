@@ -112,6 +112,8 @@ struct ObserveArgs {
     warmup_seconds: u64,
     #[arg(long, default_value_t = 10)]
     health_interval_seconds: u64,
+    #[arg(long, default_value_t = 30)]
+    factory_status_interval_seconds: u64,
     /// Stop after this many seconds; omit to keep watching.
     #[arg(long)]
     run_seconds: Option<u64>,
@@ -442,6 +444,9 @@ async fn observe(args: ObserveArgs) -> Result<()> {
     if args.health_interval_seconds == 0 {
         bail!("--health-interval-seconds must be non-zero");
     }
+    if args.factory_status_interval_seconds == 0 {
+        bail!("--factory-status-interval-seconds must be non-zero");
+    }
     let amount_in = parse_u256(&args.amount_in)?;
     if amount_in == U256::ZERO {
         bail!("--amount-in must be non-zero");
@@ -467,6 +472,7 @@ async fn observe(args: ObserveArgs) -> Result<()> {
         "candidate_emission": "warmup_and_gap_fail_closed",
         "receipt_verification": "asynchronous_bounded",
         "health_interval_seconds": args.health_interval_seconds,
+        "factory_status_interval_seconds": args.factory_status_interval_seconds,
     }))?;
     let stop_at = args
         .run_seconds
@@ -477,8 +483,11 @@ async fn observe(args: ObserveArgs) -> Result<()> {
     let mut backoff = Duration::from_millis(250);
     let verifier_slots = Arc::new(Semaphore::new(32));
     let mut verifiers: JoinSet<Result<()>> = JoinSet::new();
+    let mut status_tasks: JoinSet<Result<()>> = JoinSet::new();
     let health_interval = Duration::from_secs(args.health_interval_seconds);
+    let factory_status_interval = Duration::from_secs(args.factory_status_interval_seconds);
     let mut last_health = Instant::now();
+    let mut last_factory_status = Instant::now();
     let mut health_feed_messages = 0_u64;
     let mut health_signed_transactions = 0_u64;
     'observer: loop {
@@ -662,6 +671,9 @@ async fn observe(args: ObserveArgs) -> Result<()> {
                 while let Some(joined) = verifiers.try_join_next() {
                     joined.context("NOXA receipt verifier task panicked")??;
                 }
+                while let Some(joined) = status_tasks.try_join_next() {
+                    joined.context("NOXA factory-status task panicked")??;
+                }
                 if last_health.elapsed() >= health_interval {
                     write_json(json!({
                         "record_type": "noxa_feed_health",
@@ -677,6 +689,32 @@ async fn observe(args: ObserveArgs) -> Result<()> {
                     health_feed_messages = 0;
                     health_signed_transactions = 0;
                 }
+                if last_factory_status.elapsed() >= factory_status_interval
+                    && status_tasks.is_empty()
+                {
+                    let rpc = rpc.clone();
+                    status_tasks.spawn(async move {
+                        let value = match rpc.factory_status().await {
+                            Ok(status) => json!({
+                                "record_type": "noxa_factory_status_watch",
+                                "received_unix_ns": unix_ns(),
+                                "runtime_hash_matches_pin": status.runtime_keccak256
+                                    == NOXA_FACTORY_RUNTIME_KECCAK256,
+                                "can_launch_now": status.launch_enabled
+                                    && status.runtime_keccak256
+                                        == NOXA_FACTORY_RUNTIME_KECCAK256,
+                                "status": status,
+                            }),
+                            Err(error) => json!({
+                                "record_type": "noxa_factory_status_watch_error",
+                                "received_unix_ns": unix_ns(),
+                                "error": error.to_string(),
+                            }),
+                        };
+                        write_json(value)
+                    });
+                    last_factory_status = Instant::now();
+                }
             }
         }
         reconnects = reconnects.saturating_add(1);
@@ -689,7 +727,8 @@ async fn observe(args: ObserveArgs) -> Result<()> {
             "rpc": rpc.metrics(),
         }))?;
     }
-    drain_verifiers(&mut verifiers).await
+    drain_tasks(&mut verifiers, "NOXA receipt verifiers").await?;
+    drain_tasks(&mut status_tasks, "NOXA factory-status tasks").await
 }
 
 async fn calibrate_boundary(args: CalibrateBoundaryArgs) -> Result<()> {
@@ -854,19 +893,19 @@ async fn sleep_with_deadline(duration: Duration, deadline: Option<Instant>) -> b
     deadline.is_some_and(|deadline| Instant::now() >= deadline)
 }
 
-async fn drain_verifiers(verifiers: &mut JoinSet<Result<()>>) -> Result<()> {
+async fn drain_tasks(tasks: &mut JoinSet<Result<()>>, label: &str) -> Result<()> {
     let drain = async {
-        while let Some(joined) = verifiers.join_next().await {
-            joined.context("NOXA receipt verifier task panicked")??;
+        while let Some(joined) = tasks.join_next().await {
+            joined.with_context(|| format!("{label} task panicked"))??;
         }
         Ok(())
     };
     match tokio::time::timeout(Duration::from_secs(10), drain).await {
         Ok(result) => result,
         Err(_) => {
-            verifiers.abort_all();
-            while verifiers.join_next().await.is_some() {}
-            bail!("timed out draining NOXA receipt verifiers")
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+            bail!("timed out draining {label}")
         }
     }
 }

@@ -52,7 +52,8 @@ jq -n \
   ($events | map(select(.record_type == "noxa_receipt_verification_dropped"))) as $verify_dropped |
   (($reverted + $verified) | map(.receipt_visibility_ns) | sort) as $receipt_ns |
   ($boundary | map(select(.record_type == "noxa_boundary_sample") | .head_to_feed_ns) | sort) as $boundary_ns |
-  ($factory | map(select(.record_type == "noxa_factory_status"))) as $statuses |
+  ((($factory | map(select(.record_type == "noxa_factory_status")))
+    + ($events | map(select(.record_type == "noxa_factory_status_watch"))))) as $statuses |
   {
     record_type: "noxa_two_hour_measurement_summary",
     measurement_run: $measurement_run,

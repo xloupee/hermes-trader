@@ -11,6 +11,7 @@ pub mod probe;
 pub mod robinhood;
 pub mod rpc;
 pub mod sequencer;
+pub mod testnet_orchestrator;
 pub mod uniswap_v2;
 pub mod v2_simulator;
 pub mod v3_pool;
@@ -42,6 +43,12 @@ pub use rpc::{FactoryBootstrap, SyncUpdate, V2SnapshotClient};
 pub use sequencer::{
     ConditionalOptions, ConditionalResponse, SequencerClient, build_conditional_request,
     classify_conditional_response,
+};
+pub use testnet_orchestrator::{
+    CanaryError, ConditionalRetryDecision, ConditionalRetryState, DedicatedNonceManager,
+    NonceError, NonceLease, NonceLeaseState, PreflightError, RiskError, RiskLedger, RiskLimits,
+    RiskReservation, RiskStatus, TestnetCanaryPlan, TradePreflightInput,
+    evaluate_testnet_preflight,
 };
 pub use uniswap_v2::{V2SwapIntent, V2SwapKind, decode_v2_exact_input};
 pub use v2_simulator::{

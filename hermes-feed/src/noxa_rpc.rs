@@ -18,6 +18,7 @@ sol! {
         function maxTxLimit() external view returns (uint256);
         function restrictionEndBlock() external view returns (uint256);
         function balanceOf(address account) external view returns (uint256);
+        function allowance(address owner, address spender) external view returns (uint256);
     }
 }
 
@@ -118,7 +119,7 @@ impl NoxaRpcClient {
     }
 
     pub async fn factory_status(&self) -> Result<FactoryStatus> {
-        let chain_id = parse_u64_value(&self.request("eth_chainId", json!([])).await?)?;
+        let chain_id = self.chain_id().await?;
         if chain_id != CHAIN_ID {
             bail!("RPC chain ID {chain_id} does not match Robinhood {CHAIN_ID}");
         }
@@ -145,6 +146,51 @@ impl NoxaRpcClient {
             runtime_bytes: code.len(),
             runtime_keccak256: keccak256(&code),
         })
+    }
+
+    pub async fn chain_id(&self) -> Result<u64> {
+        parse_u64_value(&self.request("eth_chainId", json!([])).await?)
+    }
+
+    pub async fn pending_nonce(&self, account: Address) -> Result<u64> {
+        parse_u64_value(
+            &self
+                .request("eth_getTransactionCount", json!([account, "pending"]))
+                .await?,
+        )
+    }
+
+    pub async fn native_balance(&self, account: Address) -> Result<U256> {
+        parse_u256_value(
+            &self
+                .request("eth_getBalance", json!([account, "latest"]))
+                .await?,
+        )
+    }
+
+    pub async fn code_at(&self, address: Address) -> Result<Bytes> {
+        parse_bytes_value(
+            &self
+                .request("eth_getCode", json!([address, "latest"]))
+                .await?,
+        )
+    }
+
+    pub async fn erc20_balance(&self, token: Address, account: Address) -> Result<U256> {
+        let call = INoxaTokenView::balanceOfCall { account }.abi_encode();
+        let bytes = self.eth_call_data(token, &call, "latest").await?;
+        parse_u256_bytes(&bytes)
+    }
+
+    pub async fn erc20_allowance(
+        &self,
+        token: Address,
+        owner: Address,
+        spender: Address,
+    ) -> Result<U256> {
+        let call = INoxaTokenView::allowanceCall { owner, spender }.abi_encode();
+        let bytes = self.eth_call_data(token, &call, "latest").await?;
+        parse_u256_bytes(&bytes)
     }
 
     pub async fn block_by_number(&self, l2_block_number: u64) -> Result<RobinhoodBlock> {
@@ -488,6 +534,14 @@ fn optional_hex_u64(value: &Value, field: &str) -> Result<Option<u64>> {
 
 fn parse_u64_value(value: &Value) -> Result<u64> {
     parse_hex_u64(
+        value
+            .as_str()
+            .ok_or_else(|| anyhow!("hex quantity is not a string"))?,
+    )
+}
+
+fn parse_u256_value(value: &Value) -> Result<U256> {
+    parse_hex_u256(
         value
             .as_str()
             .ok_or_else(|| anyhow!("hex quantity is not a string"))?,

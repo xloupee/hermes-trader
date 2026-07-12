@@ -14,13 +14,14 @@ use futures_util::{SinkExt, StreamExt};
 use hermes_feed::feed::BroadcastMessage;
 use hermes_feed::robinhood::{
     DIRECT_FEED_URL, NOXA_FACTORY_RUNTIME_KECCAK256, NOXA_LAUNCH_FACTORY, NOXA_POOL_FEE,
-    PUBLIC_RPC_URL, UNISWAP_V3_SWAP_ROUTER_02, WETH,
+    PUBLIC_RPC_URL, TESTNET_CHAIN_ID, TESTNET_RPC_URL, UNISWAP_V3_SWAP_ROUTER_02, WETH,
 };
 use hermes_feed::{
     ConditionalOptions, FeedDecoder, Filter, NoxaLaunchEvent, NoxaLaunchHeader, NoxaPolicyInput,
-    NoxaRpcClient, SequenceTracker, TokenRestrictionSnapshot, V3ExactInputIntent,
-    decode_launch_call, decode_launch_header, decode_token_launched, encode_v3_exact_input_single,
-    evaluate_noxa_policy, hydrate_noxa_launch_receipt,
+    NoxaRpcClient, SequenceTracker, TokenRestrictionSnapshot, TradePreflightInput,
+    V3ExactInputIntent, decode_launch_call, decode_launch_header, decode_token_launched,
+    encode_v3_exact_input_single, evaluate_noxa_policy, evaluate_testnet_preflight,
+    hydrate_noxa_launch_receipt,
 };
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
@@ -60,6 +61,8 @@ enum Command {
     Observe(ObserveArgs),
     /// Measure parent-Ethereum head arrival versus Robinhood post-execution feed adoption.
     CalibrateBoundary(CalibrateBoundaryArgs),
+    /// Read testnet nonce, funding, wrapped balance, allowance, and router code.
+    TestnetPreflight(TestnetPreflightArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -138,19 +141,95 @@ struct CalibrateBoundaryArgs {
     run_seconds: Option<u64>,
 }
 
+#[derive(Debug, Args)]
+struct TestnetPreflightArgs {
+    #[arg(long, default_value = TESTNET_RPC_URL)]
+    rpc_url: String,
+    #[arg(long)]
+    account: String,
+    #[arg(long)]
+    wrapped_native: String,
+    #[arg(long)]
+    router: String,
+    #[arg(long)]
+    amount_in: String,
+    #[arg(long, default_value_t = 300_000)]
+    gas_limit: u64,
+    #[arg(long, default_value_t = 100_000_000)]
+    max_fee_per_gas: u128,
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
+    // Parse before the writer thread takes the stdout lock so clap can print
+    // --help/--version without deadlocking against an idle JSON writer.
+    let command = Cli::parse().command;
     let writer = start_json_writer()?;
-    let result = match Cli::parse().command {
+    let result = match command {
         Command::Status(args) => status(args).await,
         Command::Inspect(args) => inspect(args).await,
         Command::Backfill(args) => backfill(args).await,
         Command::Observe(args) => observe(args).await,
         Command::CalibrateBoundary(args) => calibrate_boundary(args).await,
+        Command::TestnetPreflight(args) => testnet_preflight(args).await,
     };
     let writer_result = stop_json_writer(writer);
     result.and(writer_result)
+}
+
+async fn testnet_preflight(args: TestnetPreflightArgs) -> Result<()> {
+    let account = Address::from_str(&args.account).context("invalid --account")?;
+    let wrapped_native =
+        Address::from_str(&args.wrapped_native).context("invalid --wrapped-native")?;
+    let router = Address::from_str(&args.router).context("invalid --router")?;
+    let amount_in = parse_u256(&args.amount_in)?;
+    let client = NoxaRpcClient::with_url(args.rpc_url)?;
+    let (chain_id, pending_nonce, native_balance, wrapped_balance, router_allowance, router_code) =
+        tokio::try_join!(
+            client.chain_id(),
+            client.pending_nonce(account),
+            client.native_balance(account),
+            client.erc20_balance(wrapped_native, account),
+            client.erc20_allowance(wrapped_native, account, router),
+            client.code_at(router),
+        )?;
+    if chain_id != TESTNET_CHAIN_ID {
+        bail!("RPC chain ID {chain_id} is not Robinhood testnet {TESTNET_CHAIN_ID}");
+    }
+    let input = TradePreflightInput {
+        chain_id,
+        account,
+        wrapped_native,
+        router,
+        router_code_present: !router_code.is_empty(),
+        native_balance,
+        wrapped_balance,
+        router_allowance,
+        amount_in,
+        gas_limit: args.gas_limit,
+        max_fee_per_gas: args.max_fee_per_gas,
+    };
+    let decision = evaluate_testnet_preflight(input);
+    write_json(json!({
+        "record_type": "noxa_testnet_preflight",
+        "network": "robinhood_testnet",
+        "chain_id": chain_id,
+        "pending_nonce": pending_nonce,
+        "account": account,
+        "wrapped_native": wrapped_native,
+        "router": router,
+        "router_code_bytes": router_code.len(),
+        "native_balance": native_balance,
+        "wrapped_balance": wrapped_balance,
+        "router_allowance": router_allowance,
+        "amount_in": amount_in,
+        "gas_limit": args.gas_limit,
+        "max_fee_per_gas": args.max_fee_per_gas,
+        "ready": decision.is_ok(),
+        "reject_reason": decision.as_ref().err().map(ToString::to_string),
+    }))?;
+    decision.map_err(anyhow::Error::from)
 }
 
 async fn status(args: RpcArgs) -> Result<()> {

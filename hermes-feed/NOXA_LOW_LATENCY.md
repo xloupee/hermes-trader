@@ -298,6 +298,33 @@ at the receipt block, and emits a paper router/trigger plan. A policy decision
 requires a recipient so its exact balance can be read; otherwise policy is
 reported as not evaluated. It never loads a key, signs, or submits.
 
+## Testnet-only orchestration
+
+Robinhood testnet is pinned to chain ID `46630`, public RPC
+`https://rpc.testnet.chain.robinhood.com`, feed
+`wss://feed.testnet.chain.robinhood.com`, and direct sequencer
+`https://sequencer.testnet.chain.robinhood.com`. The orchestration library now
+provides a single-owner nonce lease, signer-bound pre-signed self-transfer
+canary, conservative conditional retry decisions, hash reconciliation states,
+and latched trade/gas/exposure/session-loss limits.
+
+The read-only preflight checks the pending nonce, native gas balance,
+pre-wrapped token balance, exact router allowance, and deployed router code:
+
+```bash
+hermes-noxa testnet-preflight \
+  --account 0xTHROWAWAY_ACCOUNT \
+  --wrapped-native 0xTESTNET_WRAPPED_NATIVE \
+  --router 0xTESTNET_ROUTER \
+  --amount-in 1000000000000000
+```
+
+NOXA does not currently publish a Robinhood testnet launch deployment in its
+contract table. Therefore the first canary is intentionally a capped testnet
+self-transfer that proves nonce/sign/submit/reconcile behavior without assuming
+mainnet contract addresses. A swap canary remains fail-closed until testnet
+wrapped-native and router addresses are independently verified.
+
 ## Verification snapshot
 
 The final optimized offline suite passes 80 tests: 75 library tests and five

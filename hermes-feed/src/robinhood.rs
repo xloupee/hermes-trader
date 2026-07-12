@@ -1,10 +1,14 @@
 use alloy_primitives::{Address, B256};
 
 pub const CHAIN_ID: u64 = 4_663;
+pub const TESTNET_CHAIN_ID: u64 = 46_630;
 
 pub const PUBLIC_RPC_URL: &str = "https://rpc.mainnet.chain.robinhood.com";
 pub const DIRECT_SEQUENCER_URL: &str = "https://sequencer.mainnet.chain.robinhood.com";
 pub const DIRECT_FEED_URL: &str = "wss://feed.mainnet.chain.robinhood.com";
+pub const TESTNET_RPC_URL: &str = "https://rpc.testnet.chain.robinhood.com";
+pub const TESTNET_SEQUENCER_URL: &str = "https://sequencer.testnet.chain.robinhood.com";
+pub const TESTNET_FEED_URL: &str = "wss://feed.testnet.chain.robinhood.com";
 
 pub const NOXA_LAUNCH_FACTORY: Address =
     alloy_primitives::address!("d9ec2db5f3d1b236843925949fe5bd8a3836fccb");

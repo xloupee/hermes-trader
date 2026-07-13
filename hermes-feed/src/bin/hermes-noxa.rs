@@ -276,6 +276,9 @@ async fn testnet_submit_canary(args: TestnetSubmitCanaryArgs) -> Result<()> {
     if args.l1_window == 0 || args.max_boundary_attempts == 0 {
         bail!("--l1-window and --max-boundary-attempts must be non-zero");
     }
+    if args.source.trim().is_empty() || (args.broadcast && args.source == "unspecified") {
+        bail!("a non-empty explicit --source is required when broadcasting");
+    }
     let maximum_value = parse_u256(&args.max_value_wei)?;
     let maximum_gas_cost = parse_u256(&args.max_gas_cost_wei)?;
     let raw = read_raw_transaction(&args.raw_tx_file)?;

@@ -1,5 +1,6 @@
 pub mod boundary_gate;
 pub mod cache;
+pub mod copy_policy;
 pub mod decoder;
 pub mod feed;
 pub mod hot_path;
@@ -27,6 +28,9 @@ pub mod v3_pool;
 
 pub use boundary_gate::{BoundaryDecision, BoundaryGate, BoundaryGateError, FeedBoundary};
 pub use cache::{CacheApplyReport, CacheCheckpoint, CacheError, ConfirmedReserveCache};
+pub use copy_policy::{
+    CopyDecision, CopyPosition, CopyRejectReason, ObservedCopySwap, WatchedWalletCopyPolicy,
+};
 pub use decoder::{
     Candidate, DecodeError, DecodeReport, FeedDecoder, Filter, TransactionContext,
     TransactionFingerprint,

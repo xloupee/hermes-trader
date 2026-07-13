@@ -27,6 +27,38 @@ and signing are synchronous and RPC-free. The signed bytes wait only for the
 next contiguous feed header at `B + 1`; receipt proof and reconciliation remain
 background work.
 
+## Watched-wallet copy strategy
+
+`hermes-noxa-runtime --strategy copy` reuses the same Nitro decoder, boundary
+gate, nonce lease, risk ledger, signer, sequencer client, and receipt
+reconciliation path. It is deliberately opt-in and requires repeatable
+`--watch-wallet` and `--copy-token` allowlists. Startup rejects an allowlisted
+token unless its bytecode, token-reported NOXA factory/pair/pool/fee, V3 pool
+identity, and non-zero liquidity all match the pinned deployment.
+
+The copy hot path considers only canonical `SwapRouter02.exactInputSingle`
+transactions signed by a watched wallet. It rejects redirected recipients,
+native value, non-WETH pairs, wrong pool fees, non-zero price limits, zero
+limits, unlisted tokens, and non-Robinhood transaction chain IDs. Entry size is
+the follower's independent fixed cap, never the leader's size. The follower's
+minimum output preserves the leader's calldata limit price proportionally. An
+exit is admitted only for the matching reconciled follower position and sells
+that complete position at the leader's proportional minimum price.
+Filtering is ordered for minimum work: router address, four-byte selector,
+signer recovery, watched-wallet membership, then strict full ABI decoding.
+Unwatched router traffic never pays the full V3 decode cost.
+
+This fastest path intentionally does not add an RPC quote before signing. Paper
+mode records that the fill basis is the leader's limit-price floor. Signed copy
+broadcast therefore additionally requires
+`--copy-trust-leader-limit-price`; without that explicit choice it fails closed.
+
+Signed entry reconciliation creates an exact, full-position token allowance;
+the runtime waits for that approval receipt and then for a watched-wallet exit.
+It never converts copy mode into an automatic timed round trip. The default
+two-trigger session cap admits at most one entry and one full exit. Mainnet
+broadcast still requires the separate exact canary approval token.
+
 The retained historical oracle at transaction `0xc629…e418` exactly matches the
 real token, pool, restriction end, initial-buy amount, final V3 state, and next
 quote. A full 60,142-event scan then selected 30 evenly spaced receipts from
@@ -81,6 +113,8 @@ and reconciled the predicted fill into nonce 8, open exposure, and a position.
 - `trading_runtime.rs`: nonce/risk/sign/arm/submission/reconciliation state.
 - `hot_path.rs`: one direct sequencer request and bounded reconciliation handoff.
 - `paper_runtime.rs`: broadcast-free entry, position, exit, loss, and nonce model.
+- `copy_policy.rs`: watched-wallet/token allowlists, fixed follower sizing,
+  proportional limit-price enforcement, trigger cap, and full-position exits.
 - `hermes-paper-scenario`: deterministic executable paper runner.
 - `hermes-keystore-check`: public-address-only secure provisioning check.
 - `hermes-noxa-runtime`: live feed loop for paper, signed dry-run, and explicitly

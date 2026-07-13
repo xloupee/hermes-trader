@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::os::fd::FromRawFd;
 use std::path::PathBuf;
@@ -7,7 +8,7 @@ use std::sync::mpsc::sync_channel;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use alloy_consensus::Transaction;
+use alloy_consensus::{Transaction, transaction::SignerRecoverable};
 use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
@@ -19,13 +20,14 @@ use hermes_feed::robinhood::{
     TESTNET_SEQUENCER_URL, UNISWAP_V3_SWAP_ROUTER_02, WETH,
 };
 use hermes_feed::{
-    ApprovalTransactionPlan, AutomatedPaperRuntime, ConditionalOptions, FactoryStatus,
-    FeedBoundary, FeedDecoder, Filter, HotPathExecutor, HotPathReport, KeystoreTradeSigner,
-    NoxaPredictor, NoxaRpcClient, NoxaVerificationOutcome, ObservedNoxaFactoryCall,
-    PaperOrderState, PredictedNoxaTradeInput, ReceiptLog, ReconciliationJob, RiskLimits,
-    SequenceTracker, SequencerClient, SignedPendingKind, SignedPosition, SignedTradingRuntime,
-    TradeSigner, TradeTransactionPlan, V3ExactInputIntent, decode_launch_call,
-    decode_launch_header, prepare_predicted_noxa_trade, verify_noxa_factory_call,
+    ApprovalTransactionPlan, AutomatedPaperRuntime, ConditionalOptions, CopyDecision, CopyPosition,
+    FactoryStatus, FeedBoundary, FeedDecoder, Filter, HotPathExecutor, HotPathReport,
+    KeystoreTradeSigner, NoxaPredictor, NoxaRpcClient, NoxaVerificationOutcome, ObservedCopySwap,
+    ObservedNoxaFactoryCall, PaperOrderState, PredictedNoxaTradeInput, ReceiptLog,
+    ReconciliationJob, RiskLimits, SequenceTracker, SequencerClient, SignedPendingKind,
+    SignedPosition, SignedTradingRuntime, TradeSigner, TradeTransactionPlan, V3ExactInputIntent,
+    WatchedWalletCopyPolicy, decode_launch_call, decode_launch_header,
+    decode_v3_exact_input_single, prepare_predicted_noxa_trade, verify_noxa_factory_call,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -83,11 +85,19 @@ enum RuntimeMode {
     Signed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum StrategyMode {
+    Launch,
+    Copy,
+}
+
 #[derive(Debug, Parser)]
 #[command(version, about = "Feed-driven NOXA paper and signed trading runtime")]
 struct Cli {
     #[arg(long, value_enum, default_value_t = RuntimeMode::Paper)]
     mode: RuntimeMode,
+    #[arg(long, value_enum, default_value_t = StrategyMode::Launch)]
+    strategy: StrategyMode,
     #[arg(long, default_value = DIRECT_FEED_URL)]
     feed_url: String,
     #[arg(long, default_value = PUBLIC_RPC_URL)]
@@ -98,6 +108,19 @@ struct Cli {
     recipient: String,
     #[arg(long, default_value = "100000000000000")]
     amount_in: String,
+    /// Repeatable leader address. Required by --strategy copy.
+    #[arg(long = "watch-wallet")]
+    watched_wallets: Vec<String>,
+    /// Repeatable token allowlist. Required by --strategy copy.
+    #[arg(long = "copy-token")]
+    copy_tokens: Vec<String>,
+    #[arg(long, default_value = "1000000000000000000")]
+    copy_max_leader_entry_amount: String,
+    #[arg(long, default_value_t = 2)]
+    copy_max_triggers: u64,
+    /// Signed copy broadcasts additionally require explicit trust in the leader's calldata limit price.
+    #[arg(long, default_value_t = false)]
+    copy_trust_leader_limit_price: bool,
     #[arg(long, default_value = "100000000000000")]
     max_trade_amount_in: String,
     #[arg(long, default_value = "100000000000000")]
@@ -174,6 +197,17 @@ struct SubmitOutcome {
 }
 
 #[derive(Debug, Serialize)]
+struct CopyTokenValidation {
+    token: Address,
+    pool: Address,
+    fee: u32,
+    liquidity: u128,
+    restriction_end_l1_block: U256,
+    token_code_bytes: usize,
+    pool_code_bytes: usize,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case", tag = "outcome")]
 enum ReconciliationOutcome {
     Included {
@@ -204,6 +238,16 @@ async fn main() -> Result<()> {
     validate_args(&args)?;
     let recipient = Address::from_str(&args.recipient).context("parse --recipient")?;
     let amount_in = parse_u256(&args.amount_in)?;
+    let copy_policy = match args.strategy {
+        StrategyMode::Launch => None,
+        StrategyMode::Copy => Some(WatchedWalletCopyPolicy::new(
+            parse_address_set(&args.watched_wallets, "--watch-wallet")?,
+            parse_address_set(&args.copy_tokens, "--copy-token")?,
+            amount_in,
+            parse_u256(&args.copy_max_leader_entry_amount)?,
+            args.copy_max_triggers,
+        )?),
+    };
     let max_fee_per_gas = parse_u128(&args.max_fee_per_gas)?;
     let max_priority_fee_per_gas = parse_u128(&args.max_priority_fee_per_gas)?;
     let limits = RiskLimits {
@@ -256,6 +300,10 @@ async fn main() -> Result<()> {
         &launch_runtime,
         &dex_runtime,
     )?);
+    let copy_token_validation = match copy_policy.as_ref() {
+        Some(policy) => validate_copy_token_allowlist(&rpc, policy, status.pinned_l2_block).await?,
+        None => Vec::new(),
+    };
 
     let (reconciliation_sender, reconciliation_receiver) =
         sync_channel::<ReconciliationJob>(RECONCILIATION_QUEUE_CAPACITY);
@@ -300,7 +348,9 @@ async fn main() -> Result<()> {
                 amount_in,
                 args.gas_limit,
                 max_fee_per_gas,
-                if args.round_trip_exit_min_weth_out.is_some() {
+                if args.round_trip_exit_min_weth_out.is_some()
+                    || args.strategy == StrategyMode::Copy
+                {
                     3
                 } else {
                     1
@@ -326,6 +376,7 @@ async fn main() -> Result<()> {
     emit(json!({
         "record_type": "hermes_noxa_runtime_start",
         "mode": format!("{:?}", args.mode).to_ascii_lowercase(),
+        "strategy": format!("{:?}", args.strategy).to_ascii_lowercase(),
         "broadcast": args.broadcast,
         "recipient": recipient,
         "amount_in": amount_in,
@@ -335,6 +386,15 @@ async fn main() -> Result<()> {
         "factory_owner_is_eoa": true,
         "runtime_hash_matches_pin": true,
         "launch_enabled": status.launch_enabled,
+        "copy_policy": copy_policy.as_ref().map(|policy| json!({
+            "watched_wallets": policy.watched_wallets().len(),
+            "allowed_tokens": policy.allowed_tokens().len(),
+            "max_triggers": args.copy_max_triggers,
+            "max_leader_entry_amount": args.copy_max_leader_entry_amount,
+            "follower_entry_amount": amount_in,
+            "leader_limit_price_trusted_for_broadcast": args.copy_trust_leader_limit_price,
+            "validated_tokens": copy_token_validation,
+        })),
         "prediction_cache": {
             "launch_config": predictor.launch_config(),
             "dex_config": predictor.dex_config(),
@@ -360,6 +420,7 @@ async fn main() -> Result<()> {
     let mut feed_resume_forward_gaps = 0_u64;
     let mut last_boundary = None;
     let mut predictor_cache_revalidated = false;
+    let mut copy_triggers = 0_u64;
     let verifier_slots = Arc::new(Semaphore::new(16));
     let (proof_sender, mut proof_receiver) = mpsc::channel::<LaunchProofMessage>(32);
     let (paper_fill_sender, mut paper_fill_receiver) = mpsc::channel::<PaperFill>(8);
@@ -384,7 +445,7 @@ async fn main() -> Result<()> {
             }
             Some(outcome) = reconcile_receiver.recv() => {
                 if let Some(action) = handle_reconciliation_outcome(&mut engine, outcome)? {
-                    arm_round_trip_step(
+                    arm_reconciled_step(
                         &mut engine,
                         action,
                         last_boundary,
@@ -426,6 +487,8 @@ async fn main() -> Result<()> {
                             connected_at,
                             &rpc,
                             &predictor,
+                            copy_policy.as_ref(),
+                            &mut copy_triggers,
                             status.launch_enabled,
                             factory_owner,
                             &mut predictor_cache_revalidated,
@@ -540,6 +603,7 @@ async fn main() -> Result<()> {
         "feed_reconnects": feed_reconnects,
         "feed_replayed_messages": feed_replayed_messages,
         "feed_resume_forward_gaps": feed_resume_forward_gaps,
+        "copy_triggers": copy_triggers,
         "rpc": rpc.metrics(),
         "reason": completion_reason(status.launch_enabled, shutdown_requested),
     }))
@@ -639,6 +703,8 @@ async fn process_feed_frame(
     connected_at: Instant,
     rpc: &NoxaRpcClient,
     predictor: &Arc<NoxaPredictor>,
+    copy_policy: Option<&WatchedWalletCopyPolicy>,
+    copy_triggers: &mut u64,
     launch_enabled: bool,
     factory_owner: Address,
     predictor_cache_revalidated: &mut bool,
@@ -726,6 +792,9 @@ async fn process_feed_frame(
         )?;
 
         let mut launches = Vec::new();
+        let mut copy_swaps = Vec::new();
+        let mut malformed_watched_copy_swaps = Vec::new();
+        let mut copy_signer_error = None;
         let mut non_launch_factory_transaction = None;
         decoder.decode_message_with(message, |context| {
             let tx = context.transaction;
@@ -739,7 +808,44 @@ async fn process_feed_frame(
                     launches.push((*tx.tx_hash(), intent, header));
                 }
             }
+            if args.strategy == StrategyMode::Copy
+                && tx.to() == Some(UNISWAP_V3_SWAP_ROUTER_02)
+                && tx.input().get(..4)
+                    == Some(hermes_feed::noxa_abi::EXACT_INPUT_SINGLE_SELECTOR.as_slice())
+            {
+                match tx.recover_signer() {
+                    Ok(from)
+                        if copy_policy
+                            .is_some_and(|policy| policy.watched_wallets().contains(&from)) =>
+                    {
+                        match decode_v3_exact_input_single(tx.input()) {
+                            Some(intent) => copy_swaps.push(ObservedCopySwap {
+                                tx_hash: *tx.tx_hash(),
+                                chain_id: tx.chain_id(),
+                                from,
+                                to: UNISWAP_V3_SWAP_ROUTER_02,
+                                value: tx.value(),
+                                intent,
+                            }),
+                            None => malformed_watched_copy_swaps.push((*tx.tx_hash(), from)),
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => copy_signer_error = Some(error.to_string()),
+                }
+            }
         })?;
+        if let Some(error) = copy_signer_error {
+            bail!("could not recover a direct V3 copy candidate signer: {error}");
+        }
+        for (tx_hash, leader) in malformed_watched_copy_swaps {
+            emit(json!({
+                "record_type": "runtime_copy_candidate_rejected",
+                "source_tx_hash": tx_hash,
+                "leader": leader,
+                "reason": "watched exactInputSingle calldata is not canonical",
+            }))?;
+        }
         if *predictor_cache_revalidated && let Some(tx_hash) = non_launch_factory_transaction {
             bail!(
                 "feed observed non-launch factory transaction {tx_hash}; cached predictor invalidated"
@@ -748,6 +854,9 @@ async fn process_feed_frame(
         let emission_enabled = connected_at.elapsed() >= Duration::from_secs(args.warmup_seconds)
             && sequence.is_contiguous();
         for (tx_hash, intent, header) in launches {
+            if args.strategy != StrategyMode::Launch {
+                continue;
+            }
             if !emission_enabled {
                 emit(json!({
                     "record_type": "runtime_candidate_suppressed",
@@ -857,6 +966,37 @@ async fn process_feed_frame(
                 "receipt_verified": false,
             }))?;
         }
+        for observed in copy_swaps {
+            if !emission_enabled {
+                emit(json!({
+                    "record_type": "runtime_copy_candidate_suppressed",
+                    "source_tx_hash": observed.tx_hash,
+                    "reason": "feed_warmup_or_sequence_gap",
+                }))?;
+                continue;
+            }
+            if !launch_enabled {
+                emit(json!({
+                    "record_type": "runtime_copy_candidate_suppressed",
+                    "source_tx_hash": observed.tx_hash,
+                    "reason": "factory_disabled_at_pinned_startup",
+                }))?;
+                continue;
+            }
+            let policy = copy_policy
+                .ok_or_else(|| anyhow::anyhow!("copy strategy has no validated policy"))?;
+            handle_copy_candidate(
+                engine,
+                policy,
+                observed,
+                copy_triggers,
+                boundary,
+                recipient,
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                args,
+            )?;
+        }
     }
     Ok(())
 }
@@ -957,6 +1097,251 @@ fn handle_predicted_candidate(
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_copy_candidate(
+    engine: &mut Engine,
+    policy: &WatchedWalletCopyPolicy,
+    observed: ObservedCopySwap,
+    copy_triggers: &mut u64,
+    boundary: FeedBoundary,
+    recipient: Address,
+    max_fee_per_gas: u128,
+    max_priority_fee_per_gas: u128,
+    args: &Cli,
+) -> Result<()> {
+    let observed_token = if observed.intent.token_in == WETH {
+        observed.intent.token_out
+    } else {
+        observed.intent.token_in
+    };
+    let is_entry = observed.intent.token_in == WETH;
+    let follower_position = match engine {
+        Engine::Paper { runtime, .. } => {
+            let snapshot = runtime.snapshot();
+            snapshot
+                .positions
+                .iter()
+                .find(|position| is_entry || position.token == observed_token)
+                .map(|position| CopyPosition {
+                    token: position.token,
+                    token_amount: position.token_amount,
+                })
+        }
+        Engine::Signed { runtime, .. } => {
+            let snapshot = runtime.snapshot();
+            snapshot
+                .positions
+                .iter()
+                .find(|position| is_entry || position.token == observed_token)
+                .map(|position| CopyPosition {
+                    token: position.token,
+                    token_amount: position.token_amount,
+                })
+        }
+    };
+    let decision = match policy.evaluate(&observed, follower_position, *copy_triggers) {
+        Ok(decision) => decision,
+        Err(reason) => {
+            return emit(json!({
+                "record_type": "runtime_copy_candidate_rejected",
+                "source_tx_hash": observed.tx_hash,
+                "leader": observed.from,
+                "reason": reason,
+            }));
+        }
+    };
+    let conditions = ConditionalOptions::first_eligible_window(
+        boundary.l1_block_number,
+        args.l1_window,
+        boundary
+            .l1_timestamp
+            .checked_add(args.timestamp_window_seconds),
+    )
+    .ok_or_else(|| anyhow::anyhow!("copy boundary window overflow"))?;
+    let armed = match (engine, decision) {
+        (
+            Engine::Paper {
+                runtime,
+                pending_fill,
+            },
+            CopyDecision::Entry {
+                leader,
+                token,
+                follower_amount_in,
+                follower_minimum_out,
+            },
+        ) => match runtime.prepare_entry(
+            token,
+            follower_amount_in,
+            follower_minimum_out,
+            args.gas_limit,
+            max_fee_per_gas,
+            args.slippage_bps,
+            conditions,
+        ) {
+            Ok(order) => {
+                *pending_fill = Some((order.id, follower_minimum_out));
+                emit(json!({
+                    "record_type": "runtime_copy_paper_entry_armed",
+                    "source_tx_hash": observed.tx_hash,
+                    "leader": leader,
+                    "token": token,
+                    "follower_amount_in": follower_amount_in,
+                    "follower_minimum_out": follower_minimum_out,
+                    "paper_fill_basis": "leader_limit_price_floor",
+                    "order": order,
+                }))?;
+                true
+            }
+            Err(error) => {
+                emit_copy_runtime_rejection(observed, error.to_string())?;
+                false
+            }
+        },
+        (
+            Engine::Paper {
+                runtime,
+                pending_fill,
+            },
+            CopyDecision::Exit {
+                leader,
+                token,
+                follower_amount_in,
+                follower_minimum_out,
+            },
+        ) => match runtime.prepare_exit(
+            token,
+            follower_minimum_out,
+            args.gas_limit,
+            max_fee_per_gas,
+            args.slippage_bps,
+            conditions,
+        ) {
+            Ok(order) => {
+                *pending_fill = Some((order.id, follower_minimum_out));
+                emit(json!({
+                    "record_type": "runtime_copy_paper_exit_armed",
+                    "source_tx_hash": observed.tx_hash,
+                    "leader": leader,
+                    "token": token,
+                    "follower_amount_in": follower_amount_in,
+                    "follower_minimum_out": follower_minimum_out,
+                    "paper_fill_basis": "leader_limit_price_floor",
+                    "order": order,
+                }))?;
+                true
+            }
+            Err(error) => {
+                emit_copy_runtime_rejection(observed, error.to_string())?;
+                false
+            }
+        },
+        (
+            Engine::Signed { runtime, .. },
+            CopyDecision::Entry {
+                leader,
+                token,
+                follower_amount_in,
+                follower_minimum_out,
+            },
+        ) => {
+            let plan = TradeTransactionPlan::exact_input(
+                runtime.snapshot().next_nonce,
+                args.gas_limit,
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                &V3ExactInputIntent {
+                    token_in: WETH,
+                    token_out: token,
+                    fee: hermes_feed::robinhood::NOXA_POOL_FEE,
+                    recipient,
+                    amount_in: follower_amount_in,
+                    amount_out_minimum: follower_minimum_out,
+                    sqrt_price_limit_x96: U256::ZERO,
+                },
+            )?;
+            match runtime.arm_trade(&plan, conditions, args.slippage_bps) {
+                Ok(tx_hash) => {
+                    emit(json!({
+                        "record_type": "runtime_copy_signed_entry_armed",
+                        "source_tx_hash": observed.tx_hash,
+                        "leader": leader,
+                        "tx_hash": tx_hash,
+                        "token": token,
+                        "follower_amount_in": follower_amount_in,
+                        "follower_minimum_out": follower_minimum_out,
+                        "raw_transaction_logged": false,
+                    }))?;
+                    true
+                }
+                Err(error) => {
+                    emit_copy_runtime_rejection(observed, error.to_string())?;
+                    false
+                }
+            }
+        }
+        (
+            Engine::Signed { runtime, .. },
+            CopyDecision::Exit {
+                leader,
+                token,
+                follower_amount_in,
+                follower_minimum_out,
+            },
+        ) => {
+            let plan = TradeTransactionPlan::exact_input(
+                runtime.snapshot().next_nonce,
+                args.gas_limit,
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                &V3ExactInputIntent {
+                    token_in: token,
+                    token_out: WETH,
+                    fee: hermes_feed::robinhood::NOXA_POOL_FEE,
+                    recipient,
+                    amount_in: follower_amount_in,
+                    amount_out_minimum: follower_minimum_out,
+                    sqrt_price_limit_x96: U256::ZERO,
+                },
+            )?;
+            match runtime.arm_trade(&plan, conditions, args.slippage_bps) {
+                Ok(tx_hash) => {
+                    emit(json!({
+                        "record_type": "runtime_copy_signed_exit_armed",
+                        "source_tx_hash": observed.tx_hash,
+                        "leader": leader,
+                        "tx_hash": tx_hash,
+                        "token": token,
+                        "follower_amount_in": follower_amount_in,
+                        "follower_minimum_out": follower_minimum_out,
+                        "raw_transaction_logged": false,
+                    }))?;
+                    true
+                }
+                Err(error) => {
+                    emit_copy_runtime_rejection(observed, error.to_string())?;
+                    false
+                }
+            }
+        }
+    };
+    if armed {
+        *copy_triggers = copy_triggers
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("copy trigger counter overflow"))?;
+    }
+    Ok(())
+}
+
+fn emit_copy_runtime_rejection(observed: ObservedCopySwap, reason: String) -> Result<()> {
+    emit(json!({
+        "record_type": "runtime_copy_candidate_rejected",
+        "source_tx_hash": observed.tx_hash,
+        "leader": observed.from,
+        "reason": reason,
+    }))
 }
 
 fn handle_launch_proof(message: LaunchProofMessage) -> Result<()> {
@@ -1189,6 +1574,96 @@ fn handle_reconciliation_outcome(
         "runtime": runtime.snapshot(),
     }))?;
     Ok(action)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn arm_reconciled_step(
+    engine: &mut Engine,
+    action: ReconciledSignedAction,
+    last_boundary: Option<FeedBoundary>,
+    recipient: Address,
+    max_fee_per_gas: u128,
+    max_priority_fee_per_gas: u128,
+    args: &Cli,
+) -> Result<()> {
+    if args.strategy == StrategyMode::Copy {
+        return arm_copy_reconciled_step(
+            engine,
+            action,
+            last_boundary,
+            recipient,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            args,
+        );
+    }
+    arm_round_trip_step(
+        engine,
+        action,
+        last_boundary,
+        recipient,
+        max_fee_per_gas,
+        max_priority_fee_per_gas,
+        args,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn arm_copy_reconciled_step(
+    engine: &mut Engine,
+    action: ReconciledSignedAction,
+    last_boundary: Option<FeedBoundary>,
+    recipient: Address,
+    max_fee_per_gas: u128,
+    max_priority_fee_per_gas: u128,
+    args: &Cli,
+) -> Result<()> {
+    let Engine::Signed { runtime, .. } = engine else {
+        return Ok(());
+    };
+    match action {
+        ReconciledSignedAction::Entry(position) => {
+            let boundary = last_boundary
+                .ok_or_else(|| anyhow::anyhow!("copy approval has no feed boundary"))?;
+            let conditions = ConditionalOptions::first_eligible_window(
+                boundary.l1_block_number,
+                args.l1_window,
+                boundary
+                    .l1_timestamp
+                    .checked_add(args.timestamp_window_seconds),
+            )
+            .ok_or_else(|| anyhow::anyhow!("copy approval boundary window overflow"))?;
+            let plan = ApprovalTransactionPlan::new(
+                runtime.snapshot().next_nonce,
+                args.gas_limit,
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                position.token,
+                position.token_amount,
+                recipient,
+            )?;
+            let tx_hash = runtime.arm_approval(&plan, conditions)?;
+            emit(json!({
+                "record_type": "runtime_copy_exact_exit_approval_armed",
+                "tx_hash": tx_hash,
+                "token": position.token,
+                "amount": position.token_amount,
+                "conditions": conditions,
+                "raw_transaction_logged": false,
+            }))
+        }
+        ReconciledSignedAction::Approval(position) => emit(json!({
+            "record_type": "runtime_copy_position_ready",
+            "token": position.token,
+            "token_amount": position.token_amount,
+            "router_approved": position.router_approved,
+            "waiting_for_watched_wallet_exit": true,
+        })),
+        ReconciledSignedAction::Exit => emit(json!({
+            "record_type": "runtime_copy_exit_complete",
+            "runtime": runtime.snapshot(),
+        })),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1569,6 +2044,56 @@ async fn signed_preflight(
     Ok(())
 }
 
+async fn validate_copy_token_allowlist(
+    rpc: &NoxaRpcClient,
+    policy: &WatchedWalletCopyPolicy,
+    pinned_l2_block: u64,
+) -> Result<Vec<CopyTokenValidation>> {
+    let mut validated = Vec::with_capacity(policy.allowed_tokens().len());
+    for token in policy.allowed_tokens() {
+        let token_snapshot = rpc
+            .token_restriction_snapshot(*token, pinned_l2_block, None)
+            .await
+            .with_context(|| format!("read allowlisted token metadata for {token}"))?;
+        if token_snapshot.launch_factory != NOXA_LAUNCH_FACTORY
+            || token_snapshot.pair_token != WETH
+            || token_snapshot.pool_fee != hermes_feed::robinhood::NOXA_POOL_FEE
+            || token_snapshot.liquidity_pool == Address::ZERO
+        {
+            bail!("allowlisted token {token} does not report the pinned NOXA deployment");
+        }
+        let pool = token_snapshot.liquidity_pool;
+        let (token_code, pool_code, pool_snapshot) = tokio::try_join!(
+            rpc.code_at_l2_block(*token, pinned_l2_block),
+            rpc.code_at_l2_block(pool, pinned_l2_block),
+            rpc.v3_pool_snapshot(pool),
+        )?;
+        let pair_matches = (pool_snapshot.token0 == WETH && pool_snapshot.token1 == *token)
+            || (pool_snapshot.token0 == *token && pool_snapshot.token1 == WETH);
+        if token_code.is_empty()
+            || pool_code.is_empty()
+            || !pair_matches
+            || pool_snapshot.fee != hermes_feed::robinhood::NOXA_POOL_FEE
+            || pool_snapshot.liquidity == 0
+        {
+            bail!(
+                "allowlisted token {token} has invalid bytecode, pool identity, fee, or liquidity"
+            );
+        }
+        validated.push(CopyTokenValidation {
+            token: *token,
+            pool,
+            fee: pool_snapshot.fee,
+            liquidity: pool_snapshot.liquidity,
+            restriction_end_l1_block: token_snapshot.restriction_end_block,
+            token_code_bytes: token_code.len(),
+            pool_code_bytes: pool_code.len(),
+        });
+    }
+    validated.sort_by_key(|entry| entry.token);
+    Ok(validated)
+}
+
 fn validate_args(args: &Cli) -> Result<()> {
     if args.run_seconds == 0
         || args.l1_window == 0
@@ -1579,6 +2104,35 @@ fn validate_args(args: &Cli) -> Result<()> {
     }
     if args.slippage_bps > args.max_slippage_bps || args.max_slippage_bps >= 10_000 {
         bail!("slippage cap is invalid");
+    }
+    match args.strategy {
+        StrategyMode::Launch => {
+            if !args.watched_wallets.is_empty()
+                || !args.copy_tokens.is_empty()
+                || args.copy_trust_leader_limit_price
+            {
+                bail!("copy allowlists require --strategy copy");
+            }
+        }
+        StrategyMode::Copy => {
+            if args.watched_wallets.is_empty() || args.copy_tokens.is_empty() {
+                bail!("copy strategy requires at least one --watch-wallet and --copy-token");
+            }
+            if args.copy_max_triggers == 0 {
+                bail!("copy trigger cap must be non-zero");
+            }
+            if args.round_trip_exit_min_weth_out.is_some() {
+                bail!("copy strategy waits for watched-wallet exits and refuses timed round trips");
+            }
+            if args.mode == RuntimeMode::Signed
+                && args.broadcast
+                && !args.copy_trust_leader_limit_price
+            {
+                bail!(
+                    "signed copy broadcast requires --copy-trust-leader-limit-price because the hot path does not perform an RPC quote"
+                );
+            }
+        }
     }
     match args.mode {
         RuntimeMode::Paper => {
@@ -1650,6 +2204,20 @@ fn parse_u128(value: &str) -> Result<u128> {
     }
 }
 
+fn parse_address_set(values: &[String], flag: &str) -> Result<HashSet<Address>> {
+    values
+        .iter()
+        .map(|value| {
+            let address = Address::from_str(value)
+                .with_context(|| format!("parse {flag} address {value}"))?;
+            if address == Address::ZERO {
+                bail!("{flag} cannot contain the zero address");
+            }
+            Ok(address)
+        })
+        .collect()
+}
+
 fn emit(value: serde_json::Value) -> Result<()> {
     println!("{}", serde_json::to_string(&value)?);
     Ok(())
@@ -1680,6 +2248,219 @@ mod tests {
         ])
         .unwrap();
         assert!(validate_args(&args).is_err());
+    }
+
+    #[test]
+    fn copy_strategy_requires_explicit_leader_and_token_allowlists() {
+        let missing = Cli::try_parse_from([
+            "hermes-noxa-runtime",
+            "--strategy",
+            "copy",
+            "--recipient",
+            RECIPIENT,
+        ])
+        .unwrap();
+        assert!(validate_args(&missing).is_err());
+
+        let configured = Cli::try_parse_from([
+            "hermes-noxa-runtime",
+            "--strategy",
+            "copy",
+            "--recipient",
+            RECIPIENT,
+            "--watch-wallet",
+            "0x1111111111111111111111111111111111111111",
+            "--copy-token",
+            "0x2222222222222222222222222222222222222222",
+        ])
+        .unwrap();
+        assert!(validate_args(&configured).is_ok());
+        assert_eq!(
+            parse_address_set(&configured.watched_wallets, "--watch-wallet")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let launch_with_copy_flags = Cli {
+            strategy: StrategyMode::Launch,
+            ..configured
+        };
+        assert!(validate_args(&launch_with_copy_flags).is_err());
+    }
+
+    #[test]
+    fn copy_strategy_refuses_timed_round_trip_exit_configuration() {
+        let configured = Cli::try_parse_from([
+            "hermes-noxa-runtime",
+            "--strategy",
+            "copy",
+            "--recipient",
+            RECIPIENT,
+            "--watch-wallet",
+            "0x1111111111111111111111111111111111111111",
+            "--copy-token",
+            "0x2222222222222222222222222222222222222222",
+            "--round-trip-exit-min-weth-out",
+            "1",
+        ])
+        .unwrap();
+        assert!(validate_args(&configured).is_err());
+    }
+
+    #[test]
+    fn signed_copy_broadcast_requires_explicit_leader_limit_price_trust() {
+        let untrusted = Cli::try_parse_from([
+            "hermes-noxa-runtime",
+            "--mode",
+            "signed",
+            "--strategy",
+            "copy",
+            "--recipient",
+            RECIPIENT,
+            "--expected-address",
+            RECIPIENT,
+            "--keystore",
+            "/srv/codex-workspaces/hermes-secrets/trader.json",
+            "--watch-wallet",
+            "0x1111111111111111111111111111111111111111",
+            "--copy-token",
+            "0x2222222222222222222222222222222222222222",
+            "--broadcast",
+            "--approval-token",
+            BROADCAST_APPROVAL,
+        ])
+        .unwrap();
+        assert!(validate_args(&untrusted).is_err());
+
+        let trusted = Cli {
+            copy_trust_leader_limit_price: true,
+            ..untrusted
+        };
+        assert!(validate_args(&trusted).is_ok());
+    }
+
+    #[test]
+    fn watched_wallet_copy_runs_entry_and_full_exit_through_paper_state() {
+        let leader = Address::with_last_byte(11);
+        let token = Address::with_last_byte(12);
+        let recipient = Address::from_str(RECIPIENT).unwrap();
+        let args = Cli::try_parse_from([
+            "hermes-noxa-runtime",
+            "--strategy",
+            "copy",
+            "--recipient",
+            RECIPIENT,
+            "--amount-in",
+            "100",
+            "--max-trade-amount-in",
+            "100",
+            "--max-open-exposure",
+            "100",
+            "--max-gas-cost-wei",
+            "1000000",
+            "--max-fee-per-gas",
+            "1",
+            "--gas-limit",
+            "100",
+            "--watch-wallet",
+            &leader.to_string(),
+            "--copy-token",
+            &token.to_string(),
+        ])
+        .unwrap();
+        let policy = WatchedWalletCopyPolicy::new(
+            HashSet::from([leader]),
+            HashSet::from([token]),
+            U256::from(100),
+            U256::from(1_000),
+            2,
+        )
+        .unwrap();
+        let limits = RiskLimits {
+            max_trade_amount_in: U256::from(100),
+            max_open_exposure: U256::from(100),
+            max_gas_cost_wei: U256::from(1_000_000),
+            max_session_loss: U256::from(100),
+            max_slippage_bps: 500,
+        };
+        let mut engine = Engine::Paper {
+            runtime: Box::new(AutomatedPaperRuntime::new(0, limits)),
+            pending_fill: None,
+        };
+        let boundary = |block| FeedBoundary {
+            l1_block_number: block,
+            l1_timestamp: 1_800_000_000 + block,
+            sequence_contiguous: true,
+        };
+        let observed = |tx_byte, token_in, token_out, amount_in, minimum_out| ObservedCopySwap {
+            tx_hash: B256::with_last_byte(tx_byte),
+            chain_id: Some(hermes_feed::robinhood::CHAIN_ID),
+            from: leader,
+            to: UNISWAP_V3_SWAP_ROUTER_02,
+            value: U256::ZERO,
+            intent: V3ExactInputIntent {
+                token_in,
+                token_out,
+                fee: hermes_feed::robinhood::NOXA_POOL_FEE,
+                recipient: leader,
+                amount_in: U256::from(amount_in),
+                amount_out_minimum: U256::from(minimum_out),
+                sqrt_price_limit_x96: U256::ZERO,
+            },
+        };
+        let mut triggers = 0;
+
+        handle_copy_candidate(
+            &mut engine,
+            &policy,
+            observed(1, WETH, token, 200, 500),
+            &mut triggers,
+            boundary(100),
+            recipient,
+            1,
+            0,
+            &args,
+        )
+        .unwrap();
+        let Engine::Paper { runtime, .. } = &mut engine else {
+            unreachable!()
+        };
+        let entry = runtime.snapshot().pending_order.unwrap();
+        runtime.observe_boundary(boundary(101)).unwrap();
+        runtime
+            .reconcile_fill(entry.id, U256::from(250), U256::ZERO)
+            .unwrap();
+        assert_eq!(
+            runtime.snapshot().positions[0].token_amount,
+            U256::from(250)
+        );
+
+        handle_copy_candidate(
+            &mut engine,
+            &policy,
+            observed(2, token, WETH, 400, 160),
+            &mut triggers,
+            boundary(102),
+            recipient,
+            1,
+            0,
+            &args,
+        )
+        .unwrap();
+        let Engine::Paper { runtime, .. } = &mut engine else {
+            unreachable!()
+        };
+        let exit = runtime.snapshot().pending_order.unwrap();
+        runtime.observe_boundary(boundary(103)).unwrap();
+        runtime
+            .reconcile_fill(exit.id, U256::from(100), U256::ZERO)
+            .unwrap();
+        let final_state = runtime.snapshot();
+        assert!(final_state.positions.is_empty());
+        assert_eq!(final_state.open_exposure, U256::ZERO);
+        assert_eq!(final_state.next_nonce, 2);
+        assert_eq!(triggers, 2);
     }
 
     #[test]

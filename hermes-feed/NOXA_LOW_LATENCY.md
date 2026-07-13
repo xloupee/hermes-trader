@@ -440,6 +440,22 @@ or service restarts. No natural disconnect occurred during that window, so the
 updated reconnect path still requires a live run that actually crosses a
 disconnect before promotion.
 
+The runtime also has an explicit watched-wallet policy under `--strategy
+copy`. It requires at least one `--watch-wallet` and one `--copy-token`, verifies
+every token and its active pool at startup, and observes only direct canonical
+V3 single-hop WETH-pair swaps. Follower entries use the independent
+`--amount-in` cap while preserving the leader's minimum-output price. Follower
+exits use the complete reconciled position and the leader's proportional
+minimum-output price. Redirected recipients, unlisted tokens, unsafe price
+limits, wrong chain/router/fee/pair, excess leader entry size, missing
+positions, and sessions above `--copy-max-triggers` fail closed. Signed mode
+creates and reconciles an exact exit allowance after entry, then waits for the
+watched wallet's exit; copy mode refuses the automatic timed-round-trip option.
+The receipt-free copy path does not add an RPC quote: signed broadcast therefore
+also requires `--copy-trust-leader-limit-price`, making the leader-calldata
+price dependency explicit rather than silently treating it as an independent
+quote.
+
 ## Promotion gates
 
 The current implementation is a paper trader, not an authorized mainnet sender.

@@ -13,12 +13,6 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 InaccessiblePaths=/srv/codex-workspaces/hermes-secrets
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
-LockPersonality=true
-MemoryDenyWriteExecute=true
 
 [Install]
 WantedBy=default.target

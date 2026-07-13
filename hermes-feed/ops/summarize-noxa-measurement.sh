@@ -45,6 +45,10 @@ for file in "$EVENTS" "$BOUNDARY" "$FACTORY_STATUS"; do
     exit 1
   }
 done
+readonly BINARY_SHA256="$(awk 'NR == 1 {print $1}' "$RUN_DIR/binary.sha256")"
+readonly EVENTS_SHA256="$(sha256sum "$EVENTS" | awk '{print $1}')"
+readonly BOUNDARY_SHA256="$(sha256sum "$BOUNDARY" | awk '{print $1}')"
+readonly FACTORY_STATUS_SHA256="$(sha256sum "$FACTORY_STATUS" | awk '{print $1}')"
 
 jq -n \
   --arg measurement_run "$RUN_DIR" \
@@ -53,6 +57,10 @@ jq -n \
   --arg completed_utc "$COMPLETED_UTC" \
   --argjson requested_duration_seconds "$REQUESTED_DURATION_SECONDS" \
   --argjson wall_duration_seconds "$WALL_DURATION_SECONDS" \
+  --arg binary_sha256 "$BINARY_SHA256" \
+  --arg events_sha256 "$EVENTS_SHA256" \
+  --arg boundary_sha256 "$BOUNDARY_SHA256" \
+  --arg factory_status_sha256 "$FACTORY_STATUS_SHA256" \
   --argjson completed "$COMPLETED" \
   --slurpfile events "$EVENTS" \
   --slurpfile boundary "$BOUNDARY" \
@@ -96,6 +104,12 @@ jq -n \
       duration_requirement_met: (
         $completed and ($wall_duration_seconds >= $requested_duration_seconds)
       )
+    },
+    provenance: {
+      binary_sha256: $binary_sha256,
+      observer_events_sha256: $events_sha256,
+      boundary_sha256: $boundary_sha256,
+      factory_status_sha256: $factory_status_sha256
     },
     feed: {
       health_records: ($health | length),

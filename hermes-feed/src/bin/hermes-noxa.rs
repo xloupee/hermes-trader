@@ -170,6 +170,9 @@ struct TestnetPreflightArgs {
 
 #[derive(Debug, Args)]
 struct TestnetSubmitCanaryArgs {
+    /// Stable host/region label used when comparing canary records.
+    #[arg(long, default_value = "unspecified")]
+    source: String,
     #[arg(long, default_value = TESTNET_RPC_URL)]
     rpc_url: String,
     #[arg(long, default_value = TESTNET_SEQUENCER_URL)]
@@ -327,6 +330,7 @@ async fn testnet_submit_canary(args: TestnetSubmitCanaryArgs) -> Result<()> {
 
     write_json(json!({
         "record_type": "noxa_testnet_canary_validated",
+        "source": args.source,
         "broadcast": args.broadcast,
         "chain_id": chain_id,
         "hash": canary.hash,
@@ -385,6 +389,7 @@ async fn testnet_submit_canary(args: TestnetSubmitCanaryArgs) -> Result<()> {
     };
     write_json(json!({
         "record_type": "noxa_testnet_canary_submission",
+        "source": args.source,
         "hash": canary.hash,
         "classified_attempts": retry.attempts,
         "network_attempts": attempt_elapsed_ns.len(),
@@ -406,6 +411,7 @@ async fn testnet_submit_canary(args: TestnetSubmitCanaryArgs) -> Result<()> {
             let risk_status = risk.settle(reservation.id, realized_loss)?;
             write_json(json!({
                 "record_type": "noxa_testnet_canary_reconciled",
+                "source": args.source,
                 "hash": canary.hash,
                 "included": true,
                 "receipt_status": receipt.status,
@@ -419,6 +425,7 @@ async fn testnet_submit_canary(args: TestnetSubmitCanaryArgs) -> Result<()> {
             let known = rpc.transaction_by_hash(canary.hash).await?.is_some();
             write_json(json!({
                 "record_type": "noxa_testnet_canary_reconciled",
+                "source": args.source,
                 "hash": canary.hash,
                 "included": false,
                 "known_by_rpc": known,

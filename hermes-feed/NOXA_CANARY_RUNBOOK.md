@@ -16,6 +16,7 @@ intentional safety gate:
 
 ```bash
 hermes-noxa testnet-submit-canary \
+  --source fsn1-codex \
   --raw-tx-file ./canary-46630.raw \
   --max-value-wei 100000000000000 \
   --max-gas-cost-wei 100000000000000
@@ -37,6 +38,12 @@ same command with `--broadcast`. Only an explicit early-boundary response may
 retry the identical bytes. Rate limits, malformed replies, and ambiguous
 transport results switch to hash/receipt reconciliation. An unresolved
 submission retains its nonce and risk reservation; do not sign a replacement.
+
+Capture stdout to one JSONL file per host, using stable `--source` labels such
+as `fsn1-codex` and `us-east-2-ohio`. Compare completed runs with
+`ops/summarize-testnet-canaries.sh`. Use identical value/gas caps and canary
+counts in both regions; compare included receipts and report unresolved hashes
+separately.
 
 For a swap canary, first establish the official testnet wrapped-native and
 router deployments. Run `testnet-preflight` to prove wrapped balance, allowance,

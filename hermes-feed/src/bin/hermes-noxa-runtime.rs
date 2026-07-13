@@ -208,10 +208,26 @@ struct CopyTokenValidation {
     pool: Address,
     validated_l2_block: u64,
     fee: u32,
+    #[serde(serialize_with = "serialize_u128_decimal")]
     liquidity: u128,
+    #[serde(serialize_with = "serialize_u256_decimal")]
     restriction_end_l1_block: U256,
     token_code_bytes: usize,
     pool_code_bytes: usize,
+}
+
+fn serialize_u256_decimal<S>(value: &U256, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&value.to_string())
+}
+
+fn serialize_u128_decimal<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&value.to_string())
 }
 
 #[derive(Debug)]
@@ -2979,5 +2995,29 @@ mod tests {
             U256::from(42)
         );
         assert!(extract_erc20_received(&logs, Address::with_last_byte(7), recipient).is_err());
+    }
+
+    #[test]
+    fn copy_token_validation_serializes_full_width_restriction_height_as_string() {
+        let validation = CopyTokenValidation {
+            token: Address::with_last_byte(1),
+            pool: Address::with_last_byte(2),
+            validated_l2_block: 42,
+            fee: 10_000,
+            liquidity: u128::MAX,
+            restriction_end_l1_block: U256::MAX,
+            token_code_bytes: 1,
+            pool_code_bytes: 1,
+        };
+
+        let value = serde_json::to_value(validation).unwrap();
+        assert_eq!(
+            value["restriction_end_l1_block"],
+            serde_json::Value::String(U256::MAX.to_string())
+        );
+        assert_eq!(
+            value["liquidity"],
+            serde_json::Value::String(u128::MAX.to_string())
+        );
     }
 }

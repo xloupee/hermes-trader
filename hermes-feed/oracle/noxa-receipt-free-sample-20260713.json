@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "record_type": "noxa_receipt_free_prediction_sample",
+  "captured_utc_date": "2026-07-13",
+  "range": {
+    "from_l2_block": 61688,
+    "to_l2_block": 6880646,
+    "blocks_per_request": 50000
+  },
+  "decoded_events": 60142,
+  "category_counts": {
+    "token0_nonzero_buy": 2457,
+    "token0_zero_buy": 375,
+    "token1_nonzero_buy": 49801,
+    "token1_zero_buy": 7509
+  },
+  "selection": "three evenly spaced events within each orientation/initial-buy category",
+  "samples_run": 12,
+  "exact_matches": 12,
+  "all_required_categories_present": true,
+  "all_samples_exact": true,
+  "launch_factory_runtime_keccak256": "0xadcfca67f5d7df9f26974a07be2b5d83894765e6e5e9b9f0a232223f25c795e6",
+  "dex_factory_runtime_keccak256": "0xec72b1abd1f2faee020cfea9c646bd8994f9fb389054f6e574f103a895091739",
+  "rpc": {
+    "logical_requests": 218,
+    "http_attempts": 219,
+    "retries": 1,
+    "rate_limited": 1,
+    "server_errors": 0,
+    "transport_errors": 0
+  },
+  "samples": [
+    {"category":"token1_zero_buy","transaction_hash":"0x2ce82d86bc71560488f4b3e4607308640682b9cd0e5a837e06367a1855e31a84","l2_block":4116287,"exact":true},
+    {"category":"token0_zero_buy","transaction_hash":"0xfc4a9df17a9f6810cffae06eb5eadb0df26b7b67a29a5a8d4b47d042b9f2825d","l2_block":4169402,"exact":true},
+    {"category":"token0_nonzero_buy","transaction_hash":"0x417e583e6c2daea490487f636203f6da1d84a2fa539543c7720f048efa1412d6","l2_block":4384731,"exact":true},
+    {"category":"token1_nonzero_buy","transaction_hash":"0xb6e570ff81d1629c920e811fe626f399dc774270b5fa7e07f675e29ec202c890","l2_block":4400771,"exact":true},
+    {"category":"token0_zero_buy","transaction_hash":"0xd8258d470ab462e96e23e8b67fff1e07bd5da533891f7699e11cac2110ce49c9","l2_block":5221135,"exact":true},
+    {"category":"token1_zero_buy","transaction_hash":"0xf237310f6da1ba1992abf4f04916bc3b8779c73a7bbac8491273a14897bbf245","l2_block":5226678,"exact":true},
+    {"category":"token1_nonzero_buy","transaction_hash":"0xb6ec63460cebbf9e146e1d2b91846b1b39f342cdd3fe3f9b135aaa8ba64c80fb","l2_block":5600039,"exact":true},
+    {"category":"token0_nonzero_buy","transaction_hash":"0xefa9a9d496a67ccdb44a18315e2b75be274148e595f235d74325cf7906693ca7","l2_block":5639365,"exact":true},
+    {"category":"token1_nonzero_buy","transaction_hash":"0x06b4087dae6ce20c007cca1fc5c473c04e0772d4f613a140dc2277cc14312e4d","l2_block":6491347,"exact":true},
+    {"category":"token0_nonzero_buy","transaction_hash":"0x5135c590753abc266acb09f809a80cb8a1cc3a17a29278fb100555af5d021df7","l2_block":6499169,"exact":true},
+    {"category":"token1_zero_buy","transaction_hash":"0x96305237cc4a73a7e6198594db95cb04db3ffe279539927602130debdae9cad0","l2_block":6560063,"exact":true},
+    {"category":"token0_zero_buy","transaction_hash":"0x0c6ea54e9a4762317d54c7d9c6e0875fa38e82e3b49205151c7792398b2a9ccf","l2_block":6560760,"exact":true}
+  ],
+  "broadcast": false,
+  "private_key_used": false
+}

@@ -15,24 +15,21 @@ The target lean data path is:
 ```text
 NOXA launchToken transaction at Robinhood L1 context B
   -> post-execution Nitro feed detection
-  -> successful receipt and exact TokenLaunched verification
-  -> parse the entire receipt in logIndex order
-  -> PoolCreated + Initialize + Mint + optional post-event Swap
-  -> exact local sparse-V3 quote
+  -> strict full-calldata decode
+  -> CREATE2 token and V3-pool prediction from pinned creation code
+  -> deterministic one-sided mint and launcher initial-buy replay
+  -> exact local sparse-V3 quote without an RPC or receipt
   -> restriction policy using Ethereum L1 height
   -> pre-wrapped WETH + prior SwapRouter02 approval
   -> prebuilt and pre-signed single-hop transaction
-  -> predictive parent-L1 trigger (working hypothesis, calibrated and risky)
-     OR conditional L1 boundary retry (safe fallback)
-     OR post-execution feed transition (last-resort fallback)
+  -> one submission on the first contiguous feed header for B+1
+  -> asynchronous launch-receipt proof and trade reconciliation
 ```
 
-The current `hermes-noxa` binary implements the path through verified receipt
-hydration, exact-input quote, token restriction snapshot, paper decision, and
-prepared router calldata. Transaction construction/signing exists as a strict
-library primitive, but the CLI deliberately has no key loading, signing, send,
-or retry loop. The existing V2 observer, cache, and live paper processes are
-unchanged.
+`hermes-noxa-runtime` implements this feed-driven path in paper, signed dry-run,
+and separately approved capped broadcast modes. The receipt-based `hermes-noxa`
+observer remains the authoritative differential verifier. The existing V2
+observer, cache, and live paper processes are unchanged.
 
 ## Current chain state
 
@@ -52,8 +49,10 @@ An exhaustive non-overlapping event scan found:
 
 Bots continue sending `launchToken` calls while the factory is paused. Live
 Hermes observation confirmed that these calls have status `0x0` and no logs.
-Therefore a factory call is never a launch signal until its successful receipt
-contains the exact canonical event.
+Therefore a factory call is only a speculative fast-path signal. A successful
+receipt containing the exact canonical event remains authoritative; if a
+speculative launch reverts, the follower swap also reverts under bounded gas and
+the asynchronous reconciler accounts for it.
 
 The observer remains useful while paused: it classifies reverted launch spam
 and keeps the measured feed/RPC path warm. It reads enablement at startup; it
@@ -281,6 +280,11 @@ hermes-noxa inspect --tx-hash 0xc62997c2607d579233b552fad71faae7e392a4c13bc92b9d
 # Factory-address/topic event decoder/backfill
 hermes-noxa backfill --from-l2-block 6880646 --to-l2-block 6880646
 
+# Retained, deterministic cross-category receipt-free prediction audit
+hermes-noxa-predict-sample \
+  --samples-per-category 30 \
+  --output oracle/noxa-receipt-free-sample-120-20260713.json
+
 # Post-execution feed observer plus bounded async receipt verification
 hermes-noxa observe --run-seconds 60
 
@@ -342,18 +346,20 @@ wrapped-native and router addresses are independently verified.
 
 ## Verification snapshot
 
-The final optimized offline suite passes 86 tests: 81 library tests and five
-main-binary tests. It covers canonical ABI encoding, hot-header rejection,
+The complete all-target offline suite passes. It covers canonical ABI encoding,
+hot-header rejection,
 receipt chronology and initial-buy correlation, every restriction boundary,
 RPC retry/strict word parsing, signer-bound router construction, sequencer hash
 reconciliation, zero-liquidity V3 gaps in both directions, multiword tick
 traversal, and failure-atomic pool hydration.
 
 The historical `inspect` replay also passed against the official RPC with all
-eight launched-token views checked at exact L2 block 6,880,646. A five-second
-live feed smoke test at L2 head 8,181,686 decoded contiguous paused-factory spam,
-kept it suppressed during catch-up warmup, and exited with the verifier/output
-queues drained. No wallet, signer, transaction submission, service restart, or
+eight launched-token views checked at exact L2 block 6,880,646. A 60-second
+release-mode live paper run covered feed sequences 8,522,064 through 8,524,013
+with zero gaps, missing messages, duplicates, or reordering. It revalidated the
+prediction cache after warmup, made 24 logical RPC requests without retries or
+errors, suppressed candidates while the factory remained disabled, and drained
+cleanly. No wallet, signer, transaction submission, service restart, or
 deployment was used.
 
 ## Promotion gates
@@ -361,9 +367,12 @@ deployment was used.
 The current implementation is a paper trader, not an authorized mainnet sender.
 Before enabling any value-bearing path:
 
-1. Hydrate a broad random sample from the 60,142 ABI-valid factory events,
-   including both token orientations and zero/non-zero initial buys, and retain
-   a reproducible sample manifest.
+1. **Complete:** scan all 60,142 ABI-valid factory events and retain a broad,
+   deterministic stratified manifest covering both token orientations and
+   zero/non-zero initial buys. The 120-case manifest contains 107 exact replays,
+   13 explicitly unavailable historical-state cases, and zero verification
+   failures. Deterministic spacing was used so category and time-range coverage
+   are reproducible rather than dependent on a random seed.
 2. Differential-test multi-tick exact-input and exact-output results against
    QuoterV2 at eligible pinned blocks.
 3. Run at least 24 hours of parent-L1/feed boundary calibration from us-east-2.
@@ -371,16 +380,17 @@ Before enabling any value-bearing path:
    with a dedicated throwaway funded wallet.
 5. Benchmark direct exact-input, exact-output, and any custom executor by
    resulting feed position, not RPC acknowledgement.
-6. Replace the current post-receipt restriction RPC reads with proven cached or
-   deterministic state for any predictive sender, then prove no candidate-time
-   RPC, allocation, JSON serialization, lock, or signing remains in its submit
-   path.
+6. Broaden the exact CREATE2/state replay oracle across both token orientations,
+   empty/non-empty initial buys, and configuration changes; fail closed on any
+   runtime or configuration hash drift.
 7. Require explicit approval for a tiny-value mainnet canary, dedicated wallet,
    and deployment. Keep the existing V2 service untouched.
 
-Exact CREATE2 token-address prediction remains a research item. The caller salt
-is passed directly to CREATE2, but the init-code hash has not yet been broadly
-reconstructed and validated. Receipt-based token discovery is authoritative.
+Exact CREATE2 prediction is implemented. The launch factory runtime embeds token
+creation code with hash `0x983cd2…c7e1`; the V3 factory embeds the canonical pool
+creation code with hash `0xe34f19…8b54`. The retained historical differential
+oracle matches token, pool, restriction end, initial buy, post-launch state, and
+quote exactly. Receipt-based discovery remains the asynchronous authority.
 
 ## Primary sources
 

@@ -137,10 +137,9 @@ pub struct NoxaLaunchIntent {
     pub transaction_value: U256,
 }
 
-/// Fixed launchToken calldata fields used by the feed hot path.
-///
-/// Dynamic metadata is deliberately left undecoded until the receipt proves
-/// that the transaction succeeded.
+/// Fixed launchToken calldata fields used for asynchronous receipt correlation.
+/// The executable hot path uses `decode_launch_call`, because deterministic
+/// CREATE2 prediction also needs the canonical dynamic metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct NoxaLaunchHeader {
     pub launch_config_id: U256,
@@ -235,6 +234,9 @@ pub fn decode_launch_call(input: &[u8], transaction_value: U256) -> Option<NoxaL
         return None;
     }
     let call = launchTokenCall::abi_decode(input).ok()?;
+    if call.abi_encode().as_slice() != input {
+        return None;
+    }
     Some(NoxaLaunchIntent {
         name: call.params.name,
         symbol: call.params.symbol,

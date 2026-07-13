@@ -42,5 +42,14 @@ mod tests {
             ..ambiguous
         };
         assert!(!rejected.must_halt());
+
+        let http_error = HotPathReport {
+            result: SubmissionResult::Rejected {
+                code: 500,
+                message: "upstream error".into(),
+            },
+            ..ambiguous
+        };
+        assert!(http_error.must_halt());
     }
 }

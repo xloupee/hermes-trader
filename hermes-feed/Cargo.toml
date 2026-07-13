@@ -13,6 +13,7 @@ alloy-sol-types = "1.6.0"
 anyhow = "1.0"
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
+eth-keystore = "0.5"
 futures-util = "0.3"
 hex = "0.4"
 libc = "0.2"
@@ -25,6 +26,11 @@ thiserror = "2.0"
 tokio = { version = "1.48", features = ["fs", "io-std", "io-util", "macros", "rt", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 uniswap_v3_math = "0.6.2"
+zeroize = "1.8"
+
+[dev-dependencies]
+rand = "0.8"
+tempfile = "3"
 
 [profile.release]
 lto = "thin"

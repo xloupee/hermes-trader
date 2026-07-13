@@ -35,6 +35,19 @@ pub struct PreparedRawTransaction {
     pub signer: Address,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalTransactionPlan {
+    pub chain_id: u64,
+    pub nonce: u64,
+    pub gas_limit: u64,
+    pub max_fee_per_gas: u128,
+    pub max_priority_fee_per_gas: u128,
+    pub token: Address,
+    pub spender: Address,
+    pub amount: U256,
+    pub expected_owner: Address,
+}
+
 #[derive(Debug, Error)]
 pub enum TradePlanError {
     #[error("trade plan must target Robinhood chain ID 4663")]
@@ -139,33 +152,30 @@ impl TradeTransactionPlan {
             .calldata
             .get(..4)
             .ok_or(TradePlanError::UnsupportedCalldata)?;
-        if self.expected_token_out == Address::ZERO
-            || self.expected_token_out == WETH
-            || self.expected_recipient == Address::ZERO
-        {
+        if self.expected_token_out == Address::ZERO || self.expected_recipient == Address::ZERO {
             return Err(TradePlanError::UnsafeSwapParameters);
         }
         if selector == EXACT_INPUT_SINGLE_SELECTOR {
             let intent = decode_v3_exact_input_single(&self.calldata)
                 .ok_or(TradePlanError::UnsupportedCalldata)?;
-            if intent.token_in != WETH
-                || intent.token_out != self.expected_token_out
+            if intent.token_out != self.expected_token_out
                 || intent.recipient != self.expected_recipient
                 || intent.fee != NOXA_POOL_FEE
                 || intent.amount_in == U256::ZERO
                 || intent.amount_out_minimum == U256::ZERO
+                || !is_weth_pair(intent.token_in, intent.token_out)
             {
                 return Err(TradePlanError::UnsafeSwapParameters);
             }
         } else if selector == EXACT_OUTPUT_SINGLE_SELECTOR {
             let intent = decode_v3_exact_output_single(&self.calldata)
                 .ok_or(TradePlanError::UnsupportedCalldata)?;
-            if intent.token_in != WETH
-                || intent.token_out != self.expected_token_out
+            if intent.token_out != self.expected_token_out
                 || intent.recipient != self.expected_recipient
                 || intent.fee != NOXA_POOL_FEE
                 || intent.amount_out == U256::ZERO
                 || intent.amount_in_maximum == U256::ZERO
+                || !is_weth_pair(intent.token_in, intent.token_out)
             {
                 return Err(TradePlanError::UnsafeSwapParameters);
             }
@@ -200,26 +210,121 @@ impl TradeTransactionPlan {
     /// deliberately outside this crate and the `hermes-noxa` CLI exposes no
     /// signing command.
     pub fn sign(&self, signing_key: &SigningKey) -> Result<PreparedRawTransaction, TradePlanError> {
-        let transaction = self.unsigned_transaction()?;
-        let (signature, recovery_id): (K256Signature, RecoveryId) = signing_key
-            .sign_prehash(transaction.signature_hash().as_slice())
-            .map_err(|_| TradePlanError::Signing)?;
-        let signature: Signature = (signature, recovery_id).into();
-        let envelope: TxEnvelope = transaction.into_signed(signature).into();
-        let raw = envelope.encoded_2718();
-        let decoded = TxEnvelope::decode_2718_exact(&raw).map_err(|_| TradePlanError::RoundTrip)?;
-        let signer = decoded
-            .recover_signer()
-            .map_err(|_| TradePlanError::RoundTrip)?;
-        if signer != self.expected_recipient {
-            return Err(TradePlanError::RecipientSignerMismatch);
+        sign_transaction(
+            self.unsigned_transaction()?,
+            self.expected_recipient,
+            signing_key,
+        )
+    }
+}
+
+impl ApprovalTransactionPlan {
+    pub fn new(
+        nonce: u64,
+        gas_limit: u64,
+        max_fee_per_gas: u128,
+        max_priority_fee_per_gas: u128,
+        token: Address,
+        amount: U256,
+        expected_owner: Address,
+    ) -> Result<Self, TradePlanError> {
+        let plan = Self {
+            chain_id: CHAIN_ID,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            token,
+            spender: UNISWAP_V3_SWAP_ROUTER_02,
+            amount,
+            expected_owner,
+        };
+        plan.validate()?;
+        Ok(plan)
+    }
+
+    pub fn validate(&self) -> Result<(), TradePlanError> {
+        if self.chain_id != CHAIN_ID {
+            return Err(TradePlanError::WrongChain);
         }
-        Ok(PreparedRawTransaction {
-            hash: keccak256(&raw),
-            raw,
-            signer,
+        if self.spender != UNISWAP_V3_SWAP_ROUTER_02 {
+            return Err(TradePlanError::WrongRouter);
+        }
+        if self.token == Address::ZERO
+            || self.token == WETH
+            || self.amount == U256::ZERO
+            || self.expected_owner == Address::ZERO
+        {
+            return Err(TradePlanError::UnsafeSwapParameters);
+        }
+        if self.gas_limit == 0 || self.max_fee_per_gas == 0 {
+            return Err(TradePlanError::InvalidGas);
+        }
+        if self.max_priority_fee_per_gas > self.max_fee_per_gas {
+            return Err(TradePlanError::InvalidFee);
+        }
+        Ok(())
+    }
+
+    pub fn unsigned_transaction(&self) -> Result<TxEip1559, TradePlanError> {
+        self.validate()?;
+        let mut input = Vec::with_capacity(68);
+        input.extend_from_slice(&[0x09, 0x5e, 0xa7, 0xb3]);
+        input.extend_from_slice(&[0_u8; 12]);
+        input.extend_from_slice(self.spender.as_slice());
+        input.extend_from_slice(&self.amount.to_be_bytes::<32>());
+        Ok(TxEip1559 {
+            chain_id: self.chain_id,
+            nonce: self.nonce,
+            gas_limit: self.gas_limit,
+            max_fee_per_gas: self.max_fee_per_gas,
+            max_priority_fee_per_gas: self.max_priority_fee_per_gas,
+            to: TxKind::Call(self.token),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: input.into(),
         })
     }
+
+    pub fn sign(&self, signing_key: &SigningKey) -> Result<PreparedRawTransaction, TradePlanError> {
+        sign_transaction(
+            self.unsigned_transaction()?,
+            self.expected_owner,
+            signing_key,
+        )
+    }
+}
+
+fn sign_transaction(
+    transaction: TxEip1559,
+    expected_signer: Address,
+    signing_key: &SigningKey,
+) -> Result<PreparedRawTransaction, TradePlanError> {
+    let (signature, recovery_id): (K256Signature, RecoveryId) = signing_key
+        .sign_prehash(transaction.signature_hash().as_slice())
+        .map_err(|_| TradePlanError::Signing)?;
+    let signature: Signature = (signature, recovery_id).into();
+    let envelope: TxEnvelope = transaction.into_signed(signature).into();
+    let raw = envelope.encoded_2718();
+    let decoded = TxEnvelope::decode_2718_exact(&raw).map_err(|_| TradePlanError::RoundTrip)?;
+    let signer = decoded
+        .recover_signer()
+        .map_err(|_| TradePlanError::RoundTrip)?;
+    if signer != expected_signer {
+        return Err(TradePlanError::RecipientSignerMismatch);
+    }
+    Ok(PreparedRawTransaction {
+        hash: keccak256(&raw),
+        raw,
+        signer,
+    })
+}
+
+fn is_weth_pair(token_in: Address, token_out: Address) -> bool {
+    token_in != Address::ZERO
+        && token_out != Address::ZERO
+        && token_in != token_out
+        && ((token_in == WETH) ^ (token_out == WETH))
 }
 
 #[cfg(test)]
@@ -336,5 +441,57 @@ mod tests {
             plan.sign(&SigningKey::from_slice(&[7_u8; 32]).unwrap()),
             Err(TradePlanError::RecipientSignerMismatch)
         ));
+    }
+
+    #[test]
+    fn supports_risk_reducing_exact_input_exit_only_to_weth() {
+        let key = SigningKey::from_slice(&[7_u8; 32]).unwrap();
+        let recipient = Address::from_private_key(&key);
+        let token = Address::with_last_byte(99);
+        let plan = TradeTransactionPlan::exact_input(
+            2,
+            300_000,
+            100_000_000,
+            0,
+            &V3ExactInputIntent {
+                token_in: token,
+                token_out: WETH,
+                fee: NOXA_POOL_FEE,
+                recipient,
+                amount_in: U256::from(900),
+                amount_out_minimum: U256::from(1),
+                sqrt_price_limit_x96: U256::ZERO,
+            },
+        )
+        .unwrap();
+        assert!(plan.sign(&key).is_ok());
+
+        let mut unsafe_intent = input_intent(recipient);
+        unsafe_intent.token_in = Address::with_last_byte(1);
+        unsafe_intent.token_out = Address::with_last_byte(2);
+        assert!(matches!(
+            TradeTransactionPlan::exact_input(2, 300_000, 100_000_000, 0, &unsafe_intent),
+            Err(TradePlanError::UnsafeSwapParameters)
+        ));
+    }
+
+    #[test]
+    fn approval_plan_is_router_pinned_and_signer_bound() {
+        let key = SigningKey::from_slice(&[7_u8; 32]).unwrap();
+        let owner = Address::from_private_key(&key);
+        let plan = ApprovalTransactionPlan::new(
+            3,
+            80_000,
+            100_000_000,
+            0,
+            Address::with_last_byte(99),
+            U256::from(900),
+            owner,
+        )
+        .unwrap();
+        let unsigned = plan.unsigned_transaction().unwrap();
+        assert_eq!(unsigned.to, TxKind::Call(plan.token));
+        assert_eq!(&unsigned.input[..4], &[0x09, 0x5e, 0xa7, 0xb3]);
+        assert!(plan.sign(&key).is_ok());
     }
 }

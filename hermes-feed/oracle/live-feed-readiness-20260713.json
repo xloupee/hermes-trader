@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "network": "robinhood_chain_mainnet",
+  "run_seconds": 15,
+  "broadcast": false,
+  "observer_isolation": "ad_hoc_process_only; existing observer and Pumpfun services untouched",
+  "factory": {
+    "address": "0xd9ec2db5f3d1b236843925949fe5bd8a3836fccb",
+    "launch_enabled": false,
+    "runtime_hash_matches_pin": true,
+    "runtime_keccak256": "0xadcfca67f5d7df9f26974a07be2b5d83894765e6e5e9b9f0a232223f25c795e6"
+  },
+  "feed": {
+    "url": "wss://feed.mainnet.chain.robinhood.com",
+    "reconnects": 0,
+    "first_sequence": 8429766,
+    "last_sequence": 8431009,
+    "gaps": 0,
+    "missing": 0,
+    "duplicates_or_reordered": 0,
+    "signed_transactions_observed": 7416
+  },
+  "rpc": {
+    "logical_requests": 12,
+    "http_attempts": 12,
+    "retries": 0,
+    "rate_limited": 0,
+    "server_errors": 0,
+    "transport_errors": 0
+  },
+  "result": "feed_healthy_but_launch_path_inactive"
+}

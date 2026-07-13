@@ -1,31 +1,39 @@
+pub mod boundary_gate;
 pub mod cache;
 pub mod decoder;
 pub mod feed;
 pub mod hot_path;
 mod hot_path_safety;
 pub mod noxa_abi;
+pub mod noxa_candidate;
 pub mod noxa_launch;
 pub mod noxa_policy;
+pub mod noxa_predict;
 pub mod noxa_rpc;
 pub mod noxa_trade;
+pub mod noxa_verifier;
 pub mod paper;
+pub mod paper_runtime;
 pub mod probe;
 pub mod robinhood;
 pub mod rpc;
 pub mod sequencer;
+pub mod signer;
 pub mod testnet_orchestrator;
+pub mod trading_runtime;
 pub mod uniswap_v2;
 pub mod v2_simulator;
 pub mod v3_pool;
 
+pub use boundary_gate::{BoundaryDecision, BoundaryGate, BoundaryGateError, FeedBoundary};
 pub use cache::{CacheApplyReport, CacheCheckpoint, CacheError, ConfirmedReserveCache};
 pub use decoder::{
     Candidate, DecodeError, DecodeReport, FeedDecoder, Filter, TransactionContext,
     TransactionFingerprint,
 };
 pub use hot_path::{
-    HotPathError, HotPathExecutor, HotPathReport, HotPathStrategy, HotTransaction,
-    ReconciliationJob, SubmissionResult,
+    ArmedHotTransaction, HotPathError, HotPathExecutor, HotPathReport, HotPathStrategy,
+    HotTransaction, ReconciliationJob, SubmissionResult,
 };
 pub use noxa_abi::{
     NoxaLaunchEvent, NoxaLaunchHeader, NoxaLaunchIntent, ReceiptLog, V3ExactInputIntent,
@@ -34,27 +42,51 @@ pub use noxa_abi::{
     decode_v3_exact_output_single, decode_v3_pool_event, encode_v3_exact_input_single,
     encode_v3_exact_output_single,
 };
+pub use noxa_candidate::{
+    NoxaCandidateError, PredictedNoxaTradeInput, PreparedNoxaTradeCandidate,
+    VerifiedNoxaTradeInput, prepare_predicted_noxa_trade, prepare_verified_noxa_trade,
+};
 pub use noxa_launch::{HydratedNoxaLaunch, NoxaHydrationError, hydrate_noxa_launch_receipt};
 pub use noxa_policy::{
     NoxaPolicyDecision, NoxaPolicyInput, NoxaRejectReason, evaluate_noxa_policy,
+};
+pub use noxa_predict::{
+    DEX_CONFIG_SELECTOR, LAUNCH_CONFIG_SELECTOR, NoxaDexConfig, NoxaLaunchConfig,
+    NoxaPredictionError, NoxaPredictor, PredictedNoxaLaunch, config_call, create2_address,
+    decode_dex_config, decode_launch_config, predict_v3_pool_address,
 };
 pub use noxa_rpc::{
     FactoryStatus, NoxaReceipt, NoxaRpcClient, ObservedLaunchLog, RobinhoodBlock,
     RobinhoodTransaction, RpcMetricsSnapshot, TokenRestrictionSnapshot,
 };
-pub use noxa_trade::{PreparedRawTransaction, TradePlanError, TradeTransactionPlan};
+pub use noxa_trade::{
+    ApprovalTransactionPlan, PreparedRawTransaction, TradePlanError, TradeTransactionPlan,
+};
+pub use noxa_verifier::{
+    NoxaVerificationOutcome, ObservedNoxaFactoryCall, VerifiedNoxaLaunch,
+    validate_verified_restrictions, verify_noxa_factory_call,
+};
 pub use paper::{PaperDecision, PaperPolicy, PaperRejectReason, ReservePaperDecision};
+pub use paper_runtime::{
+    AutomatedPaperRuntime, PaperBoundaryEvent, PaperOrderKind, PaperOrderSnapshot, PaperOrderState,
+    PaperPosition, PaperReconciliation, PaperRuntimeError, PaperRuntimeSnapshot,
+};
 pub use probe::{FrameReport, SequenceObservation, SequenceTracker};
 pub use rpc::{FactoryBootstrap, SyncUpdate, V2SnapshotClient};
 pub use sequencer::{
     ConditionalOptions, ConditionalResponse, SequencerClient, build_conditional_request,
     classify_conditional_response,
 };
+pub use signer::{KeystoreTradeSigner, SignerLoadError, TradeSigner};
 pub use testnet_orchestrator::{
     CanaryError, ConditionalRetryDecision, ConditionalRetryState, DedicatedNonceManager,
     NonceError, NonceLease, NonceLeaseState, PreflightError, RiskError, RiskLedger, RiskLimits,
     RiskReservation, RiskStatus, TestnetCanaryPlan, TradePreflightInput, ValidatedTestnetCanary,
     evaluate_testnet_preflight, validate_signed_testnet_canary,
+};
+pub use trading_runtime::{
+    SignedBoundaryRelease, SignedPendingKind, SignedPosition, SignedRuntimeError,
+    SignedRuntimeSnapshot, SignedTradingRuntime,
 };
 pub use uniswap_v2::{V2SwapIntent, V2SwapKind, decode_v2_exact_input};
 pub use v2_simulator::{

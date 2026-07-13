@@ -8,6 +8,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::noxa_abi::ReceiptLog;
+use crate::noxa_predict::{
+    DEX_CONFIG_SELECTOR, LAUNCH_CONFIG_SELECTOR, NoxaDexConfig, NoxaLaunchConfig, config_call,
+    decode_dex_config, decode_launch_config,
+};
 use crate::robinhood::{CHAIN_ID, NOXA_LAUNCH_FACTORY, PUBLIC_RPC_URL};
 
 sol! {
@@ -26,6 +30,7 @@ sol! {
 
 const LAUNCH_ENABLED_SELECTOR: &str = "0x236a4afb";
 const LAUNCH_FEE_SELECTOR: &str = "0xcf3cf573";
+const OWNER_SELECTOR: &str = "0x8da5cb5b";
 const TOKEN_LAUNCHED_TOPIC: B256 =
     alloy_primitives::b256!("db51ea9ad51ab453a65a4cb7e60c3cb378c9501bb002609f8f97778fb6c4235a");
 const RPC_ATTEMPTS: usize = 6;
@@ -95,6 +100,8 @@ pub struct NoxaReceipt {
     pub status: bool,
     pub l2_block_number: u64,
     pub transaction_index: u64,
+    pub gas_used: Option<u64>,
+    pub effective_gas_price: Option<U256>,
     pub logs: Vec<ReceiptLog>,
 }
 
@@ -204,11 +211,39 @@ impl NoxaRpcClient {
     }
 
     pub async fn code_at(&self, address: Address) -> Result<Bytes> {
+        self.code_at_block(address, "latest").await
+    }
+
+    pub async fn code_at_l2_block(&self, address: Address, l2_block_number: u64) -> Result<Bytes> {
+        self.code_at_block(address, &hex_u64(l2_block_number)).await
+    }
+
+    async fn code_at_block(&self, address: Address, block_tag: &str) -> Result<Bytes> {
         parse_bytes_value(
             &self
-                .request("eth_getCode", json!([address, "latest"]))
+                .request("eth_getCode", json!([address, block_tag]))
                 .await?,
         )
+    }
+
+    pub async fn launch_config_at(
+        &self,
+        id: U256,
+        l2_block_number: u64,
+    ) -> Result<NoxaLaunchConfig> {
+        let call = config_call(LAUNCH_CONFIG_SELECTOR, id);
+        let bytes = self
+            .eth_call_data(NOXA_LAUNCH_FACTORY, &call, &hex_u64(l2_block_number))
+            .await?;
+        decode_launch_config(&bytes).map_err(Into::into)
+    }
+
+    pub async fn dex_config_at(&self, id: U256, l2_block_number: u64) -> Result<NoxaDexConfig> {
+        let call = config_call(DEX_CONFIG_SELECTOR, id);
+        let bytes = self
+            .eth_call_data(NOXA_LAUNCH_FACTORY, &call, &hex_u64(l2_block_number))
+            .await?;
+        decode_dex_config(&bytes).map_err(Into::into)
     }
 
     pub async fn erc20_balance(&self, token: Address, account: Address) -> Result<U256> {
@@ -280,6 +315,17 @@ impl NoxaRpcClient {
             )
             .await?;
         parse_u256_bytes(&bytes)
+    }
+
+    pub async fn factory_owner_at(&self, l2_block_number: u64) -> Result<Address> {
+        let bytes = self
+            .eth_call(
+                NOXA_LAUNCH_FACTORY,
+                OWNER_SELECTOR,
+                &hex_u64(l2_block_number),
+            )
+            .await?;
+        parse_address_word(&bytes)
     }
 
     pub async fn token_restriction_snapshot(
@@ -564,6 +610,12 @@ fn parse_receipt(value: &Value) -> Result<NoxaReceipt> {
         status: parse_hex_u64(field_str(value, "status")?)? == 1,
         l2_block_number: parse_hex_u64(field_str(value, "blockNumber")?)?,
         transaction_index: parse_hex_u64(field_str(value, "transactionIndex")?)?,
+        gas_used: optional_hex_u64(value, "gasUsed")?,
+        effective_gas_price: value
+            .get("effectiveGasPrice")
+            .and_then(Value::as_str)
+            .map(parse_hex_u256)
+            .transpose()?,
         logs,
     })
 }

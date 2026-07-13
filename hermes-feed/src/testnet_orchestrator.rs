@@ -131,6 +131,30 @@ impl DedicatedNonceManager {
         self.next_nonce = nonce;
         Ok(())
     }
+
+    /// Release a signed nonce after a definitive local or sequencer rejection.
+    /// The caller must never use this for timeouts, rate limits, malformed
+    /// replies, or any other result where bytes may have been accepted.
+    pub fn release_explicitly_rejected(
+        &mut self,
+        nonce: u64,
+        tx_hash: B256,
+    ) -> Result<(), NonceError> {
+        let active = self.active.ok_or(NonceError::LeaseMismatch)?;
+        if active.nonce != nonce {
+            return Err(NonceError::LeaseMismatch);
+        }
+        let active_hash = match active.state {
+            NonceLeaseState::Signed { tx_hash } | NonceLeaseState::Submitted { tx_hash } => tx_hash,
+            NonceLeaseState::Reserved => return Err(NonceError::LeaseMismatch),
+        };
+        if active_hash != tx_hash {
+            return Err(NonceError::HashMismatch);
+        }
+        self.active = None;
+        self.next_nonce = nonce;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -147,12 +171,16 @@ pub struct RiskReservation {
     pub id: u64,
     pub amount_in: U256,
     pub max_gas_cost: U256,
+    #[serde(default)]
+    pub reduces_exposure: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RiskLedger {
     pub limits: RiskLimits,
     pub realized_session_loss: U256,
+    #[serde(default)]
+    pub open_exposure: U256,
     pub active: Option<RiskReservation>,
     next_id: u64,
 }
@@ -180,6 +208,8 @@ pub enum RiskError {
     LossLimit,
     #[error("risk reservation does not match")]
     ReservationMismatch,
+    #[error("risk reservation has the wrong exposure direction")]
+    ReservationDirection,
     #[error("risk accounting overflow")]
     Overflow,
 }
@@ -189,6 +219,7 @@ impl RiskLedger {
         Self {
             limits,
             realized_session_loss: U256::ZERO,
+            open_exposure: U256::ZERO,
             active: None,
             next_id: 0,
         }
@@ -213,7 +244,11 @@ impl RiskLedger {
         if self.realized_session_loss >= self.limits.max_session_loss {
             return Err(RiskError::LossLimit);
         }
-        if amount_in > self.limits.max_open_exposure {
+        let projected_exposure = self
+            .open_exposure
+            .checked_add(amount_in)
+            .ok_or(RiskError::Overflow)?;
+        if projected_exposure > self.limits.max_open_exposure {
             return Err(RiskError::Exposure);
         }
         let max_gas_cost = U256::from(gas_limit)
@@ -228,6 +263,67 @@ impl RiskLedger {
             id,
             amount_in,
             max_gas_cost,
+            reduces_exposure: false,
+        };
+        self.active = Some(reservation);
+        Ok(reservation)
+    }
+
+    pub fn reserve_exit(
+        &mut self,
+        exposure_to_close: U256,
+        gas_limit: u64,
+        max_fee_per_gas: u128,
+        slippage_bps: u16,
+    ) -> Result<RiskReservation, RiskError> {
+        if self.active.is_some() {
+            return Err(RiskError::ReservationActive);
+        }
+        if exposure_to_close == U256::ZERO || exposure_to_close > self.open_exposure {
+            return Err(RiskError::Exposure);
+        }
+        if slippage_bps > self.limits.max_slippage_bps {
+            return Err(RiskError::Slippage);
+        }
+        let max_gas_cost = U256::from(gas_limit)
+            .checked_mul(U256::from(max_fee_per_gas))
+            .ok_or(RiskError::GasCost)?;
+        if max_gas_cost > self.limits.max_gas_cost_wei {
+            return Err(RiskError::GasCost);
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.checked_add(1).ok_or(RiskError::Overflow)?;
+        let reservation = RiskReservation {
+            id,
+            amount_in: exposure_to_close,
+            max_gas_cost,
+            reduces_exposure: true,
+        };
+        self.active = Some(reservation);
+        Ok(reservation)
+    }
+
+    pub fn reserve_maintenance(
+        &mut self,
+        gas_limit: u64,
+        max_fee_per_gas: u128,
+    ) -> Result<RiskReservation, RiskError> {
+        if self.active.is_some() {
+            return Err(RiskError::ReservationActive);
+        }
+        let max_gas_cost = U256::from(gas_limit)
+            .checked_mul(U256::from(max_fee_per_gas))
+            .ok_or(RiskError::GasCost)?;
+        if max_gas_cost > self.limits.max_gas_cost_wei {
+            return Err(RiskError::GasCost);
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.checked_add(1).ok_or(RiskError::Overflow)?;
+        let reservation = RiskReservation {
+            id,
+            amount_in: U256::ZERO,
+            max_gas_cost,
+            reduces_exposure: false,
         };
         self.active = Some(reservation);
         Ok(reservation)
@@ -250,13 +346,62 @@ impl RiskLedger {
             .checked_add(realized_loss)
             .ok_or(RiskError::Overflow)?;
         self.active = None;
-        Ok(
-            if self.realized_session_loss >= self.limits.max_session_loss {
-                RiskStatus::LossLimitBreached
-            } else {
-                RiskStatus::WithinLimits
-            },
-        )
+        Ok(self.status())
+    }
+
+    pub fn settle_entry(&mut self, id: u64, realized_loss: U256) -> Result<RiskStatus, RiskError> {
+        let reservation = self
+            .active
+            .filter(|reservation| reservation.id == id)
+            .ok_or(RiskError::ReservationMismatch)?;
+        if reservation.reduces_exposure {
+            return Err(RiskError::ReservationDirection);
+        }
+        let next_loss = self
+            .realized_session_loss
+            .checked_add(realized_loss)
+            .ok_or(RiskError::Overflow)?;
+        let next_exposure = self
+            .open_exposure
+            .checked_add(reservation.amount_in)
+            .ok_or(RiskError::Overflow)?;
+        if next_exposure > self.limits.max_open_exposure {
+            return Err(RiskError::Exposure);
+        }
+        self.realized_session_loss = next_loss;
+        self.open_exposure = next_exposure;
+        self.active = None;
+        Ok(self.status())
+    }
+
+    pub fn settle_exit(&mut self, id: u64, realized_loss: U256) -> Result<RiskStatus, RiskError> {
+        let reservation = self
+            .active
+            .filter(|reservation| reservation.id == id)
+            .ok_or(RiskError::ReservationMismatch)?;
+        if !reservation.reduces_exposure {
+            return Err(RiskError::ReservationDirection);
+        }
+        let next_loss = self
+            .realized_session_loss
+            .checked_add(realized_loss)
+            .ok_or(RiskError::Overflow)?;
+        let next_exposure = self
+            .open_exposure
+            .checked_sub(reservation.amount_in)
+            .ok_or(RiskError::Exposure)?;
+        self.realized_session_loss = next_loss;
+        self.open_exposure = next_exposure;
+        self.active = None;
+        Ok(self.status())
+    }
+
+    fn status(&self) -> RiskStatus {
+        if self.realized_session_loss >= self.limits.max_session_loss {
+            RiskStatus::LossLimitBreached
+        } else {
+            RiskStatus::WithinLimits
+        }
     }
 }
 
@@ -537,6 +682,19 @@ mod tests {
     }
 
     #[test]
+    fn explicitly_rejected_submission_can_reuse_its_nonce() {
+        let hash = B256::with_last_byte(9);
+        let mut manager = DedicatedNonceManager::from_pending_nonce(4);
+        let lease = manager.reserve().unwrap();
+        manager.mark_signed(lease.nonce, hash).unwrap();
+        manager.mark_submitted(lease.nonce, hash).unwrap();
+        manager
+            .release_explicitly_rejected(lease.nonce, hash)
+            .unwrap();
+        assert_eq!(manager.reserve().unwrap().nonce, 4);
+    }
+
+    #[test]
     fn risk_limits_reserve_and_latch_session_loss() {
         let mut ledger = RiskLedger::new(RiskLimits {
             max_trade_amount_in: U256::from(1_000),
@@ -554,6 +712,32 @@ mod tests {
             ledger.reserve(U256::from(1), 1, 1, 1),
             Err(RiskError::LossLimit)
         ));
+    }
+
+    #[test]
+    fn risk_limits_enforce_cumulative_open_exposure() {
+        let mut ledger = RiskLedger::new(RiskLimits {
+            max_trade_amount_in: U256::from(1_000),
+            max_open_exposure: U256::from(750),
+            max_gas_cost_wei: U256::from(100_000),
+            max_session_loss: U256::from(100),
+            max_slippage_bps: 500,
+        });
+        let first = ledger.reserve(U256::from(500), 1_000, 10, 100).unwrap();
+        ledger.settle_entry(first.id, U256::ZERO).unwrap();
+        assert_eq!(ledger.open_exposure, U256::from(500));
+        assert_eq!(
+            ledger.reserve(U256::from(251), 1_000, 10, 100),
+            Err(RiskError::Exposure)
+        );
+        let second = ledger.reserve(U256::from(250), 1_000, 10, 100).unwrap();
+        ledger.settle(second.id, U256::from(1)).unwrap();
+        assert_eq!(ledger.open_exposure, U256::from(500));
+        let exit = ledger
+            .reserve_exit(U256::from(500), 1_000, 10, 100)
+            .unwrap();
+        ledger.settle_exit(exit.id, U256::from(1)).unwrap();
+        assert_eq!(ledger.open_exposure, U256::ZERO);
     }
 
     #[test]

@@ -21,10 +21,11 @@ use hermes_feed::robinhood::{
 use hermes_feed::{
     ConditionalOptions, ConditionalRetryDecision, ConditionalRetryState, DedicatedNonceManager,
     FeedDecoder, Filter, NoxaLaunchEvent, NoxaLaunchHeader, NoxaPolicyInput, NoxaRpcClient,
-    RiskLedger, RiskLimits, SequenceTracker, SequencerClient, TokenRestrictionSnapshot,
-    TradePreflightInput, V3ExactInputIntent, decode_launch_call, decode_launch_header,
-    decode_token_launched, encode_v3_exact_input_single, evaluate_noxa_policy,
-    evaluate_testnet_preflight, hydrate_noxa_launch_receipt, validate_signed_testnet_canary,
+    NoxaVerificationOutcome, ObservedNoxaFactoryCall, RiskLedger, RiskLimits, SequenceTracker,
+    SequencerClient, TokenRestrictionSnapshot, TradePreflightInput, V3ExactInputIntent,
+    decode_launch_call, decode_launch_header, decode_token_launched, encode_v3_exact_input_single,
+    evaluate_noxa_policy, evaluate_testnet_preflight, hydrate_noxa_launch_receipt,
+    validate_signed_testnet_canary, verify_noxa_factory_call,
 };
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
@@ -1144,84 +1145,45 @@ async fn verify_observed_factory_call(
     slippage_bps: u16,
     recipient: Option<Address>,
 ) -> Result<Value> {
-    let started = Instant::now();
-    let receipt_deadline = started + Duration::from_secs(5);
-    let mut receipt = None;
-    while Instant::now() < receipt_deadline {
-        let remaining = receipt_deadline.saturating_duration_since(Instant::now());
-        receipt = tokio::time::timeout(remaining, rpc.receipt(tx_hash))
-            .await
-            .context("receipt lookup exceeded the five-second visibility deadline")??;
-        if receipt.is_some() {
-            break;
-        }
-        let remaining = receipt_deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        tokio::time::sleep(remaining.min(Duration::from_millis(25))).await;
-    }
-    let receipt = receipt.ok_or_else(|| anyhow::anyhow!("receipt not visible after 5 seconds"))?;
-    let receipt_visibility_ns = started.elapsed().as_nanos();
-    if !receipt.status {
+    let outcome = verify_noxa_factory_call(
+        &rpc,
+        ObservedNoxaFactoryCall {
+            tx_hash,
+            sequence_number,
+            feed_l1_block,
+            feed_l1_timestamp,
+            observed_unix_ns,
+            header,
+        },
+        amount_in,
+        recipient,
+        Duration::from_secs(5),
+    )
+    .await?;
+    let NoxaVerificationOutcome::Verified(verified) = outcome else {
+        let NoxaVerificationOutcome::Reverted {
+            observation,
+            receipt_l2_block,
+            transaction_index,
+            receipt_visibility_ns,
+        } = outcome
+        else {
+            unreachable!("verification outcomes are exhaustive")
+        };
         return Ok(json!({
             "record_type": "noxa_launch_reverted",
-            "tx_hash": tx_hash,
-            "sequence_number": sequence_number,
-            "feed_l1_block": feed_l1_block,
-            "receipt_l2_block": receipt.l2_block_number,
-            "transaction_index": receipt.transaction_index,
+            "tx_hash": observation.tx_hash,
+            "sequence_number": observation.sequence_number,
+            "feed_l1_block": observation.feed_l1_block,
+            "receipt_l2_block": receipt_l2_block,
+            "transaction_index": transaction_index,
             "receipt_visibility_ns": receipt_visibility_ns,
         }));
-    }
-    let transaction = rpc
-        .transaction_by_hash(tx_hash)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("successful launch transaction is not visible"))?;
-    if transaction.hash != tx_hash || transaction.to != Some(NOXA_LAUNCH_FACTORY) {
-        bail!("verified transaction does not target the canonical NOXA factory");
-    }
-    let intent = decode_launch_call(&transaction.input, transaction.value).ok_or_else(|| {
-        anyhow::anyhow!("successful transaction is not a strict launchToken call")
-    })?;
-    if intent.launch_config_id != header.launch_config_id
-        || intent.dex_id != header.dex_id
-        || intent.salt != header.salt
-        || intent.transaction_value != header.transaction_value
-    {
-        bail!("strict launch calldata does not match feed hot-path header");
-    }
-    let block = rpc.block_by_number(receipt.l2_block_number).await?;
-    if block.l1_block_number != feed_l1_block {
-        bail!(
-            "feed L1 block {} does not match receipt block L1 {}",
-            feed_l1_block,
-            block.l1_block_number
-        );
-    }
-    let hydrated =
-        hydrate_noxa_launch_receipt(&receipt.logs, feed_l1_block, receipt.l2_block_number)?;
-    if hydrated.launch.dex_id != intent.dex_id
-        || hydrated.launch.launch_config_id != intent.launch_config_id
-    {
-        bail!("launch calldata and receipt IDs do not match");
-    }
-    let token_restrictions = rpc
-        .token_restriction_snapshot(hydrated.launch.token, receipt.l2_block_number, recipient)
-        .await?;
-    validate_token_restrictions(&token_restrictions, &hydrated.launch)?;
-    let launch_fee = rpc.launch_fee_at(receipt.l2_block_number).await?;
-    let provisional_initial_buy = intent
-        .transaction_value
-        .checked_sub(launch_fee)
-        .ok_or_else(|| anyhow::anyhow!("transaction value below launch fee"))?;
-    if provisional_initial_buy != hydrated.launch.initial_buy_amount {
-        bail!("transaction value minus launch fee does not match launch event");
-    }
-    let quote = hydrated.pool.quote_exact_input(WETH, amount_in, None)?;
-    let restrictions_end = u64::try_from(hydrated.launch.restrictions_end_l1_block)
+    };
+    let restrictions_end = u64::try_from(verified.launch.restrictions_end_l1_block)
         .context("restriction end does not fit u64")?;
-    let policy = token_restrictions
+    let policy = verified
+        .restrictions
         .recipient_balance
         .map(|recipient_balance_before| {
             evaluate_noxa_policy(NoxaPolicyInput {
@@ -1229,13 +1191,14 @@ async fn verify_observed_factory_call(
                 restrictions_end_l1_block: restrictions_end,
                 current_l1_block: feed_l1_block.saturating_add(1),
                 recipient_balance_before,
-                expected_bought_output: quote.amount_out,
+                expected_bought_output: verified.quote.amount_out,
                 origin_bought_before: U256::ZERO,
-                max_wallet_limit: token_restrictions.max_wallet_limit,
-                max_tx_limit: token_restrictions.max_tx_limit,
+                max_wallet_limit: verified.restrictions.max_wallet_limit,
+                max_tx_limit: verified.restrictions.max_tx_limit,
             })
         });
-    let amount_out_minimum = quote
+    let amount_out_minimum = verified
+        .quote
         .amount_out
         .checked_mul(U256::from(10_000_u64 - u64::from(slippage_bps)))
         .ok_or_else(|| anyhow::anyhow!("minimum output overflow"))?
@@ -1244,7 +1207,7 @@ async fn verify_observed_factory_call(
         .map(|recipient| {
             encode_v3_exact_input_single(&V3ExactInputIntent {
                 token_in: WETH,
-                token_out: hydrated.launch.token,
+                token_out: verified.launch.token,
                 fee: NOXA_POOL_FEE,
                 recipient,
                 amount_in,
@@ -1265,13 +1228,13 @@ async fn verify_observed_factory_call(
         "tx_hash": tx_hash,
         "sequence_number": sequence_number,
         "observed_unix_ns": observed_unix_ns,
-        "receipt_visibility_ns": receipt_visibility_ns,
-        "verification_total_ns": started.elapsed().as_nanos(),
-        "block": block,
-        "launch_intent": intent,
-        "launch": hydrated.launch,
-        "quote": quote,
-        "token_restrictions": token_restrictions,
+        "receipt_visibility_ns": verified.receipt_visibility_ns,
+        "verification_total_ns": verified.verification_total_ns,
+        "block": verified.block,
+        "launch_intent": verified.intent,
+        "launch": verified.launch,
+        "quote": verified.quote,
+        "token_restrictions": verified.restrictions,
         "policy_at_first_eligible_l1": policy,
         "policy_evaluated": policy.is_some(),
         "prepared": {

@@ -5,7 +5,12 @@ readonly BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$BASE_DIR/ops/noxa-observer-common.sh"
 umask 077
 
-readonly BIN="$BASE_DIR/target/release/hermes-noxa"
+readonly BIN="$(canonical_runtime_path \
+  "${HERMES_NOXA_BIN:?HERMES_NOXA_BIN is required}" "observer binary")"
+[[ -x "$BIN" ]] || {
+  echo "Missing immutable observer binary: $BIN" >&2
+  exit 1
+}
 readonly RUN_DIR="$(canonical_runtime_path \
   "${HERMES_NOXA_RUN_DIR:?HERMES_NOXA_RUN_DIR is required}" "run directory")"
 readonly PID_FILE="$(canonical_runtime_path \

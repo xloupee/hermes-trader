@@ -7,7 +7,7 @@ umask 077
 
 readonly STATE_DIR="$(canonical_runtime_path \
   "${HERMES_NOXA_STATE_DIR:-$WORKTREE_ROOT/.runtime/hermes-noxa}" "state directory")"
-readonly BIN="$BASE_DIR/target/release/hermes-noxa"
+readonly SOURCE_BIN="$BASE_DIR/target/release/hermes-noxa"
 
 mkdir -p "$STATE_DIR"
 readonly PID_FILE="$(canonical_child_path \
@@ -26,8 +26,8 @@ if [[ -s "$PID_FILE" ]]; then
   fi
   rm -f -- "$PID_FILE"
 fi
-if [[ ! -x "$BIN" ]]; then
-  echo "Missing release binary: $BIN" >&2
+if [[ ! -x "$SOURCE_BIN" ]]; then
+  echo "Missing release binary: $SOURCE_BIN" >&2
   exit 1
 fi
 
@@ -37,6 +37,9 @@ readonly RUN_DIR="$(canonical_child_path \
 mkdir -p "$RUN_DIR"
 ln -sfn "$RUN_DIR" "$STATE_DIR/current"
 
+readonly BIN="$(canonical_child_path \
+  "$RUN_DIR/hermes-noxa" "$RUN_DIR" "immutable observer binary")"
+install --mode=0500 -- "$SOURCE_BIN" "$BIN"
 sha256sum "$BIN" >"$RUN_DIR/binary.sha256"
 {
   echo "started_utc=$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
@@ -50,6 +53,7 @@ sha256sum "$BIN" >"$RUN_DIR/binary.sha256"
 
 HERMES_NOXA_RUN_DIR="$RUN_DIR" \
 HERMES_NOXA_PID_FILE="$PID_FILE" \
+HERMES_NOXA_BIN="$BIN" \
 nohup setsid --fork prlimit \
   --as=805306368 \
   --fsize=1073741824 \

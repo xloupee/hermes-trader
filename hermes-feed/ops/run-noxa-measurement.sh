@@ -5,7 +5,12 @@ readonly BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$BASE_DIR/ops/noxa-observer-common.sh"
 umask 077
 
-readonly BIN="$BASE_DIR/target/release/hermes-noxa"
+readonly BIN="$(canonical_runtime_path \
+  "${HERMES_NOXA_BIN:?HERMES_NOXA_BIN is required}" "measurement binary")"
+[[ -x "$BIN" ]] || {
+  echo "Missing immutable measurement binary: $BIN" >&2
+  exit 1
+}
 readonly RUN_DIR="$(canonical_runtime_path \
   "${HERMES_NOXA_MEASUREMENT_RUN_DIR:?HERMES_NOXA_MEASUREMENT_RUN_DIR is required}" \
   "measurement run directory")"
@@ -50,7 +55,13 @@ status_loop() {
       printf '%s status_poll_failed\n' "$(date --utc +%Y-%m-%dT%H:%M:%SZ)" \
         >>"$RUN_DIR/measurement-restarts.log"
     fi
-    sleep "$STATUS_INTERVAL_SECONDS"
+    remaining="$((END_EPOCH - $(date +%s)))"
+    (( remaining > 0 )) || break
+    if (( remaining < STATUS_INTERVAL_SECONDS )); then
+      sleep "$remaining"
+    else
+      sleep "$STATUS_INTERVAL_SECONDS"
+    fi
   done
 }
 status_loop &

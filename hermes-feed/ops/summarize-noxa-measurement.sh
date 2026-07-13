@@ -18,6 +18,7 @@ readonly OBSERVER_RUN="$(canonical_child_path \
 readonly EVENTS="$OBSERVER_RUN/events.jsonl"
 readonly BOUNDARY="$RUN_DIR/boundary.jsonl"
 readonly FACTORY_STATUS="$RUN_DIR/factory-status.jsonl"
+readonly MEASUREMENT_RESTARTS="$RUN_DIR/measurement-restarts.log"
 readonly STARTED_UTC="$(sed -n 's/^started_utc=//p' "$RUN_DIR/manifest")"
 readonly REQUESTED_DURATION_SECONDS="$(sed -n 's/^duration_seconds=//p' "$RUN_DIR/manifest")"
 [[ "$REQUESTED_DURATION_SECONDS" =~ ^[1-9][0-9]*$ ]] || {
@@ -49,6 +50,28 @@ readonly BINARY_SHA256="$(awk 'NR == 1 {print $1}' "$RUN_DIR/binary.sha256")"
 readonly EVENTS_SHA256="$(sha256sum "$EVENTS" | awk '{print $1}')"
 readonly BOUNDARY_SHA256="$(sha256sum "$BOUNDARY" | awk '{print $1}')"
 readonly FACTORY_STATUS_SHA256="$(sha256sum "$FACTORY_STATUS" | awk '{print $1}')"
+if [[ -f "$MEASUREMENT_RESTARTS" ]]; then
+  readonly BOUNDARY_RUNS="$(awk '/boundary_status=/ {count++} END {print count + 0}' "$MEASUREMENT_RESTARTS")"
+  readonly BOUNDARY_FAILED_RUNS="$(awk '
+    /boundary_status=/ {
+      status = $0
+      sub(/^.*boundary_status=/, "", status)
+      sub(/ .*/, "", status)
+      if (status != "0") count++
+    }
+    END {print count + 0}
+  ' "$MEASUREMENT_RESTARTS")"
+  readonly FACTORY_POLL_FAILURES="$(awk '/status_poll_failed/ {count++} END {print count + 0}' "$MEASUREMENT_RESTARTS")"
+else
+  readonly BOUNDARY_RUNS=0
+  readonly BOUNDARY_FAILED_RUNS=0
+  readonly FACTORY_POLL_FAILURES=0
+fi
+readonly BOUNDARY_STDERR_BYTES="$(wc -c <"$RUN_DIR/boundary.stderr")"
+readonly FACTORY_STDERR_BYTES="$(wc -c <"$RUN_DIR/factory-status.stderr")"
+readonly MEASUREMENT_SUPERVISOR_STDERR_BYTES="$(wc -c <"$RUN_DIR/supervisor.stderr")"
+readonly OBSERVER_STDERR_BYTES="$(wc -c <"$OBSERVER_RUN/observer.stderr")"
+readonly OBSERVER_SUPERVISOR_STDERR_BYTES="$(wc -c <"$OBSERVER_RUN/supervisor.stderr")"
 
 jq -n \
   --arg measurement_run "$RUN_DIR" \
@@ -61,6 +84,14 @@ jq -n \
   --arg events_sha256 "$EVENTS_SHA256" \
   --arg boundary_sha256 "$BOUNDARY_SHA256" \
   --arg factory_status_sha256 "$FACTORY_STATUS_SHA256" \
+  --argjson boundary_runs "$BOUNDARY_RUNS" \
+  --argjson boundary_failed_runs "$BOUNDARY_FAILED_RUNS" \
+  --argjson factory_poll_failures "$FACTORY_POLL_FAILURES" \
+  --argjson boundary_stderr_bytes "$BOUNDARY_STDERR_BYTES" \
+  --argjson factory_stderr_bytes "$FACTORY_STDERR_BYTES" \
+  --argjson measurement_supervisor_stderr_bytes "$MEASUREMENT_SUPERVISOR_STDERR_BYTES" \
+  --argjson observer_stderr_bytes "$OBSERVER_STDERR_BYTES" \
+  --argjson observer_supervisor_stderr_bytes "$OBSERVER_SUPERVISOR_STDERR_BYTES" \
   --argjson completed "$COMPLETED" \
   --slurpfile events "$EVENTS" \
   --slurpfile boundary "$BOUNDARY" \
@@ -110,6 +141,19 @@ jq -n \
       observer_events_sha256: $events_sha256,
       boundary_sha256: $boundary_sha256,
       factory_status_sha256: $factory_status_sha256
+    },
+    process_health: {
+      boundary_runs: $boundary_runs,
+      boundary_failed_runs: $boundary_failed_runs,
+      factory_poll_failures: $factory_poll_failures,
+      boundary_stderr_bytes: $boundary_stderr_bytes,
+      factory_status_stderr_bytes: $factory_stderr_bytes,
+      measurement_supervisor_stderr_bytes: $measurement_supervisor_stderr_bytes,
+      observer_stderr_bytes: $observer_stderr_bytes,
+      observer_supervisor_stderr_bytes: $observer_supervisor_stderr_bytes,
+      factory_watch_errors: (
+        $events | map(select(.record_type == "noxa_factory_status_watch_error")) | length
+      )
     },
     feed: {
       health_records: ($health | length),

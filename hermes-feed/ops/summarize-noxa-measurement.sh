@@ -28,9 +28,15 @@ readonly REQUESTED_DURATION_SECONDS="$(sed -n 's/^duration_seconds=//p' "$RUN_DI
 if [[ -f "$RUN_DIR/completed" ]]; then
   readonly COMPLETED=true
   readonly COMPLETED_UTC="$(awk 'NR == 1 {print $1}' "$RUN_DIR/completed")"
+  if grep -q 'recovered_after_live_script_mutation=true' "$RUN_DIR/completed"; then
+    readonly COMPLETION_MARKER_RECOVERED=true
+  else
+    readonly COMPLETION_MARKER_RECOVERED=false
+  fi
 else
   readonly COMPLETED=false
   readonly COMPLETED_UTC=""
+  readonly COMPLETION_MARKER_RECOVERED=false
 fi
 readonly STARTED_EPOCH="$(date --date="$STARTED_UTC" +%s)"
 if [[ -n "$COMPLETED_UTC" ]]; then
@@ -63,7 +69,22 @@ if [[ -x "$OBSERVER_RUN/hermes-noxa" ]]; then
 else
   readonly OBSERVER_BINARY_IMMUTABLE=false
 fi
-readonly EVENTS_PREFIX_BYTES="$(stat --format='%s' "$EVENTS")"
+if [[ "$COMPLETED" == true ]]; then
+  readonly FIRST_POST_WINDOW_LINE="$(
+    jq -r --argjson end "$WINDOW_END_NS" \
+      'select((.received_unix_ns? // 0) > $end) | input_line_number' "$EVENTS" \
+      | head -n 1
+  )"
+  if [[ -n "$FIRST_POST_WINDOW_LINE" ]]; then
+    readonly EVENTS_PREFIX_BYTES="$(
+      head -n "$((FIRST_POST_WINDOW_LINE - 1))" "$EVENTS" | wc -c
+    )"
+  else
+    readonly EVENTS_PREFIX_BYTES="$(stat --format='%s' "$EVENTS")"
+  fi
+else
+  readonly EVENTS_PREFIX_BYTES="$(stat --format='%s' "$EVENTS")"
+fi
 readonly EVENTS_SHA256="$(head --bytes="$EVENTS_PREFIX_BYTES" "$EVENTS" | sha256sum | awk '{print $1}')"
 readonly BOUNDARY_SHA256="$(sha256sum "$BOUNDARY" | awk '{print $1}')"
 readonly FACTORY_STATUS_SHA256="$(sha256sum "$FACTORY_STATUS" | awk '{print $1}')"
@@ -115,6 +136,7 @@ jq -n \
   --argjson observer_stderr_bytes "$OBSERVER_STDERR_BYTES" \
   --argjson observer_supervisor_stderr_bytes "$OBSERVER_SUPERVISOR_STDERR_BYTES" \
   --argjson completed "$COMPLETED" \
+  --argjson completion_marker_recovered "$COMPLETION_MARKER_RECOVERED" \
   --slurpfile events "$EVENTS" \
   --slurpfile boundary "$BOUNDARY" \
   --slurpfile factory "$FACTORY_STATUS" '
@@ -190,6 +212,12 @@ jq -n \
       wall_duration_seconds: (if $completed then $wall_duration_seconds else null end),
       duration_requirement_met: (
         $completed and ($wall_duration_seconds >= $requested_duration_seconds)
+      ),
+      completion_marker_recovered: $completion_marker_recovered,
+      completion_recovery_note: (
+        if $completion_marker_recovered
+        then "The live supervisor collected the full window and exited after a late parse error caused by modifying its script in place; completion time was recovered from the clean boundary-run exit record."
+        else null end
       )
     },
     provenance: {

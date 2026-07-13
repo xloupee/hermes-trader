@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use crate::robinhood::DIRECT_SEQUENCER_URL;
 
 const CONDITIONS_FAILED_CODE: i64 = -32_003;
+const GENERIC_SERVER_ERROR_CODE: i64 = -32_000;
 const RATE_LIMIT_CODE: i64 = -32_005;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -161,7 +162,9 @@ pub fn classify_conditional_response(bytes: &[u8], expected_tx_hash: B256) -> Co
         .and_then(Value::as_str)
         .unwrap_or("unknown JSON-RPC error")
         .to_owned();
-    if code == CONDITIONS_FAILED_CODE && message.contains("BlockNumberMin condition not met") {
+    if matches!(code, CONDITIONS_FAILED_CODE | GENERIC_SERVER_ERROR_CODE)
+        && message.contains("BlockNumberMin condition not met")
+    {
         ConditionalResponse::BoundaryNotReached { message }
     } else if code == RATE_LIMIT_CODE || message.to_ascii_lowercase().contains("rate limit") {
         ConditionalResponse::RateLimited { message }
@@ -219,6 +222,15 @@ mod tests {
             expected,
         );
         assert!(matches!(expired, ConditionalResponse::Rejected { .. }));
+
+        let testnet_variant = classify_conditional_response(
+            br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"BlockNumberMin condition not met"}}"#,
+            expected,
+        );
+        assert!(matches!(
+            testnet_variant,
+            ConditionalResponse::BoundaryNotReached { .. }
+        ));
     }
 
     #[test]

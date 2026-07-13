@@ -53,6 +53,16 @@ for file in "$EVENTS" "$BOUNDARY" "$FACTORY_STATUS"; do
   }
 done
 readonly BINARY_SHA256="$(awk 'NR == 1 {print $1}' "$RUN_DIR/binary.sha256")"
+if [[ -x "$RUN_DIR/hermes-noxa" ]]; then
+  readonly MEASUREMENT_BINARY_IMMUTABLE=true
+else
+  readonly MEASUREMENT_BINARY_IMMUTABLE=false
+fi
+if [[ -x "$OBSERVER_RUN/hermes-noxa" ]]; then
+  readonly OBSERVER_BINARY_IMMUTABLE=true
+else
+  readonly OBSERVER_BINARY_IMMUTABLE=false
+fi
 readonly EVENTS_PREFIX_BYTES="$(stat --format='%s' "$EVENTS")"
 readonly EVENTS_SHA256="$(head --bytes="$EVENTS_PREFIX_BYTES" "$EVENTS" | sha256sum | awk '{print $1}')"
 readonly BOUNDARY_SHA256="$(sha256sum "$BOUNDARY" | awk '{print $1}')"
@@ -90,6 +100,8 @@ jq -n \
   --argjson window_start_ns "$WINDOW_START_NS" \
   --argjson window_end_ns "$WINDOW_END_NS" \
   --arg binary_sha256 "$BINARY_SHA256" \
+  --argjson measurement_binary_immutable "$MEASUREMENT_BINARY_IMMUTABLE" \
+  --argjson observer_binary_immutable "$OBSERVER_BINARY_IMMUTABLE" \
   --arg events_sha256 "$EVENTS_SHA256" \
   --argjson events_prefix_bytes "$EVENTS_PREFIX_BYTES" \
   --arg boundary_sha256 "$BOUNDARY_SHA256" \
@@ -165,6 +177,14 @@ jq -n \
     },
     provenance: {
       binary_sha256: $binary_sha256,
+      measurement_binary_immutable: $measurement_binary_immutable,
+      observer_binary_immutable: $observer_binary_immutable,
+      binary_scope_note: (
+        if $measurement_binary_immutable and $observer_binary_immutable
+        then "Every subprocess in this run used its run-local immutable binary copy."
+        else "Legacy run: long-lived processes retain their start binary, but periodic subprocesses referenced the mutable release path; inspect zero-restart evidence and binary hashes."
+        end
+      ),
       observer_journal_prefix_bytes: $events_prefix_bytes,
       observer_journal_prefix_sha256: $events_sha256,
       observer_statistics_window_start_unix_ns: $window_start_ns,

@@ -863,6 +863,7 @@ async fn observe(args: ObserveArgs) -> Result<()> {
                                         Err(error) => json!({
                                             "record_type": "noxa_receipt_verification_error",
                                             "tx_hash": tx_hash,
+                                            "receipt_visibility_deadline_ns": 5_000_000_000_u64,
                                             "error": error.to_string(),
                                         }),
                                     };
@@ -1144,13 +1145,13 @@ async fn verify_observed_factory_call(
     recipient: Option<Address>,
 ) -> Result<Value> {
     let started = Instant::now();
-    let receipt_deadline = started + Duration::from_secs(2);
+    let receipt_deadline = started + Duration::from_secs(5);
     let mut receipt = None;
     while Instant::now() < receipt_deadline {
         let remaining = receipt_deadline.saturating_duration_since(Instant::now());
         receipt = tokio::time::timeout(remaining, rpc.receipt(tx_hash))
             .await
-            .context("receipt lookup exceeded the two-second visibility deadline")??;
+            .context("receipt lookup exceeded the five-second visibility deadline")??;
         if receipt.is_some() {
             break;
         }
@@ -1160,7 +1161,7 @@ async fn verify_observed_factory_call(
         }
         tokio::time::sleep(remaining.min(Duration::from_millis(25))).await;
     }
-    let receipt = receipt.ok_or_else(|| anyhow::anyhow!("receipt not visible after 2 seconds"))?;
+    let receipt = receipt.ok_or_else(|| anyhow::anyhow!("receipt not visible after 5 seconds"))?;
     let receipt_visibility_ns = started.elapsed().as_nanos();
     if !receipt.status {
         return Ok(json!({

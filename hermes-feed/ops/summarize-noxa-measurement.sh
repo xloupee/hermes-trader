@@ -154,6 +154,23 @@ jq -n \
   ($events | map(select(.record_type == "noxa_launch_reverted"))) as $reverted |
   ($events | map(select(.record_type == "noxa_launch_verified_shadow"))) as $verified |
   ($events | map(select(.record_type == "noxa_receipt_verification_error"))) as $verify_errors |
+  ($verify_errors
+    | map(select(
+        (.error | contains("receipt lookup exceeded"))
+        or (.error | contains("receipt not visible after"))
+      ))) as $receipt_deadline_censored |
+  ($verify_errors
+    | map(select(
+        ((.error | contains("receipt lookup exceeded"))
+          or (.error | contains("receipt not visible after"))) | not
+      ))) as $other_verify_errors |
+  ($receipt_deadline_censored
+    | map(
+        .receipt_visibility_deadline_ns
+        // (if (.error | contains("two-second")) or (.error | contains("after 2 seconds"))
+            then 2000000000 else 5000000000 end)
+      )
+    | min // null) as $censored_lower_bound_ns |
   ($events | map(select(.record_type == "noxa_receipt_verification_dropped"))) as $verify_dropped |
   (($reverted + $verified) | map(.receipt_visibility_ns) | sort) as $receipt_ns |
   ($boundary | map(select(.record_type == "noxa_boundary_sample") | .head_to_feed_ns) | sort) as $boundary_ns |
@@ -234,13 +251,18 @@ jq -n \
       reverted: ($reverted | length),
       verified: ($verified | length),
       verification_errors: ($verify_errors | length),
+      receipt_deadline_censored: ($receipt_deadline_censored | length),
+      other_verification_errors: ($other_verify_errors | length),
       verifier_saturation_drops: ($verify_dropped | length),
       receipt_visibility_ns: {
         samples: ($receipt_ns | length),
+        attempted: (($receipt_ns | length) + ($receipt_deadline_censored | length)),
         p50: percentile($receipt_ns; 50),
         p95: percentile($receipt_ns; 95),
         p99: percentile($receipt_ns; 99),
-        max: ($receipt_ns | last // null)
+        max_observed: ($receipt_ns | last // null),
+        max_is_right_censored: (($receipt_deadline_censored | length) > 0),
+        censored_lower_bound_ns: $censored_lower_bound_ns
       }
     },
     boundary: {

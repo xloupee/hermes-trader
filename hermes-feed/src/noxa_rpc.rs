@@ -241,6 +241,16 @@ impl NoxaRpcClient {
         parse_block(&value)
     }
 
+    pub async fn latest_block(&self) -> Result<RobinhoodBlock> {
+        let value = self
+            .request("eth_getBlockByNumber", json!(["latest", false]))
+            .await?;
+        if value.is_null() {
+            bail!("Robinhood RPC returned no latest block");
+        }
+        parse_block(&value)
+    }
+
     pub async fn transaction_by_hash(&self, hash: B256) -> Result<Option<RobinhoodTransaction>> {
         let value = self
             .request("eth_getTransactionByHash", json!([hash]))

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::fs;
 use std::io::{BufWriter, Write};
 use std::str::FromStr;
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
@@ -14,14 +15,16 @@ use futures_util::{SinkExt, StreamExt};
 use hermes_feed::feed::BroadcastMessage;
 use hermes_feed::robinhood::{
     DIRECT_FEED_URL, NOXA_FACTORY_RUNTIME_KECCAK256, NOXA_LAUNCH_FACTORY, NOXA_POOL_FEE,
-    PUBLIC_RPC_URL, TESTNET_CHAIN_ID, TESTNET_RPC_URL, UNISWAP_V3_SWAP_ROUTER_02, WETH,
+    PUBLIC_RPC_URL, TESTNET_CHAIN_ID, TESTNET_RPC_URL, TESTNET_SEQUENCER_URL,
+    UNISWAP_V3_SWAP_ROUTER_02, WETH,
 };
 use hermes_feed::{
-    ConditionalOptions, FeedDecoder, Filter, NoxaLaunchEvent, NoxaLaunchHeader, NoxaPolicyInput,
-    NoxaRpcClient, SequenceTracker, TokenRestrictionSnapshot, TradePreflightInput,
-    V3ExactInputIntent, decode_launch_call, decode_launch_header, decode_token_launched,
-    encode_v3_exact_input_single, evaluate_noxa_policy, evaluate_testnet_preflight,
-    hydrate_noxa_launch_receipt,
+    ConditionalOptions, ConditionalRetryDecision, ConditionalRetryState, DedicatedNonceManager,
+    FeedDecoder, Filter, NoxaLaunchEvent, NoxaLaunchHeader, NoxaPolicyInput, NoxaRpcClient,
+    RiskLedger, RiskLimits, SequenceTracker, SequencerClient, TokenRestrictionSnapshot,
+    TradePreflightInput, V3ExactInputIntent, decode_launch_call, decode_launch_header,
+    decode_token_launched, encode_v3_exact_input_single, evaluate_noxa_policy,
+    evaluate_testnet_preflight, hydrate_noxa_launch_receipt, validate_signed_testnet_canary,
 };
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
@@ -63,6 +66,8 @@ enum Command {
     CalibrateBoundary(CalibrateBoundaryArgs),
     /// Read testnet nonce, funding, wrapped balance, allowance, and router code.
     TestnetPreflight(TestnetPreflightArgs),
+    /// Validate, and only with --broadcast submit, an externally signed testnet self-transfer.
+    TestnetSubmitCanary(TestnetSubmitCanaryArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -163,6 +168,33 @@ struct TestnetPreflightArgs {
     max_fee_per_gas: u128,
 }
 
+#[derive(Debug, Args)]
+struct TestnetSubmitCanaryArgs {
+    #[arg(long, default_value = TESTNET_RPC_URL)]
+    rpc_url: String,
+    #[arg(long, default_value = TESTNET_SEQUENCER_URL)]
+    sequencer_url: String,
+    /// Binary EIP-2718 bytes or a 0x-prefixed hex text file. Never a private key.
+    #[arg(long)]
+    raw_tx_file: String,
+    /// Maximum transferred wei; required and independently checked against signed bytes.
+    #[arg(long)]
+    max_value_wei: String,
+    /// Maximum gas-limit times max-fee-per-gas in wei.
+    #[arg(long)]
+    max_gas_cost_wei: String,
+    #[arg(long, default_value_t = 3)]
+    l1_window: u64,
+    #[arg(long, default_value_t = 2)]
+    max_boundary_attempts: u16,
+    /// Poll this long for hash/receipt reconciliation after submission.
+    #[arg(long, default_value_t = 15)]
+    reconcile_seconds: u64,
+    /// Actually transmit the validated bytes. Without this flag the command is read-only.
+    #[arg(long, default_value_t = false)]
+    broadcast: bool,
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -177,6 +209,7 @@ async fn main() -> Result<()> {
         Command::Observe(args) => observe(args).await,
         Command::CalibrateBoundary(args) => calibrate_boundary(args).await,
         Command::TestnetPreflight(args) => testnet_preflight(args).await,
+        Command::TestnetSubmitCanary(args) => testnet_submit_canary(args).await,
     };
     let writer_result = stop_json_writer(writer);
     result.and(writer_result)
@@ -234,6 +267,162 @@ async fn testnet_preflight(args: TestnetPreflightArgs) -> Result<()> {
         "reject_reason": decision.as_ref().err().map(ToString::to_string),
     }))?;
     decision.map_err(anyhow::Error::from)
+}
+
+async fn testnet_submit_canary(args: TestnetSubmitCanaryArgs) -> Result<()> {
+    if args.l1_window == 0 || args.max_boundary_attempts == 0 {
+        bail!("--l1-window and --max-boundary-attempts must be non-zero");
+    }
+    let maximum_value = parse_u256(&args.max_value_wei)?;
+    let maximum_gas_cost = parse_u256(&args.max_gas_cost_wei)?;
+    let raw = read_raw_transaction(&args.raw_tx_file)?;
+    let canary = validate_signed_testnet_canary(&raw, maximum_value)?;
+    let rpc = NoxaRpcClient::with_url(args.rpc_url)?;
+    let (chain_id, pending_nonce, native_balance, latest_block) = tokio::try_join!(
+        rpc.chain_id(),
+        rpc.pending_nonce(canary.signer),
+        rpc.native_balance(canary.signer),
+        rpc.latest_block(),
+    )?;
+    if chain_id != TESTNET_CHAIN_ID {
+        bail!("RPC chain ID {chain_id} is not Robinhood testnet {TESTNET_CHAIN_ID}");
+    }
+    if canary.nonce != pending_nonce {
+        bail!(
+            "signed nonce {} does not match pending nonce {pending_nonce}",
+            canary.nonce
+        );
+    }
+    let signed_gas_cost = U256::from(canary.gas_limit)
+        .checked_mul(U256::from(canary.max_fee_per_gas))
+        .context("signed gas cost overflow")?;
+    if signed_gas_cost > maximum_gas_cost {
+        bail!("signed maximum gas cost exceeds --max-gas-cost-wei");
+    }
+    let required_balance = canary
+        .value
+        .checked_add(signed_gas_cost)
+        .context("required native balance overflow")?;
+    if native_balance < required_balance {
+        bail!("native balance cannot cover the signed value plus maximum gas cost");
+    }
+
+    let mut nonces = DedicatedNonceManager::from_pending_nonce(pending_nonce);
+    let lease = nonces.reserve()?;
+    nonces.mark_signed(lease.nonce, canary.hash)?;
+    let mut risk = RiskLedger::new(RiskLimits {
+        max_trade_amount_in: maximum_value,
+        max_open_exposure: maximum_value,
+        max_gas_cost_wei: maximum_gas_cost,
+        max_session_loss: maximum_value,
+        max_slippage_bps: 0,
+    });
+    let reservation = risk.reserve(canary.value, canary.gas_limit, canary.max_fee_per_gas, 0)?;
+    let conditions = ConditionalOptions::first_eligible_window(
+        latest_block.l1_block_number,
+        args.l1_window,
+        None,
+    )
+    .context("conditional L1 window overflow")?;
+
+    write_json(json!({
+        "record_type": "noxa_testnet_canary_validated",
+        "broadcast": args.broadcast,
+        "chain_id": chain_id,
+        "hash": canary.hash,
+        "signer": canary.signer,
+        "nonce": canary.nonce,
+        "value": canary.value,
+        "gas_limit": canary.gas_limit,
+        "max_fee_per_gas": canary.max_fee_per_gas,
+        "max_priority_fee_per_gas": canary.max_priority_fee_per_gas,
+        "maximum_value": maximum_value,
+        "maximum_gas_cost": maximum_gas_cost,
+        "native_balance": native_balance,
+        "conditions": conditions,
+    }))?;
+    if !args.broadcast {
+        risk.release_unsubmitted(reservation.id)?;
+        nonces.release_never_submitted(canary.nonce)?;
+        return Ok(());
+    }
+
+    // Mark ambiguous before the network call: a transport error can still mean
+    // the sequencer received the bytes, so this nonce must never be reused.
+    nonces.mark_submitted(canary.nonce, canary.hash)?;
+    let sequencer = SequencerClient::with_url(args.sequencer_url)?;
+    let mut retry = ConditionalRetryState {
+        expected_tx_hash: canary.hash,
+        conditions,
+        attempts: 0,
+        max_boundary_attempts: args.max_boundary_attempts,
+    };
+    let decision = loop {
+        let response = sequencer
+            .submit_conditional(&canary.raw, retry.conditions)
+            .await?;
+        let decision = retry.on_response(response);
+        if matches!(decision, ConditionalRetryDecision::RetrySameBytes) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+        break decision;
+    };
+    write_json(json!({
+        "record_type": "noxa_testnet_canary_submission",
+        "hash": canary.hash,
+        "attempts": retry.attempts,
+        "decision": &decision,
+    }))?;
+
+    let deadline = Instant::now() + Duration::from_secs(args.reconcile_seconds);
+    loop {
+        if let Some(receipt) = rpc.receipt(canary.hash).await? {
+            nonces.finalize_included(canary.nonce, canary.hash)?;
+            let realized_loss = if receipt.status {
+                U256::ZERO
+            } else {
+                canary.value
+            };
+            let risk_status = risk.settle(reservation.id, realized_loss)?;
+            write_json(json!({
+                "record_type": "noxa_testnet_canary_reconciled",
+                "hash": canary.hash,
+                "included": true,
+                "receipt_status": receipt.status,
+                "l2_block_number": receipt.l2_block_number,
+                "risk_status": risk_status,
+            }))?;
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let known = rpc.transaction_by_hash(canary.hash).await?.is_some();
+            write_json(json!({
+                "record_type": "noxa_testnet_canary_reconciled",
+                "hash": canary.hash,
+                "included": false,
+                "known_by_rpc": known,
+                "nonce_state": nonces.active(),
+                "risk_reservation": risk.active,
+            }))?;
+            bail!("canary remains pending or ambiguous; nonce is intentionally not reusable");
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn read_raw_transaction(path: &str) -> Result<Vec<u8>> {
+    let bytes = fs::read(path).with_context(|| format!("read signed transaction {path}"))?;
+    if let Ok(text) = std::str::from_utf8(&bytes) {
+        let trimmed = text.trim();
+        if let Some(hex_text) = trimmed.strip_prefix("0x") {
+            return hex::decode(hex_text).context("decode 0x-prefixed signed transaction");
+        }
+    }
+    if bytes.is_empty() {
+        bail!("signed transaction file is empty");
+    }
+    Ok(bytes)
 }
 
 async fn status(args: RpcArgs) -> Result<()> {

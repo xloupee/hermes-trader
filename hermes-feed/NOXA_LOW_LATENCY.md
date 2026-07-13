@@ -314,6 +314,15 @@ provides a single-owner nonce lease, signer-bound pre-signed self-transfer
 canary, conservative conditional retry decisions, hash reconciliation states,
 and latched trade/gas/exposure/session-loss limits.
 
+`testnet-submit-canary` accepts only externally signed bytes and defaults to a
+read-only validation pass. It recovers the signer, requires a data-free
+self-transfer on chain 46630, matches the pending nonce, enforces independent
+value and worst-case gas caps, and checks funding before an explicit
+`--broadcast`. It records each network attempt and receipt latency with a
+stable source label for Falkenstein/Ohio comparison. Ambiguous transport or
+RPC outcomes retain the nonce and reconcile only by the signed hash; the
+command never reads or stores a private key. See `NOXA_CANARY_RUNBOOK.md`.
+
 The read-only preflight checks the pending nonce, native gas balance,
 pre-wrapped token balance, exact router allowance, and deployed router code:
 
@@ -333,7 +342,7 @@ wrapped-native and router addresses are independently verified.
 
 ## Verification snapshot
 
-The final optimized offline suite passes 80 tests: 75 library tests and five
+The final optimized offline suite passes 86 tests: 81 library tests and five
 main-binary tests. It covers canonical ABI encoding, hot-header rejection,
 receipt chronology and initial-buy correlation, every restriction boundary,
 RPC retry/strict word parsing, signer-bound router construction, sequencer hash

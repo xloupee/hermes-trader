@@ -18,10 +18,25 @@ readonly OBSERVER_RUN="$(canonical_child_path \
 readonly EVENTS="$OBSERVER_RUN/events.jsonl"
 readonly BOUNDARY="$RUN_DIR/boundary.jsonl"
 readonly FACTORY_STATUS="$RUN_DIR/factory-status.jsonl"
+readonly STARTED_UTC="$(sed -n 's/^started_utc=//p' "$RUN_DIR/manifest")"
+readonly REQUESTED_DURATION_SECONDS="$(sed -n 's/^duration_seconds=//p' "$RUN_DIR/manifest")"
+[[ "$REQUESTED_DURATION_SECONDS" =~ ^[1-9][0-9]*$ ]] || {
+  echo "Invalid requested duration in measurement manifest" >&2
+  exit 1
+}
 if [[ -f "$RUN_DIR/completed" ]]; then
   readonly COMPLETED=true
+  readonly COMPLETED_UTC="$(awk 'NR == 1 {print $1}' "$RUN_DIR/completed")"
 else
   readonly COMPLETED=false
+  readonly COMPLETED_UTC=""
+fi
+readonly STARTED_EPOCH="$(date --date="$STARTED_UTC" +%s)"
+if [[ -n "$COMPLETED_UTC" ]]; then
+  readonly COMPLETED_EPOCH="$(date --date="$COMPLETED_UTC" +%s)"
+  readonly WALL_DURATION_SECONDS="$((COMPLETED_EPOCH - STARTED_EPOCH))"
+else
+  readonly WALL_DURATION_SECONDS=0
 fi
 
 for file in "$EVENTS" "$BOUNDARY" "$FACTORY_STATUS"; do
@@ -34,6 +49,10 @@ done
 jq -n \
   --arg measurement_run "$RUN_DIR" \
   --arg observer_run "$OBSERVER_RUN" \
+  --arg started_utc "$STARTED_UTC" \
+  --arg completed_utc "$COMPLETED_UTC" \
+  --argjson requested_duration_seconds "$REQUESTED_DURATION_SECONDS" \
+  --argjson wall_duration_seconds "$WALL_DURATION_SECONDS" \
   --argjson completed "$COMPLETED" \
   --slurpfile events "$EVENTS" \
   --slurpfile boundary "$BOUNDARY" \
@@ -69,6 +88,15 @@ jq -n \
     measurement_run: $measurement_run,
     observer_run: $observer_run,
     completed: $completed,
+    capture_window: {
+      started_utc: $started_utc,
+      completed_utc: (if $completed_utc == "" then null else $completed_utc end),
+      requested_duration_seconds: $requested_duration_seconds,
+      wall_duration_seconds: (if $completed then $wall_duration_seconds else null end),
+      duration_requirement_met: (
+        $completed and ($wall_duration_seconds >= $requested_duration_seconds)
+      )
+    },
     feed: {
       health_records: ($health | length),
       first_sequence: $last_health.sequence.first,

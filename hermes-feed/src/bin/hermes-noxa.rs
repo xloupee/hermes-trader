@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use alloy_consensus::Transaction;
 use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use futures_util::{SinkExt, StreamExt};
 use hermes_feed::feed::BroadcastMessage;
 use hermes_feed::robinhood::{
@@ -21,11 +21,14 @@ use hermes_feed::robinhood::{
 use hermes_feed::{
     ConditionalOptions, ConditionalRetryDecision, ConditionalRetryState, DedicatedNonceManager,
     FeedDecoder, Filter, NoxaLaunchEvent, NoxaLaunchHeader, NoxaPolicyInput, NoxaRpcClient,
-    NoxaVerificationOutcome, ObservedNoxaFactoryCall, RiskLedger, RiskLimits, SequenceTracker,
-    SequencerClient, TokenRestrictionSnapshot, TradePreflightInput, V3ExactInputIntent,
-    decode_launch_call, decode_launch_header, decode_token_launched, encode_v3_exact_input_single,
+    NoxaVerificationOutcome, ObservedNoxaFactoryCall, RiskLedger, RiskLimits, RobinhoodBlock,
+    SequenceTracker, SequencerClient, TestnetRoundTripAccountState, TestnetRoundTripExpectation,
+    TestnetRoundTripReconciliationInput, TestnetRoundTripStepKind, TokenRestrictionSnapshot,
+    TradePreflightInput, V3ExactInputIntent, ValidatedTestnetRoundTripStep, decode_launch_call,
+    decode_launch_header, decode_token_launched, encode_v3_exact_input_single,
     evaluate_noxa_policy, evaluate_testnet_preflight, hydrate_noxa_launch_receipt,
-    validate_signed_testnet_canary, verify_noxa_factory_call,
+    reconcile_testnet_round_trip_step, validate_signed_testnet_canary,
+    validate_signed_testnet_round_trip_step, verify_noxa_factory_call,
 };
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
@@ -35,6 +38,7 @@ use tokio_tungstenite::tungstenite::Message;
 const FACTORY_DEPLOYMENT_L2_BLOCK: u64 = 61_688;
 const DEFAULT_QUOTE_AMOUNT_IN: &str = "10000000000000000";
 const OUTPUT_QUEUE_CAPACITY: usize = 4_096;
+const TESTNET_ROUND_TRIP_APPROVAL: &str = "TESTNET_ROUND_TRIP_APPROVED";
 
 static JSON_OUTPUT: OnceLock<SyncSender<JsonOutput>> = OnceLock::new();
 
@@ -69,6 +73,10 @@ enum Command {
     TestnetPreflight(TestnetPreflightArgs),
     /// Validate, and only with --broadcast submit, an externally signed testnet self-transfer.
     TestnetSubmitCanary(TestnetSubmitCanaryArgs),
+    /// Read-only validation of one externally signed testnet round-trip stage.
+    TestnetValidateRoundTripStep(TestnetValidateRoundTripStepArgs),
+    /// Validate and, only with explicit approval, submit and reconcile one testnet stage.
+    TestnetSubmitRoundTripStep(TestnetSubmitRoundTripStepArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -167,6 +175,9 @@ struct TestnetPreflightArgs {
     gas_limit: u64,
     #[arg(long, default_value_t = 100_000_000)]
     max_fee_per_gas: u128,
+    /// Remaining capped transactions: entry, exact token approval, and full exit.
+    #[arg(long, default_value_t = 3)]
+    required_transactions: u64,
 }
 
 #[derive(Debug, Args)]
@@ -199,6 +210,83 @@ struct TestnetSubmitCanaryArgs {
     broadcast: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TestnetRoundTripStepArg {
+    Wrap,
+    ApproveEntry,
+    Entry,
+    ApproveExit,
+    Exit,
+}
+
+impl From<TestnetRoundTripStepArg> for TestnetRoundTripStepKind {
+    fn from(value: TestnetRoundTripStepArg) -> Self {
+        match value {
+            TestnetRoundTripStepArg::Wrap => Self::Wrap,
+            TestnetRoundTripStepArg::ApproveEntry => Self::ApproveEntry,
+            TestnetRoundTripStepArg::Entry => Self::Entry,
+            TestnetRoundTripStepArg::ApproveExit => Self::ApproveExit,
+            TestnetRoundTripStepArg::Exit => Self::Exit,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+struct TestnetValidateRoundTripStepArgs {
+    #[arg(long, default_value = TESTNET_RPC_URL)]
+    rpc_url: String,
+    #[arg(long, value_enum)]
+    kind: TestnetRoundTripStepArg,
+    /// Externally signed EIP-1559 bytes; Hermes never loads a key for this workflow.
+    #[arg(long)]
+    raw_tx_file: String,
+    #[arg(long)]
+    account: String,
+    #[arg(long)]
+    wrapped_native: String,
+    #[arg(long)]
+    router: String,
+    #[arg(long)]
+    factory: String,
+    #[arg(long)]
+    token: String,
+    #[arg(long)]
+    pool: String,
+    /// Exact wrap, approval, or swap input amount for this stage.
+    #[arg(long)]
+    exact_amount: String,
+    /// Required for entry and exit; must be zero for wrap and approvals.
+    #[arg(long, default_value = "0")]
+    minimum_amount_out: String,
+    #[arg(long, default_value_t = NOXA_POOL_FEE)]
+    pool_fee: u32,
+    #[arg(long)]
+    max_gas_cost_wei: String,
+}
+
+#[derive(Debug, Args)]
+struct TestnetSubmitRoundTripStepArgs {
+    #[command(flatten)]
+    step: TestnetValidateRoundTripStepArgs,
+    #[arg(long, default_value = TESTNET_SEQUENCER_URL)]
+    sequencer_url: String,
+    /// Stable host/region label included in every submission record.
+    #[arg(long, default_value = "unspecified")]
+    source: String,
+    #[arg(long, default_value_t = 3)]
+    l1_window: u64,
+    #[arg(long, default_value_t = 2)]
+    max_boundary_attempts: u16,
+    #[arg(long, default_value_t = 20)]
+    reconcile_seconds: u64,
+    /// Exact opt-in token required together with --broadcast.
+    #[arg(long)]
+    approval_token: Option<String>,
+    /// Submit the already validated bytes; omitted by default.
+    #[arg(long, default_value_t = false)]
+    broadcast: bool,
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -214,9 +302,385 @@ async fn main() -> Result<()> {
         Command::CalibrateBoundary(args) => calibrate_boundary(args).await,
         Command::TestnetPreflight(args) => testnet_preflight(args).await,
         Command::TestnetSubmitCanary(args) => testnet_submit_canary(args).await,
+        Command::TestnetValidateRoundTripStep(args) => testnet_validate_round_trip_step(args).await,
+        Command::TestnetSubmitRoundTripStep(args) => testnet_submit_round_trip_step(args).await,
     };
     let writer_result = stop_json_writer(writer);
     result.and(writer_result)
+}
+
+async fn testnet_submit_round_trip_step(args: TestnetSubmitRoundTripStepArgs) -> Result<()> {
+    validate_testnet_submit_round_trip_args(&args)?;
+    let context = validate_testnet_round_trip_context(args.step).await?;
+    write_json(context.validation_record)?;
+    if !args.broadcast {
+        return Ok(());
+    }
+
+    let mut nonces = DedicatedNonceManager::from_pending_nonce(context.before.pending_nonce);
+    let lease = nonces.reserve()?;
+    nonces.mark_signed(lease.nonce, context.validated.hash)?;
+    let conditions = ConditionalOptions::first_eligible_window(
+        context.latest_block.l1_block_number,
+        args.l1_window,
+        None,
+    )
+    .context("conditional L1 window overflow")?;
+    let sequencer = SequencerClient::with_url(args.sequencer_url)?;
+    // Only become ambiguous immediately before the first network call.
+    nonces.mark_submitted(lease.nonce, context.validated.hash)?;
+    let mut retry = ConditionalRetryState {
+        expected_tx_hash: context.validated.hash,
+        conditions,
+        attempts: 0,
+        max_boundary_attempts: args.max_boundary_attempts,
+    };
+    let submission_started = Instant::now();
+    let submission_started_unix_ns = unix_ns();
+    let mut attempt_elapsed_ns = Vec::new();
+    let decision = loop {
+        let attempt_started = Instant::now();
+        let response = match sequencer
+            .submit_conditional(&context.validated.raw, retry.conditions)
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                attempt_elapsed_ns.push(attempt_started.elapsed().as_nanos());
+                break ConditionalRetryDecision::ReconcileByHash {
+                    tx_hash: context.validated.hash,
+                    reason: error.to_string(),
+                };
+            }
+        };
+        attempt_elapsed_ns.push(attempt_started.elapsed().as_nanos());
+        let decision = retry.on_response(response);
+        if matches!(decision, ConditionalRetryDecision::RetrySameBytes) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+        break decision;
+    };
+    write_json(json!({
+        "record_type": "noxa_testnet_round_trip_step_submission",
+        "source": args.source,
+        "broadcast": true,
+        "kind": context.validated.kind,
+        "hash": context.validated.hash,
+        "nonce": context.validated.nonce,
+        "conditions": conditions,
+        "classified_attempts": retry.attempts,
+        "network_attempts": attempt_elapsed_ns.len(),
+        "submission_started_unix_ns": submission_started_unix_ns,
+        "submission_elapsed_ns": submission_started.elapsed().as_nanos(),
+        "attempt_elapsed_ns": attempt_elapsed_ns,
+        "decision": &decision,
+        "private_key_used": false,
+    }))?;
+    if matches!(decision, ConditionalRetryDecision::Failed { .. }) {
+        nonces.release_explicitly_rejected(context.validated.nonce, context.validated.hash)?;
+        bail!("sequencer definitively rejected the testnet round-trip step");
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(args.reconcile_seconds);
+    loop {
+        if let Some(receipt) = context.rpc.receipt(context.validated.hash).await? {
+            nonces.finalize_included(context.validated.nonce, context.validated.hash)?;
+            let after = read_testnet_round_trip_account_state(
+                &context.rpc,
+                context.account,
+                context.wrapped_native,
+                context.token,
+                context.router,
+            )
+            .await?;
+            let reconciliation =
+                reconcile_testnet_round_trip_step(TestnetRoundTripReconciliationInput {
+                    kind: context.validated.kind,
+                    exact_amount: context.validated.exact_amount,
+                    receipt_status: receipt.status,
+                    before: context.before,
+                    after,
+                });
+            write_json(json!({
+                "record_type": "noxa_testnet_round_trip_step_reconciled",
+                "source": args.source,
+                "hash": context.validated.hash,
+                "kind": context.validated.kind,
+                "receipt_status": receipt.status,
+                "l2_block_number": receipt.l2_block_number,
+                "transaction_index": receipt.transaction_index,
+                "gas_used": receipt.gas_used,
+                "effective_gas_price": receipt.effective_gas_price,
+                "before": context.before,
+                "after": after,
+                "reconciliation": reconciliation.as_ref().ok(),
+                "reject_reason": reconciliation.as_ref().err().map(ToString::to_string),
+                "submit_to_receipt_ns": submission_started.elapsed().as_nanos(),
+                "nonce_state": nonces.active(),
+                "private_key_used": false,
+            }))?;
+            reconciliation?;
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let known = context
+                .rpc
+                .transaction_by_hash(context.validated.hash)
+                .await?
+                .is_some();
+            write_json(json!({
+                "record_type": "noxa_testnet_round_trip_step_reconciliation_timeout",
+                "source": args.source,
+                "hash": context.validated.hash,
+                "kind": context.validated.kind,
+                "known_by_rpc": known,
+                "nonce_state": nonces.active(),
+                "reconciliation_elapsed_ns": submission_started.elapsed().as_nanos(),
+                "private_key_used": false,
+            }))?;
+            bail!("testnet step remains pending or ambiguous; nonce is intentionally not reusable");
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn validate_testnet_submit_round_trip_args(args: &TestnetSubmitRoundTripStepArgs) -> Result<()> {
+    if args.l1_window == 0 || args.max_boundary_attempts == 0 || args.reconcile_seconds == 0 {
+        bail!("L1 window, boundary attempts, and reconciliation timeout must be non-zero");
+    }
+    if args.broadcast
+        && (args.source == "unspecified"
+            || args.source.trim().is_empty()
+            || args.approval_token.as_deref() != Some(TESTNET_ROUND_TRIP_APPROVAL))
+    {
+        bail!("broadcast requires an explicit source and TESTNET_ROUND_TRIP_APPROVED token");
+    }
+    if !args.broadcast && args.approval_token.is_some() {
+        bail!("approval token is only accepted together with --broadcast");
+    }
+    Ok(())
+}
+
+async fn read_testnet_round_trip_account_state(
+    rpc: &NoxaRpcClient,
+    account: Address,
+    wrapped_native: Address,
+    token: Address,
+    router: Address,
+) -> Result<TestnetRoundTripAccountState> {
+    let (pending_nonce, wrapped_balance, token_balance, wrapped_allowance, token_allowance) = tokio::try_join!(
+        rpc.pending_nonce(account),
+        rpc.erc20_balance(wrapped_native, account),
+        rpc.erc20_balance(token, account),
+        rpc.erc20_allowance(wrapped_native, account, router),
+        rpc.erc20_allowance(token, account, router),
+    )?;
+    Ok(TestnetRoundTripAccountState {
+        pending_nonce,
+        wrapped_balance,
+        token_balance,
+        wrapped_allowance,
+        token_allowance,
+    })
+}
+
+async fn testnet_validate_round_trip_step(args: TestnetValidateRoundTripStepArgs) -> Result<()> {
+    let context = validate_testnet_round_trip_context(args).await?;
+    write_json(context.validation_record)
+}
+
+struct TestnetRoundTripValidationContext {
+    rpc: NoxaRpcClient,
+    latest_block: RobinhoodBlock,
+    validated: ValidatedTestnetRoundTripStep,
+    before: TestnetRoundTripAccountState,
+    account: Address,
+    wrapped_native: Address,
+    router: Address,
+    token: Address,
+    validation_record: Value,
+}
+
+async fn validate_testnet_round_trip_context(
+    args: TestnetValidateRoundTripStepArgs,
+) -> Result<TestnetRoundTripValidationContext> {
+    let account = Address::from_str(&args.account).context("invalid --account")?;
+    let wrapped_native =
+        Address::from_str(&args.wrapped_native).context("invalid --wrapped-native")?;
+    let router = Address::from_str(&args.router).context("invalid --router")?;
+    let factory = Address::from_str(&args.factory).context("invalid --factory")?;
+    let token = Address::from_str(&args.token).context("invalid --token")?;
+    let pool = Address::from_str(&args.pool).context("invalid --pool")?;
+    let addresses = [account, wrapped_native, router, factory, token, pool];
+    if addresses.contains(&Address::ZERO)
+        || addresses
+            .iter()
+            .enumerate()
+            .any(|(index, address)| addresses[index + 1..].contains(address))
+    {
+        bail!("account and every testnet contract address must be non-zero and distinct");
+    }
+    let exact_amount = parse_u256(&args.exact_amount)?;
+    let minimum_amount_out = parse_u256(&args.minimum_amount_out)?;
+    let maximum_gas_cost = parse_u256(&args.max_gas_cost_wei)?;
+    let raw = read_raw_transaction(&args.raw_tx_file)?;
+    let kind: TestnetRoundTripStepKind = args.kind.into();
+    let rpc = NoxaRpcClient::with_url(args.rpc_url)?;
+    let latest_block = rpc.latest_block().await?;
+    let (
+        chain_id,
+        pending_nonce,
+        native_balance,
+        wrapped_balance,
+        token_balance,
+        wrapped_allowance,
+        token_allowance,
+        wrapped_code,
+        router_code,
+        factory_code,
+        token_code,
+        pool_code,
+        pool_snapshot,
+        token_snapshot,
+    ) = tokio::try_join!(
+        rpc.chain_id(),
+        rpc.pending_nonce(account),
+        rpc.native_balance(account),
+        rpc.erc20_balance(wrapped_native, account),
+        rpc.erc20_balance(token, account),
+        rpc.erc20_allowance(wrapped_native, account, router),
+        rpc.erc20_allowance(token, account, router),
+        rpc.code_at(wrapped_native),
+        rpc.code_at(router),
+        rpc.code_at(factory),
+        rpc.code_at(token),
+        rpc.code_at(pool),
+        rpc.v3_pool_snapshot(pool),
+        rpc.token_restriction_snapshot(token, latest_block.l2_block_number, Some(account)),
+    )?;
+    if chain_id != TESTNET_CHAIN_ID {
+        bail!("RPC chain ID {chain_id} is not Robinhood testnet {TESTNET_CHAIN_ID}");
+    }
+    if wrapped_code.is_empty()
+        || router_code.is_empty()
+        || factory_code.is_empty()
+        || token_code.is_empty()
+        || pool_code.is_empty()
+    {
+        bail!("wrapped-native, router, factory, token, and pool must all have deployed bytecode");
+    }
+    if token_snapshot.launch_factory != factory
+        || token_snapshot.liquidity_pool != pool
+        || token_snapshot.pair_token != wrapped_native
+        || token_snapshot.pool_fee != args.pool_fee
+    {
+        bail!("token-reported factory, pool, pair token, or fee does not match the official set");
+    }
+    let pool_pair_matches = (pool_snapshot.token0 == wrapped_native
+        && pool_snapshot.token1 == token)
+        || (pool_snapshot.token0 == token && pool_snapshot.token1 == wrapped_native);
+    if !pool_pair_matches || pool_snapshot.fee != args.pool_fee || pool_snapshot.liquidity == 0 {
+        bail!("pool tokens, fee, or active liquidity do not match the intended round trip");
+    }
+    let required_native = maximum_gas_cost
+        .checked_add(if kind == TestnetRoundTripStepKind::Wrap {
+            exact_amount
+        } else {
+            U256::ZERO
+        })
+        .context("native funding requirement overflow")?;
+    if native_balance < required_native {
+        bail!("native balance cannot cover the explicit gas cap and wrap value");
+    }
+    match kind {
+        TestnetRoundTripStepKind::Wrap => {}
+        TestnetRoundTripStepKind::ApproveEntry => {
+            if wrapped_balance < exact_amount {
+                bail!("wrapped balance is below the exact approval amount");
+            }
+        }
+        TestnetRoundTripStepKind::Entry => {
+            if wrapped_balance < exact_amount || wrapped_allowance != exact_amount {
+                bail!("entry requires sufficient wrapped balance and exact router allowance");
+            }
+        }
+        TestnetRoundTripStepKind::ApproveExit => {
+            if token_balance != exact_amount {
+                bail!("exit approval amount must equal the complete token position");
+            }
+        }
+        TestnetRoundTripStepKind::Exit => {
+            if token_balance != exact_amount || token_allowance != exact_amount {
+                bail!("exit requires the exact full position and exact router allowance");
+            }
+        }
+    }
+    let validated = validate_signed_testnet_round_trip_step(
+        &raw,
+        TestnetRoundTripExpectation {
+            kind,
+            account,
+            wrapped_native,
+            router,
+            token,
+            expected_nonce: pending_nonce,
+            exact_amount,
+            minimum_amount_out,
+            pool_fee: args.pool_fee,
+            maximum_gas_cost,
+        },
+    )?;
+    let before = TestnetRoundTripAccountState {
+        pending_nonce,
+        wrapped_balance,
+        token_balance,
+        wrapped_allowance,
+        token_allowance,
+    };
+    let validation_record = json!({
+        "record_type": "noxa_testnet_round_trip_step_validated",
+        "network": "robinhood_testnet",
+        "broadcast": false,
+        "chain_id": chain_id,
+        "kind": kind,
+        "validated": validated,
+        "account": account,
+        "wrapped_native": wrapped_native,
+        "router": router,
+        "factory": factory,
+        "token": token,
+        "pool": pool,
+        "pool_snapshot": pool_snapshot,
+        "token_snapshot": token_snapshot,
+        "code_bytes": {
+            "wrapped_native": wrapped_code.len(),
+            "router": router_code.len(),
+            "factory": factory_code.len(),
+            "token": token_code.len(),
+            "pool": pool_code.len(),
+        },
+        "state": {
+            "pending_nonce": pending_nonce,
+            "native_balance": native_balance,
+            "wrapped_balance": wrapped_balance,
+            "token_balance": token_balance,
+            "wrapped_allowance": wrapped_allowance,
+            "token_allowance": token_allowance,
+        },
+        "private_key_used": false,
+    });
+    Ok(TestnetRoundTripValidationContext {
+        rpc,
+        latest_block,
+        validated,
+        before,
+        account,
+        wrapped_native,
+        router,
+        token,
+        validation_record,
+    })
 }
 
 async fn testnet_preflight(args: TestnetPreflightArgs) -> Result<()> {
@@ -226,15 +690,23 @@ async fn testnet_preflight(args: TestnetPreflightArgs) -> Result<()> {
     let router = Address::from_str(&args.router).context("invalid --router")?;
     let amount_in = parse_u256(&args.amount_in)?;
     let client = NoxaRpcClient::with_url(args.rpc_url)?;
-    let (chain_id, pending_nonce, native_balance, wrapped_balance, router_allowance, router_code) =
-        tokio::try_join!(
-            client.chain_id(),
-            client.pending_nonce(account),
-            client.native_balance(account),
-            client.erc20_balance(wrapped_native, account),
-            client.erc20_allowance(wrapped_native, account, router),
-            client.code_at(router),
-        )?;
+    let (
+        chain_id,
+        pending_nonce,
+        native_balance,
+        wrapped_balance,
+        router_allowance,
+        wrapped_code,
+        router_code,
+    ) = tokio::try_join!(
+        client.chain_id(),
+        client.pending_nonce(account),
+        client.native_balance(account),
+        client.erc20_balance(wrapped_native, account),
+        client.erc20_allowance(wrapped_native, account, router),
+        client.code_at(wrapped_native),
+        client.code_at(router),
+    )?;
     if chain_id != TESTNET_CHAIN_ID {
         bail!("RPC chain ID {chain_id} is not Robinhood testnet {TESTNET_CHAIN_ID}");
     }
@@ -243,6 +715,7 @@ async fn testnet_preflight(args: TestnetPreflightArgs) -> Result<()> {
         account,
         wrapped_native,
         router,
+        wrapped_code_present: !wrapped_code.is_empty(),
         router_code_present: !router_code.is_empty(),
         native_balance,
         wrapped_balance,
@@ -250,6 +723,7 @@ async fn testnet_preflight(args: TestnetPreflightArgs) -> Result<()> {
         amount_in,
         gas_limit: args.gas_limit,
         max_fee_per_gas: args.max_fee_per_gas,
+        required_transactions: args.required_transactions,
     };
     let decision = evaluate_testnet_preflight(input);
     write_json(json!({
@@ -260,6 +734,7 @@ async fn testnet_preflight(args: TestnetPreflightArgs) -> Result<()> {
         "account": account,
         "wrapped_native": wrapped_native,
         "router": router,
+        "wrapped_code_bytes": wrapped_code.len(),
         "router_code_bytes": router_code.len(),
         "native_balance": native_balance,
         "wrapped_balance": wrapped_balance,
@@ -267,6 +742,7 @@ async fn testnet_preflight(args: TestnetPreflightArgs) -> Result<()> {
         "amount_in": amount_in,
         "gas_limit": args.gas_limit,
         "max_fee_per_gas": args.max_fee_per_gas,
+        "required_transactions": args.required_transactions,
         "ready": decision.is_ok(),
         "reject_reason": decision.as_ref().err().map(ToString::to_string),
     }))?;
@@ -1355,5 +1831,82 @@ fn write_json(value: Value) -> Result<()> {
         Ok(()) => Ok(()),
         Err(TrySendError::Full(_)) => bail!("JSON output queue saturated; failing closed"),
         Err(TrySendError::Disconnected(_)) => bail!("JSON writer is unavailable"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn submit_args(extra: &[&str]) -> TestnetSubmitRoundTripStepArgs {
+        let mut argv = vec![
+            "hermes-noxa",
+            "testnet-submit-round-trip-step",
+            "--kind",
+            "entry",
+            "--raw-tx-file",
+            "/srv/codex-workspaces/hermes-staging/entry.raw",
+            "--account",
+            "0x0000000000000000000000000000000000000001",
+            "--wrapped-native",
+            "0x0000000000000000000000000000000000000002",
+            "--router",
+            "0x0000000000000000000000000000000000000003",
+            "--factory",
+            "0x0000000000000000000000000000000000000004",
+            "--token",
+            "0x0000000000000000000000000000000000000005",
+            "--pool",
+            "0x0000000000000000000000000000000000000006",
+            "--exact-amount",
+            "100",
+            "--minimum-amount-out",
+            "90",
+            "--max-gas-cost-wei",
+            "30000000000000",
+        ];
+        argv.extend_from_slice(extra);
+        let cli = Cli::try_parse_from(argv).unwrap();
+        let Command::TestnetSubmitRoundTripStep(args) = cli.command else {
+            panic!("parsed wrong command")
+        };
+        args
+    }
+
+    #[test]
+    fn testnet_round_trip_submit_defaults_to_dry_run() {
+        let args = submit_args(&[]);
+        assert!(!args.broadcast);
+        assert!(validate_testnet_submit_round_trip_args(&args).is_ok());
+    }
+
+    #[test]
+    fn testnet_round_trip_broadcast_requires_exact_approval_and_source() {
+        let missing = submit_args(&["--broadcast"]);
+        assert!(validate_testnet_submit_round_trip_args(&missing).is_err());
+
+        let wrong = submit_args(&[
+            "--broadcast",
+            "--source",
+            "fsn1",
+            "--approval-token",
+            "WRONG",
+        ]);
+        assert!(validate_testnet_submit_round_trip_args(&wrong).is_err());
+
+        let approved = submit_args(&[
+            "--broadcast",
+            "--source",
+            "fsn1",
+            "--approval-token",
+            TESTNET_ROUND_TRIP_APPROVAL,
+        ]);
+        assert!(validate_testnet_submit_round_trip_args(&approved).is_ok());
+    }
+
+    #[test]
+    fn testnet_round_trip_dry_run_rejects_stray_approval_token() {
+        let args = submit_args(&["--approval-token", TESTNET_ROUND_TRIP_APPROVAL]);
+        assert!(validate_testnet_submit_round_trip_args(&args).is_err());
     }
 }

@@ -128,6 +128,15 @@ pub struct TokenRestrictionSnapshot {
     pub recipient_balance: Option<U256>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct V3PoolSnapshot {
+    pub pool: Address,
+    pub token0: Address,
+    pub token1: Address,
+    pub fee: u32,
+    pub liquidity: u128,
+}
+
 impl NoxaRpcClient {
     pub fn new() -> Result<Self> {
         Self::with_url(PUBLIC_RPC_URL)
@@ -261,6 +270,27 @@ impl NoxaRpcClient {
         let call = INoxaTokenView::allowanceCall { owner, spender }.abi_encode();
         let bytes = self.eth_call_data(token, &call, "latest").await?;
         parse_u256_bytes(&bytes)
+    }
+
+    pub async fn v3_pool_snapshot(&self, pool: Address) -> Result<V3PoolSnapshot> {
+        const TOKEN0: [u8; 4] = [0x0d, 0xfe, 0x16, 0x81];
+        const TOKEN1: [u8; 4] = [0xd2, 0x12, 0x20, 0xa7];
+        const FEE: [u8; 4] = [0xdd, 0xca, 0x3f, 0x43];
+        const LIQUIDITY: [u8; 4] = [0x1a, 0x68, 0x65, 0x02];
+        let (token0, token1, fee, liquidity) = tokio::try_join!(
+            self.eth_call_data(pool, &TOKEN0, "latest"),
+            self.eth_call_data(pool, &TOKEN1, "latest"),
+            self.eth_call_data(pool, &FEE, "latest"),
+            self.eth_call_data(pool, &LIQUIDITY, "latest"),
+        )?;
+        Ok(V3PoolSnapshot {
+            pool,
+            token0: parse_address_word(&token0)?,
+            token1: parse_address_word(&token1)?,
+            fee: parse_u32_word(&fee)?,
+            liquidity: u128::try_from(parse_u256_bytes(&liquidity)?)
+                .context("V3 liquidity word does not fit u128")?,
+        })
     }
 
     pub async fn block_by_number(&self, l2_block_number: u64) -> Result<RobinhoodBlock> {

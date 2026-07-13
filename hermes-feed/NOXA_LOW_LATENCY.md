@@ -308,6 +308,13 @@ runner combines these journals with parent-head/feed samples and 30-second
 `launchEnabled()` snapshots. The persistent observer independently continues
 the same 30-second factory watch after a bounded measurement finishes.
 
+The trading runtime resumes a dropped Nitro feed by requesting exactly the next
+expected sequence with Nitro's `Arbitrum-Requested-Sequence-Number` WebSocket
+header. It skips only older catch-up replay, records the first processed
+sequence after every reconnect, and treats any forward jump as a fail-closed
+gap. This avoids both reprocessing an old launch and mistaking relay backlog
+replay for live feed reordering.
+
 ## Testnet-only orchestration
 
 Robinhood testnet is pinned to chain ID `46630`, public RPC
@@ -328,15 +335,71 @@ RPC outcomes retain the nonce and reconcile only by the signed hash; the
 command never reads or stores a private key. See `NOXA_CANARY_RUNBOOK.md`.
 
 The read-only preflight checks the pending nonce, native gas balance,
-pre-wrapped token balance, exact router allowance, and deployed router code:
+pre-wrapped token balance, exact router allowance, deployed wrapped-native and
+router bytecode, and worst-case gas funding for every remaining transaction in
+the entry/approval/full-exit sequence:
 
 ```bash
 hermes-noxa testnet-preflight \
   --account 0xTHROWAWAY_ACCOUNT \
   --wrapped-native 0xTESTNET_WRAPPED_NATIVE \
   --router 0xTESTNET_ROUTER \
-  --amount-in 1000000000000000
+  --amount-in 1000000000000000 \
+  --required-transactions 3
 ```
+
+Before any round-trip transaction is broadcast, each externally signed step can
+be validated independently with `testnet-validate-round-trip-step`. The command
+never loads a key or broadcasts. It requires chain 46630, the current pending
+nonce, EIP-1559 encoding, an explicit gas-cost cap, bytecode at the official
+wrapped-native/router/token/pool addresses, the intended pool token pair and
+fee, and non-zero active V3 liquidity. Its five accepted stages are:
+
+1. exact native-to-wrapped `deposit()`;
+2. exact wrapped-token approval for entry;
+3. exact-input wrapped-token entry with a non-zero minimum output;
+4. exact approval equal to the complete acquired token position;
+5. exact-input full exit to wrapped native with a non-zero minimum output.
+
+The signed-byte validator rejects unlimited or one-unit-over approvals, wrong
+addresses, wrong nonce or chain, native value on swaps, foreign recipients,
+different calldata, partial exits, and gas above the independent cap. The
+reconciliation model then requires a successful receipt, exactly one nonce
+advance, exact allowance creation and consumption, a measurable entry position,
+and a final token balance and allowance of zero.
+
+```bash
+hermes-noxa testnet-validate-round-trip-step \
+  --kind entry \
+  --raw-tx-file /srv/codex-workspaces/hermes-staging/entry.raw \
+  --account 0xTHROWAWAY_ACCOUNT \
+  --wrapped-native 0xVERIFIED_TESTNET_WRAPPED_NATIVE \
+  --router 0xVERIFIED_TESTNET_ROUTER \
+  --factory 0xVERIFIED_TESTNET_NOXA_FACTORY \
+  --token 0xVERIFIED_TEST_TOKEN \
+  --pool 0xVERIFIED_LIQUID_POOL \
+  --exact-amount 1000000000000000 \
+  --minimum-amount-out 1 \
+  --max-gas-cost-wei 30000000000000
+```
+
+The example minimum is only structural and is not a safe quote. The real value
+must be derived from verified live testnet liquidity immediately before signing.
+
+`testnet-submit-round-trip-step` uses the same validation gate and defaults to
+the same no-broadcast behavior. Actual testnet transmission additionally
+requires `--broadcast`, a non-placeholder `--source`, and the exact
+`TESTNET_ROUND_TRIP_APPROVED` opt-in token. The command marks the nonce
+ambiguous before the network call, uses bounded conditional retries, reconciles
+only by the signed transaction hash, and never makes an uncertain nonce
+reusable. After a receipt it rereads nonce, balances, and both allowances and
+applies the zero-exposure reconciliation checks above. A reverted receipt,
+partial exit, unexpected allowance, nonce drift, or receipt timeout fails
+closed.
+
+This command being present is not approval to use it. Each live testnet stage
+still requires an explicit operator decision after the monitor has identified
+and the operator has verified the official deployment and live quote.
 
 NOXA does not currently publish a Robinhood testnet launch deployment in its
 contract table. Therefore the first canary is intentionally a capped testnet
@@ -361,6 +424,21 @@ prediction cache after warmup, made 24 logical RPC requests without retries or
 errors, suppressed candidates while the factory remained disabled, and drained
 cleanly. No wallet, signer, transaction submission, service restart, or
 deployment was used.
+
+A later 30-minute one-shot shadow run proved in-process recovery from three
+connection resets with zero service restarts and a clean deadline exit. That
+run also exposed that reconnects were not sending Nitro's requested-sequence
+header: the relay replayed backlog, producing 1,539 duplicate/reordered counts
+and one 719-message forward jump. The runtime now uses the official catch-up
+header, skips only replay below the requested point, and reports exact versus
+forward-gap resumes separately. A 15-second release-mode handshake against the
+public Robinhood feed accepted the new headers and covered sequences 8,863,532
+through 8,864,427 with zero gaps, missing messages, duplicates, or reordering.
+A corrected 30-minute one-shot run then covered sequences 8,864,493 through
+8,883,198 with zero gaps, missing messages, duplicates, reordering, RPC errors,
+or service restarts. No natural disconnect occurred during that window, so the
+updated reconnect path still requires a live run that actually crosses a
+disconnect before promotion.
 
 ## Promotion gates
 
@@ -404,3 +482,4 @@ quote exactly. Receipt-based discovery remains the asynchronous authority.
 - [Nitro conditional checks](https://github.com/OffchainLabs/go-ethereum/blob/f3a977ddf30b138da2fe673ac5cbff2bc6dd4c88/arbitrum/conditionaltx.go)
 - [Pinned Nitro transaction pre-checker](https://github.com/OffchainLabs/nitro/blob/3599acae1ad2fab4059fc46453c9cd3294126641/execution/gethexec/tx_pre_checker.go)
 - [Pinned Nitro sequencer](https://github.com/OffchainLabs/nitro/blob/3599acae1ad2fab4059fc46453c9cd3294126641/execution/gethexec/sequencer.go)
+- [Pinned Nitro feed client's requested-sequence handshake](https://github.com/OffchainLabs/nitro/blob/3599acae1ad2fab4059fc46453c9cd3294126641/broadcastclient/broadcastclient.go)

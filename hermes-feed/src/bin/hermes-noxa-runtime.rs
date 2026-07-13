@@ -31,10 +31,51 @@ use serde::Serialize;
 use serde_json::json;
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream,
+    tungstenite::{
+        Message,
+        client::IntoClientRequest,
+        http::{HeaderValue, Request},
+    },
+};
 
 const BROADCAST_APPROVAL: &str = "MAINNET_CANARY_APPROVED";
 const RECONCILIATION_QUEUE_CAPACITY: usize = 64;
+const FEED_RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+const FEED_RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(5);
+const NITRO_FEED_CLIENT_VERSION: &str = "2";
+const NITRO_FEED_CLIENT_VERSION_HEADER: &str = "Arbitrum-Feed-Client-Version";
+const NITRO_REQUESTED_SEQUENCE_HEADER: &str = "Arbitrum-Requested-Sequence-Number";
+
+type FeedRead = SplitStream<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>>;
+
+#[derive(Debug, Clone, Copy)]
+struct FeedResume {
+    reconnect: u64,
+    requested_sequence: u64,
+    replayed_messages: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeedResumeDisposition {
+    Replay,
+    Exact,
+    ForwardGap,
+}
+
+impl FeedResume {
+    fn observe(&mut self, sequence: u64) -> FeedResumeDisposition {
+        if sequence < self.requested_sequence {
+            self.replayed_messages = self.replayed_messages.saturating_add(1);
+            FeedResumeDisposition::Replay
+        } else if sequence == self.requested_sequence {
+            FeedResumeDisposition::Exact
+        } else {
+            FeedResumeDisposition::ForwardGap
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum RuntimeMode {
@@ -305,7 +346,7 @@ async fn main() -> Result<()> {
         "private_key_logged": false,
     }))?;
 
-    let (stream, _) = tokio_tungstenite::connect_async(&args.feed_url)
+    let (stream, _) = tokio_tungstenite::connect_async(feed_request(&args.feed_url, 0)?)
         .await
         .context("connect Robinhood Nitro feed")?;
     let (_, mut feed_read) = stream.split();
@@ -313,6 +354,10 @@ async fn main() -> Result<()> {
     let connected_at = Instant::now();
     let mut decoder = FeedDecoder::new(Filter::default());
     let mut sequences = SequenceTracker::default();
+    let mut feed_reconnects = 0_u64;
+    let mut feed_resume = None;
+    let mut feed_replayed_messages = 0_u64;
+    let mut feed_resume_forward_gaps = 0_u64;
     let mut last_boundary = None;
     let mut predictor_cache_revalidated = false;
     let verifier_slots = Arc::new(Semaphore::new(16));
@@ -321,11 +366,19 @@ async fn main() -> Result<()> {
     let (submit_sender, mut submit_receiver) = mpsc::channel::<SubmitOutcome>(8);
     let (reconcile_sender, mut reconcile_receiver) = mpsc::channel::<ReconciliationOutcome>(8);
     let mut tasks = JoinSet::new();
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+    let mut shutdown_requested = false;
 
     let loop_result: Result<()> = async {
         loop {
             tokio::select! {
             biased;
+            signal = &mut shutdown => {
+                signal?;
+                shutdown_requested = true;
+                break;
+            }
             Some(outcome) = submit_receiver.recv() => {
                 handle_submit_outcome(&mut engine, outcome)?;
             }
@@ -359,30 +412,75 @@ async fn main() -> Result<()> {
                 });
             }
             frame = next_feed_frame(&mut feed_read, deadline) => {
-                let Some(frame) = frame? else { break };
-                process_feed_frame(
-                    frame,
-                    &mut decoder,
-                    &mut sequences,
-                    &mut last_boundary,
-                    connected_at,
-                    &rpc,
-                    &predictor,
-                    status.launch_enabled,
-                    factory_owner,
-                    &mut predictor_cache_revalidated,
-                    &args,
-                    recipient,
-                    amount_in,
-                    max_fee_per_gas,
-                    max_priority_fee_per_gas,
-                    &verifier_slots,
-                    &proof_sender,
-                    &mut engine,
-                    &paper_fill_sender,
-                    &submit_sender,
-                    &mut tasks,
-                ).await?;
+                let disconnect = match frame {
+                    Ok(Some(Message::Close(reason))) => Some(format!("feed closed: {reason:?}")),
+                    Ok(Some(frame)) => {
+                        process_feed_frame(
+                            frame,
+                            &mut decoder,
+                            &mut sequences,
+                            &mut feed_resume,
+                            &mut feed_replayed_messages,
+                            &mut feed_resume_forward_gaps,
+                            &mut last_boundary,
+                            connected_at,
+                            &rpc,
+                            &predictor,
+                            status.launch_enabled,
+                            factory_owner,
+                            &mut predictor_cache_revalidated,
+                            &args,
+                            recipient,
+                            amount_in,
+                            max_fee_per_gas,
+                            max_priority_fee_per_gas,
+                            &verifier_slots,
+                            &proof_sender,
+                            &mut engine,
+                            &paper_fill_sender,
+                            &submit_sender,
+                            &mut tasks,
+                        ).await?;
+                        None
+                    }
+                    Ok(None) if Instant::now() >= deadline => break,
+                    Ok(None) => Some("feed stream ended".to_owned()),
+                    Err(error) => Some(error.to_string()),
+                };
+                if let Some(reason) = disconnect {
+                    handle_boundary(
+                        &mut engine,
+                        FeedBoundary {
+                            l1_block_number: u64::MAX,
+                            l1_timestamp: u64::MAX,
+                            sequence_contiguous: false,
+                        },
+                        &args,
+                        &paper_fill_sender,
+                        &submit_sender,
+                        &mut tasks,
+                    )?;
+                    last_boundary = None;
+                    feed_reconnects = feed_reconnects.saturating_add(1);
+                    let requested_sequence = sequences
+                        .current()
+                        .last
+                        .map_or(0, |last| last.saturating_add(1));
+                    let Some(reconnected) = reconnect_feed(
+                        &args.feed_url,
+                        deadline,
+                        feed_reconnects,
+                        requested_sequence,
+                        &reason,
+                        args.broadcast,
+                    ).await? else { break };
+                    feed_read = reconnected;
+                    feed_resume = Some(FeedResume {
+                        reconnect: feed_reconnects,
+                        requested_sequence,
+                        replayed_messages: 0,
+                    });
+                }
             }
             }
             while let Some(joined) = tasks.try_join_next() {
@@ -439,9 +537,38 @@ async fn main() -> Result<()> {
     emit(json!({
         "record_type": "hermes_noxa_runtime_stop",
         "sequence": sequences.current(),
+        "feed_reconnects": feed_reconnects,
+        "feed_replayed_messages": feed_replayed_messages,
+        "feed_resume_forward_gaps": feed_resume_forward_gaps,
         "rpc": rpc.metrics(),
-        "reason": if status.launch_enabled { "duration_complete" } else { "duration_complete_launch_disabled" },
+        "reason": completion_reason(status.launch_enabled, shutdown_requested),
     }))
+}
+
+fn completion_reason(launch_enabled: bool, shutdown_requested: bool) -> &'static str {
+    match (shutdown_requested, launch_enabled) {
+        (true, true) => "shutdown_signal",
+        (true, false) => "shutdown_signal_launch_disabled",
+        (false, true) => "duration_complete",
+        (false, false) => "duration_complete_launch_disabled",
+    }
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() -> Result<()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("install SIGTERM handler")?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result.context("install SIGINT handler"),
+        _ = terminate.recv() => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() -> Result<()> {
+    tokio::signal::ctrl_c()
+        .await
+        .context("install shutdown handler")
 }
 
 async fn revalidate_predictor_cache(
@@ -505,6 +632,9 @@ async fn process_feed_frame(
     frame: Message,
     decoder: &mut FeedDecoder,
     sequences: &mut SequenceTracker,
+    feed_resume: &mut Option<FeedResume>,
+    feed_replayed_messages: &mut u64,
+    feed_resume_forward_gaps: &mut u64,
     last_boundary: &mut Option<FeedBoundary>,
     connected_at: Instant,
     rpc: &NoxaRpcClient,
@@ -552,6 +682,33 @@ async fn process_feed_frame(
         }))?;
     }
     for message in &feed.messages {
+        let resume_disposition = feed_resume
+            .as_mut()
+            .map(|resume| resume.observe(message.sequence_number));
+        if resume_disposition == Some(FeedResumeDisposition::Replay) {
+            *feed_replayed_messages = feed_replayed_messages.saturating_add(1);
+            continue;
+        }
+        if let Some(disposition) = resume_disposition {
+            let Some(resume) = feed_resume.take() else {
+                bail!("feed resume state disappeared while processing a sequence");
+            };
+            let outcome = if disposition == FeedResumeDisposition::Exact {
+                "exact"
+            } else {
+                *feed_resume_forward_gaps = feed_resume_forward_gaps.saturating_add(1);
+                "forward_gap"
+            };
+            emit(json!({
+                "record_type": "runtime_feed_resume",
+                "reconnect": resume.reconnect,
+                "requested_sequence_number": resume.requested_sequence,
+                "first_processed_sequence_number": message.sequence_number,
+                "replayed_messages_skipped": resume.replayed_messages,
+                "outcome": outcome,
+                "broadcast": args.broadcast,
+            }))?;
+        }
         let sequence = sequences.observe(message.sequence_number);
         let boundary = FeedBoundary {
             l1_block_number: message.message.message.header.block_number,
@@ -1307,14 +1464,76 @@ async fn drain_paper_pending(
     }
 }
 
-async fn next_feed_frame(
-    read: &mut SplitStream<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>>,
-    deadline: Instant,
-) -> Result<Option<Message>> {
+async fn next_feed_frame(read: &mut FeedRead, deadline: Instant) -> Result<Option<Message>> {
     match tokio::time::timeout_at(deadline.into(), read.next()).await {
         Ok(Some(frame)) => frame.map(Some).context("read Robinhood feed"),
         Ok(None) | Err(_) => Ok(None),
     }
+}
+
+async fn reconnect_feed(
+    feed_url: &str,
+    deadline: Instant,
+    reconnect: u64,
+    requested_sequence: u64,
+    disconnect_reason: &str,
+    broadcast: bool,
+) -> Result<Option<FeedRead>> {
+    emit(json!({
+        "record_type": "runtime_feed_disconnected",
+        "reconnect": reconnect,
+        "requested_sequence_number": requested_sequence,
+        "reason": disconnect_reason,
+        "broadcast": broadcast,
+    }))?;
+    let mut backoff = FEED_RECONNECT_INITIAL_BACKOFF;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        tokio::time::sleep(backoff.min(deadline.saturating_duration_since(now))).await;
+        let request = feed_request(feed_url, requested_sequence)?;
+        match tokio::time::timeout_at(deadline.into(), tokio_tungstenite::connect_async(request))
+            .await
+        {
+            Ok(Ok((stream, _))) => {
+                emit(json!({
+                    "record_type": "runtime_feed_reconnected",
+                    "reconnect": reconnect,
+                    "requested_sequence_number": requested_sequence,
+                    "broadcast": broadcast,
+                }))?;
+                return Ok(Some(stream.split().1));
+            }
+            Ok(Err(error)) => {
+                emit(json!({
+                    "record_type": "runtime_feed_reconnect_error",
+                    "reconnect": reconnect,
+                    "error": error.to_string(),
+                    "broadcast": broadcast,
+                }))?;
+                backoff = (backoff * 2).min(FEED_RECONNECT_MAX_BACKOFF);
+            }
+            Err(_) => return Ok(None),
+        }
+    }
+}
+
+fn feed_request(feed_url: &str, requested_sequence: u64) -> Result<Request<()>> {
+    let mut request = feed_url
+        .into_client_request()
+        .context("build Robinhood Nitro feed request")?;
+    request.headers_mut().insert(
+        NITRO_FEED_CLIENT_VERSION_HEADER,
+        HeaderValue::from_static(NITRO_FEED_CLIENT_VERSION),
+    );
+    request.headers_mut().insert(
+        NITRO_REQUESTED_SEQUENCE_HEADER,
+        HeaderValue::from_str(&requested_sequence.to_string())
+            .context("encode requested Nitro feed sequence")?,
+    );
+    Ok(request)
 }
 
 async fn signed_preflight(
@@ -1461,6 +1680,101 @@ mod tests {
         ])
         .unwrap();
         assert!(validate_args(&args).is_err());
+    }
+
+    #[test]
+    fn completion_reason_distinguishes_deadline_and_signal_shutdown() {
+        assert_eq!(completion_reason(true, false), "duration_complete");
+        assert_eq!(
+            completion_reason(false, false),
+            "duration_complete_launch_disabled"
+        );
+        assert_eq!(completion_reason(true, true), "shutdown_signal");
+        assert_eq!(
+            completion_reason(false, true),
+            "shutdown_signal_launch_disabled"
+        );
+    }
+
+    #[test]
+    fn feed_request_uses_the_official_nitro_resume_headers() {
+        let request = feed_request("wss://feed.mainnet.chain.robinhood.com", 8_859_765).unwrap();
+        assert_eq!(
+            request.headers()[NITRO_FEED_CLIENT_VERSION_HEADER],
+            NITRO_FEED_CLIENT_VERSION
+        );
+        assert_eq!(
+            request.headers()[NITRO_REQUESTED_SEQUENCE_HEADER],
+            "8859765"
+        );
+    }
+
+    #[test]
+    fn feed_request_rejects_an_invalid_websocket_url() {
+        assert!(feed_request("not a websocket URL", 1).is_err());
+    }
+
+    #[test]
+    fn feed_resume_skips_replay_then_accepts_the_exact_requested_sequence() {
+        let mut resume = FeedResume {
+            reconnect: 1,
+            requested_sequence: 100,
+            replayed_messages: 0,
+        };
+        assert_eq!(resume.observe(98), FeedResumeDisposition::Replay);
+        assert_eq!(resume.observe(99), FeedResumeDisposition::Replay);
+        assert_eq!(resume.replayed_messages, 2);
+        assert_eq!(resume.observe(100), FeedResumeDisposition::Exact);
+    }
+
+    #[test]
+    fn feed_resume_reports_a_forward_gap() {
+        let mut resume = FeedResume {
+            reconnect: 1,
+            requested_sequence: 100,
+            replayed_messages: 0,
+        };
+        assert_eq!(resume.observe(101), FeedResumeDisposition::ForwardGap);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reconnect_handshake_sends_the_requested_sequence_to_the_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (header_sender, header_receiver) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut header_sender = Some(header_sender);
+            let websocket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                move |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                      response| {
+                    let requested = request.headers()[NITRO_REQUESTED_SEQUENCE_HEADER]
+                        .to_str()
+                        .unwrap()
+                        .to_owned();
+                    header_sender.take().unwrap().send(requested).unwrap();
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            drop(websocket);
+        });
+
+        let read = reconnect_feed(
+            &url,
+            Instant::now() + Duration::from_secs(2),
+            1,
+            42_424,
+            "test disconnect",
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(read.is_some());
+        assert_eq!(header_receiver.await.unwrap(), "42424");
+        server.await.unwrap();
     }
 
     #[test]

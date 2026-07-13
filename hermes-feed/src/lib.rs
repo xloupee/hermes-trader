@@ -57,7 +57,7 @@ pub use noxa_predict::{
 };
 pub use noxa_rpc::{
     FactoryStatus, NoxaReceipt, NoxaRpcClient, ObservedLaunchLog, RobinhoodBlock,
-    RobinhoodTransaction, RpcMetricsSnapshot, TokenRestrictionSnapshot,
+    RobinhoodTransaction, RpcMetricsSnapshot, TokenRestrictionSnapshot, V3PoolSnapshot,
 };
 pub use noxa_trade::{
     ApprovalTransactionPlan, PreparedRawTransaction, TradePlanError, TradeTransactionPlan,
@@ -81,8 +81,12 @@ pub use signer::{KeystoreTradeSigner, SignerLoadError, TradeSigner};
 pub use testnet_orchestrator::{
     CanaryError, ConditionalRetryDecision, ConditionalRetryState, DedicatedNonceManager,
     NonceError, NonceLease, NonceLeaseState, PreflightError, RiskError, RiskLedger, RiskLimits,
-    RiskReservation, RiskStatus, TestnetCanaryPlan, TradePreflightInput, ValidatedTestnetCanary,
-    evaluate_testnet_preflight, validate_signed_testnet_canary,
+    RiskReservation, RiskStatus, RoundTripReconciliationError, RoundTripStepError,
+    TestnetCanaryPlan, TestnetRoundTripAccountState, TestnetRoundTripExpectation,
+    TestnetRoundTripReconciliation, TestnetRoundTripReconciliationInput, TestnetRoundTripStepKind,
+    TradePreflightInput, ValidatedTestnetCanary, ValidatedTestnetRoundTripStep,
+    evaluate_testnet_preflight, reconcile_testnet_round_trip_step, validate_signed_testnet_canary,
+    validate_signed_testnet_round_trip_step,
 };
 pub use trading_runtime::{
     SignedBoundaryRelease, SignedPendingKind, SignedPosition, SignedRuntimeError,

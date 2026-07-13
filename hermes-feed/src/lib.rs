@@ -2,6 +2,7 @@ pub mod cache;
 pub mod decoder;
 pub mod feed;
 pub mod hot_path;
+mod hot_path_safety;
 pub mod noxa_abi;
 pub mod noxa_launch;
 pub mod noxa_policy;

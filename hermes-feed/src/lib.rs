@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod decoder;
 pub mod feed;
+pub mod hot_path;
 pub mod noxa_abi;
 pub mod noxa_launch;
 pub mod noxa_policy;
@@ -20,6 +21,10 @@ pub use cache::{CacheApplyReport, CacheCheckpoint, CacheError, ConfirmedReserveC
 pub use decoder::{
     Candidate, DecodeError, DecodeReport, FeedDecoder, Filter, TransactionContext,
     TransactionFingerprint,
+};
+pub use hot_path::{
+    HotPathError, HotPathExecutor, HotPathReport, HotPathStrategy, HotTransaction,
+    ReconciliationJob, SubmissionResult,
 };
 pub use noxa_abi::{
     NoxaLaunchEvent, NoxaLaunchHeader, NoxaLaunchIntent, ReceiptLog, V3ExactInputIntent,

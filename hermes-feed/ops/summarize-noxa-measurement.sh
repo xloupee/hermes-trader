@@ -42,6 +42,14 @@ jq -n \
     if ($values | length) == 0 then null
     else $values[(((($values | length) * $percent / 100) | ceil) - 1)]
     end;
+  def distribution($values): {
+    samples: ($values | length),
+    p50_ns: percentile($values; 50),
+    p95_ns: percentile($values; 95),
+    p99_ns: percentile($values; 99),
+    min_ns: ($values | first // null),
+    max_ns: ($values | last // null)
+  };
   ($events | map(select(.record_type == "noxa_feed_health"))) as $health |
   ($health | first // {}) as $first_health |
   ($health | last // {}) as $last_health |
@@ -52,6 +60,8 @@ jq -n \
   ($events | map(select(.record_type == "noxa_receipt_verification_dropped"))) as $verify_dropped |
   (($reverted + $verified) | map(.receipt_visibility_ns) | sort) as $receipt_ns |
   ($boundary | map(select(.record_type == "noxa_boundary_sample") | .head_to_feed_ns) | sort) as $boundary_ns |
+  ($boundary_ns | map(select(. <= 30000000000))) as $prompt_boundary_ns |
+  ($boundary_ns | map(select(. > 30000000000))) as $delayed_boundary_ns |
   ((($factory | map(select(.record_type == "noxa_factory_status")))
     + ($events | map(select(.record_type == "noxa_factory_status_watch"))))) as $statuses |
   {
@@ -97,12 +107,11 @@ jq -n \
       }
     },
     boundary: {
-      samples: ($boundary_ns | length),
-      p50_ns: percentile($boundary_ns; 50),
-      p95_ns: percentile($boundary_ns; 95),
-      p99_ns: percentile($boundary_ns; 99),
-      min_ns: ($boundary_ns | first // null),
-      max_ns: ($boundary_ns | last // null)
+      observable: "parent newHeads arrival to first post-warmup feed message carrying the same L1 header number",
+      caveat: "This is not pure network latency: an idle or delayed L2 message can first carry an older L1 header much later.",
+      all_samples: distribution($boundary_ns),
+      prompt_at_most_30s: distribution($prompt_boundary_ns),
+      delayed_over_30s: distribution($delayed_boundary_ns)
     },
     rpc: ($last_health.rpc // null),
     factory: {

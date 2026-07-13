@@ -39,6 +39,12 @@ if [[ -n "$COMPLETED_UTC" ]]; then
 else
   readonly WALL_DURATION_SECONDS=0
 fi
+readonly WINDOW_START_NS="$((STARTED_EPOCH * 1000000000))"
+if [[ -n "$COMPLETED_UTC" ]]; then
+  readonly WINDOW_END_NS="$((COMPLETED_EPOCH * 1000000000))"
+else
+  readonly WINDOW_END_NS="$(( $(date +%s) * 1000000000 ))"
+fi
 
 for file in "$EVENTS" "$BOUNDARY" "$FACTORY_STATUS"; do
   [[ -f "$file" ]] || {
@@ -47,7 +53,8 @@ for file in "$EVENTS" "$BOUNDARY" "$FACTORY_STATUS"; do
   }
 done
 readonly BINARY_SHA256="$(awk 'NR == 1 {print $1}' "$RUN_DIR/binary.sha256")"
-readonly EVENTS_SHA256="$(sha256sum "$EVENTS" | awk '{print $1}')"
+readonly EVENTS_PREFIX_BYTES="$(stat --format='%s' "$EVENTS")"
+readonly EVENTS_SHA256="$(head --bytes="$EVENTS_PREFIX_BYTES" "$EVENTS" | sha256sum | awk '{print $1}')"
 readonly BOUNDARY_SHA256="$(sha256sum "$BOUNDARY" | awk '{print $1}')"
 readonly FACTORY_STATUS_SHA256="$(sha256sum "$FACTORY_STATUS" | awk '{print $1}')"
 if [[ -f "$MEASUREMENT_RESTARTS" ]]; then
@@ -80,8 +87,11 @@ jq -n \
   --arg completed_utc "$COMPLETED_UTC" \
   --argjson requested_duration_seconds "$REQUESTED_DURATION_SECONDS" \
   --argjson wall_duration_seconds "$WALL_DURATION_SECONDS" \
+  --argjson window_start_ns "$WINDOW_START_NS" \
+  --argjson window_end_ns "$WINDOW_END_NS" \
   --arg binary_sha256 "$BINARY_SHA256" \
   --arg events_sha256 "$EVENTS_SHA256" \
+  --argjson events_prefix_bytes "$EVENTS_PREFIX_BYTES" \
   --arg boundary_sha256 "$BOUNDARY_SHA256" \
   --arg factory_status_sha256 "$FACTORY_STATUS_SHA256" \
   --argjson boundary_runs "$BOUNDARY_RUNS" \
@@ -108,6 +118,23 @@ jq -n \
     min_ns: ($values | first // null),
     max_ns: ($values | last // null)
   };
+  ($events
+    | map(select(
+        (.received_unix_ns? != null)
+        and (.received_unix_ns >= $window_start_ns)
+        and (.received_unix_ns <= $window_end_ns)
+      ))) as $timestamped_events |
+  ($timestamped_events
+    | map(select(.record_type == "noxa_factory_call_observed") | .tx_hash)) as $window_tx_hashes |
+  ($events
+    | map(select(
+        ((.received_unix_ns? != null)
+          and (.received_unix_ns >= $window_start_ns)
+          and (.received_unix_ns <= $window_end_ns))
+        or ((.received_unix_ns? == null)
+          and (.tx_hash? != null)
+          and (.tx_hash as $hash | $window_tx_hashes | index($hash) != null))
+      ))) as $events |
   ($events | map(select(.record_type == "noxa_feed_health"))) as $health |
   ($health | first // {}) as $first_health |
   ($health | last // {}) as $last_health |
@@ -138,7 +165,10 @@ jq -n \
     },
     provenance: {
       binary_sha256: $binary_sha256,
-      observer_events_sha256: $events_sha256,
+      observer_journal_prefix_bytes: $events_prefix_bytes,
+      observer_journal_prefix_sha256: $events_sha256,
+      observer_statistics_window_start_unix_ns: $window_start_ns,
+      observer_statistics_window_end_unix_ns: $window_end_ns,
       boundary_sha256: $boundary_sha256,
       factory_status_sha256: $factory_status_sha256
     },
@@ -168,10 +198,11 @@ jq -n \
         then ($last_health.received_unix_ns - $first_health.received_unix_ns)
         else null end
       ),
+      first_health_sequence: ($first_health.sequence.last // null),
       sequence_rate_per_second: (
         if ($first_health.received_unix_ns and $last_health.received_unix_ns)
           and ($last_health.received_unix_ns > $first_health.received_unix_ns)
-        then (($last_health.sequence.last - $first_health.sequence.first + 1) * 1000000000
+        then (($last_health.sequence.last - $first_health.sequence.last) * 1000000000
           / ($last_health.received_unix_ns - $first_health.received_unix_ns))
         else null end
       ),
@@ -208,12 +239,20 @@ jq -n \
       last: ($statuses | last // null),
       runtime_hash_mismatches: ($statuses | map(select(.runtime_hash_matches_pin != true)) | length)
     },
-    connections: (
-      $events
-      | map(select(.record_type == "noxa_connection") | .state)
-      | sort
-      | group_by(.)
-      | map({key: .[0], value: length})
-      | from_entries
-    )
+    connections: {
+      events: ($events | map(select(.record_type == "noxa_connection")) | length),
+      disconnects: (
+        $events
+        | map(select(.record_type == "noxa_connection" and .state != "connected"))
+        | length
+      ),
+      by_state: (
+        $events
+        | map(select(.record_type == "noxa_connection") | .state)
+        | sort
+        | group_by(.)
+        | map({key: .[0], value: length})
+        | from_entries
+      )
+    }
   }'

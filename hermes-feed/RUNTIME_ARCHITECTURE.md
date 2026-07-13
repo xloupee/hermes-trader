@@ -31,22 +31,30 @@ background work.
 
 `hermes-noxa-runtime --strategy copy` reuses the same Nitro decoder, boundary
 gate, nonce lease, risk ledger, signer, sequencer client, and receipt
-reconciliation path. It is deliberately opt-in and requires repeatable
-`--watch-wallet` and `--copy-token` allowlists. Startup rejects an allowlisted
-token unless its bytecode, token-reported NOXA factory/pair/pool/fee, V3 pool
-identity, and non-zero liquidity all match the pinned deployment.
+reconciliation path. It is deliberately opt-in and requires leaders supplied
+with repeatable `--watch-wallet` flags or a private `--watch-wallet-file`.
+`--copy-token` remains an optional startup bootstrap, but is no longer required.
+Unknown tokens are suppressed, validated asynchronously at one pinned L2 block,
+and admitted only after their bytecode, token-reported NOXA factory/pair/pool/fee,
+canonical CREATE2 V3 pool identity, pool bytecode, and non-zero liquidity match.
+Verified launch receipts populate the same pool-bound registry without waiting
+for a later manual token-list update.
 
-The copy hot path considers only canonical `SwapRouter02.exactInputSingle`
-transactions signed by a watched wallet. It rejects redirected recipients,
-native value, non-WETH pairs, wrong pool fees, non-zero price limits, zero
-limits, unlisted tokens, and non-Robinhood transaction chain IDs. Entry size is
+The copy hot path considers canonical `SwapRouter02.exactInputSingle` calls and
+strict single-leg `0x4d819a2a` Robinhood aggregator calls signed by a watched
+wallet. Aggregator native-ETH buys are normalized to WETH input and token sells
+to WETH output. The follower always submits through the pinned SwapRouter02,
+never the upgradeable aggregator. Redirected recipients, inconsistent native
+value flags, multi-leg or extended aggregator routes, non-WETH pairs, wrong
+pool addresses or fees, non-zero direct-router price limits, zero limits,
+unvalidated tokens, and non-Robinhood transaction chain IDs are rejected. Entry size is
 the follower's independent fixed cap, never the leader's size. The follower's
 minimum output preserves the leader's calldata limit price proportionally. An
 exit is admitted only for the matching reconciled follower position and sells
 that complete position at the leader's proportional minimum price.
 Filtering is ordered for minimum work: router address, four-byte selector,
 signer recovery, watched-wallet membership, then strict full ABI decoding.
-Unwatched router traffic never pays the full V3 decode cost.
+Unwatched router or aggregator traffic never pays the full ABI decode cost.
 
 This fastest path intentionally does not add an RPC quote before signing. Paper
 mode records that the fill basis is the leader's limit-price floor. Signed copy

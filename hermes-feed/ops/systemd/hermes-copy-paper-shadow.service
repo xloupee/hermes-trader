@@ -1,0 +1,24 @@
+[Unit]
+Description=Hermes Robinhood Chain watched-wallet copy paper shadow
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/codex-workspaces/pumpfunnoti/hermes-feed
+ExecStart=/srv/codex-workspaces/pumpfunnoti/hermes-feed/target/release/hermes-noxa-runtime --mode paper --strategy copy --recipient 0xd7A41D7E502F5D63B36Ec59c84F59A3eFA6B99a0 --watch-wallet-file /srv/codex-workspaces/pumpfunnoti/.runtime/hermes-copy/watch-wallets.txt --run-seconds 1800 --warmup-seconds 5 --copy-max-triggers 100
+Restart=no
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+InaccessiblePaths=/srv/codex-workspaces/hermes-secrets
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=default.target

@@ -91,7 +91,6 @@ impl WatchedWalletCopyPolicy {
         max_triggers: u64,
     ) -> Result<Self, CopyRejectReason> {
         if watched_wallets.is_empty()
-            || allowed_tokens.is_empty()
             || follower_entry_amount == U256::ZERO
             || max_leader_entry_amount == U256::ZERO
             || max_triggers == 0
@@ -123,6 +122,28 @@ impl WatchedWalletCopyPolicy {
         observed: &ObservedCopySwap,
         follower_position: Option<CopyPosition>,
         admitted_triggers: u64,
+    ) -> Result<CopyDecision, CopyRejectReason> {
+        self.evaluate_inner(observed, follower_position, admitted_triggers, false)
+    }
+
+    /// Evaluate a candidate whose token/pool identity was independently
+    /// validated by the runtime registry. This is the path used for tokens
+    /// learned from verified NOXA launch receipts or asynchronous RPC proof.
+    pub fn evaluate_validated(
+        &self,
+        observed: &ObservedCopySwap,
+        follower_position: Option<CopyPosition>,
+        admitted_triggers: u64,
+    ) -> Result<CopyDecision, CopyRejectReason> {
+        self.evaluate_inner(observed, follower_position, admitted_triggers, true)
+    }
+
+    fn evaluate_inner(
+        &self,
+        observed: &ObservedCopySwap,
+        follower_position: Option<CopyPosition>,
+        admitted_triggers: u64,
+        independently_validated_token: bool,
     ) -> Result<CopyDecision, CopyRejectReason> {
         if admitted_triggers >= self.max_triggers {
             return Err(CopyRejectReason::TriggerLimit);
@@ -161,7 +182,7 @@ impl WatchedWalletCopyPolicy {
         } else {
             observed.intent.token_in
         };
-        if !self.allowed_tokens.contains(&token) {
+        if !independently_validated_token && !self.allowed_tokens.contains(&token) {
             return Err(CopyRejectReason::TokenNotAllowed);
         }
 
@@ -364,5 +385,23 @@ mod tests {
             policy().evaluate(&observed(WETH, token(), 1_000, 1), None, 0),
             Err(CopyRejectReason::LimitPrice)
         );
+    }
+
+    #[test]
+    fn independently_validated_tokens_do_not_need_a_static_allowlist() {
+        let policy = WatchedWalletCopyPolicy::new(
+            HashSet::from([leader()]),
+            HashSet::new(),
+            U256::from(100),
+            U256::from(1_000),
+            2,
+        )
+        .unwrap();
+        let candidate = observed(WETH, token(), 200, 500);
+        assert_eq!(
+            policy.evaluate(&candidate, None, 0),
+            Err(CopyRejectReason::TokenNotAllowed)
+        );
+        assert!(policy.evaluate_validated(&candidate, None, 0).is_ok());
     }
 }

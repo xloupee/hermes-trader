@@ -108,11 +108,33 @@ sol! {
         external
         payable
         returns (uint256 amountIn);
+
+    struct AggregatorSwapDescriptor {
+        uint8 dexId;
+        address tokenIn;
+        address tokenOut;
+        address pool;
+        uint24 fee;
+        int24 tickSpacing;
+        address router;
+        bytes data;
+        address callback;
+        bytes32 metadata;
+    }
+
+    function swap(
+        AggregatorSwapDescriptor[] descs,
+        address feeToken,
+        uint256 amountIn,
+        uint256 minReturn,
+        uint256 userFeeRate
+    ) external payable;
 }
 
 pub const LAUNCH_TOKEN_SELECTOR: [u8; 4] = [0x68, 0x63, 0x99, 0xcb];
 pub const EXACT_INPUT_SINGLE_SELECTOR: [u8; 4] = [0x04, 0xe4, 0x5a, 0xaf];
 pub const EXACT_OUTPUT_SINGLE_SELECTOR: [u8; 4] = [0x50, 0x23, 0xb4, 0xdf];
+pub const AGGREGATOR_SWAP_SELECTOR: [u8; 4] = [0x4d, 0x81, 0x9a, 0x2a];
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct NoxaSocials {
@@ -182,6 +204,29 @@ pub struct V3ExactOutputIntent {
     pub amount_out: U256,
     pub amount_in_maximum: U256,
     pub sqrt_price_limit_x96: U256,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AggregatorSwapIntent {
+    pub descriptors: Vec<AggregatorSwapLeg>,
+    pub fee_token: Address,
+    pub amount_in: U256,
+    pub minimum_return: U256,
+    pub user_fee_rate: U256,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AggregatorSwapLeg {
+    pub dex_id: u8,
+    pub token_in: Address,
+    pub token_out: Address,
+    pub pool: Address,
+    pub fee: u32,
+    pub tick_spacing: i32,
+    pub router: Address,
+    pub data: Bytes,
+    pub callback: Address,
+    pub metadata: B256,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -304,6 +349,41 @@ pub fn decode_v3_exact_output_single(input: &[u8]) -> Option<V3ExactOutputIntent
         amount_out: call.params.amountOut,
         amount_in_maximum: call.params.amountInMaximum,
         sqrt_price_limit_x96: U256::from(call.params.sqrtPriceLimitX96),
+    })
+}
+
+pub fn decode_aggregator_swap(input: &[u8]) -> Option<AggregatorSwapIntent> {
+    if input.get(..4)? != AGGREGATOR_SWAP_SELECTOR {
+        return None;
+    }
+    let call = swapCall::abi_decode(input).ok()?;
+    if call.abi_encode().as_slice() != input {
+        return None;
+    }
+    let descriptors = call
+        .descs
+        .into_iter()
+        .map(|leg| {
+            Some(AggregatorSwapLeg {
+                dex_id: leg.dexId,
+                token_in: leg.tokenIn,
+                token_out: leg.tokenOut,
+                pool: leg.pool,
+                fee: u32::try_from(leg.fee).ok()?,
+                tick_spacing: i32::try_from(leg.tickSpacing).ok()?,
+                router: leg.router,
+                data: leg.data,
+                callback: leg.callback,
+                metadata: leg.metadata,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(AggregatorSwapIntent {
+        descriptors,
+        fee_token: call.feeToken,
+        amount_in: call.amountIn,
+        minimum_return: call.minReturn,
+        user_fee_rate: call.userFeeRate,
     })
 }
 
@@ -449,6 +529,7 @@ mod tests {
             exactOutputSingleCall::SELECTOR,
             EXACT_OUTPUT_SINGLE_SELECTOR
         );
+        assert_eq!(swapCall::SELECTOR, AGGREGATOR_SWAP_SELECTOR);
         assert_eq!(
             TokenLaunched::SIGNATURE_HASH,
             b256!("db51ea9ad51ab453a65a4cb7e60c3cb378c9501bb002609f8f97778fb6c4235a")

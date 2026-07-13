@@ -1,6 +1,7 @@
-use std::collections::HashSet;
-use std::fs::File;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
 use std::os::fd::FromRawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -16,8 +17,9 @@ use futures_util::{StreamExt, stream::SplitStream};
 use hermes_feed::feed::BroadcastMessage;
 use hermes_feed::robinhood::{
     DIRECT_FEED_URL, NOXA_DEX_ID_UNISWAP, NOXA_FACTORY_RUNTIME_KECCAK256,
-    NOXA_LAUNCH_CONFIG_ID_WETH, NOXA_LAUNCH_FACTORY, PUBLIC_RPC_URL, TESTNET_RPC_URL,
-    TESTNET_SEQUENCER_URL, UNISWAP_V3_SWAP_ROUTER_02, WETH,
+    NOXA_LAUNCH_CONFIG_ID_WETH, NOXA_LAUNCH_FACTORY, PUBLIC_RPC_URL, ROBINHOOD_SWAP_AGGREGATOR,
+    TESTNET_RPC_URL, TESTNET_SEQUENCER_URL, UNISWAP_V3_FACTORY,
+    UNISWAP_V3_POOL_INIT_CODE_KECCAK256, UNISWAP_V3_SWAP_ROUTER_02, WETH,
 };
 use hermes_feed::{
     ApprovalTransactionPlan, AutomatedPaperRuntime, ConditionalOptions, CopyDecision, CopyPosition,
@@ -27,7 +29,8 @@ use hermes_feed::{
     ReconciliationJob, RiskLimits, SequenceTracker, SequencerClient, SignedPendingKind,
     SignedPosition, SignedTradingRuntime, TradeSigner, TradeTransactionPlan, V3ExactInputIntent,
     WatchedWalletCopyPolicy, decode_launch_call, decode_launch_header,
-    decode_v3_exact_input_single, prepare_predicted_noxa_trade, verify_noxa_factory_call,
+    decode_v3_exact_input_single, normalize_aggregator_copy_swap, predict_v3_pool_address,
+    prepare_predicted_noxa_trade, verify_noxa_factory_call,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -111,7 +114,10 @@ struct Cli {
     /// Repeatable leader address. Required by --strategy copy.
     #[arg(long = "watch-wallet")]
     watched_wallets: Vec<String>,
-    /// Repeatable token allowlist. Required by --strategy copy.
+    /// Local mode-0600 file containing one leader address per line.
+    #[arg(long)]
+    watch_wallet_file: Option<PathBuf>,
+    /// Optional repeatable token bootstrap allowlist. New NOXA tokens are learned dynamically.
     #[arg(long = "copy-token")]
     copy_tokens: Vec<String>,
     #[arg(long, default_value = "1000000000000000000")]
@@ -196,15 +202,61 @@ struct SubmitOutcome {
     report: Result<HotPathReport, String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct CopyTokenValidation {
     token: Address,
     pool: Address,
+    validated_l2_block: u64,
     fee: u32,
     liquidity: u128,
     restriction_end_l1_block: U256,
     token_code_bytes: usize,
     pool_code_bytes: usize,
+}
+
+#[derive(Debug)]
+struct CopyTokenProofMessage {
+    token: Address,
+    advertised_pool: Address,
+    result: Result<CopyTokenValidation, String>,
+}
+
+#[derive(Debug, Default)]
+struct CopyTokenRegistry {
+    validated: HashMap<Address, Address>,
+    pending: HashSet<Address>,
+}
+
+impl CopyTokenRegistry {
+    fn insert(&mut self, validation: CopyTokenValidation) {
+        self.pending.remove(&validation.token);
+        self.validated.insert(validation.token, validation.pool);
+    }
+
+    fn insert_verified_launch(&mut self, token: Address, pool: Address) {
+        self.pending.remove(&token);
+        self.validated.insert(token, pool);
+    }
+
+    fn begin_validation(&mut self, token: Address) -> bool {
+        !self.validated.contains_key(&token) && self.pending.insert(token)
+    }
+
+    fn finish_failed_validation(&mut self, token: Address) {
+        self.pending.remove(&token);
+    }
+
+    fn contains(&self, token: Address, pool: Address) -> bool {
+        self.validated
+            .get(&token)
+            .is_some_and(|validated_pool| *validated_pool == pool)
+    }
+}
+
+#[derive(Debug)]
+struct ObservedCopyCandidate {
+    swap: ObservedCopySwap,
+    pool: Address,
 }
 
 #[derive(Debug, Serialize)]
@@ -241,7 +293,7 @@ async fn main() -> Result<()> {
     let copy_policy = match args.strategy {
         StrategyMode::Launch => None,
         StrategyMode::Copy => Some(WatchedWalletCopyPolicy::new(
-            parse_address_set(&args.watched_wallets, "--watch-wallet")?,
+            load_watched_wallets(&args)?,
             parse_address_set(&args.copy_tokens, "--copy-token")?,
             amount_in,
             parse_u256(&args.copy_max_leader_entry_amount)?,
@@ -264,7 +316,11 @@ async fn main() -> Result<()> {
     if status.runtime_keccak256 != NOXA_FACTORY_RUNTIME_KECCAK256 {
         bail!("NOXA factory runtime hash does not match the pinned implementation");
     }
-    if args.mode == RuntimeMode::Signed && args.broadcast && !status.launch_enabled {
+    if args.mode == RuntimeMode::Signed
+        && args.broadcast
+        && args.strategy == StrategyMode::Launch
+        && !status.launch_enabled
+    {
         bail!(
             "signed broadcast is disabled while the pinned NOXA factory reports launchEnabled=false"
         );
@@ -304,6 +360,10 @@ async fn main() -> Result<()> {
         Some(policy) => validate_copy_token_allowlist(&rpc, policy, status.pinned_l2_block).await?,
         None => Vec::new(),
     };
+    let mut copy_token_registry = CopyTokenRegistry::default();
+    for validation in copy_token_validation.iter().cloned() {
+        copy_token_registry.insert(validation);
+    }
 
     let (reconciliation_sender, reconciliation_receiver) =
         sync_channel::<ReconciliationJob>(RECONCILIATION_QUEUE_CAPACITY);
@@ -388,7 +448,8 @@ async fn main() -> Result<()> {
         "launch_enabled": status.launch_enabled,
         "copy_policy": copy_policy.as_ref().map(|policy| json!({
             "watched_wallets": policy.watched_wallets().len(),
-            "allowed_tokens": policy.allowed_tokens().len(),
+            "bootstrap_tokens": policy.allowed_tokens().len(),
+            "dynamic_token_validation": true,
             "max_triggers": args.copy_max_triggers,
             "max_leader_entry_amount": args.copy_max_leader_entry_amount,
             "follower_entry_amount": amount_in,
@@ -423,6 +484,8 @@ async fn main() -> Result<()> {
     let mut copy_triggers = 0_u64;
     let verifier_slots = Arc::new(Semaphore::new(16));
     let (proof_sender, mut proof_receiver) = mpsc::channel::<LaunchProofMessage>(32);
+    let (copy_token_proof_sender, mut copy_token_proof_receiver) =
+        mpsc::channel::<CopyTokenProofMessage>(32);
     let (paper_fill_sender, mut paper_fill_receiver) = mpsc::channel::<PaperFill>(8);
     let (submit_sender, mut submit_receiver) = mpsc::channel::<SubmitOutcome>(8);
     let (reconcile_sender, mut reconcile_receiver) = mpsc::channel::<ReconciliationOutcome>(8);
@@ -460,7 +523,12 @@ async fn main() -> Result<()> {
                 handle_paper_fill(&mut engine, fill)?;
             }
             Some(proof) = proof_receiver.recv() => {
-                handle_launch_proof(proof)?;
+                if let Some((token, pool)) = handle_launch_proof(proof)? {
+                    copy_token_registry.insert_verified_launch(token, pool);
+                }
+            }
+            Some(proof) = copy_token_proof_receiver.recv() => {
+                handle_copy_token_proof(&mut copy_token_registry, proof)?;
             }
             Some(job) = job_receiver.recv() => {
                 let rpc = rpc.clone();
@@ -488,6 +556,7 @@ async fn main() -> Result<()> {
                             &rpc,
                             &predictor,
                             copy_policy.as_ref(),
+                            &mut copy_token_registry,
                             &mut copy_triggers,
                             status.launch_enabled,
                             factory_owner,
@@ -499,6 +568,7 @@ async fn main() -> Result<()> {
                             max_priority_fee_per_gas,
                             &verifier_slots,
                             &proof_sender,
+                            &copy_token_proof_sender,
                             &mut engine,
                             &paper_fill_sender,
                             &submit_sender,
@@ -704,6 +774,7 @@ async fn process_feed_frame(
     rpc: &NoxaRpcClient,
     predictor: &Arc<NoxaPredictor>,
     copy_policy: Option<&WatchedWalletCopyPolicy>,
+    copy_token_registry: &mut CopyTokenRegistry,
     copy_triggers: &mut u64,
     launch_enabled: bool,
     factory_owner: Address,
@@ -715,6 +786,7 @@ async fn process_feed_frame(
     max_priority_fee_per_gas: u128,
     verifier_slots: &Arc<Semaphore>,
     proof_sender: &mpsc::Sender<LaunchProofMessage>,
+    copy_token_proof_sender: &mpsc::Sender<CopyTokenProofMessage>,
     engine: &mut Engine,
     paper_fill_sender: &mpsc::Sender<PaperFill>,
     submit_sender: &mpsc::Sender<SubmitOutcome>,
@@ -808,25 +880,44 @@ async fn process_feed_frame(
                     launches.push((*tx.tx_hash(), intent, header));
                 }
             }
-            if args.strategy == StrategyMode::Copy
-                && tx.to() == Some(UNISWAP_V3_SWAP_ROUTER_02)
+            let direct_copy = tx.to() == Some(UNISWAP_V3_SWAP_ROUTER_02)
                 && tx.input().get(..4)
-                    == Some(hermes_feed::noxa_abi::EXACT_INPUT_SINGLE_SELECTOR.as_slice())
-            {
+                    == Some(hermes_feed::noxa_abi::EXACT_INPUT_SINGLE_SELECTOR.as_slice());
+            let aggregator_copy = tx.to() == Some(ROBINHOOD_SWAP_AGGREGATOR)
+                && tx.input().get(..4)
+                    == Some(hermes_feed::noxa_abi::AGGREGATOR_SWAP_SELECTOR.as_slice());
+            if args.strategy == StrategyMode::Copy && (direct_copy || aggregator_copy) {
                 match tx.recover_signer() {
                     Ok(from)
                         if copy_policy
                             .is_some_and(|policy| policy.watched_wallets().contains(&from)) =>
                     {
-                        match decode_v3_exact_input_single(tx.input()) {
-                            Some(intent) => copy_swaps.push(ObservedCopySwap {
-                                tx_hash: *tx.tx_hash(),
-                                chain_id: tx.chain_id(),
-                                from,
-                                to: UNISWAP_V3_SWAP_ROUTER_02,
-                                value: tx.value(),
-                                intent,
-                            }),
+                        let normalized = if direct_copy {
+                            decode_v3_exact_input_single(tx.input()).and_then(|intent| {
+                                let token = copy_token(&intent)?;
+                                Some((intent, expected_noxa_pool(token), tx.value()))
+                            })
+                        } else {
+                            normalize_aggregator_copy_swap(tx.input(), tx.value(), from)
+                                .ok()
+                                .map(|normalized| (normalized.intent, normalized.pool, U256::ZERO))
+                        };
+                        match normalized {
+                            Some((intent, pool, normalized_value)) => {
+                                copy_swaps.push(ObservedCopyCandidate {
+                                    swap: ObservedCopySwap {
+                                        tx_hash: *tx.tx_hash(),
+                                        chain_id: tx.chain_id(),
+                                        from,
+                                        // The follower always uses the pinned direct router. Aggregator
+                                        // native-value semantics were checked during normalization.
+                                        to: UNISWAP_V3_SWAP_ROUTER_02,
+                                        value: normalized_value,
+                                        intent,
+                                    },
+                                    pool,
+                                })
+                            }
                             None => malformed_watched_copy_swaps.push((*tx.tx_hash(), from)),
                         }
                     }
@@ -843,7 +934,7 @@ async fn process_feed_frame(
                 "record_type": "runtime_copy_candidate_rejected",
                 "source_tx_hash": tx_hash,
                 "leader": leader,
-                "reason": "watched exactInputSingle calldata is not canonical",
+                "reason": "watched swap calldata is not a supported canonical NOXA route",
             }))?;
         }
         if *predictor_cache_revalidated && let Some(tx_hash) = non_launch_factory_transaction {
@@ -854,9 +945,6 @@ async fn process_feed_frame(
         let emission_enabled = connected_at.elapsed() >= Duration::from_secs(args.warmup_seconds)
             && sequence.is_contiguous();
         for (tx_hash, intent, header) in launches {
-            if args.strategy != StrategyMode::Launch {
-                continue;
-            }
             if !emission_enabled {
                 emit(json!({
                     "record_type": "runtime_candidate_suppressed",
@@ -887,32 +975,34 @@ async fn process_feed_frame(
                     continue;
                 }
             };
-            let quote = match predicted.quote_entry(predictor.launch_config().pair_token, amount_in)
-            {
-                Ok(quote) => quote,
-                Err(error) => {
-                    emit(json!({
-                        "record_type": "runtime_candidate_rejected",
-                        "tx_hash": tx_hash,
-                        "reason": error.to_string(),
-                        "stage": "receipt_free_quote",
-                    }))?;
-                    continue;
-                }
-            };
-            handle_predicted_candidate(
-                engine,
-                tx_hash,
-                &predicted,
-                quote.amount_out,
-                boundary,
-                recipient,
-                amount_in,
-                max_fee_per_gas,
-                max_priority_fee_per_gas,
-                args,
-                prediction_started,
-            )?;
+            if args.strategy == StrategyMode::Launch {
+                let quote =
+                    match predicted.quote_entry(predictor.launch_config().pair_token, amount_in) {
+                        Ok(quote) => quote,
+                        Err(error) => {
+                            emit(json!({
+                                "record_type": "runtime_candidate_rejected",
+                                "tx_hash": tx_hash,
+                                "reason": error.to_string(),
+                                "stage": "receipt_free_quote",
+                            }))?;
+                            continue;
+                        }
+                    };
+                handle_predicted_candidate(
+                    engine,
+                    tx_hash,
+                    &predicted,
+                    quote.amount_out,
+                    boundary,
+                    recipient,
+                    amount_in,
+                    max_fee_per_gas,
+                    max_priority_fee_per_gas,
+                    args,
+                    prediction_started,
+                )?;
+            }
 
             let Ok(permit) = verifier_slots.clone().try_acquire_owned() else {
                 emit(json!({
@@ -962,11 +1052,13 @@ async fn process_feed_frame(
                 "l1_block_number": boundary.l1_block_number,
                 "predicted_token": predicted.token,
                 "predicted_pool": predicted.pool,
-                "prediction_and_arm_ns": prediction_started.elapsed().as_nanos(),
+                "prediction_and_optional_arm_ns": prediction_started.elapsed().as_nanos(),
+                "candidate_armed": args.strategy == StrategyMode::Launch,
                 "receipt_verified": false,
             }))?;
         }
-        for observed in copy_swaps {
+        for candidate in copy_swaps {
+            let observed = candidate.swap;
             if !emission_enabled {
                 emit(json!({
                     "record_type": "runtime_copy_candidate_suppressed",
@@ -975,11 +1067,34 @@ async fn process_feed_frame(
                 }))?;
                 continue;
             }
-            if !launch_enabled {
+            let Some(token) = copy_token(&observed.intent) else {
+                continue;
+            };
+            if !copy_token_registry.contains(token, candidate.pool) {
+                if copy_token_registry.begin_validation(token) {
+                    let rpc = rpc.clone();
+                    let sender = copy_token_proof_sender.clone();
+                    let advertised_pool = candidate.pool;
+                    tasks.spawn(async move {
+                        let result = validate_dynamic_copy_token(&rpc, token, advertised_pool)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = sender
+                            .send(CopyTokenProofMessage {
+                                token,
+                                advertised_pool,
+                                result,
+                            })
+                            .await;
+                        Ok(())
+                    });
+                }
                 emit(json!({
                     "record_type": "runtime_copy_candidate_suppressed",
                     "source_tx_hash": observed.tx_hash,
-                    "reason": "factory_disabled_at_pinned_startup",
+                    "token": token,
+                    "pool": candidate.pool,
+                    "reason": "dynamic_noxa_validation_pending",
                 }))?;
                 continue;
             }
@@ -1141,7 +1256,7 @@ fn handle_copy_candidate(
                 })
         }
     };
-    let decision = match policy.evaluate(&observed, follower_position, *copy_triggers) {
+    let decision = match policy.evaluate_validated(&observed, follower_position, *copy_triggers) {
         Ok(decision) => decision,
         Err(reason) => {
             return emit(json!({
@@ -1344,7 +1459,7 @@ fn emit_copy_runtime_rejection(observed: ObservedCopySwap, reason: String) -> Re
     }))
 }
 
-fn handle_launch_proof(message: LaunchProofMessage) -> Result<()> {
+fn handle_launch_proof(message: LaunchProofMessage) -> Result<Option<(Address, Address)>> {
     match message.result {
         Ok(NoxaVerificationOutcome::Verified(verified)) => {
             let exact = verified.launch.token == message.predicted_token
@@ -1359,24 +1474,67 @@ fn handle_launch_proof(message: LaunchProofMessage) -> Result<()> {
                 "actual_pool": verified.launch.pool,
                 "receipt_visibility_ns": verified.receipt_visibility_ns,
                 "verification_total_ns": verified.verification_total_ns,
-            }))
+            }))?;
+            Ok(exact.then_some((verified.launch.token, verified.launch.pool)))
         }
         Ok(NoxaVerificationOutcome::Reverted {
             receipt_visibility_ns,
             ..
-        }) => emit(json!({
+        }) => {
+            emit(json!({
             "record_type": "runtime_launch_proof",
             "source_tx_hash": message.source_tx_hash,
             "status": "launch_reverted",
             "receipt_visibility_ns": receipt_visibility_ns,
-        })),
-        Err(error) => emit(json!({
-            "record_type": "runtime_launch_proof",
-            "source_tx_hash": message.source_tx_hash,
-            "status": "proof_error",
-            "error": error,
-        })),
+            }))?;
+            Ok(None)
+        }
+        Err(error) => {
+            emit(json!({
+                "record_type": "runtime_launch_proof",
+                "source_tx_hash": message.source_tx_hash,
+                "status": "proof_error",
+                "error": error,
+            }))?;
+            Ok(None)
+        }
     }
+}
+
+fn handle_copy_token_proof(
+    registry: &mut CopyTokenRegistry,
+    message: CopyTokenProofMessage,
+) -> Result<()> {
+    match message.result {
+        Ok(validation) if validation.pool == message.advertised_pool => {
+            emit(json!({
+                "record_type": "runtime_copy_token_validated",
+                "validation": validation,
+                "source": "pinned_rpc_proof",
+            }))?;
+            registry.insert(validation);
+        }
+        Ok(validation) => {
+            registry.finish_failed_validation(message.token);
+            emit(json!({
+                "record_type": "runtime_copy_token_rejected",
+                "token": message.token,
+                "advertised_pool": message.advertised_pool,
+                "validated_pool": validation.pool,
+                "reason": "pool_mismatch",
+            }))?;
+        }
+        Err(error) => {
+            registry.finish_failed_validation(message.token);
+            emit(json!({
+                "record_type": "runtime_copy_token_rejected",
+                "token": message.token,
+                "advertised_pool": message.advertised_pool,
+                "reason": error,
+            }))?;
+        }
+    }
+    Ok(())
 }
 
 fn handle_boundary(
@@ -2051,47 +2209,97 @@ async fn validate_copy_token_allowlist(
 ) -> Result<Vec<CopyTokenValidation>> {
     let mut validated = Vec::with_capacity(policy.allowed_tokens().len());
     for token in policy.allowed_tokens() {
-        let token_snapshot = rpc
-            .token_restriction_snapshot(*token, pinned_l2_block, None)
-            .await
-            .with_context(|| format!("read allowlisted token metadata for {token}"))?;
-        if token_snapshot.launch_factory != NOXA_LAUNCH_FACTORY
-            || token_snapshot.pair_token != WETH
-            || token_snapshot.pool_fee != hermes_feed::robinhood::NOXA_POOL_FEE
-            || token_snapshot.liquidity_pool == Address::ZERO
-        {
-            bail!("allowlisted token {token} does not report the pinned NOXA deployment");
-        }
-        let pool = token_snapshot.liquidity_pool;
-        let (token_code, pool_code, pool_snapshot) = tokio::try_join!(
-            rpc.code_at_l2_block(*token, pinned_l2_block),
-            rpc.code_at_l2_block(pool, pinned_l2_block),
-            rpc.v3_pool_snapshot(pool),
-        )?;
-        let pair_matches = (pool_snapshot.token0 == WETH && pool_snapshot.token1 == *token)
-            || (pool_snapshot.token0 == *token && pool_snapshot.token1 == WETH);
-        if token_code.is_empty()
-            || pool_code.is_empty()
-            || !pair_matches
-            || pool_snapshot.fee != hermes_feed::robinhood::NOXA_POOL_FEE
-            || pool_snapshot.liquidity == 0
-        {
-            bail!(
-                "allowlisted token {token} has invalid bytecode, pool identity, fee, or liquidity"
-            );
-        }
-        validated.push(CopyTokenValidation {
-            token: *token,
-            pool,
-            fee: pool_snapshot.fee,
-            liquidity: pool_snapshot.liquidity,
-            restriction_end_l1_block: token_snapshot.restriction_end_block,
-            token_code_bytes: token_code.len(),
-            pool_code_bytes: pool_code.len(),
-        });
+        validated.push(
+            validate_copy_token_at(rpc, *token, expected_noxa_pool(*token), pinned_l2_block)
+                .await
+                .with_context(|| format!("validate bootstrap copy token {token}"))?,
+        );
     }
     validated.sort_by_key(|entry| entry.token);
     Ok(validated)
+}
+
+async fn validate_dynamic_copy_token(
+    rpc: &NoxaRpcClient,
+    token: Address,
+    advertised_pool: Address,
+) -> Result<CopyTokenValidation> {
+    if advertised_pool != expected_noxa_pool(token) {
+        bail!("aggregator advertised a non-canonical NOXA pool");
+    }
+    let block = rpc.latest_block().await?;
+    validate_copy_token_at(rpc, token, advertised_pool, block.l2_block_number).await
+}
+
+async fn validate_copy_token_at(
+    rpc: &NoxaRpcClient,
+    token: Address,
+    expected_pool: Address,
+    pinned_l2_block: u64,
+) -> Result<CopyTokenValidation> {
+    let token_snapshot = rpc
+        .token_restriction_snapshot(token, pinned_l2_block, None)
+        .await?;
+    if token_snapshot.launch_factory != NOXA_LAUNCH_FACTORY
+        || token_snapshot.pair_token != WETH
+        || token_snapshot.pool_fee != hermes_feed::robinhood::NOXA_POOL_FEE
+        || token_snapshot.liquidity_pool != expected_pool
+    {
+        bail!("token does not report the pinned NOXA deployment");
+    }
+    let (token_code, pool_code, pool_snapshot) = tokio::try_join!(
+        rpc.code_at_l2_block(token, pinned_l2_block),
+        rpc.code_at_l2_block(expected_pool, pinned_l2_block),
+        rpc.v3_pool_snapshot_at(expected_pool, pinned_l2_block),
+    )?;
+    let pair_matches = (pool_snapshot.token0 == WETH && pool_snapshot.token1 == token)
+        || (pool_snapshot.token0 == token && pool_snapshot.token1 == WETH);
+    if token_code.is_empty()
+        || pool_code.is_empty()
+        || !pair_matches
+        || pool_snapshot.fee != hermes_feed::robinhood::NOXA_POOL_FEE
+        || pool_snapshot.liquidity == 0
+    {
+        bail!("token has invalid bytecode, pool identity, fee, or liquidity");
+    }
+    Ok(CopyTokenValidation {
+        token,
+        pool: expected_pool,
+        validated_l2_block: pinned_l2_block,
+        fee: pool_snapshot.fee,
+        liquidity: pool_snapshot.liquidity,
+        restriction_end_l1_block: token_snapshot.restriction_end_block,
+        token_code_bytes: token_code.len(),
+        pool_code_bytes: pool_code.len(),
+    })
+}
+
+fn copy_token(intent: &V3ExactInputIntent) -> Option<Address> {
+    if intent.token_in == WETH && intent.token_out != Address::ZERO && intent.token_out != WETH {
+        Some(intent.token_out)
+    } else if intent.token_out == WETH
+        && intent.token_in != Address::ZERO
+        && intent.token_in != WETH
+    {
+        Some(intent.token_in)
+    } else {
+        None
+    }
+}
+
+fn expected_noxa_pool(token: Address) -> Address {
+    let (token0, token1) = if token < WETH {
+        (token, WETH)
+    } else {
+        (WETH, token)
+    };
+    predict_v3_pool_address(
+        UNISWAP_V3_FACTORY,
+        token0,
+        token1,
+        hermes_feed::robinhood::NOXA_POOL_FEE,
+        UNISWAP_V3_POOL_INIT_CODE_KECCAK256,
+    )
 }
 
 fn validate_args(args: &Cli) -> Result<()> {
@@ -2108,6 +2316,7 @@ fn validate_args(args: &Cli) -> Result<()> {
     match args.strategy {
         StrategyMode::Launch => {
             if !args.watched_wallets.is_empty()
+                || args.watch_wallet_file.is_some()
                 || !args.copy_tokens.is_empty()
                 || args.copy_trust_leader_limit_price
             {
@@ -2115,8 +2324,8 @@ fn validate_args(args: &Cli) -> Result<()> {
             }
         }
         StrategyMode::Copy => {
-            if args.watched_wallets.is_empty() || args.copy_tokens.is_empty() {
-                bail!("copy strategy requires at least one --watch-wallet and --copy-token");
+            if args.watched_wallets.is_empty() && args.watch_wallet_file.is_none() {
+                bail!("copy strategy requires --watch-wallet or --watch-wallet-file");
             }
             if args.copy_max_triggers == 0 {
                 bail!("copy trigger cap must be non-zero");
@@ -2218,6 +2427,37 @@ fn parse_address_set(values: &[String], flag: &str) -> Result<HashSet<Address>> 
         .collect()
 }
 
+fn load_watched_wallets(args: &Cli) -> Result<HashSet<Address>> {
+    let mut values = args.watched_wallets.clone();
+    if let Some(path) = args.watch_wallet_file.as_deref() {
+        let metadata = fs::symlink_metadata(path)
+            .with_context(|| format!("inspect --watch-wallet-file {}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("--watch-wallet-file must be a regular non-symlink file");
+        }
+        if metadata.permissions().mode() & 0o077 != 0 {
+            bail!("--watch-wallet-file must not be accessible by group or other users");
+        }
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("read --watch-wallet-file {}", path.display()))?;
+        values.extend(
+            contents
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .map(str::to_owned),
+        );
+    }
+    if values.len() > 1_024 {
+        bail!("copy watchlist exceeds 1024 entries");
+    }
+    let watched = parse_address_set(&values, "copy watchlist")?;
+    if watched.is_empty() {
+        bail!("copy watchlist contains no addresses");
+    }
+    Ok(watched)
+}
+
 fn emit(value: serde_json::Value) -> Result<()> {
     println!("{}", serde_json::to_string(&value)?);
     Ok(())
@@ -2251,7 +2491,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_strategy_requires_explicit_leader_and_token_allowlists() {
+    fn copy_strategy_requires_leaders_but_allows_dynamic_tokens() {
         let missing = Cli::try_parse_from([
             "hermes-noxa-runtime",
             "--strategy",
@@ -2282,6 +2522,18 @@ mod tests {
             1
         );
 
+        let dynamic_only = Cli::try_parse_from([
+            "hermes-noxa-runtime",
+            "--strategy",
+            "copy",
+            "--recipient",
+            RECIPIENT,
+            "--watch-wallet",
+            "0x1111111111111111111111111111111111111111",
+        ])
+        .unwrap();
+        assert!(validate_args(&dynamic_only).is_ok());
+
         let launch_with_copy_flags = Cli {
             strategy: StrategyMode::Launch,
             ..configured
@@ -2306,6 +2558,52 @@ mod tests {
         ])
         .unwrap();
         assert!(validate_args(&configured).is_err());
+    }
+
+    #[test]
+    fn dynamic_copy_registry_is_pool_bound_and_deduplicates_proofs() {
+        let token = Address::with_last_byte(0x44);
+        let pool = Address::with_last_byte(0x45);
+        let other_pool = Address::with_last_byte(0x46);
+        let mut registry = CopyTokenRegistry::default();
+        assert!(registry.begin_validation(token));
+        assert!(!registry.begin_validation(token));
+        assert!(!registry.contains(token, pool));
+        registry.insert_verified_launch(token, pool);
+        assert!(registry.contains(token, pool));
+        assert!(!registry.contains(token, other_pool));
+        assert!(!registry.begin_validation(token));
+    }
+
+    #[test]
+    fn local_watchlist_file_is_private_and_deduplicated() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))
+            .unwrap();
+        writeln!(file, "# local strategy watchlist").unwrap();
+        writeln!(file, "0x1111111111111111111111111111111111111111").unwrap();
+        writeln!(file, "0x2222222222222222222222222222222222222222").unwrap();
+        let args = Cli::try_parse_from([
+            "hermes-noxa-runtime",
+            "--strategy",
+            "copy",
+            "--recipient",
+            RECIPIENT,
+            "--watch-wallet",
+            "0x1111111111111111111111111111111111111111",
+            "--watch-wallet-file",
+            file.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(load_watched_wallets(&args).unwrap().len(), 2);
+
+        file.as_file()
+            .set_permissions(fs::Permissions::from_mode(0o640))
+            .unwrap();
+        assert!(load_watched_wallets(&args).is_err());
     }
 
     #[test]

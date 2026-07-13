@@ -11,7 +11,9 @@ The retained user-service templates add a second defense: both make
 shadow service also starts the runtime strictly in `--mode paper`, which refuses
 keystore and broadcast arguments.
 
-The retained paper-shadow template runs one 30-minute session. It does not
+The retained paper-shadow templates run one 30-minute session. The dedicated
+`hermes-copy-paper-shadow.service` reads the mode-0600 local leader file, runs
+strictly in paper copy mode, and cannot access the Hermes secrets directory. They do not
 restart after normal completion or failure, so the observation window cannot
 silently extend. The runtime reconnects transient feed disconnects inside the
 same process with bounded backoff, preserves its original deadline and sequence
@@ -53,6 +55,8 @@ Useful read-only commands after activation:
 ```bash
 systemctl --user status hermes-readiness-monitor.service
 systemctl --user status hermes-paper-shadow.service
+systemctl --user status hermes-copy-paper-shadow.service
 journalctl --user -u hermes-readiness-monitor.service -n 20 --no-pager
 journalctl --user -u hermes-paper-shadow.service -n 20 --no-pager
+journalctl --user -u hermes-copy-paper-shadow.service -n 20 --no-pager
 ```

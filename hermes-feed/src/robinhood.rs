@@ -28,6 +28,10 @@ pub const UNISWAP_V3_SWAP_ROUTER_02: Address =
     alloy_primitives::address!("caf681a66d020601342297493863e78c959e5cb2");
 pub const UNISWAP_UNIVERSAL_ROUTER: Address =
     alloy_primitives::address!("8876789976decbfcbbbe364623c63652db8c0904");
+/// Upgradeable frontend aggregator used by Robinhood Chain wallets. Hermes
+/// observes this address but always submits follower swaps to SwapRouter02.
+pub const ROBINHOOD_SWAP_AGGREGATOR: Address =
+    alloy_primitives::address!("65050a9b7e5075a2ba5ced7b1b64ee66262c40dc");
 
 pub const NOXA_DEX_ID_UNISWAP: u64 = 0;
 pub const NOXA_LAUNCH_CONFIG_ID_WETH: u64 = 0;

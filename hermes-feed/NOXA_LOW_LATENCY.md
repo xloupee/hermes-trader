@@ -441,13 +441,19 @@ updated reconnect path still requires a live run that actually crosses a
 disconnect before promotion.
 
 The runtime also has an explicit watched-wallet policy under `--strategy
-copy`. It requires at least one `--watch-wallet` and one `--copy-token`, verifies
-every token and its active pool at startup, and observes only direct canonical
-V3 single-hop WETH-pair swaps. Follower entries use the independent
+copy`. It requires at least one leader through `--watch-wallet` or a private
+`--watch-wallet-file`; `--copy-token` is now only an optional startup bootstrap.
+Unknown tokens are suppressed and asynchronously proven against pinned NOXA
+token views, bytecode, canonical pool identity, fee, pair, and live liquidity.
+Verified launch receipts populate the same registry. The observer accepts direct
+canonical V3 calls and strict single-leg Robinhood aggregator calls, including
+native-ETH buys and token sells, while follower bytes always target the pinned
+SwapRouter02. Follower entries use the independent
 `--amount-in` cap while preserving the leader's minimum-output price. Follower
 exits use the complete reconciled position and the leader's proportional
-minimum-output price. Redirected recipients, unlisted tokens, unsafe price
-limits, wrong chain/router/fee/pair, excess leader entry size, missing
+minimum-output price. Redirected recipients, unvalidated tokens, unsafe price
+limits, wrong chain/router/pool/fee/pair, extended or multi-leg aggregator calls,
+excess leader entry size, missing
 positions, and sessions above `--copy-max-triggers` fail closed. Signed mode
 creates and reconciles an exact exit allowance after entry, then waits for the
 watched wallet's exit; copy mode refuses the automatic timed-round-trip option.

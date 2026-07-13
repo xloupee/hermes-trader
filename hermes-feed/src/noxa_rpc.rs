@@ -273,15 +273,32 @@ impl NoxaRpcClient {
     }
 
     pub async fn v3_pool_snapshot(&self, pool: Address) -> Result<V3PoolSnapshot> {
+        self.v3_pool_snapshot_at_tag(pool, "latest").await
+    }
+
+    pub async fn v3_pool_snapshot_at(
+        &self,
+        pool: Address,
+        l2_block_number: u64,
+    ) -> Result<V3PoolSnapshot> {
+        self.v3_pool_snapshot_at_tag(pool, &hex_u64(l2_block_number))
+            .await
+    }
+
+    async fn v3_pool_snapshot_at_tag(
+        &self,
+        pool: Address,
+        block_tag: &str,
+    ) -> Result<V3PoolSnapshot> {
         const TOKEN0: [u8; 4] = [0x0d, 0xfe, 0x16, 0x81];
         const TOKEN1: [u8; 4] = [0xd2, 0x12, 0x20, 0xa7];
         const FEE: [u8; 4] = [0xdd, 0xca, 0x3f, 0x43];
         const LIQUIDITY: [u8; 4] = [0x1a, 0x68, 0x65, 0x02];
         let (token0, token1, fee, liquidity) = tokio::try_join!(
-            self.eth_call_data(pool, &TOKEN0, "latest"),
-            self.eth_call_data(pool, &TOKEN1, "latest"),
-            self.eth_call_data(pool, &FEE, "latest"),
-            self.eth_call_data(pool, &LIQUIDITY, "latest"),
+            self.eth_call_data(pool, &TOKEN0, block_tag),
+            self.eth_call_data(pool, &TOKEN1, block_tag),
+            self.eth_call_data(pool, &FEE, block_tag),
+            self.eth_call_data(pool, &LIQUIDITY, block_tag),
         )?;
         Ok(V3PoolSnapshot {
             pool,

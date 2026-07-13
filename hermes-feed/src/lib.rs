@@ -1,5 +1,6 @@
 pub mod boundary_gate;
 pub mod cache;
+pub mod copy_observation;
 pub mod copy_policy;
 pub mod decoder;
 pub mod feed;
@@ -28,6 +29,9 @@ pub mod v3_pool;
 
 pub use boundary_gate::{BoundaryDecision, BoundaryGate, BoundaryGateError, FeedBoundary};
 pub use cache::{CacheApplyReport, CacheCheckpoint, CacheError, ConfirmedReserveCache};
+pub use copy_observation::{
+    AggregatorCopyRejectReason, NormalizedAggregatorSwap, normalize_aggregator_copy_swap,
+};
 pub use copy_policy::{
     CopyDecision, CopyPosition, CopyRejectReason, ObservedCopySwap, WatchedWalletCopyPolicy,
 };
@@ -40,11 +44,11 @@ pub use hot_path::{
     HotTransaction, ReconciliationJob, SubmissionResult,
 };
 pub use noxa_abi::{
-    NoxaLaunchEvent, NoxaLaunchHeader, NoxaLaunchIntent, ReceiptLog, V3ExactInputIntent,
-    V3ExactOutputIntent, V3PoolCreatedEvent, V3PoolEvent, decode_launch_call, decode_launch_header,
-    decode_pool_created, decode_token_launched, decode_v3_exact_input_single,
-    decode_v3_exact_output_single, decode_v3_pool_event, encode_v3_exact_input_single,
-    encode_v3_exact_output_single,
+    AggregatorSwapIntent, AggregatorSwapLeg, NoxaLaunchEvent, NoxaLaunchHeader, NoxaLaunchIntent,
+    ReceiptLog, V3ExactInputIntent, V3ExactOutputIntent, V3PoolCreatedEvent, V3PoolEvent,
+    decode_aggregator_swap, decode_launch_call, decode_launch_header, decode_pool_created,
+    decode_token_launched, decode_v3_exact_input_single, decode_v3_exact_output_single,
+    decode_v3_pool_event, encode_v3_exact_input_single, encode_v3_exact_output_single,
 };
 pub use noxa_candidate::{
     NoxaCandidateError, PredictedNoxaTradeInput, PreparedNoxaTradeCandidate,

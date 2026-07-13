@@ -357,10 +357,25 @@ async fn testnet_submit_canary(args: TestnetSubmitCanaryArgs) -> Result<()> {
         attempts: 0,
         max_boundary_attempts: args.max_boundary_attempts,
     };
+    let submission_started_unix_ns = unix_ns();
+    let submission_started = Instant::now();
+    let mut attempt_elapsed_ns = Vec::new();
     let decision = loop {
-        let response = sequencer
+        let attempt_started = Instant::now();
+        let response = match sequencer
             .submit_conditional(&canary.raw, retry.conditions)
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                attempt_elapsed_ns.push(attempt_started.elapsed().as_nanos());
+                break ConditionalRetryDecision::ReconcileByHash {
+                    tx_hash: canary.hash,
+                    reason: error.to_string(),
+                };
+            }
+        };
+        attempt_elapsed_ns.push(attempt_started.elapsed().as_nanos());
         let decision = retry.on_response(response);
         if matches!(decision, ConditionalRetryDecision::RetrySameBytes) {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -371,7 +386,11 @@ async fn testnet_submit_canary(args: TestnetSubmitCanaryArgs) -> Result<()> {
     write_json(json!({
         "record_type": "noxa_testnet_canary_submission",
         "hash": canary.hash,
-        "attempts": retry.attempts,
+        "classified_attempts": retry.attempts,
+        "network_attempts": attempt_elapsed_ns.len(),
+        "submission_started_unix_ns": submission_started_unix_ns,
+        "submission_elapsed_ns": submission_started.elapsed().as_nanos(),
+        "attempt_elapsed_ns": attempt_elapsed_ns,
         "decision": &decision,
     }))?;
 
@@ -391,6 +410,7 @@ async fn testnet_submit_canary(args: TestnetSubmitCanaryArgs) -> Result<()> {
                 "included": true,
                 "receipt_status": receipt.status,
                 "l2_block_number": receipt.l2_block_number,
+                "submit_to_receipt_ns": submission_started.elapsed().as_nanos(),
                 "risk_status": risk_status,
             }))?;
             return Ok(());
@@ -402,6 +422,7 @@ async fn testnet_submit_canary(args: TestnetSubmitCanaryArgs) -> Result<()> {
                 "hash": canary.hash,
                 "included": false,
                 "known_by_rpc": known,
+                "reconciliation_elapsed_ns": submission_started.elapsed().as_nanos(),
                 "nonce_state": nonces.active(),
                 "risk_reservation": risk.active,
             }))?;

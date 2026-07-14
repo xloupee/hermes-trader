@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::noxa_abi::ReceiptLog;
 use crate::noxa_predict::{
     DEX_CONFIG_SELECTOR, LAUNCH_CONFIG_SELECTOR, NoxaDexConfig, NoxaLaunchConfig, config_call,
-    decode_dex_config, decode_launch_config,
+    decode_active_dex_config, decode_dex_config, decode_launch_config,
 };
 use crate::robinhood::{CHAIN_ID, NOXA_LAUNCH_FACTORY, PUBLIC_RPC_URL};
 
@@ -25,6 +25,32 @@ sol! {
         function restrictionEndBlock() external view returns (uint256);
         function balanceOf(address account) external view returns (uint256);
         function allowance(address owner, address spender) external view returns (uint256);
+    }
+
+    interface IActiveNoxaTokenView {
+        function factory() external view returns (address);
+        function maxWalletAmount() external view returns (uint256);
+        function maxTxAmount() external view returns (uint256);
+        function restrictionsEndBlock() external view returns (uint256);
+    }
+
+    struct ActiveLaunchedToken {
+        address token;
+        address deployer;
+        address feeWallet;
+        address pairToken;
+        address pool;
+        uint256 dexId;
+        uint256 launchConfigId;
+        uint256 positionId;
+        uint256 restrictionsEndBlock;
+        uint256 initialBuyAmount;
+        uint256 createdAtBlock;
+        bool isToken0;
+    }
+
+    interface IActiveNoxaFactoryView {
+        function getLaunchedToken(address token) external view returns (ActiveLaunchedToken memory);
     }
 }
 
@@ -128,6 +154,35 @@ pub struct TokenRestrictionSnapshot {
     pub recipient_balance: Option<U256>,
 }
 
+/// Active N0xa tokens intentionally expose a smaller token-view ABI than the
+/// retired NOXA deployment. Pool identity comes from the audited factory and
+/// canonical V3 CREATE2 calculation, never from token-provided metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ActiveNoxaTokenSnapshot {
+    pub token: Address,
+    pub l2_block_number: u64,
+    pub factory: Address,
+    pub max_wallet_amount: U256,
+    pub max_tx_amount: U256,
+    pub restrictions_end_block: U256,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ActiveNoxaLaunchRecord {
+    pub token: Address,
+    pub deployer: Address,
+    pub fee_wallet: Address,
+    pub pair_token: Address,
+    pub pool: Address,
+    pub dex_id: U256,
+    pub launch_config_id: U256,
+    pub position_id: U256,
+    pub restrictions_end_block: U256,
+    pub initial_buy_amount: U256,
+    pub created_at_block: U256,
+    pub is_token0: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct V3PoolSnapshot {
     pub pool: Address,
@@ -170,6 +225,13 @@ impl NoxaRpcClient {
     }
 
     pub async fn factory_status(&self) -> Result<FactoryStatus> {
+        self.factory_status_for(NOXA_LAUNCH_FACTORY).await
+    }
+
+    /// Read the immutable-at-a-block launch status for an explicitly selected,
+    /// independently pinned factory. This does not make an arbitrary factory
+    /// trusted; callers must separately check its runtime hash and config.
+    pub async fn factory_status_for(&self, factory: Address) -> Result<FactoryStatus> {
         let chain_id = self.chain_id().await?;
         if chain_id != CHAIN_ID {
             bail!("RPC chain ID {chain_id} does not match Robinhood {CHAIN_ID}");
@@ -178,14 +240,14 @@ impl NoxaRpcClient {
         let block_tag = hex_u64(latest);
         let block = self.block_by_number(latest).await?;
         let enabled = self
-            .eth_call(NOXA_LAUNCH_FACTORY, LAUNCH_ENABLED_SELECTOR, &block_tag)
+            .eth_call(factory, LAUNCH_ENABLED_SELECTOR, &block_tag)
             .await?;
         let fee = self
-            .eth_call(NOXA_LAUNCH_FACTORY, LAUNCH_FEE_SELECTOR, &block_tag)
+            .eth_call(factory, LAUNCH_FEE_SELECTOR, &block_tag)
             .await?;
         let code = parse_bytes_value(
             &self
-                .request("eth_getCode", json!([NOXA_LAUNCH_FACTORY, block_tag]))
+                .request("eth_getCode", json!([factory, block_tag]))
                 .await?,
         )?;
         Ok(FactoryStatus {
@@ -240,19 +302,52 @@ impl NoxaRpcClient {
         id: U256,
         l2_block_number: u64,
     ) -> Result<NoxaLaunchConfig> {
+        self.launch_config_at_for(NOXA_LAUNCH_FACTORY, id, l2_block_number)
+            .await
+    }
+
+    pub async fn launch_config_at_for(
+        &self,
+        factory: Address,
+        id: U256,
+        l2_block_number: u64,
+    ) -> Result<NoxaLaunchConfig> {
         let call = config_call(LAUNCH_CONFIG_SELECTOR, id);
         let bytes = self
-            .eth_call_data(NOXA_LAUNCH_FACTORY, &call, &hex_u64(l2_block_number))
+            .eth_call_data(factory, &call, &hex_u64(l2_block_number))
             .await?;
         decode_launch_config(&bytes).map_err(Into::into)
     }
 
     pub async fn dex_config_at(&self, id: U256, l2_block_number: u64) -> Result<NoxaDexConfig> {
+        self.dex_config_at_for(NOXA_LAUNCH_FACTORY, id, l2_block_number)
+            .await
+    }
+
+    pub async fn dex_config_at_for(
+        &self,
+        factory: Address,
+        id: U256,
+        l2_block_number: u64,
+    ) -> Result<NoxaDexConfig> {
         let call = config_call(DEX_CONFIG_SELECTOR, id);
         let bytes = self
-            .eth_call_data(NOXA_LAUNCH_FACTORY, &call, &hex_u64(l2_block_number))
+            .eth_call_data(factory, &call, &hex_u64(l2_block_number))
             .await?;
         decode_dex_config(&bytes).map_err(Into::into)
+    }
+
+    pub async fn active_dex_config_at_for(
+        &self,
+        factory: Address,
+        id: U256,
+        l2_block_number: u64,
+    ) -> Result<NoxaDexConfig> {
+        let call = config_call(DEX_CONFIG_SELECTOR, id);
+        let bytes = self
+            .eth_call_data(factory, &call, &hex_u64(l2_block_number))
+            .await?;
+        decode_active_dex_config(&bytes).map_err(Into::into)
     }
 
     pub async fn erc20_balance(&self, token: Address, account: Address) -> Result<U256> {
@@ -354,23 +449,29 @@ impl NoxaRpcClient {
     }
 
     pub async fn launch_fee_at(&self, l2_block_number: u64) -> Result<U256> {
+        self.launch_fee_at_for(NOXA_LAUNCH_FACTORY, l2_block_number)
+            .await
+    }
+
+    pub async fn launch_fee_at_for(&self, factory: Address, l2_block_number: u64) -> Result<U256> {
         let bytes = self
-            .eth_call(
-                NOXA_LAUNCH_FACTORY,
-                LAUNCH_FEE_SELECTOR,
-                &hex_u64(l2_block_number),
-            )
+            .eth_call(factory, LAUNCH_FEE_SELECTOR, &hex_u64(l2_block_number))
             .await?;
         parse_u256_bytes(&bytes)
     }
 
     pub async fn factory_owner_at(&self, l2_block_number: u64) -> Result<Address> {
+        self.factory_owner_at_for(NOXA_LAUNCH_FACTORY, l2_block_number)
+            .await
+    }
+
+    pub async fn factory_owner_at_for(
+        &self,
+        factory: Address,
+        l2_block_number: u64,
+    ) -> Result<Address> {
         let bytes = self
-            .eth_call(
-                NOXA_LAUNCH_FACTORY,
-                OWNER_SELECTOR,
-                &hex_u64(l2_block_number),
-            )
+            .eth_call(factory, OWNER_SELECTOR, &hex_u64(l2_block_number))
             .await?;
         parse_address_word(&bytes)
     }
@@ -432,6 +533,45 @@ impl NoxaRpcClient {
                 .map(|bytes| parse_u256_bytes(bytes.as_ref()))
                 .transpose()?,
         })
+    }
+
+    pub async fn active_noxa_token_snapshot(
+        &self,
+        token: Address,
+        l2_block_number: u64,
+    ) -> Result<ActiveNoxaTokenSnapshot> {
+        let block_tag = hex_u64(l2_block_number);
+        let factory_call = IActiveNoxaTokenView::factoryCall {}.abi_encode();
+        let max_wallet_call = IActiveNoxaTokenView::maxWalletAmountCall {}.abi_encode();
+        let max_tx_call = IActiveNoxaTokenView::maxTxAmountCall {}.abi_encode();
+        let restrictions_call = IActiveNoxaTokenView::restrictionsEndBlockCall {}.abi_encode();
+        let (factory, max_wallet_amount, max_tx_amount, restrictions_end_block) = tokio::try_join!(
+            self.eth_call_data(token, &factory_call, &block_tag),
+            self.eth_call_data(token, &max_wallet_call, &block_tag),
+            self.eth_call_data(token, &max_tx_call, &block_tag),
+            self.eth_call_data(token, &restrictions_call, &block_tag),
+        )?;
+        Ok(ActiveNoxaTokenSnapshot {
+            token,
+            l2_block_number,
+            factory: parse_address_word(&factory)?,
+            max_wallet_amount: parse_u256_bytes(&max_wallet_amount)?,
+            max_tx_amount: parse_u256_bytes(&max_tx_amount)?,
+            restrictions_end_block: parse_u256_bytes(&restrictions_end_block)?,
+        })
+    }
+
+    pub async fn active_noxa_launch_record(
+        &self,
+        factory: Address,
+        token: Address,
+        l2_block_number: u64,
+    ) -> Result<ActiveNoxaLaunchRecord> {
+        let call = IActiveNoxaFactoryView::getLaunchedTokenCall { token }.abi_encode();
+        let bytes = self
+            .eth_call_data(factory, &call, &hex_u64(l2_block_number))
+            .await?;
+        decode_active_noxa_launch_record(&bytes)
     }
 
     pub async fn token_launched_logs(
@@ -788,6 +928,35 @@ fn parse_address_word(value: &[u8]) -> Result<Address> {
 fn parse_u32_word(value: &[u8]) -> Result<u32> {
     let value = parse_u256_bytes(value)?;
     u32::try_from(value).context("ABI word does not fit u32")
+}
+
+fn decode_active_noxa_launch_record(bytes: &[u8]) -> Result<ActiveNoxaLaunchRecord> {
+    if bytes.len() != 12 * 32 {
+        bail!(
+            "active N0xa getLaunchedToken returned {} bytes, expected 384",
+            bytes.len()
+        );
+    }
+    let word = |index: usize| -> &[u8] { &bytes[index * 32..(index + 1) * 32] };
+    let is_token0 = match parse_u256_bytes(word(11))? {
+        value if value == U256::ZERO => false,
+        value if value == U256::from(1) => true,
+        _ => bail!("active N0xa isToken0 is not ABI bool"),
+    };
+    Ok(ActiveNoxaLaunchRecord {
+        token: parse_address_word(word(0))?,
+        deployer: parse_address_word(word(1))?,
+        fee_wallet: parse_address_word(word(2))?,
+        pair_token: parse_address_word(word(3))?,
+        pool: parse_address_word(word(4))?,
+        dex_id: parse_u256_bytes(word(5))?,
+        launch_config_id: parse_u256_bytes(word(6))?,
+        position_id: parse_u256_bytes(word(7))?,
+        restrictions_end_block: parse_u256_bytes(word(8))?,
+        initial_buy_amount: parse_u256_bytes(word(9))?,
+        created_at_block: parse_u256_bytes(word(10))?,
+        is_token0,
+    })
 }
 
 fn hex_u64(value: u64) -> String {

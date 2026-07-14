@@ -9,10 +9,12 @@ use uniswap_v3_math::{
 
 use crate::noxa_abi::NoxaLaunchIntent;
 use crate::robinhood::{
-    NOXA_DEX_ID_UNISWAP, NOXA_FACTORY_RUNTIME_KECCAK256, NOXA_POOL_FEE, NOXA_RESTRICTION_L1_BLOCKS,
-    NOXA_TICK_SPACING, NOXA_TOKEN_CREATION_CODE_KECCAK256, UNISWAP_V3_FACTORY,
-    UNISWAP_V3_FACTORY_RUNTIME_KECCAK256, UNISWAP_V3_POOL_INIT_CODE_KECCAK256,
-    UNISWAP_V3_POSITION_MANAGER, UNISWAP_V3_SWAP_ROUTER_02, WETH,
+    ACTIVE_NOXA_FACTORY_RUNTIME_KECCAK256, ACTIVE_NOXA_LAUNCH_FACTORY,
+    ACTIVE_NOXA_TOKEN_CREATION_CODE_KECCAK256, NOXA_DEX_ID_UNISWAP, NOXA_FACTORY_RUNTIME_KECCAK256,
+    NOXA_POOL_FEE, NOXA_RESTRICTION_L1_BLOCKS, NOXA_TICK_SPACING,
+    NOXA_TOKEN_CREATION_CODE_KECCAK256, UNISWAP_V3_FACTORY, UNISWAP_V3_FACTORY_RUNTIME_KECCAK256,
+    UNISWAP_V3_POOL_INIT_CODE_KECCAK256, UNISWAP_V3_POSITION_MANAGER, UNISWAP_V3_SWAP_ROUTER_02,
+    WETH,
 };
 use crate::v3_pool::{V3PoolError, V3PoolState, V3Quote};
 
@@ -22,6 +24,8 @@ pub const TOKEN_CREATION_CODE_OFFSET: usize = 0x3264;
 pub const TOKEN_CREATION_CODE_LEN: usize = 0x26ab;
 pub const V3_POOL_CREATION_CODE_OFFSET: usize = 0x0703;
 pub const V3_POOL_CREATION_CODE_LEN: usize = 0x58c8;
+pub const ACTIVE_TOKEN_CREATION_CODE_OFFSET: usize = 10_303;
+pub const ACTIVE_TOKEN_CREATION_CODE_LEN: usize = 3_734;
 
 const BPS_DENOMINATOR: u64 = 10_000;
 const Q96: U256 = U256::from_limbs([0, 1 << 32, 0, 0]);
@@ -53,6 +57,15 @@ sol! {
         string logo;
         string description;
         ConstructorSocials socials;
+    }
+
+    struct ActiveTokenConstructor {
+        string name;
+        string symbol;
+        uint256 supply;
+        uint16 maxWalletBps;
+        uint16 maxTxBps;
+        uint256 restrictionsEndBlock;
     }
 }
 
@@ -100,6 +113,13 @@ pub struct NoxaPredictor {
     dex_config: NoxaDexConfig,
     token_creation_code: Vec<u8>,
     pool_init_code_hash: B256,
+    token_constructor: TokenConstructorKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenConstructorKind {
+    Legacy,
+    Active,
 }
 
 #[derive(Debug, Error)]
@@ -162,6 +182,50 @@ impl NoxaPredictor {
             dex_config,
             token_creation_code,
             pool_init_code_hash: keccak256(pool_creation_code),
+            token_constructor: TokenConstructorKind::Legacy,
+        })
+    }
+
+    /// Build a predictor for the independently audited active N0xa deployment.
+    /// The deployment uses the same launch config and V3 infrastructure, but a
+    /// different LaunchToken constructor and a sender-derived CREATE2 salt.
+    pub fn new_active(
+        launch_fee: U256,
+        launch_config: NoxaLaunchConfig,
+        dex_config: NoxaDexConfig,
+        launch_factory_runtime: &[u8],
+        dex_factory_runtime: &[u8],
+    ) -> Result<Self, NoxaPredictionError> {
+        validate_config(&launch_config, &dex_config)?;
+        if keccak256(launch_factory_runtime) != ACTIVE_NOXA_FACTORY_RUNTIME_KECCAK256
+            || keccak256(dex_factory_runtime) != UNISWAP_V3_FACTORY_RUNTIME_KECCAK256
+        {
+            return Err(NoxaPredictionError::RuntimeLayout);
+        }
+        let token_creation_code = creation_code_slice(
+            launch_factory_runtime,
+            ACTIVE_TOKEN_CREATION_CODE_OFFSET,
+            ACTIVE_TOKEN_CREATION_CODE_LEN,
+        )?
+        .to_vec();
+        let pool_creation_code = creation_code_slice(
+            dex_factory_runtime,
+            V3_POOL_CREATION_CODE_OFFSET,
+            V3_POOL_CREATION_CODE_LEN,
+        )?;
+        if keccak256(&token_creation_code) != ACTIVE_NOXA_TOKEN_CREATION_CODE_KECCAK256
+            || keccak256(pool_creation_code) != UNISWAP_V3_POOL_INIT_CODE_KECCAK256
+        {
+            return Err(NoxaPredictionError::RuntimeLayout);
+        }
+        Ok(Self {
+            launch_factory: ACTIVE_NOXA_LAUNCH_FACTORY,
+            launch_fee,
+            launch_config,
+            dex_config,
+            token_creation_code,
+            pool_init_code_hash: keccak256(pool_creation_code),
+            token_constructor: TokenConstructorKind::Active,
         })
     }
 
@@ -190,22 +254,58 @@ impl NoxaPredictor {
         intent: &NoxaLaunchIntent,
         launch_l1_block: u64,
     ) -> Result<PredictedNoxaLaunch, NoxaPredictionError> {
+        if self.token_constructor != TokenConstructorKind::Legacy {
+            return Err(NoxaPredictionError::IntentConfiguration);
+        }
+        self.predict_with_salt(intent, intent.salt, launch_l1_block)
+    }
+
+    /// The active N0xa factory salts CREATE2 with `keccak256(abi.encode(sender,
+    /// suppliedSalt))`, so the recovered feed sender is part of the prediction.
+    pub fn predict_active(
+        &self,
+        intent: &NoxaLaunchIntent,
+        sender: Address,
+        launch_l1_block: u64,
+    ) -> Result<PredictedNoxaLaunch, NoxaPredictionError> {
+        if self.token_constructor != TokenConstructorKind::Active {
+            return Err(NoxaPredictionError::IntentConfiguration);
+        }
+        let mut encoded = [0_u8; 64];
+        encoded[12..32].copy_from_slice(sender.as_slice());
+        encoded[32..].copy_from_slice(intent.salt.as_slice());
+        self.predict_with_salt(intent, keccak256(encoded), launch_l1_block)
+    }
+
+    fn predict_with_salt(
+        &self,
+        intent: &NoxaLaunchIntent,
+        create2_salt: B256,
+        launch_l1_block: u64,
+    ) -> Result<PredictedNoxaLaunch, NoxaPredictionError> {
         if intent.dex_id != self.launch_config.dex_id {
             return Err(NoxaPredictionError::IntentConfiguration);
         }
         let restrictions_end_l1_block = launch_l1_block
             .checked_add(self.launch_config.restriction_l1_blocks)
             .ok_or(NoxaPredictionError::Arithmetic)?;
-        let constructor = encode_token_constructor(
-            intent,
-            &self.launch_config,
-            &self.dex_config,
-            restrictions_end_l1_block,
-        );
+        let constructor = match self.token_constructor {
+            TokenConstructorKind::Legacy => encode_token_constructor(
+                intent,
+                &self.launch_config,
+                &self.dex_config,
+                restrictions_end_l1_block,
+            ),
+            TokenConstructorKind::Active => encode_active_token_constructor(
+                intent,
+                &self.launch_config,
+                restrictions_end_l1_block,
+            ),
+        };
         let mut init_code = Vec::with_capacity(self.token_creation_code.len() + constructor.len());
         init_code.extend_from_slice(&self.token_creation_code);
         init_code.extend_from_slice(&constructor);
-        let token = create2_address(self.launch_factory, intent.salt, keccak256(&init_code));
+        let token = create2_address(self.launch_factory, create2_salt, keccak256(&init_code));
         let (token0, token1) = sorted_tokens(self.launch_config.pair_token, token);
         let pool = predict_v3_pool_address(
             self.dex_config.factory,
@@ -302,6 +402,25 @@ pub fn decode_dex_config(bytes: &[u8]) -> Result<NoxaDexConfig, NoxaPredictionEr
     })
 }
 
+/// The active N0xa factory returns its DEX tuple directly (without the legacy
+/// display-name string at ABI offset zero).
+pub fn decode_active_dex_config(bytes: &[u8]) -> Result<NoxaDexConfig, NoxaPredictionError> {
+    if bytes.len() != 6 * 32 {
+        return Err(NoxaPredictionError::MalformedConfiguration);
+    }
+    Ok(NoxaDexConfig {
+        name: "uniswap".to_owned(),
+        factory: address_at(bytes, 0)?,
+        position_manager: address_at(bytes, 1)?,
+        swap_router: address_at(bytes, 2)?,
+        pool_fee: u32::try_from(word_at(bytes, 3)?)
+            .map_err(|_| NoxaPredictionError::MalformedConfiguration)?,
+        tick_spacing: i32::try_from(word_at(bytes, 4)?)
+            .map_err(|_| NoxaPredictionError::MalformedConfiguration)?,
+        enabled: bool_at(bytes, 5)?,
+    })
+}
+
 pub fn create2_address(factory: Address, salt: B256, init_code_hash: B256) -> Address {
     let mut encoded = [0_u8; 85];
     encoded[0] = 0xff;
@@ -393,6 +512,22 @@ fn encode_token_constructor(
         },
     };
     (config, metadata).abi_encode_params()
+}
+
+fn encode_active_token_constructor(
+    intent: &NoxaLaunchIntent,
+    launch: &NoxaLaunchConfig,
+    restrictions_end_l1_block: u64,
+) -> Vec<u8> {
+    ActiveTokenConstructor {
+        name: intent.name.clone(),
+        symbol: intent.symbol.clone(),
+        supply: launch.supply,
+        maxWalletBps: u16::try_from(launch.max_wallet_bps).unwrap_or_default(),
+        maxTxBps: u16::try_from(launch.max_tx_bps).unwrap_or_default(),
+        restrictionsEndBlock: U256::from(restrictions_end_l1_block),
+    }
+    .abi_encode_params()
 }
 
 fn build_post_launch_pool(

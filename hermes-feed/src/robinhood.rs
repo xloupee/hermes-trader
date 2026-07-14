@@ -14,6 +14,12 @@ pub const NOXA_LAUNCH_FACTORY: Address =
     alloy_primitives::address!("d9ec2db5f3d1b236843925949fe5bd8a3836fccb");
 pub const NOXA_LAUNCH_LOCKER: Address =
     alloy_primitives::address!("7f03effbd7ceb22a3f80dd468f67ef27826acd85");
+/// Current N0xa deployment. This is deliberately separate from the retired
+/// NOXA deployment above; callers must opt in to this factory explicitly.
+pub const ACTIVE_NOXA_LAUNCH_FACTORY: Address =
+    alloy_primitives::address!("52453b4289a6c3a70bb8b4682bcd3d8731267e28");
+pub const ACTIVE_NOXA_LAUNCH_LOCKER: Address =
+    alloy_primitives::address!("173d8370b4f67535d406f2f46168ec48aa03d26e");
 pub const WETH: Address = alloy_primitives::address!("0bd7d308f8e1639fab988df18a8011f41eacad73");
 pub const MULTICALL3: Address =
     alloy_primitives::address!("ca11bde05977b3631167028862be2a173976ca11");
@@ -44,5 +50,11 @@ pub const UNISWAP_V3_FACTORY_RUNTIME_KECCAK256: B256 =
     alloy_primitives::b256!("ec72b1abd1f2faee020cfea9c646bd8994f9fb389054f6e574f103a895091739");
 pub const NOXA_TOKEN_CREATION_CODE_KECCAK256: B256 =
     alloy_primitives::b256!("983cd2b9ed743ddb79121ba35310b8eb55440997f88b0de4b0705ea5463ec7e1");
+pub const ACTIVE_NOXA_FACTORY_RUNTIME_KECCAK256: B256 =
+    alloy_primitives::b256!("f4c5e57d72e716c1da2dbe6c598a26b43528fb27fe234534c15527b47fae4a67");
+pub const ACTIVE_NOXA_TOKEN_CREATION_CODE_KECCAK256: B256 =
+    alloy_primitives::b256!("138947820ae2a1381e56ac03e883ad3e42b2701fbf5577976015c0944d335ccc");
 pub const UNISWAP_V3_POOL_INIT_CODE_KECCAK256: B256 =
     alloy_primitives::b256!("e34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54");
+pub const UNISWAP_V3_POOL_RUNTIME_KECCAK256: B256 =
+    alloy_primitives::b256!("42e2b85666f65feb5b70bf6b61cd156d30a9997d00c0bcca3c16d54c92ea43d6");

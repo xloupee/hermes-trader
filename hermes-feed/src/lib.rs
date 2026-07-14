@@ -1,3 +1,4 @@
+pub mod active_noxa;
 pub mod boundary_gate;
 pub mod cache;
 pub mod copy_observation;
@@ -27,6 +28,7 @@ pub mod uniswap_v2;
 pub mod v2_simulator;
 pub mod v3_pool;
 
+pub use active_noxa::validate_active_noxa_copy_token;
 pub use boundary_gate::{BoundaryDecision, BoundaryGate, BoundaryGateError, FeedBoundary};
 pub use cache::{CacheApplyReport, CacheCheckpoint, CacheError, ConfirmedReserveCache};
 pub use copy_observation::{
@@ -61,11 +63,12 @@ pub use noxa_policy::{
 pub use noxa_predict::{
     DEX_CONFIG_SELECTOR, LAUNCH_CONFIG_SELECTOR, NoxaDexConfig, NoxaLaunchConfig,
     NoxaPredictionError, NoxaPredictor, PredictedNoxaLaunch, config_call, create2_address,
-    decode_dex_config, decode_launch_config, predict_v3_pool_address,
+    decode_active_dex_config, decode_dex_config, decode_launch_config, predict_v3_pool_address,
 };
 pub use noxa_rpc::{
-    FactoryStatus, NoxaReceipt, NoxaRpcClient, ObservedLaunchLog, RobinhoodBlock,
-    RobinhoodTransaction, RpcMetricsSnapshot, TokenRestrictionSnapshot, V3PoolSnapshot,
+    ActiveNoxaLaunchRecord, ActiveNoxaTokenSnapshot, FactoryStatus, NoxaReceipt, NoxaRpcClient,
+    ObservedLaunchLog, RobinhoodBlock, RobinhoodTransaction, RpcMetricsSnapshot,
+    TokenRestrictionSnapshot, V3PoolSnapshot,
 };
 pub use noxa_trade::{
     ApprovalTransactionPlan, PreparedRawTransaction, TradePlanError, TradeTransactionPlan,

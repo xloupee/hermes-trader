@@ -16,10 +16,11 @@ use clap::{Parser, ValueEnum};
 use futures_util::{StreamExt, stream::SplitStream};
 use hermes_feed::feed::BroadcastMessage;
 use hermes_feed::robinhood::{
-    DIRECT_FEED_URL, NOXA_DEX_ID_UNISWAP, NOXA_FACTORY_RUNTIME_KECCAK256,
-    NOXA_LAUNCH_CONFIG_ID_WETH, NOXA_LAUNCH_FACTORY, PUBLIC_RPC_URL, ROBINHOOD_SWAP_AGGREGATOR,
-    TESTNET_RPC_URL, TESTNET_SEQUENCER_URL, UNISWAP_V3_FACTORY,
-    UNISWAP_V3_POOL_INIT_CODE_KECCAK256, UNISWAP_V3_SWAP_ROUTER_02, WETH,
+    ACTIVE_NOXA_FACTORY_RUNTIME_KECCAK256, ACTIVE_NOXA_LAUNCH_FACTORY, DIRECT_FEED_URL,
+    NOXA_DEX_ID_UNISWAP, NOXA_FACTORY_RUNTIME_KECCAK256, NOXA_LAUNCH_CONFIG_ID_WETH,
+    NOXA_LAUNCH_FACTORY, PUBLIC_RPC_URL, ROBINHOOD_SWAP_AGGREGATOR, TESTNET_RPC_URL,
+    TESTNET_SEQUENCER_URL, UNISWAP_V3_FACTORY, UNISWAP_V3_POOL_INIT_CODE_KECCAK256,
+    UNISWAP_V3_SWAP_ROUTER_02, WETH,
 };
 use hermes_feed::{
     ApprovalTransactionPlan, AutomatedPaperRuntime, ConditionalOptions, CopyDecision, CopyPosition,
@@ -30,7 +31,7 @@ use hermes_feed::{
     SignedPosition, SignedTradingRuntime, TradeSigner, TradeTransactionPlan, V3ExactInputIntent,
     WatchedWalletCopyPolicy, decode_launch_call, decode_launch_header,
     decode_v3_exact_input_single, normalize_aggregator_copy_swap, predict_v3_pool_address,
-    prepare_predicted_noxa_trade, verify_noxa_factory_call,
+    prepare_predicted_noxa_trade, validate_active_noxa_copy_token, verify_noxa_factory_call,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -94,6 +95,14 @@ enum StrategyMode {
     Copy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Deployment {
+    /// Retired NOXA factory retained for compatibility with existing paper runs.
+    LegacyNoxa,
+    /// Independently pinned current N0xa factory. Never accepts lookalikes.
+    ActiveNoxa,
+}
+
 #[derive(Debug, Parser)]
 #[command(version, about = "Feed-driven NOXA paper and signed trading runtime")]
 struct Cli {
@@ -101,6 +110,8 @@ struct Cli {
     mode: RuntimeMode,
     #[arg(long, value_enum, default_value_t = StrategyMode::Launch)]
     strategy: StrategyMode,
+    #[arg(long, value_enum, default_value_t = Deployment::LegacyNoxa)]
+    deployment: Deployment,
     #[arg(long, default_value = DIRECT_FEED_URL)]
     feed_url: String,
     #[arg(long, default_value = PUBLIC_RPC_URL)]
@@ -328,9 +339,17 @@ async fn main() -> Result<()> {
     validate_caps(&args, amount_in, max_fee_per_gas, limits)?;
 
     let rpc = NoxaRpcClient::with_url(args.rpc_url.clone())?;
-    let status = rpc.factory_status().await?;
-    if status.runtime_keccak256 != NOXA_FACTORY_RUNTIME_KECCAK256 {
-        bail!("NOXA factory runtime hash does not match the pinned implementation");
+    let launch_factory = match args.deployment {
+        Deployment::LegacyNoxa => NOXA_LAUNCH_FACTORY,
+        Deployment::ActiveNoxa => ACTIVE_NOXA_LAUNCH_FACTORY,
+    };
+    let expected_factory_runtime = match args.deployment {
+        Deployment::LegacyNoxa => NOXA_FACTORY_RUNTIME_KECCAK256,
+        Deployment::ActiveNoxa => ACTIVE_NOXA_FACTORY_RUNTIME_KECCAK256,
+    };
+    let status = rpc.factory_status_for(launch_factory).await?;
+    if status.runtime_keccak256 != expected_factory_runtime {
+        bail!("selected launch factory runtime hash does not match its pinned implementation");
     }
     if args.mode == RuntimeMode::Signed
         && args.broadcast
@@ -342,12 +361,15 @@ async fn main() -> Result<()> {
         );
     }
     let launch_config = rpc
-        .launch_config_at(
+        .launch_config_at_for(
+            launch_factory,
             U256::from(NOXA_LAUNCH_CONFIG_ID_WETH),
             status.pinned_l2_block,
         )
         .await?;
-    let factory_owner = rpc.factory_owner_at(status.pinned_l2_block).await?;
+    let factory_owner = rpc
+        .factory_owner_at_for(launch_factory, status.pinned_l2_block)
+        .await?;
     if !rpc
         .code_at_l2_block(factory_owner, status.pinned_l2_block)
         .await?
@@ -355,25 +377,54 @@ async fn main() -> Result<()> {
     {
         bail!("NOXA factory owner is a contract; direct feed mutation detection is insufficient");
     }
-    let dex_config = rpc
-        .dex_config_at(U256::from(NOXA_DEX_ID_UNISWAP), status.pinned_l2_block)
-        .await?;
+    let dex_config = match args.deployment {
+        Deployment::LegacyNoxa => {
+            rpc.dex_config_at(U256::from(NOXA_DEX_ID_UNISWAP), status.pinned_l2_block)
+                .await?
+        }
+        Deployment::ActiveNoxa => {
+            rpc.active_dex_config_at_for(
+                launch_factory,
+                U256::from(NOXA_DEX_ID_UNISWAP),
+                status.pinned_l2_block,
+            )
+            .await?
+        }
+    };
     let launch_runtime = rpc
-        .code_at_l2_block(NOXA_LAUNCH_FACTORY, status.pinned_l2_block)
+        .code_at_l2_block(launch_factory, status.pinned_l2_block)
         .await?;
     let dex_runtime = rpc
         .code_at_l2_block(dex_config.factory, status.pinned_l2_block)
         .await?;
-    let predictor = Arc::new(NoxaPredictor::new(
-        NOXA_LAUNCH_FACTORY,
-        status.launch_fee,
-        launch_config,
-        dex_config,
-        &launch_runtime,
-        &dex_runtime,
-    )?);
+    let predictor = Arc::new(match args.deployment {
+        Deployment::LegacyNoxa => NoxaPredictor::new(
+            launch_factory,
+            status.launch_fee,
+            launch_config,
+            dex_config,
+            &launch_runtime,
+            &dex_runtime,
+        )?,
+        Deployment::ActiveNoxa => NoxaPredictor::new_active(
+            status.launch_fee,
+            launch_config,
+            dex_config,
+            &launch_runtime,
+            &dex_runtime,
+        )?,
+    });
     let copy_token_validation = match copy_policy.as_ref() {
-        Some(policy) => validate_copy_token_allowlist(&rpc, policy, status.pinned_l2_block).await?,
+        Some(policy) => {
+            validate_copy_token_allowlist(
+                &rpc,
+                policy,
+                args.deployment,
+                predictor.launch_config(),
+                status.pinned_l2_block,
+            )
+            .await?
+        }
         None => Vec::new(),
     };
     let mut copy_token_registry = CopyTokenRegistry::default();
@@ -571,6 +622,8 @@ async fn main() -> Result<()> {
                             connected_at,
                             &rpc,
                             &predictor,
+                            args.deployment,
+                            launch_factory,
                             copy_policy.as_ref(),
                             &mut copy_token_registry,
                             &mut copy_triggers,
@@ -724,17 +777,25 @@ async fn shutdown_signal() -> Result<()> {
 async fn revalidate_predictor_cache(
     rpc: &NoxaRpcClient,
     predictor: &NoxaPredictor,
+    deployment: Deployment,
+    launch_factory: Address,
     expected_launch_enabled: bool,
     expected_factory_owner: Address,
 ) -> Result<FactoryStatus> {
-    let status = rpc.factory_status().await?;
+    let expected_runtime = match deployment {
+        Deployment::LegacyNoxa => NOXA_FACTORY_RUNTIME_KECCAK256,
+        Deployment::ActiveNoxa => ACTIVE_NOXA_FACTORY_RUNTIME_KECCAK256,
+    };
+    let status = rpc.factory_status_for(launch_factory).await?;
     if status.launch_enabled != expected_launch_enabled
         || status.launch_fee != predictor.launch_fee()
-        || status.runtime_keccak256 != NOXA_FACTORY_RUNTIME_KECCAK256
+        || status.runtime_keccak256 != expected_runtime
     {
         bail!("NOXA factory state changed during feed warmup; restart to rebuild the predictor");
     }
-    let owner = rpc.factory_owner_at(status.pinned_l2_block).await?;
+    let owner = rpc
+        .factory_owner_at_for(launch_factory, status.pinned_l2_block)
+        .await?;
     if owner != expected_factory_owner
         || !rpc
             .code_at_l2_block(owner, status.pinned_l2_block)
@@ -744,31 +805,52 @@ async fn revalidate_predictor_cache(
         bail!("NOXA factory ownership changed during feed warmup; restart required");
     }
     let launch_config = rpc
-        .launch_config_at(
+        .launch_config_at_for(
+            launch_factory,
             U256::from(NOXA_LAUNCH_CONFIG_ID_WETH),
             status.pinned_l2_block,
         )
         .await?;
-    let dex_config = rpc
-        .dex_config_at(U256::from(NOXA_DEX_ID_UNISWAP), status.pinned_l2_block)
-        .await?;
+    let dex_config = match deployment {
+        Deployment::LegacyNoxa => {
+            rpc.dex_config_at(U256::from(NOXA_DEX_ID_UNISWAP), status.pinned_l2_block)
+                .await?
+        }
+        Deployment::ActiveNoxa => {
+            rpc.active_dex_config_at_for(
+                launch_factory,
+                U256::from(NOXA_DEX_ID_UNISWAP),
+                status.pinned_l2_block,
+            )
+            .await?
+        }
+    };
     if &launch_config != predictor.launch_config() || &dex_config != predictor.dex_config() {
         bail!("NOXA factory configuration changed during feed warmup; restart required");
     }
     let launch_runtime = rpc
-        .code_at_l2_block(NOXA_LAUNCH_FACTORY, status.pinned_l2_block)
+        .code_at_l2_block(launch_factory, status.pinned_l2_block)
         .await?;
     let dex_runtime = rpc
         .code_at_l2_block(dex_config.factory, status.pinned_l2_block)
         .await?;
-    let refreshed = NoxaPredictor::new(
-        NOXA_LAUNCH_FACTORY,
-        status.launch_fee,
-        launch_config,
-        dex_config,
-        &launch_runtime,
-        &dex_runtime,
-    )?;
+    let refreshed = match deployment {
+        Deployment::LegacyNoxa => NoxaPredictor::new(
+            launch_factory,
+            status.launch_fee,
+            launch_config,
+            dex_config,
+            &launch_runtime,
+            &dex_runtime,
+        )?,
+        Deployment::ActiveNoxa => NoxaPredictor::new_active(
+            status.launch_fee,
+            launch_config,
+            dex_config,
+            &launch_runtime,
+            &dex_runtime,
+        )?,
+    };
     if refreshed.token_creation_code_hash() != predictor.token_creation_code_hash()
         || refreshed.pool_init_code_hash() != predictor.pool_init_code_hash()
     {
@@ -789,6 +871,8 @@ async fn process_feed_frame(
     connected_at: Instant,
     rpc: &NoxaRpcClient,
     predictor: &Arc<NoxaPredictor>,
+    deployment: Deployment,
+    launch_factory: Address,
     copy_policy: Option<&WatchedWalletCopyPolicy>,
     copy_token_registry: &mut CopyTokenRegistry,
     copy_triggers: &mut u64,
@@ -823,8 +907,15 @@ async fn process_feed_frame(
     if connected_at.elapsed() >= Duration::from_secs(args.warmup_seconds)
         && !*predictor_cache_revalidated
     {
-        let refreshed =
-            revalidate_predictor_cache(rpc, predictor, launch_enabled, factory_owner).await?;
+        let refreshed = revalidate_predictor_cache(
+            rpc,
+            predictor,
+            deployment,
+            launch_factory,
+            launch_enabled,
+            factory_owner,
+        )
+        .await?;
         *predictor_cache_revalidated = true;
         emit(json!({
             "record_type": "runtime_prediction_cache_revalidated",
@@ -883,17 +974,21 @@ async fn process_feed_frame(
         let mut copy_swaps = Vec::new();
         let mut malformed_watched_copy_swaps = Vec::new();
         let mut copy_signer_error = None;
+        let mut launch_signer_error = None;
         let mut non_launch_factory_transaction = None;
         decoder.decode_message_with(message, |context| {
             let tx = context.transaction;
-            if tx.to() == Some(NOXA_LAUNCH_FACTORY) {
+            if tx.to() == Some(launch_factory) {
                 if is_non_launch_factory_transaction(tx.input()) {
                     non_launch_factory_transaction = Some(*tx.tx_hash());
                 } else if let (Some(intent), Some(header)) = (
                     decode_launch_call(tx.input(), tx.value()),
                     decode_launch_header(tx.input(), tx.value()),
                 ) {
-                    launches.push((*tx.tx_hash(), intent, header));
+                    match tx.recover_signer() {
+                        Ok(sender) => launches.push((*tx.tx_hash(), intent, header, sender)),
+                        Err(error) => launch_signer_error = Some(error.to_string()),
+                    }
                 }
             }
             let direct_copy = tx.to() == Some(UNISWAP_V3_SWAP_ROUTER_02)
@@ -945,6 +1040,9 @@ async fn process_feed_frame(
         if let Some(error) = copy_signer_error {
             bail!("could not recover a direct V3 copy candidate signer: {error}");
         }
+        if let Some(error) = launch_signer_error {
+            bail!("could not recover selected factory launch sender: {error}");
+        }
         for (tx_hash, leader) in malformed_watched_copy_swaps {
             emit(json!({
                 "record_type": "runtime_copy_candidate_rejected",
@@ -960,7 +1058,7 @@ async fn process_feed_frame(
         }
         let emission_enabled = connected_at.elapsed() >= Duration::from_secs(args.warmup_seconds)
             && sequence.is_contiguous();
-        for (tx_hash, intent, header) in launches {
+        for (tx_hash, intent, header, sender) in launches {
             if !emission_enabled {
                 emit(json!({
                     "record_type": "runtime_candidate_suppressed",
@@ -979,7 +1077,13 @@ async fn process_feed_frame(
                 continue;
             }
             let prediction_started = Instant::now();
-            let predicted = match predictor.predict(&intent, boundary.l1_block_number) {
+            let prediction = match deployment {
+                Deployment::LegacyNoxa => predictor.predict(&intent, boundary.l1_block_number),
+                Deployment::ActiveNoxa => {
+                    predictor.predict_active(&intent, sender, boundary.l1_block_number)
+                }
+            };
+            let predicted = match prediction {
                 Ok(predicted) => predicted,
                 Err(error) => {
                     emit(json!({
@@ -1020,6 +1124,21 @@ async fn process_feed_frame(
                 )?;
             }
 
+            if deployment == Deployment::ActiveNoxa {
+                emit(json!({
+                    "record_type": "runtime_active_noxa_launch_observed",
+                    "tx_hash": tx_hash,
+                    "sequence_number": message.sequence_number,
+                    "l1_block_number": boundary.l1_block_number,
+                    "predicted_token": predicted.token,
+                    "predicted_pool": predicted.pool,
+                    "prediction_and_optional_arm_ns": prediction_started.elapsed().as_nanos(),
+                    "candidate_armed": args.strategy == StrategyMode::Launch,
+                    "receipt_verified": false,
+                    "receipt_proof": "active_deployment_receipt_proof_pending",
+                }))?;
+                continue;
+            }
             let Ok(permit) = verifier_slots.clone().try_acquire_owned() else {
                 emit(json!({
                     "record_type": "runtime_launch_proof_suppressed",
@@ -1091,10 +1210,17 @@ async fn process_feed_frame(
                     let rpc = rpc.clone();
                     let sender = copy_token_proof_sender.clone();
                     let advertised_pool = candidate.pool;
+                    let launch_config = predictor.launch_config().clone();
                     tasks.spawn(async move {
-                        let result = validate_dynamic_copy_token(&rpc, token, advertised_pool)
-                            .await
-                            .map_err(|error| error.to_string());
+                        let result = validate_dynamic_copy_token(
+                            &rpc,
+                            token,
+                            advertised_pool,
+                            deployment,
+                            launch_config,
+                        )
+                        .await
+                        .map_err(|error| error.to_string());
                         let _ = sender
                             .send(CopyTokenProofMessage {
                                 token,
@@ -2221,14 +2347,30 @@ async fn signed_preflight(
 async fn validate_copy_token_allowlist(
     rpc: &NoxaRpcClient,
     policy: &WatchedWalletCopyPolicy,
+    deployment: Deployment,
+    launch_config: &hermes_feed::NoxaLaunchConfig,
     pinned_l2_block: u64,
 ) -> Result<Vec<CopyTokenValidation>> {
     let mut validated = Vec::with_capacity(policy.allowed_tokens().len());
     for token in policy.allowed_tokens() {
         validated.push(
-            validate_copy_token_at(rpc, *token, expected_noxa_pool(*token), pinned_l2_block)
-                .await
-                .with_context(|| format!("validate bootstrap copy token {token}"))?,
+            match deployment {
+                Deployment::LegacyNoxa => {
+                    validate_copy_token_at(rpc, *token, expected_noxa_pool(*token), pinned_l2_block)
+                        .await
+                }
+                Deployment::ActiveNoxa => {
+                    validate_active_copy_token_at(
+                        rpc,
+                        *token,
+                        expected_noxa_pool(*token),
+                        launch_config,
+                        pinned_l2_block,
+                    )
+                    .await
+                }
+            }
+            .with_context(|| format!("validate bootstrap copy token {token}"))?,
         );
     }
     validated.sort_by_key(|entry| entry.token);
@@ -2239,12 +2381,65 @@ async fn validate_dynamic_copy_token(
     rpc: &NoxaRpcClient,
     token: Address,
     advertised_pool: Address,
+    deployment: Deployment,
+    launch_config: hermes_feed::NoxaLaunchConfig,
 ) -> Result<CopyTokenValidation> {
     if advertised_pool != expected_noxa_pool(token) {
         bail!("aggregator advertised a non-canonical NOXA pool");
     }
     let block = rpc.latest_block().await?;
-    validate_copy_token_at(rpc, token, advertised_pool, block.l2_block_number).await
+    match deployment {
+        Deployment::LegacyNoxa => {
+            validate_copy_token_at(rpc, token, advertised_pool, block.l2_block_number).await
+        }
+        Deployment::ActiveNoxa => {
+            validate_active_copy_token_at(
+                rpc,
+                token,
+                advertised_pool,
+                &launch_config,
+                block.l2_block_number,
+            )
+            .await
+        }
+    }
+}
+
+async fn validate_active_copy_token_at(
+    rpc: &NoxaRpcClient,
+    token: Address,
+    expected_pool: Address,
+    launch_config: &hermes_feed::NoxaLaunchConfig,
+    pinned_l2_block: u64,
+) -> Result<CopyTokenValidation> {
+    let (record, token_view, token_code, pool_code, pool_snapshot) = tokio::try_join!(
+        rpc.active_noxa_launch_record(ACTIVE_NOXA_LAUNCH_FACTORY, token, pinned_l2_block),
+        rpc.active_noxa_token_snapshot(token, pinned_l2_block),
+        rpc.code_at_l2_block(token, pinned_l2_block),
+        rpc.code_at_l2_block(expected_pool, pinned_l2_block),
+        rpc.v3_pool_snapshot_at(expected_pool, pinned_l2_block),
+    )?;
+    if token_code.is_empty() || pool_code.is_empty() {
+        bail!("active N0xa token or canonical pool has no bytecode");
+    }
+    validate_active_noxa_copy_token(
+        token,
+        &record,
+        &token_view,
+        &pool_snapshot,
+        &pool_code,
+        launch_config,
+    )?;
+    Ok(CopyTokenValidation {
+        token,
+        pool: expected_pool,
+        validated_l2_block: pinned_l2_block,
+        fee: pool_snapshot.fee,
+        liquidity: pool_snapshot.liquidity,
+        restriction_end_l1_block: token_view.restrictions_end_block,
+        token_code_bytes: token_code.len(),
+        pool_code_bytes: pool_code.len(),
+    })
 }
 
 async fn validate_copy_token_at(

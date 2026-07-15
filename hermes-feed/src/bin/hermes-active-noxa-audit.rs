@@ -24,11 +24,16 @@ const ACTIVE_LAUNCH_FIXTURES: [B256; 3] = [
 struct Cli {
     #[arg(long, default_value = "https://rpc.mainnet.chain.robinhood.com")]
     rpc_url: String,
+    /// Optional active N0xa launch transaction to audit instead of the bundled fixture.
+    /// This remains read-only and is useful for independently checking a paper capture.
+    #[arg(long)]
+    tx_hash: Option<B256>,
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args = Cli::parse();
+    let audited_tx = args.tx_hash.unwrap_or(LATER_LAUNCH_TX);
     let rpc = NoxaRpcClient::with_url(args.rpc_url)?;
     let status = rpc.factory_status_for(ACTIVE_NOXA_FACTORY).await?;
     let runtime = rpc
@@ -60,9 +65,9 @@ async fn main() -> Result<()> {
         &dex_runtime,
     )?;
     let transaction = rpc
-        .transaction_by_hash(LATER_LAUNCH_TX)
+        .transaction_by_hash(audited_tx)
         .await?
-        .context("later fixture transaction missing")?;
+        .context("audited active N0xa transaction missing")?;
     let l2_block = transaction
         .l2_block_number
         .context("later fixture transaction is not mined")?;
@@ -71,9 +76,12 @@ async fn main() -> Result<()> {
         .context("later fixture did not decode as launchToken")?;
     let predicted = predictor.predict_active(&intent, transaction.from, block.l1_block_number)?;
     let receipt = rpc
-        .receipt(LATER_LAUNCH_TX)
+        .receipt(audited_tx)
         .await?
-        .context("later receipt missing")?;
+        .context("audited active N0xa receipt missing")?;
+    if !receipt.status {
+        bail!("audited active N0xa launch transaction reverted");
+    }
     let actual = receipt
         .logs
         .iter()
@@ -104,14 +112,62 @@ async fn main() -> Result<()> {
     {
         bail!("later fixture token or canonical V3 pool validation failed");
     }
-    validate_active_noxa_copy_token(
+    if let Err(error) = validate_active_noxa_copy_token(
         actual.token,
         &launch_record,
         &token_snapshot,
         &pool_snapshot,
         &pool_runtime,
         &config,
-    )?;
+    ) {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "record_type": "active_n0xa_candidate_validation_failed",
+                "tx_hash": audited_tx,
+                "error": error.to_string(),
+                "predicted_token": predicted.token,
+                "predicted_pool": predicted.pool,
+                "event_token": actual.token,
+                "event_pool": actual.pool,
+                "launch_config": {
+                    "pair_token": config.pair_token,
+                    "dex_id": config.dex_id.to_string(),
+                    "initial_tick": config.initial_tick,
+                    "supply": config.supply.to_string(),
+                    "max_wallet_bps": config.max_wallet_bps.to_string(),
+                    "max_tx_bps": config.max_tx_bps.to_string(),
+                    "restriction_l1_blocks": config.restriction_l1_blocks,
+                    "flags": config.flags,
+                },
+                "factory_record": {
+                    "token": launch_record.token,
+                    "pair_token": launch_record.pair_token,
+                    "pool": launch_record.pool,
+                    "dex_id": launch_record.dex_id.to_string(),
+                    "launch_config_id": launch_record.launch_config_id.to_string(),
+                    "restrictions_end_block": launch_record.restrictions_end_block.to_string(),
+                    "initial_buy_amount": launch_record.initial_buy_amount.to_string(),
+                },
+                "token_snapshot": {
+                    "token": token_snapshot.token,
+                    "factory": token_snapshot.factory,
+                    "max_wallet_amount": token_snapshot.max_wallet_amount.to_string(),
+                    "max_tx_amount": token_snapshot.max_tx_amount.to_string(),
+                    "restrictions_end_block": token_snapshot.restrictions_end_block.to_string(),
+                },
+                "pool_snapshot": {
+                    "pool": pool_snapshot.pool,
+                    "token0": pool_snapshot.token0,
+                    "token1": pool_snapshot.token1,
+                    "fee": pool_snapshot.fee,
+                    "liquidity": pool_snapshot.liquidity.to_string(),
+                },
+                "pool_runtime_keccak256": keccak256(&pool_runtime),
+            }))?
+        );
+        return Err(error).context("active N0xa copy-policy validation failed");
+    }
     for fixture_tx in ACTIVE_LAUNCH_FIXTURES.into_iter().skip(1) {
         let transaction = rpc
             .transaction_by_hash(fixture_tx)
@@ -154,7 +210,7 @@ async fn main() -> Result<()> {
             "launch_config": config,
             "dex_config": dex,
             "later_fixture": {
-                "tx_hash": LATER_LAUNCH_TX,
+                "tx_hash": audited_tx,
                 "predicted_token": predicted.token,
                 "predicted_pool": predicted.pool,
                 "event_token": actual.token,

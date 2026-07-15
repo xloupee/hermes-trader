@@ -3,14 +3,14 @@
 //! These checks are intentionally not shared with the retired NOXA deployment:
 //! an otherwise similar token must not pass through the active copy path.
 
-use alloy_primitives::{Address, U256, keccak256};
+use alloy_primitives::{Address, U256};
 use anyhow::{Result, bail};
 
 use crate::noxa_predict::{NoxaLaunchConfig, predict_v3_pool_address};
 use crate::noxa_rpc::{ActiveNoxaLaunchRecord, ActiveNoxaTokenSnapshot, V3PoolSnapshot};
 use crate::robinhood::{
     ACTIVE_NOXA_LAUNCH_FACTORY, NOXA_POOL_FEE, UNISWAP_V3_FACTORY,
-    UNISWAP_V3_POOL_INIT_CODE_KECCAK256, UNISWAP_V3_POOL_RUNTIME_KECCAK256, WETH,
+    UNISWAP_V3_POOL_INIT_CODE_KECCAK256, WETH,
 };
 
 /// Verify the factory record, token immutable views, and canonical V3 pool for
@@ -65,7 +65,12 @@ pub fn validate_active_noxa_copy_token(
         || pool_view.pool != expected_pool
         || pool_view.fee != NOXA_POOL_FEE
         || pool_view.liquidity == 0
-        || keccak256(pool_runtime) != UNISWAP_V3_POOL_RUNTIME_KECCAK256
+        // Solidity immutables (token addresses, fee, and tick spacing) are
+        // embedded in every V3 pool's runtime bytecode. Consequently a full
+        // runtime hash differs for each legitimate pool and cannot be pinned
+        // globally. The pinned factory + CREATE2 address + queried immutable
+        // pool fields above are the identity proof; code must merely exist.
+        || pool_runtime.is_empty()
         || !((pool_view.token0 == WETH && pool_view.token1 == token)
             || (pool_view.token0 == token && pool_view.token1 == WETH))
     {
@@ -80,8 +85,13 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn rejects_legacy_factory_even_with_a_canonical_pool() {
+    fn valid_fixture() -> (
+        Address,
+        NoxaLaunchConfig,
+        ActiveNoxaLaunchRecord,
+        ActiveNoxaTokenSnapshot,
+        V3PoolSnapshot,
+    ) {
         let token = Address::with_last_byte(1);
         let config = NoxaLaunchConfig {
             pair_token: WETH,
@@ -117,7 +127,7 @@ mod tests {
         let token_view = ActiveNoxaTokenSnapshot {
             token,
             l2_block_number: 1,
-            factory: Address::ZERO,
+            factory: ACTIVE_NOXA_LAUNCH_FACTORY,
             max_wallet_amount: config.supply / U256::from(50),
             max_tx_amount: U256::ZERO,
             restrictions_end_block: U256::from(1),
@@ -129,9 +139,41 @@ mod tests {
             fee: NOXA_POOL_FEE,
             liquidity: 1,
         };
+        (token, config, record, token_view, pool_view)
+    }
+
+    #[test]
+    fn accepts_canonical_pool_with_nonempty_instance_runtime() {
+        let (token, config, record, token_view, pool_view) = valid_fixture();
+
+        validate_active_noxa_copy_token(token, &record, &token_view, &pool_view, &[0x60], &config)
+            .unwrap();
+    }
+
+    #[test]
+    fn rejects_canonical_pool_without_runtime() {
+        let (token, config, record, token_view, pool_view) = valid_fixture();
+
         assert!(
-            validate_active_noxa_copy_token(token, &record, &token_view, &pool_view, &[], &config)
+            validate_active_noxa_copy_token(token, &record, &token_view, &pool_view, &[], &config,)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_legacy_factory_even_with_a_canonical_pool() {
+        let (token, config, record, mut token_view, pool_view) = valid_fixture();
+        token_view.factory = Address::ZERO;
+        assert!(
+            validate_active_noxa_copy_token(
+                token,
+                &record,
+                &token_view,
+                &pool_view,
+                &[0x60],
+                &config,
+            )
+            .is_err()
         );
     }
 }

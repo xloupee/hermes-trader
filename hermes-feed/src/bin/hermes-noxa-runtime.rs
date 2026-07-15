@@ -27,7 +27,7 @@ use hermes_feed::{
     ApprovalTransactionPlan, AutomatedPaperRuntime, ConditionalOptions, CopyDecision, CopyPosition,
     FactoryStatus, FeedBoundary, FeedDecoder, Filter, HotPathExecutor, HotPathReport,
     KeystoreTradeSigner, NoxaPredictor, NoxaRpcClient, NoxaVerificationOutcome, ObservedCopySwap,
-    ObservedNoxaFactoryCall, PaperOrderState, PredictedNoxaTradeInput, ReceiptLog,
+    ObservedNoxaFactoryCall, PaperOrderKind, PaperOrderState, PredictedNoxaTradeInput, ReceiptLog,
     ReconciliationJob, RiskLimits, RpcMetricsSnapshot, SequenceTracker, SequencerClient,
     SignedPendingKind, SignedPosition, SignedTradingRuntime, TradeSigner, TradeTransactionPlan,
     V3ExactInputIntent, WatchedWalletCopyPolicy, decode_launch_call, decode_launch_header,
@@ -196,6 +196,10 @@ struct Cli {
     /// Private mode-0600 file containing exactly `ARMED`; required for live broadcast.
     #[arg(long)]
     kill_switch_file: Option<PathBuf>,
+    /// Canary-only full-position unwind floor. Paper mode exercises the lifecycle; signed
+    /// broadcast remains subject to every existing mainnet approval and kill-switch gate.
+    #[arg(long)]
+    copy_bounded_exit_min_weth_out: Option<String>,
     #[arg(long)]
     round_trip_exit_min_weth_out: Option<String>,
 }
@@ -622,6 +626,8 @@ async fn main() -> Result<()> {
             "max_triggers": args.copy_max_triggers,
             "max_leader_entry_amount": args.copy_max_leader_entry_amount,
             "follower_entry_amount": amount_in,
+            "bounded_exit_min_weth_out": args.copy_bounded_exit_min_weth_out,
+            "bounded_exit_full_position": args.copy_bounded_exit_min_weth_out.is_some(),
             "leader_limit_price_trusted_for_broadcast": args.copy_trust_leader_limit_price,
             "validated_tokens": copy_token_validation,
         })),
@@ -690,7 +696,13 @@ async fn main() -> Result<()> {
                 }
             }
             Some(fill) = paper_fill_receiver.recv() => {
-                handle_paper_fill(&mut engine, fill)?;
+                handle_paper_fill(
+                    &mut engine,
+                    fill,
+                    last_boundary,
+                    &args,
+                    max_fee_per_gas,
+                )?;
             }
             Some(proof) = proof_receiver.recv() => {
                 if let Some((token, pool)) = handle_launch_proof(proof)? {
@@ -819,6 +831,9 @@ async fn main() -> Result<()> {
             .saturating_add(Duration::from_secs(1)),
         &mut paper_fill_receiver,
         &mut tasks,
+        last_boundary,
+        &args,
+        max_fee_per_gas,
     )
     .await?;
     drain_signed_pending(
@@ -2015,16 +2030,68 @@ fn handle_boundary(
     Ok(())
 }
 
-fn handle_paper_fill(engine: &mut Engine, fill: PaperFill) -> Result<()> {
-    let Engine::Paper { runtime, .. } = engine else {
+fn handle_paper_fill(
+    engine: &mut Engine,
+    fill: PaperFill,
+    last_boundary: Option<FeedBoundary>,
+    args: &Cli,
+    max_fee_per_gas: u128,
+) -> Result<()> {
+    let Engine::Paper {
+        runtime,
+        pending_fill,
+    } = engine
+    else {
         return Ok(());
     };
     let reconciliation = runtime.reconcile_fill(fill.order_id, fill.actual_amount, U256::ZERO)?;
     emit(json!({
         "record_type": "runtime_paper_reconciliation",
-        "reconciliation": reconciliation,
+        "reconciliation": &reconciliation,
         "runtime": runtime.snapshot(),
-    }))
+    }))?;
+    let Some(minimum_text) = args.copy_bounded_exit_min_weth_out.as_deref() else {
+        return Ok(());
+    };
+    match reconciliation.kind {
+        PaperOrderKind::Entry { token, .. } => {
+            let boundary = last_boundary
+                .ok_or_else(|| anyhow::anyhow!("bounded paper exit has no feed boundary"))?;
+            let conditions = ConditionalOptions::first_eligible_window(
+                boundary.l1_block_number,
+                args.l1_window,
+                boundary
+                    .l1_timestamp
+                    .checked_add(args.timestamp_window_seconds),
+            )
+            .ok_or_else(|| anyhow::anyhow!("bounded paper exit boundary window overflow"))?;
+            let minimum_weth_out = parse_u256(minimum_text)?;
+            let order = runtime.prepare_exit(
+                token,
+                minimum_weth_out,
+                args.gas_limit,
+                max_fee_per_gas,
+                args.slippage_bps,
+                conditions,
+            )?;
+            *pending_fill = Some((order.id, minimum_weth_out));
+            emit(json!({
+                "record_type": "runtime_copy_bounded_paper_exit_armed",
+                "token": token,
+                "full_position": true,
+                "minimum_weth_out": minimum_weth_out,
+                "order": order,
+                "conditions": conditions,
+                "broadcast": false,
+            }))
+        }
+        PaperOrderKind::Exit { token, .. } => emit(json!({
+            "record_type": "runtime_copy_bounded_paper_exit_complete",
+            "token": token,
+            "runtime": runtime.snapshot(),
+            "broadcast": false,
+        })),
+    }
 }
 
 fn handle_submit_outcome(engine: &mut Engine, outcome: SubmitOutcome) -> Result<()> {
@@ -2210,13 +2277,61 @@ fn arm_copy_reconciled_step(
                 "raw_transaction_logged": false,
             }))
         }
-        ReconciledSignedAction::Approval(position) => emit(json!({
-            "record_type": "runtime_copy_position_ready",
-            "token": position.token,
-            "token_amount": position.token_amount,
-            "router_approved": position.router_approved,
-            "waiting_for_watched_wallet_exit": true,
-        })),
+        ReconciledSignedAction::Approval(position) => {
+            let Some(minimum_text) = args.copy_bounded_exit_min_weth_out.as_deref() else {
+                return emit(json!({
+                    "record_type": "runtime_copy_position_ready",
+                    "token": position.token,
+                    "token_amount": position.token_amount,
+                    "router_approved": position.router_approved,
+                    "waiting_for_watched_wallet_exit": true,
+                }));
+            };
+            let boundary = last_boundary
+                .ok_or_else(|| anyhow::anyhow!("bounded copy exit has no feed boundary"))?;
+            let conditions = ConditionalOptions::first_eligible_window(
+                boundary.l1_block_number,
+                args.l1_window,
+                boundary
+                    .l1_timestamp
+                    .checked_add(args.timestamp_window_seconds),
+            )
+            .ok_or_else(|| anyhow::anyhow!("bounded copy exit boundary window overflow"))?;
+            let minimum_weth_out = parse_u256(minimum_text)?;
+            let loss_floor = position
+                .cost_basis
+                .checked_mul(U256::from(10_000_u64 - u64::from(args.max_slippage_bps)))
+                .and_then(|value| value.checked_div(U256::from(10_000_u64)))
+                .ok_or_else(|| anyhow::anyhow!("bounded copy exit loss floor overflow"))?;
+            if minimum_weth_out < loss_floor {
+                bail!("bounded copy exit minimum WETH output violates the configured loss cap");
+            }
+            let plan = TradeTransactionPlan::exact_input(
+                runtime.snapshot().next_nonce,
+                args.gas_limit,
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                &V3ExactInputIntent {
+                    token_in: position.token,
+                    token_out: WETH,
+                    fee: hermes_feed::robinhood::NOXA_POOL_FEE,
+                    recipient,
+                    amount_in: position.token_amount,
+                    amount_out_minimum: minimum_weth_out,
+                    sqrt_price_limit_x96: U256::ZERO,
+                },
+            )?;
+            let tx_hash = runtime.arm_trade(&plan, conditions, args.slippage_bps)?;
+            emit(json!({
+                "record_type": "runtime_copy_bounded_signed_exit_armed",
+                "tx_hash": tx_hash,
+                "token": position.token,
+                "full_position_amount": position.token_amount,
+                "minimum_weth_out": minimum_weth_out,
+                "conditions": conditions,
+                "raw_transaction_logged": false,
+            }))
+        }
         ReconciledSignedAction::Exit => emit(json!({
             "record_type": "runtime_copy_exit_complete",
             "runtime": runtime.snapshot(),
@@ -2459,6 +2574,9 @@ async fn drain_paper_pending(
     timeout: Duration,
     paper_fill_receiver: &mut mpsc::Receiver<PaperFill>,
     tasks: &mut JoinSet<Result<()>>,
+    last_boundary: Option<FeedBoundary>,
+    args: &Cli,
+    max_fee_per_gas: u128,
 ) -> Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -2486,7 +2604,7 @@ async fn drain_paper_pending(
         }
         tokio::select! {
             Some(fill) = paper_fill_receiver.recv() => {
-                handle_paper_fill(engine, fill)?;
+                handle_paper_fill(engine, fill, last_boundary, args, max_fee_per_gas)?;
             }
             joined = tasks.join_next(), if !tasks.is_empty() => {
                 if let Some(joined) = joined {
@@ -2812,6 +2930,7 @@ fn validate_args(args: &Cli) -> Result<()> {
                 || !args.copy_tokens.is_empty()
                 || args.copy_trust_leader_limit_price
                 || args.copy_discover_all_wallets
+                || args.copy_bounded_exit_min_weth_out.is_some()
             {
                 bail!("copy allowlists require --strategy copy");
             }
@@ -2839,6 +2958,45 @@ fn validate_args(args: &Cli) -> Result<()> {
             }
             if args.round_trip_exit_min_weth_out.is_some() {
                 bail!("copy strategy waits for watched-wallet exits and refuses timed round trips");
+            }
+            if let Some(minimum_text) = args.copy_bounded_exit_min_weth_out.as_deref() {
+                if args.deployment != Deployment::ActiveNoxa {
+                    bail!("bounded copy exit requires the pinned active Noxa deployment");
+                }
+                if args.copy_max_triggers != 1 {
+                    bail!("bounded copy exit requires exactly one copy trigger");
+                }
+                let amount_in = parse_u256(&args.amount_in)?;
+                if amount_in != U256::from(LIVE_CANARY_AMOUNT_IN_WEI)
+                    || parse_u256(&args.max_trade_amount_in)? != amount_in
+                    || parse_u256(&args.max_open_exposure)? != amount_in
+                {
+                    bail!("bounded copy exit requires the exact tiny canary exposure profile");
+                }
+                if args.slippage_bps > LIVE_CANARY_MAX_SLIPPAGE_BPS
+                    || args.max_slippage_bps > LIVE_CANARY_MAX_SLIPPAGE_BPS
+                {
+                    bail!("bounded copy exit exceeds the tiny canary slippage cap");
+                }
+                let minimum = parse_u256(minimum_text)?;
+                let loss_floor = amount_in
+                    .checked_mul(U256::from(10_000_u64 - u64::from(args.max_slippage_bps)))
+                    .and_then(|value| value.checked_div(U256::from(10_000_u64)))
+                    .ok_or_else(|| anyhow::anyhow!("bounded copy exit loss floor overflow"))?;
+                if minimum < loss_floor || minimum > amount_in {
+                    bail!("bounded copy exit minimum is outside the configured loss band");
+                }
+                if args.mode == RuntimeMode::Signed
+                    && (args.copy_discover_all_wallets
+                        || args.watch_wallet_file.is_some()
+                        || args.watched_wallets.len() != 1
+                        || args.copy_tokens.len() != 1
+                        || !args.broadcast)
+                {
+                    bail!(
+                        "signed bounded copy exit requires one inline wallet, one token, and separately approved broadcast mode"
+                    );
+                }
             }
             if args.mode == RuntimeMode::Signed
                 && args.broadcast
@@ -3242,6 +3400,51 @@ mod tests {
     }
 
     #[test]
+    fn bounded_copy_exit_is_active_noxa_one_trigger_and_loss_banded() {
+        let configured = Cli::try_parse_from([
+            "hermes-noxa-runtime",
+            "--strategy",
+            "copy",
+            "--deployment",
+            "active-noxa",
+            "--recipient",
+            RECIPIENT,
+            "--copy-discover-all-wallets",
+            "--copy-max-triggers",
+            "1",
+            "--slippage-bps",
+            "100",
+            "--max-slippage-bps",
+            "100",
+            "--copy-bounded-exit-min-weth-out",
+            "99000000000000",
+        ])
+        .unwrap();
+        assert!(validate_args(&configured).is_ok());
+        assert!(
+            validate_args(&Cli {
+                copy_max_triggers: 2,
+                ..configured.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_args(&Cli {
+                copy_bounded_exit_min_weth_out: Some("98999999999999".into()),
+                ..configured.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_args(&Cli {
+                deployment: Deployment::LegacyNoxa,
+                ..configured
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
     fn dynamic_copy_registry_is_pool_bound_and_deduplicates_proofs() {
         let token = Address::with_last_byte(0x44);
         let pool = Address::with_last_byte(0x45);
@@ -3471,6 +3674,149 @@ mod tests {
         assert_eq!(final_state.open_exposure, U256::ZERO);
         assert_eq!(final_state.next_nonce, 2);
         assert_eq!(triggers, 2);
+    }
+
+    #[test]
+    fn bounded_copy_paper_entry_automatically_unwinds_the_full_position() {
+        let leader = Address::with_last_byte(21);
+        let token = Address::with_last_byte(22);
+        let recipient = Address::from_str(RECIPIENT).unwrap();
+        let args = Cli::try_parse_from([
+            "hermes-noxa-runtime",
+            "--strategy",
+            "copy",
+            "--deployment",
+            "active-noxa",
+            "--recipient",
+            RECIPIENT,
+            "--watch-wallet",
+            &leader.to_string(),
+            "--copy-token",
+            &token.to_string(),
+            "--copy-max-triggers",
+            "1",
+            "--slippage-bps",
+            "100",
+            "--max-slippage-bps",
+            "100",
+            "--copy-bounded-exit-min-weth-out",
+            "99000000000000",
+        ])
+        .unwrap();
+        assert!(validate_args(&args).is_ok());
+        let amount_in = U256::from(LIVE_CANARY_AMOUNT_IN_WEI);
+        let minimum_weth_out = U256::from(99_000_000_000_000_u64);
+        let policy = WatchedWalletCopyPolicy::new(
+            HashSet::from([leader]),
+            HashSet::from([token]),
+            amount_in,
+            U256::from(1_000_000_000_000_000_000_u64),
+            1,
+        )
+        .unwrap();
+        let limits = RiskLimits {
+            max_trade_amount_in: amount_in,
+            max_open_exposure: amount_in,
+            max_gas_cost_wei: U256::from(100_000_000_000_000_u64),
+            max_session_loss: U256::from(200_000_000_000_000_u64),
+            max_slippage_bps: 100,
+        };
+        let mut engine = Engine::Paper {
+            runtime: Box::new(AutomatedPaperRuntime::new(0, limits)),
+            pending_fill: None,
+        };
+        let boundary = |block| FeedBoundary {
+            l1_block_number: block,
+            l1_timestamp: 1_800_000_000 + block,
+            sequence_contiguous: true,
+        };
+        let observed = ObservedCopySwap {
+            tx_hash: B256::with_last_byte(23),
+            chain_id: Some(hermes_feed::robinhood::CHAIN_ID),
+            from: leader,
+            to: UNISWAP_V3_SWAP_ROUTER_02,
+            value: U256::ZERO,
+            intent: V3ExactInputIntent {
+                token_in: WETH,
+                token_out: token,
+                fee: hermes_feed::robinhood::NOXA_POOL_FEE,
+                recipient: leader,
+                amount_in: amount_in * U256::from(2),
+                amount_out_minimum: U256::from(500),
+                sqrt_price_limit_x96: U256::ZERO,
+            },
+        };
+        let mut triggers = 0;
+        handle_copy_candidate(
+            &mut engine,
+            &policy,
+            observed,
+            &mut triggers,
+            boundary(100),
+            recipient,
+            1,
+            0,
+            &args,
+            Instant::now(),
+        )
+        .unwrap();
+        let entry_id = match &mut engine {
+            Engine::Paper { runtime, .. } => {
+                let entry = runtime.snapshot().pending_order.unwrap();
+                runtime.observe_boundary(boundary(101)).unwrap();
+                entry.id
+            }
+            Engine::Signed { .. } => unreachable!(),
+        };
+        handle_paper_fill(
+            &mut engine,
+            PaperFill {
+                order_id: entry_id,
+                actual_amount: U256::from(250),
+            },
+            Some(boundary(101)),
+            &args,
+            1,
+        )
+        .unwrap();
+        let exit_id = match &mut engine {
+            Engine::Paper { runtime, .. } => {
+                let exit = runtime.snapshot().pending_order.unwrap();
+                assert_eq!(
+                    exit.kind,
+                    PaperOrderKind::Exit {
+                        token,
+                        expected_proceeds: minimum_weth_out,
+                    }
+                );
+                runtime.observe_boundary(boundary(102)).unwrap();
+                exit.id
+            }
+            Engine::Signed { .. } => unreachable!(),
+        };
+        handle_paper_fill(
+            &mut engine,
+            PaperFill {
+                order_id: exit_id,
+                actual_amount: minimum_weth_out,
+            },
+            Some(boundary(102)),
+            &args,
+            1,
+        )
+        .unwrap();
+        let Engine::Paper { runtime, .. } = engine else {
+            unreachable!()
+        };
+        let final_state = runtime.snapshot();
+        assert!(final_state.positions.is_empty());
+        assert_eq!(final_state.open_exposure, U256::ZERO);
+        assert_eq!(final_state.next_nonce, 2);
+        assert_eq!(
+            final_state.realized_session_loss,
+            amount_in - minimum_weth_out
+        );
+        assert_eq!(triggers, 1);
     }
 
     #[test]

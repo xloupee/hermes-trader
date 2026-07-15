@@ -52,6 +52,12 @@ const BROADCAST_APPROVAL: &str = "MAINNET_CANARY_APPROVED";
 const LIVE_CANARY_AMOUNT_IN_WEI: u64 = 100_000_000_000_000;
 const LIVE_CANARY_MAX_WETH_BALANCE_WEI: u64 = 1_000_000_000_000_000;
 const LIVE_CANARY_MAX_SLIPPAGE_BPS: u16 = 100;
+const LIVE_CANARY_GAS_LIMIT: u64 = 350_000;
+const LIVE_CANARY_MAX_FEE_PER_GAS_WEI: u128 = 200_000_000;
+const LIVE_CANARY_MAX_PRIORITY_FEE_PER_GAS_WEI: u128 = 0;
+const LIVE_CANARY_MAX_GAS_COST_WEI: u64 = 70_000_000_000_000;
+const LIVE_CANARY_MAX_SESSION_LOSS_WEI: u64 = 1_000_000_000_000;
+const LIVE_CANARY_BASE_FEE_HEADROOM_MULTIPLIER: u128 = 2;
 const KILL_SWITCH_ARMED: &[u8] = b"ARMED\n";
 const RECONCILIATION_QUEUE_CAPACITY: usize = 64;
 const FEED_RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
@@ -167,7 +173,7 @@ struct Cli {
     slippage_bps: u16,
     #[arg(long, default_value_t = 350_000)]
     gas_limit: u64,
-    #[arg(long, default_value = "20000000")]
+    #[arg(long, default_value = "200000000")]
     max_fee_per_gas: String,
     #[arg(long, default_value = "0")]
     max_priority_fee_per_gas: String,
@@ -531,6 +537,7 @@ async fn main() -> Result<()> {
         }
     });
 
+    let mut signed_preflight_base_fee_per_gas = None;
     let mut engine = match args.mode {
         RuntimeMode::Paper => Engine::Paper {
             runtime: Box::new(AutomatedPaperRuntime::new(0, limits)),
@@ -557,22 +564,24 @@ async fn main() -> Result<()> {
                 password,
                 expected,
             )?;
-            signed_preflight(
-                &rpc,
-                signer.address(),
-                amount_in,
-                args.gas_limit,
-                max_fee_per_gas,
-                parse_u256(&args.max_wallet_weth_balance)?,
-                if args.round_trip_exit_min_weth_out.is_some()
-                    || args.strategy == StrategyMode::Copy
-                {
-                    3
-                } else {
-                    1
-                },
-            )
-            .await?;
+            signed_preflight_base_fee_per_gas = Some(
+                signed_preflight(
+                    &rpc,
+                    signer.address(),
+                    amount_in,
+                    args.gas_limit,
+                    max_fee_per_gas,
+                    parse_u256(&args.max_wallet_weth_balance)?,
+                    if args.round_trip_exit_min_weth_out.is_some()
+                        || args.strategy == StrategyMode::Copy
+                    {
+                        3
+                    } else {
+                        1
+                    },
+                )
+                .await?,
+            );
             let pending_nonce = rpc.pending_nonce(signer.address()).await?;
             let executor = if args.broadcast {
                 Some(HotPathExecutor::new(
@@ -609,6 +618,13 @@ async fn main() -> Result<()> {
             "fixed_entry_amount_wei": LIVE_CANARY_AMOUNT_IN_WEI,
             "max_wallet_weth_balance": args.max_wallet_weth_balance,
             "max_slippage_bps": args.max_slippage_bps,
+            "gas_limit": args.gas_limit,
+            "max_fee_per_gas": args.max_fee_per_gas,
+            "max_priority_fee_per_gas": args.max_priority_fee_per_gas,
+            "max_gas_cost_wei": args.max_gas_cost_wei,
+            "max_session_loss_wei": args.max_session_loss,
+            "startup_base_fee_per_gas": signed_preflight_base_fee_per_gas,
+            "base_fee_headroom_multiplier": LIVE_CANARY_BASE_FEE_HEADROOM_MULTIPLIER,
             "kill_switch_required": args.broadcast,
         },
         "launch_enabled": status.launch_enabled,
@@ -2696,16 +2712,18 @@ async fn signed_preflight(
     max_fee_per_gas: u128,
     max_wallet_weth_balance: U256,
     required_transactions: u64,
-) -> Result<()> {
-    let (router_code, wrapped_balance, allowance, native_balance) = tokio::try_join!(
+) -> Result<u128> {
+    let (router_code, wrapped_balance, allowance, native_balance, base_fee_per_gas) = tokio::try_join!(
         rpc.code_at(UNISWAP_V3_SWAP_ROUTER_02),
         rpc.erc20_balance(WETH, signer),
         rpc.erc20_allowance(WETH, signer, UNISWAP_V3_SWAP_ROUTER_02),
         rpc.native_balance(signer),
+        rpc.latest_base_fee_per_gas(),
     )?;
     if router_code.is_empty() {
         bail!("canonical SwapRouter02 has no bytecode");
     }
+    validate_live_fee_headroom(max_fee_per_gas, base_fee_per_gas)?;
     let max_gas_cost = U256::from(gas_limit)
         .checked_mul(U256::from(max_fee_per_gas))
         .and_then(|value| value.checked_mul(U256::from(required_transactions)))
@@ -2717,7 +2735,20 @@ async fn signed_preflight(
         amount_in,
         max_wallet_weth_balance,
         max_gas_cost,
-    )
+    )?;
+    Ok(base_fee_per_gas)
+}
+
+fn validate_live_fee_headroom(max_fee_per_gas: u128, base_fee_per_gas: u128) -> Result<()> {
+    let required = base_fee_per_gas
+        .checked_mul(LIVE_CANARY_BASE_FEE_HEADROOM_MULTIPLIER)
+        .ok_or_else(|| anyhow::anyhow!("live base-fee headroom overflow"))?;
+    if max_fee_per_gas < required {
+        bail!(
+            "configured max fee per gas lacks the required live base-fee headroom: configured {max_fee_per_gas}, base {base_fee_per_gas}, required {required}"
+        );
+    }
+    Ok(())
 }
 
 fn validate_signed_funding(
@@ -3055,6 +3086,23 @@ fn validate_args(args: &Cli) -> Result<()> {
                 {
                     bail!("signed broadcast slippage exceeds the live-canary cap");
                 }
+                if args.gas_limit != LIVE_CANARY_GAS_LIMIT
+                    || parse_u128(&args.max_fee_per_gas)? != LIVE_CANARY_MAX_FEE_PER_GAS_WEI
+                    || parse_u128(&args.max_priority_fee_per_gas)?
+                        != LIVE_CANARY_MAX_PRIORITY_FEE_PER_GAS_WEI
+                    || parse_u256(&args.max_gas_cost_wei)?
+                        != U256::from(LIVE_CANARY_MAX_GAS_COST_WEI)
+                {
+                    bail!("signed broadcast requires the exact reviewed live-canary fee envelope");
+                }
+                if args.copy_bounded_exit_min_weth_out.is_some()
+                    && parse_u256(&args.max_session_loss)?
+                        != U256::from(LIVE_CANARY_MAX_SESSION_LOSS_WEI)
+                {
+                    bail!(
+                        "bounded signed broadcast requires the exact one-percent session-loss cap"
+                    );
+                }
             }
             if let Some(minimum) = args.round_trip_exit_min_weth_out.as_deref()
                 && (!args.broadcast || parse_u256(minimum)? == U256::ZERO)
@@ -3217,6 +3265,16 @@ mod tests {
         file.write_all(KILL_SWITCH_ARMED).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    fn with_live_fee_envelope(args: Cli) -> Cli {
+        Cli {
+            gas_limit: LIVE_CANARY_GAS_LIMIT,
+            max_fee_per_gas: LIVE_CANARY_MAX_FEE_PER_GAS_WEI.to_string(),
+            max_priority_fee_per_gas: LIVE_CANARY_MAX_PRIORITY_FEE_PER_GAS_WEI.to_string(),
+            max_gas_cost_wei: LIVE_CANARY_MAX_GAS_COST_WEI.to_string(),
+            ..args
+        }
     }
 
     #[test]
@@ -3438,7 +3496,32 @@ mod tests {
         assert!(
             validate_args(&Cli {
                 deployment: Deployment::LegacyNoxa,
-                ..configured
+                ..configured.clone()
+            })
+            .is_err()
+        );
+
+        let kill_switch = armed_kill_switch();
+        let signed = with_live_fee_envelope(Cli {
+            mode: RuntimeMode::Signed,
+            copy_discover_all_wallets: false,
+            watched_wallets: vec!["0x1111111111111111111111111111111111111111".into()],
+            copy_tokens: vec!["0x2222222222222222222222222222222222222222".into()],
+            copy_trust_leader_limit_price: true,
+            expected_address: Some(RECIPIENT.into()),
+            keystore: Some("/srv/codex-workspaces/hermes-secrets/trader-mainnet.json".into()),
+            broadcast: true,
+            approval_token: Some(BROADCAST_APPROVAL.into()),
+            kill_switch_file: Some(kill_switch.path().to_path_buf()),
+            max_session_loss: LIVE_CANARY_MAX_SESSION_LOSS_WEI.to_string(),
+            ..configured
+        });
+        assert!(validate_args(&signed).is_ok());
+        assert!(ensure_live_broadcast_armed(&signed).is_ok());
+        assert!(
+            validate_args(&Cli {
+                max_session_loss: (LIVE_CANARY_MAX_SESSION_LOSS_WEI + 1).to_string(),
+                ..signed
             })
             .is_err()
         );
@@ -3534,13 +3617,13 @@ mod tests {
             BROADCAST_APPROVAL,
         ])
         .unwrap();
-        let untrusted = Cli {
+        let untrusted = with_live_fee_envelope(Cli {
             deployment: Deployment::ActiveNoxa,
             max_slippage_bps: LIVE_CANARY_MAX_SLIPPAGE_BPS,
             slippage_bps: LIVE_CANARY_MAX_SLIPPAGE_BPS,
             kill_switch_file: Some(kill_switch.path().to_path_buf()),
             ..parsed
-        };
+        });
         assert!(validate_args(&untrusted).is_err());
 
         let trusted = Cli {
@@ -3957,13 +4040,13 @@ mod tests {
             BROADCAST_APPROVAL,
         ])
         .unwrap();
-        let approved = Cli {
+        let approved = with_live_fee_envelope(Cli {
             deployment: Deployment::ActiveNoxa,
             max_slippage_bps: LIVE_CANARY_MAX_SLIPPAGE_BPS,
             slippage_bps: LIVE_CANARY_MAX_SLIPPAGE_BPS,
             kill_switch_file: Some(kill_switch.path().to_path_buf()),
             ..parsed
-        };
+        });
         assert!(validate_args(&approved).is_ok());
         assert!(ensure_live_broadcast_armed(&approved).is_ok());
 
@@ -3999,7 +4082,7 @@ mod tests {
     #[test]
     fn live_broadcast_profile_rejects_legacy_oversized_and_loose_configuration() {
         let kill_switch = armed_kill_switch();
-        let approved = Cli {
+        let approved = with_live_fee_envelope(Cli {
             mode: RuntimeMode::Signed,
             deployment: Deployment::ActiveNoxa,
             broadcast: true,
@@ -4010,7 +4093,7 @@ mod tests {
             max_slippage_bps: LIVE_CANARY_MAX_SLIPPAGE_BPS,
             slippage_bps: LIVE_CANARY_MAX_SLIPPAGE_BPS,
             ..Cli::try_parse_from(["hermes-noxa-runtime", "--recipient", RECIPIENT]).unwrap()
-        };
+        });
         assert!(validate_args(&approved).is_ok());
 
         let legacy = Cli {
@@ -4033,9 +4116,27 @@ mod tests {
 
         let overfunded = Cli {
             max_wallet_weth_balance: (LIVE_CANARY_MAX_WETH_BALANCE_WEI + 1).to_string(),
-            ..approved
+            ..approved.clone()
         };
         assert!(validate_args(&overfunded).is_err());
+
+        let stale_fee = Cli {
+            max_fee_per_gas: "20000000".into(),
+            ..approved.clone()
+        };
+        assert!(validate_args(&stale_fee).is_err());
+
+        let loose_gas_cap = Cli {
+            max_gas_cost_wei: (LIVE_CANARY_MAX_GAS_COST_WEI + 1).to_string(),
+            ..approved
+        };
+        assert!(validate_args(&loose_gas_cap).is_err());
+    }
+
+    #[test]
+    fn live_fee_headroom_rejects_a_stale_envelope() {
+        assert!(validate_live_fee_headroom(200_000_000, 67_644_000).is_ok());
+        assert!(validate_live_fee_headroom(100_000_000, 67_644_000).is_err());
     }
 
     #[test]
@@ -4101,7 +4202,7 @@ mod tests {
         .unwrap();
         assert!(validate_args(&args).is_err());
 
-        let approved = Cli {
+        let approved = with_live_fee_envelope(Cli {
             broadcast: true,
             approval_token: Some(BROADCAST_APPROVAL.into()),
             deployment: Deployment::ActiveNoxa,
@@ -4109,7 +4210,7 @@ mod tests {
             slippage_bps: LIVE_CANARY_MAX_SLIPPAGE_BPS,
             kill_switch_file: Some(kill_switch.path().to_path_buf()),
             ..args
-        };
+        });
         assert!(validate_args(&approved).is_ok());
         assert!(ensure_live_broadcast_armed(&approved).is_ok());
     }

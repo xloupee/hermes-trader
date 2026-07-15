@@ -137,14 +137,17 @@ The operator must separately review and approve this complete envelope before
 launching it:
 
 - recipient and expected signer:
-  `0xd7a41d7e502f5d63b36ec59c84f59a3efa6b99a0`;
+  `0x73bdbc2f46ed5b637431413a5f88f277cf1a52b5`;
 - watched leader: `0xa5cd583d88ab54572bc1ea177388d44e77fde5b1`;
 - active-Noxa token: `0xfab5f908facac184db22c69caee7b6258e215223`;
 - exactly one trigger and exactly `100000000000000` wei WETH entry exposure;
 - at most 100 basis points of configured slippage;
 - automatic full-position exit with at least `99000000000000` wei WETH out;
 - at most `1000000000000` wei realized session loss and
-  `7000000000000` wei gas cost per signed step;
+  `70000000000000` wei gas cost per signed step;
+- exactly `350000` gas, `200000000` wei maximum fee per gas, and zero priority
+  fee; startup additionally requires that cap to remain at least twice the
+  latest Robinhood base fee;
 - at most `1000000000000000` wei WETH in the signer wallet;
 - the pinned active-Noxa factory and router enforced by the runtime;
 - an armed private kill-switch file checked before every signed step and again
@@ -165,8 +168,8 @@ the operator; neither value is committed:
   --mode signed \
   --deployment active-noxa \
   --strategy copy \
-  --recipient 0xd7A41D7E502F5D63B36Ec59c84F59A3eFA6B99a0 \
-  --expected-address 0xd7A41D7E502F5D63B36Ec59c84F59A3eFA6B99a0 \
+  --recipient 0x73bDBC2f46Ed5b637431413a5F88f277cf1A52B5 \
+  --expected-address 0x73bDBC2f46Ed5b637431413a5F88f277cf1A52B5 \
   --watch-wallet 0xa5cd583d88ab54572bc1ea177388d44e77fde5b1 \
   --copy-token 0xfab5f908facac184db22c69caee7b6258e215223 \
   --copy-max-triggers 1 \
@@ -175,12 +178,12 @@ the operator; neither value is committed:
   --max-trade-amount-in 100000000000000 \
   --max-open-exposure 100000000000000 \
   --max-wallet-weth-balance 1000000000000000 \
-  --max-gas-cost-wei 7000000000000 \
+  --max-gas-cost-wei 70000000000000 \
   --max-session-loss 1000000000000 \
   --slippage-bps 100 \
   --max-slippage-bps 100 \
   --gas-limit 350000 \
-  --max-fee-per-gas 20000000 \
+  --max-fee-per-gas 200000000 \
   --max-priority-fee-per-gas 0 \
   --l1-window 3 \
   --timestamp-window-seconds 30 \

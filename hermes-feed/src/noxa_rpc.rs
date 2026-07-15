@@ -438,6 +438,15 @@ impl NoxaRpcClient {
         parse_block(&value)
     }
 
+    /// Returns the current EIP-1559 base fee. Signed canaries use this to
+    /// reject a fee envelope that is already stale before any bytes are signed.
+    pub async fn latest_base_fee_per_gas(&self) -> Result<u128> {
+        let value = self
+            .request("eth_getBlockByNumber", json!(["latest", false]))
+            .await?;
+        parse_base_fee_per_gas(&value)
+    }
+
     pub async fn transaction_by_hash(&self, hash: B256) -> Result<Option<RobinhoodTransaction>> {
         let value = self
             .request("eth_getTransactionByHash", json!([hash]))
@@ -953,6 +962,11 @@ fn parse_hex_u256(value: &str) -> Result<U256> {
     .context("parse U256 hex quantity")
 }
 
+fn parse_base_fee_per_gas(value: &Value) -> Result<u128> {
+    let base_fee = parse_hex_u256(field_str(value, "baseFeePerGas")?)?;
+    u128::try_from(base_fee).context("base fee per gas does not fit u128")
+}
+
 fn parse_bytes_value(value: &Value) -> Result<Bytes> {
     parse_bytes_str(
         value
@@ -1040,6 +1054,21 @@ mod tests {
         let block = parse_block(&value).unwrap();
         assert_eq!(block.l2_block_number, 6_880_646);
         assert_eq!(block.l1_block_number, 25_508_851);
+    }
+
+    #[test]
+    fn parses_latest_base_fee_and_rejects_missing_or_oversized_values() {
+        assert_eq!(
+            parse_base_fee_per_gas(&json!({"baseFeePerGas": "0x4082a60"})).unwrap(),
+            67_644_000
+        );
+        assert!(parse_base_fee_per_gas(&json!({})).is_err());
+        assert!(
+            parse_base_fee_per_gas(
+                &json!({"baseFeePerGas": "0x100000000000000000000000000000000"})
+            )
+            .is_err()
+        );
     }
 
     #[test]

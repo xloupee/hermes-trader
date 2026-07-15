@@ -55,8 +55,9 @@
       "target": "0xcaf681a66d020601342297493863e78c959e5cb2",
       "selector": "0x5ae401dc",
       "route": "canonical_swap_router_02_multicall",
+      "route_compatible": true,
       "copy_eligible": false,
-      "reason": "multicall decoding is not implemented"
+      "reason": "multicall decoding is not implemented and every decoded inner Noxa swap sets amountOutMinimum to zero"
     },
     {
       "address": "0xae4c5c72d78621aa25773be5f594de6c4887b3b5",

@@ -78,5 +78,42 @@
     "sequence_missing": 0,
     "completion_reason": "duration_complete"
   },
-  "result": "paper_runtime_ready_for_bounded_targeted_watch_no_production_eligible_leader_trade_not_ready_for_live_money"
+  "targeted_60_minute_run": {
+    "started_at_utc": "2026-07-15T06:35:09Z",
+    "run_seconds": 3600,
+    "completion_reason": "duration_complete",
+    "copy_triggers": 0,
+    "active_noxa_launches_observed": 0,
+    "post_warmup_candidates_suppressed_as_launch_not_observed": 4451,
+    "warmup_candidates_suppressed": 93,
+    "unique_candidate_tokens": 325,
+    "post_run_factory_registry_audit": {
+      "tokens_checked": 325,
+      "registered_active_noxa_tokens": 0,
+      "not_registered": 325,
+      "validation_failures": 0,
+      "query_failures": 0
+    },
+    "rpc": {
+      "logical_requests": 57,
+      "http_attempts": 57,
+      "rate_limited": 0,
+      "retries": 0,
+      "server_errors": 0,
+      "transport_errors": 0
+    },
+    "feed": {
+      "sequence_first": 10180003,
+      "sequence_last": 10216614,
+      "sequence_gaps": 0,
+      "sequence_missing": 0,
+      "duplicates_or_reordered": 0,
+      "reconnects": 0,
+      "replayed_messages": 0,
+      "resume_forward_gaps": 0
+    }
+  },
+  "live_eligibility_gate_passed": false,
+  "live_eligibility_blocker": "no production-eligible Noxa leader entry has been observed; both historically verified traders used zero amountOutMinimum and the current leader traded no active-Noxa token during the 60-minute watch",
+  "result": "paper_runtime_infrastructure_clean_strategy_signal_not_live_ready"
 }

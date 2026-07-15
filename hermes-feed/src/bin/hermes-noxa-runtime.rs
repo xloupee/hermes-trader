@@ -14,7 +14,7 @@ use alloy_consensus::{Transaction, transaction::SignerRecoverable};
 use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
-use futures_util::{StreamExt, stream::SplitStream};
+use futures_util::{StreamExt, TryStreamExt, stream, stream::SplitStream};
 use hermes_feed::feed::BroadcastMessage;
 use hermes_feed::robinhood::{
     ACTIVE_NOXA_FACTORY_RUNTIME_KECCAK256, ACTIVE_NOXA_LAUNCH_FACTORY, DIRECT_FEED_URL,
@@ -30,7 +30,7 @@ use hermes_feed::{
     ObservedNoxaFactoryCall, PaperOrderState, PredictedNoxaTradeInput, ReceiptLog,
     ReconciliationJob, RiskLimits, SequenceTracker, SequencerClient, SignedPendingKind,
     SignedPosition, SignedTradingRuntime, TradeSigner, TradeTransactionPlan, V3ExactInputIntent,
-    WatchedWalletCopyPolicy, decode_launch_call, decode_launch_header,
+    WatchedWalletCopyPolicy, decode_launch_call, decode_launch_header, decode_token_launched,
     decode_v3_exact_input_single, normalize_aggregator_copy_swap, predict_v3_pool_address,
     prepare_predicted_noxa_trade, validate_active_noxa_copy_token, verify_noxa_factory_call,
 };
@@ -58,6 +58,9 @@ const FEED_RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(5);
 const NITRO_FEED_CLIENT_VERSION: &str = "2";
 const NITRO_FEED_CLIENT_VERSION_HEADER: &str = "Arbitrum-Feed-Client-Version";
 const NITRO_REQUESTED_SEQUENCE_HEADER: &str = "Arbitrum-Requested-Sequence-Number";
+const ACTIVE_NOXA_DISCOVERY_FROM_L2_BLOCK: u64 = 8_000_000;
+const ACTIVE_NOXA_DISCOVERY_LOG_CHUNK: u64 = 25_000;
+const ACTIVE_NOXA_DISCOVERY_BACKFILL_CONCURRENCY: usize = 4;
 
 type FeedRead = SplitStream<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>>;
 
@@ -503,6 +506,14 @@ async fn main() -> Result<()> {
     for validation in copy_token_validation.iter().cloned() {
         copy_token_registry.insert(validation);
     }
+    let historical_active_noxa_launches = if args.copy_discover_all_wallets {
+        backfill_active_noxa_launches(&rpc, status.pinned_l2_block).await?
+    } else {
+        Vec::new()
+    };
+    for (token, pool) in historical_active_noxa_launches.iter().copied() {
+        copy_token_registry.observe_launch(token, pool);
+    }
 
     let (reconciliation_sender, reconciliation_receiver) =
         sync_channel::<ReconciliationJob>(RECONCILIATION_QUEUE_CAPACITY);
@@ -601,10 +612,11 @@ async fn main() -> Result<()> {
             "bootstrap_tokens": policy.allowed_tokens().len(),
             "dynamic_token_validation": true,
             "dynamic_token_candidate_source": if args.deployment == Deployment::ActiveNoxa {
-                "observed_pinned_factory_launch"
+                "pinned_factory_log_backfill_and_live_observation"
             } else {
                 "watched_swap"
             },
+            "historical_factory_launches": historical_active_noxa_launches.len(),
             "max_triggers": args.copy_max_triggers,
             "max_leader_entry_amount": args.copy_max_leader_entry_amount,
             "follower_entry_amount": amount_in,
@@ -1379,6 +1391,56 @@ async fn process_feed_frame(
         }
     }
     Ok(())
+}
+
+fn active_noxa_discovery_log_ranges(to_l2_block: u64) -> Vec<(u64, u64)> {
+    if to_l2_block < ACTIVE_NOXA_DISCOVERY_FROM_L2_BLOCK {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    let mut from = ACTIVE_NOXA_DISCOVERY_FROM_L2_BLOCK;
+    loop {
+        let to = from
+            .saturating_add(ACTIVE_NOXA_DISCOVERY_LOG_CHUNK - 1)
+            .min(to_l2_block);
+        ranges.push((from, to));
+        if to == to_l2_block {
+            break;
+        }
+        from = to + 1;
+    }
+    ranges
+}
+
+async fn backfill_active_noxa_launches(
+    rpc: &NoxaRpcClient,
+    to_l2_block: u64,
+) -> Result<Vec<(Address, Address)>> {
+    let batches = stream::iter(active_noxa_discovery_log_ranges(to_l2_block))
+        .map(|(from, to)| {
+            let rpc = rpc.clone();
+            async move {
+                rpc.token_launched_logs_for(ACTIVE_NOXA_LAUNCH_FACTORY, from, to)
+                    .await
+                    .with_context(|| format!("backfill active Noxa launches {from}..={to}"))
+            }
+        })
+        .buffered(ACTIVE_NOXA_DISCOVERY_BACKFILL_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+    let mut launches = HashMap::<Address, Address>::new();
+    for observed in batches.into_iter().flatten() {
+        let launch = decode_token_launched(&observed.log)
+            .context("active Noxa factory emitted malformed TokenLaunched log")?;
+        if let Some(previous) = launches.insert(launch.token, launch.pool)
+            && previous != launch.pool
+        {
+            bail!("active Noxa factory emitted conflicting pools for one token");
+        }
+    }
+    let mut launches = launches.into_iter().collect::<Vec<_>>();
+    launches.sort_unstable_by_key(|(token, _)| *token);
+    Ok(launches)
 }
 
 fn should_observe_launch(
@@ -3076,6 +3138,19 @@ mod tests {
         assert!(!should_observe_launch(false, true, false));
         assert!(!should_observe_launch(false, false, true));
         assert!(should_observe_launch(true, false, true));
+    }
+
+    #[test]
+    fn active_noxa_discovery_backfill_ranges_are_bounded_and_contiguous() {
+        assert!(active_noxa_discovery_log_ranges(7_999_999).is_empty());
+        assert_eq!(
+            active_noxa_discovery_log_ranges(8_000_000),
+            vec![(8_000_000, 8_000_000)]
+        );
+        assert_eq!(
+            active_noxa_discovery_log_ranges(8_025_000),
+            vec![(8_000_000, 8_024_999), (8_025_000, 8_025_000)]
+        );
     }
 
     #[test]

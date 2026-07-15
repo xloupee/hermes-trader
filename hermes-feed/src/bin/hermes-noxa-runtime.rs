@@ -1328,9 +1328,11 @@ async fn process_feed_frame(
                 continue;
             }
             if !copy_token_registry.contains(token, candidate.pool) {
-                if deployment == Deployment::ActiveNoxa
-                    && !copy_token_registry.launch_was_observed(token, candidate.pool)
-                {
+                let factory_proven_paper_discovery = args.mode == RuntimeMode::Paper
+                    && args.deployment == Deployment::ActiveNoxa
+                    && args.copy_discover_all_wallets
+                    && copy_token_registry.launch_was_observed(token, candidate.pool);
+                if deployment == Deployment::ActiveNoxa && !factory_proven_paper_discovery {
                     emit(json!({
                         "record_type": "runtime_copy_candidate_suppressed",
                         "source_tx_hash": observed.tx_hash,
@@ -1365,14 +1367,27 @@ async fn process_feed_frame(
                         Ok(())
                     });
                 }
-                emit(json!({
-                    "record_type": "runtime_copy_candidate_suppressed",
-                    "source_tx_hash": observed.tx_hash,
-                    "token": token,
-                    "pool": candidate.pool,
-                    "reason": "dynamic_noxa_validation_pending",
-                }))?;
-                continue;
+                if factory_proven_paper_discovery {
+                    emit(json!({
+                        "record_type": "runtime_copy_factory_proven_candidate",
+                        "source_tx_hash": observed.tx_hash,
+                        "leader": observed.from,
+                        "token": token,
+                        "pool": candidate.pool,
+                        "identity_proof": "pinned_active_noxa_factory_log",
+                        "full_rpc_validation_pending": true,
+                        "broadcast": false,
+                    }))?;
+                } else {
+                    emit(json!({
+                        "record_type": "runtime_copy_candidate_suppressed",
+                        "source_tx_hash": observed.tx_hash,
+                        "token": token,
+                        "pool": candidate.pool,
+                        "reason": "dynamic_noxa_validation_pending",
+                    }))?;
+                    continue;
+                }
             }
             let policy = copy_policy
                 .ok_or_else(|| anyhow::anyhow!("copy strategy has no validated policy"))?;

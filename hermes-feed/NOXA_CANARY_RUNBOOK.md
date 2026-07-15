@@ -115,3 +115,86 @@ signer and one-time approval arguments:
 
 Disarming the switch is an operator stop, not permission to replace or retry a
 transaction whose submission outcome is ambiguous.
+
+### One-trigger bounded copy canary
+
+The bounded copy canary is narrower than the general preparation workflow. It
+may be run only after a paper watch has produced all of the following in one
+uninterrupted session:
+
+- a factory-proven and independently receipt-audited leader entry;
+- a guarded paper order with measured detection-to-order latency;
+- entry reconciliation followed by an automatic full-position exit;
+- zero final exposure, zero remaining positions, and no pending order;
+- a completed health window with no missing feed sequence and exact reconnects;
+- no post-startup RPC retry, rate-limit, server, or transport error.
+
+The 2026-07-15 Falkenstein evidence satisfying those gates is recorded in
+`oracle/active-noxa-bounded-exit-paper-20260715.json`. That evidence is not by
+itself authorization to spend mainnet funds.
+
+The operator must separately review and approve this complete envelope before
+launching it:
+
+- recipient and expected signer:
+  `0xd7a41d7e502f5d63b36ec59c84f59a3efa6b99a0`;
+- watched leader: `0xa5cd583d88ab54572bc1ea177388d44e77fde5b1`;
+- active-Noxa token: `0xfab5f908facac184db22c69caee7b6258e215223`;
+- exactly one trigger and exactly `100000000000000` wei WETH entry exposure;
+- at most 100 basis points of configured slippage;
+- automatic full-position exit with at least `99000000000000` wei WETH out;
+- at most `1000000000000` wei realized session loss and
+  `7000000000000` wei gas cost per signed step;
+- at most `1000000000000000` wei WETH in the signer wallet;
+- the pinned active-Noxa factory and router enforced by the runtime;
+- an armed private kill-switch file checked before every signed step and again
+  before sequencer submission.
+
+Before starting, the operator must independently confirm that the signer has
+enough native gas, between `100000000000000` and `1000000000000000` wei WETH,
+and an exact `100000000000000` wei WETH allowance to the pinned router. The
+runtime preflight fails closed if these conditions, the chain, bytecode, nonce,
+or wallet cap do not match.
+
+After recording the separate approval, the credential-bearing invocation is
+operator-executed. `KEYSTORE` and `KILL_SWITCH` are private paths supplied by
+the operator; neither value is committed:
+
+```bash
+/srv/codex-workspaces/pumpfunnoti/hermes-feed/target/release/hermes-noxa-runtime \
+  --mode signed \
+  --deployment active-noxa \
+  --strategy copy \
+  --recipient 0xd7A41D7E502F5D63B36Ec59c84F59A3eFA6B99a0 \
+  --expected-address 0xd7A41D7E502F5D63B36Ec59c84F59A3eFA6B99a0 \
+  --watch-wallet 0xa5cd583d88ab54572bc1ea177388d44e77fde5b1 \
+  --copy-token 0xfab5f908facac184db22c69caee7b6258e215223 \
+  --copy-max-triggers 1 \
+  --copy-trust-leader-limit-price \
+  --amount-in 100000000000000 \
+  --max-trade-amount-in 100000000000000 \
+  --max-open-exposure 100000000000000 \
+  --max-wallet-weth-balance 1000000000000000 \
+  --max-gas-cost-wei 7000000000000 \
+  --max-session-loss 1000000000000 \
+  --slippage-bps 100 \
+  --max-slippage-bps 100 \
+  --gas-limit 350000 \
+  --max-fee-per-gas 20000000 \
+  --max-priority-fee-per-gas 0 \
+  --l1-window 3 \
+  --timestamp-window-seconds 30 \
+  --copy-bounded-exit-min-weth-out 99000000000000 \
+  --run-seconds 3600 \
+  --warmup-seconds 5 \
+  --reconciliation-seconds 20 \
+  --keystore "$KEYSTORE" \
+  --password-fd 3 \
+  --broadcast \
+  --approval-token MAINNET_CANARY_APPROVED \
+  --kill-switch-file "$KILL_SWITCH" \
+  3< <(systemd-ask-password "Hermes mainnet canary keystore password")
+```
+
+Do not start a replacement if any submission becomes ambiguous. Disarm the
+kill switch and reconcile the leased nonce and transaction hash first.

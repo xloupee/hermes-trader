@@ -1151,8 +1151,16 @@ async fn process_feed_frame(
         }
         let emission_enabled = connected_at.elapsed() >= Duration::from_secs(args.warmup_seconds)
             && sequence.is_contiguous();
+        // Paper discovery must learn launches replayed during the connection warmup. It still
+        // cannot arm an order until `emission_enabled`, and the CLI validator confines
+        // `copy_discover_all_wallets` to active-Noxa paper mode.
+        let launch_observation_enabled = should_observe_launch(
+            emission_enabled,
+            args.copy_discover_all_wallets,
+            sequence.is_contiguous(),
+        );
         for (tx_hash, intent, header, sender) in launches {
-            if !emission_enabled {
+            if !launch_observation_enabled {
                 emit(json!({
                     "record_type": "runtime_candidate_suppressed",
                     "tx_hash": tx_hash,
@@ -1228,6 +1236,7 @@ async fn process_feed_frame(
                     "predicted_pool": predicted.pool,
                     "prediction_and_optional_arm_ns": prediction_started.elapsed().as_nanos(),
                     "candidate_armed": args.strategy == StrategyMode::Launch,
+                    "observed_during_warmup": !emission_enabled,
                     "receipt_verified": false,
                     "receipt_proof": "active_deployment_receipt_proof_pending",
                 }))?;
@@ -1370,6 +1379,14 @@ async fn process_feed_frame(
         }
     }
     Ok(())
+}
+
+fn should_observe_launch(
+    emission_enabled: bool,
+    copy_discover_all_wallets: bool,
+    sequence_contiguous: bool,
+) -> bool {
+    emission_enabled || (copy_discover_all_wallets && sequence_contiguous)
 }
 
 fn is_non_launch_factory_transaction(input: &[u8]) -> bool {
@@ -3051,6 +3068,14 @@ mod tests {
             ..discovery
         };
         assert!(validate_args(&signed).is_err());
+    }
+
+    #[test]
+    fn paper_discovery_learns_contiguous_launches_during_warmup_without_general_emission() {
+        assert!(should_observe_launch(false, true, true));
+        assert!(!should_observe_launch(false, true, false));
+        assert!(!should_observe_launch(false, false, true));
+        assert!(should_observe_launch(true, false, true));
     }
 
     #[test]

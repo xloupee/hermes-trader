@@ -28,11 +28,12 @@ use hermes_feed::{
     FactoryStatus, FeedBoundary, FeedDecoder, Filter, HotPathExecutor, HotPathReport,
     KeystoreTradeSigner, NoxaPredictor, NoxaRpcClient, NoxaVerificationOutcome, ObservedCopySwap,
     ObservedNoxaFactoryCall, PaperOrderState, PredictedNoxaTradeInput, ReceiptLog,
-    ReconciliationJob, RiskLimits, SequenceTracker, SequencerClient, SignedPendingKind,
-    SignedPosition, SignedTradingRuntime, TradeSigner, TradeTransactionPlan, V3ExactInputIntent,
-    WatchedWalletCopyPolicy, decode_launch_call, decode_launch_header, decode_token_launched,
-    decode_v3_exact_input_single, normalize_aggregator_copy_swap, predict_v3_pool_address,
-    prepare_predicted_noxa_trade, validate_active_noxa_copy_token, verify_noxa_factory_call,
+    ReconciliationJob, RiskLimits, RpcMetricsSnapshot, SequenceTracker, SequencerClient,
+    SignedPendingKind, SignedPosition, SignedTradingRuntime, TradeSigner, TradeTransactionPlan,
+    V3ExactInputIntent, WatchedWalletCopyPolicy, decode_launch_call, decode_launch_header,
+    decode_token_launched, decode_v3_exact_input_single, normalize_aggregator_copy_swap,
+    predict_v3_pool_address, prepare_predicted_noxa_trade, validate_active_noxa_copy_token,
+    verify_noxa_factory_call,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -60,7 +61,7 @@ const NITRO_FEED_CLIENT_VERSION_HEADER: &str = "Arbitrum-Feed-Client-Version";
 const NITRO_REQUESTED_SEQUENCE_HEADER: &str = "Arbitrum-Requested-Sequence-Number";
 const ACTIVE_NOXA_DISCOVERY_FROM_L2_BLOCK: u64 = 8_000_000;
 const ACTIVE_NOXA_DISCOVERY_LOG_CHUNK: u64 = 25_000;
-const ACTIVE_NOXA_DISCOVERY_BACKFILL_CONCURRENCY: usize = 4;
+const ACTIVE_NOXA_DISCOVERY_BACKFILL_CONCURRENCY: usize = 2;
 
 type FeedRead = SplitStream<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>>;
 
@@ -584,6 +585,7 @@ async fn main() -> Result<()> {
         }
     };
 
+    let rpc_startup_metrics = rpc.metrics();
     emit(json!({
         "record_type": "hermes_noxa_runtime_start",
         "mode": format!("{:?}", args.mode).to_ascii_lowercase(),
@@ -632,6 +634,7 @@ async fn main() -> Result<()> {
         "boundary_trigger": "contiguous_nitro_l1_header",
         "launch_receipt_on_hot_path": false,
         "private_key_logged": false,
+        "rpc_startup": rpc_startup_metrics,
     }))?;
 
     let (stream, _) = tokio_tungstenite::connect_async(feed_request(&args.feed_url, 0)?)
@@ -836,6 +839,7 @@ async fn main() -> Result<()> {
     drop(reconciliation_sender);
     let _ = bridge.join();
     loop_result?;
+    let rpc_total = rpc.metrics();
     emit(json!({
         "record_type": "hermes_noxa_runtime_stop",
         "sequence": sequences.current(),
@@ -843,7 +847,8 @@ async fn main() -> Result<()> {
         "feed_replayed_messages": feed_replayed_messages,
         "feed_resume_forward_gaps": feed_resume_forward_gaps,
         "copy_triggers": copy_triggers,
-        "rpc": rpc.metrics(),
+        "rpc": rpc_total,
+        "rpc_after_startup": rpc_metrics_delta(rpc_total, rpc_startup_metrics),
         "reason": completion_reason(status.launch_enabled, shutdown_requested),
     }))
 }
@@ -1406,6 +1411,24 @@ async fn process_feed_frame(
         }
     }
     Ok(())
+}
+
+fn rpc_metrics_delta(
+    total: RpcMetricsSnapshot,
+    baseline: RpcMetricsSnapshot,
+) -> RpcMetricsSnapshot {
+    RpcMetricsSnapshot {
+        logical_requests: total
+            .logical_requests
+            .saturating_sub(baseline.logical_requests),
+        http_attempts: total.http_attempts.saturating_sub(baseline.http_attempts),
+        retries: total.retries.saturating_sub(baseline.retries),
+        rate_limited: total.rate_limited.saturating_sub(baseline.rate_limited),
+        server_errors: total.server_errors.saturating_sub(baseline.server_errors),
+        transport_errors: total
+            .transport_errors
+            .saturating_sub(baseline.transport_errors),
+    }
 }
 
 fn active_noxa_discovery_log_ranges(to_l2_block: u64) -> Vec<(u64, u64)> {
@@ -3165,6 +3188,37 @@ mod tests {
         assert_eq!(
             active_noxa_discovery_log_ranges(8_025_000),
             vec![(8_000_000, 8_024_999), (8_025_000, 8_025_000)]
+        );
+    }
+
+    #[test]
+    fn rpc_metrics_delta_separates_startup_from_live_watch_activity() {
+        let baseline = RpcMetricsSnapshot {
+            logical_requests: 100,
+            http_attempts: 120,
+            retries: 20,
+            rate_limited: 20,
+            server_errors: 0,
+            transport_errors: 0,
+        };
+        let total = RpcMetricsSnapshot {
+            logical_requests: 107,
+            http_attempts: 127,
+            retries: 20,
+            rate_limited: 20,
+            server_errors: 0,
+            transport_errors: 0,
+        };
+        assert_eq!(
+            rpc_metrics_delta(total, baseline),
+            RpcMetricsSnapshot {
+                logical_requests: 7,
+                http_attempts: 7,
+                retries: 0,
+                rate_limited: 0,
+                server_errors: 0,
+                transport_errors: 0,
+            }
         );
     }
 

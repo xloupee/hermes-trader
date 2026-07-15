@@ -147,5 +147,40 @@
       }
     }
   },
-  "result": "many_active_noxa_wallets_confirmed_and_one_policy_safe_entry_occurred_during_the_deployed_watch_but_outside_its_stale_allowlist"
+  "final_all_wallet_discovery_scan": {
+    "scan_from_l2_block": 10520067,
+    "scan_to_l2_block": 10556976,
+    "active_factory_launches": 2184,
+    "pool_swap_transactions": 53,
+    "wallets": 33,
+    "production_eligible_entries": 2,
+    "eligible_entry_leaders": [
+      {
+        "address": "0x7d678fb0f95633ed17ea2b0cdd29a5855cb0ca46",
+        "transaction": "0xcb57e30094081a4f0b52e9c3f2480d09c8d475886f622940cd2f6396150c0087",
+        "l2_block": 10523579,
+        "token": "0x7ca559897c59689614ae03f5e6124ecba5557398",
+        "pool": "0x17ad550ab52fc5d72a61284ab2c6d5eca28b0bee",
+        "runtime_result": "paper_entry_armed_and_reconciled",
+        "detection_to_order_ns": 1005491
+      },
+      {
+        "address": "0x59cb462cd4adabe9734b1c7a8517a1b52d1c36d0",
+        "transaction": "0x18052118d42acd12bd94e89ad87ea171405152b9ed33def68061739f7c479809",
+        "l2_block": 10554323,
+        "token": "0x3c937b294c5f750088bb998f080f557d07ba9e7e",
+        "pool": "0xab1c618c0ee8b9566c2d06fb6916fd98a9d7b92d",
+        "runtime_result": "rejected_position_already_open"
+      }
+    ],
+    "canonical_exit_only_wallets": [
+      "0x3bab580fa3425997152e66bfd2c45e036bba6164",
+      "0x32d9d868e0e2dec53970baf87aa09a57138a58b3",
+      "0x0c883962c39fb31ca22f5ed420ac9905ccd7985a",
+      "0x87bb6840eb4ac72a0aa0f3a06e09a76a8b8e49fe"
+    ],
+    "unsupported_route_wallets": 27,
+    "scanner_rpc_errors": 0
+  },
+  "result": "thirty_three_active_noxa_traders_confirmed_with_two_policy_safe_entry_leaders"
 }

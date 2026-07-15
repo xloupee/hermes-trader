@@ -45,17 +45,21 @@
   "historical_guarded_path_replay": {
     "live_measurement": false,
     "measurement_scope": "normalized_verified_candidate_to_paper_order",
-    "historical_transaction": "0xfcf1b4a4d174dae3d2b857a47a197d941e52163c2f3b93e74db38257b39fe924",
+    "source_route": "robinhood_aggregator",
+    "historical_transaction": "0x77f70b0e67cae3d3e7b0155389c6886817ff737f288c710eabad8bef51182298",
+    "leader": "0xcc6ae8be8689b168d9e14130b11b00eb6321e1fa",
+    "token": "0xec3ff0ab2f0260615f4f8e49fe8212db89d93517",
+    "pool": "0x64910218a9e21f0e36f39edf59f6c5e5e75ad6cc",
     "iterations": 10000,
-    "historical_amount_out_minimum": "0x0",
-    "benchmark_limit_adjusted": true,
-    "production_policy_would_accept_historical_trade": false,
+    "historical_amount_out_minimum": "0x14ad5de897e8fdaafb8d2",
+    "benchmark_limit_adjusted": false,
+    "production_policy_would_accept_historical_trade": true,
     "latency_ns": {
-      "min": 969,
-      "median": 1442,
-      "p95": 2447,
-      "p99": 2799,
-      "max": 33721
+      "min": 1152,
+      "median": 1770,
+      "p95": 3979,
+      "p99": 5370,
+      "max": 93895
     }
   },
   "targeted_30_minute_run": {
@@ -113,7 +117,36 @@
       "resume_forward_gaps": 0
     }
   },
+  "recent_active_noxa_market_scan": {
+    "factory_launches_backfilled": 1014,
+    "last_launch_l2_block": "0x9ad577",
+    "last_launch_token": "0xa1f3dc500a92898faeb2da7229ecc2c9866d17e5",
+    "recent_l2_blocks_scanned": 100000,
+    "active_pools": 18,
+    "swap_transactions": 98,
+    "wallets": 58,
+    "production_eligible_direct_entries": 0,
+    "canonical_aggregator_transactions_audited": 11,
+    "production_eligible_aggregator_entries": 2,
+    "eligible_leaders": [
+      "0xcc6ae8be8689b168d9e14130b11b00eb6321e1fa",
+      "0xf917e3393bb41f04bccd629fbdba848eee26fdd6"
+    ]
+  },
+  "next_targeted_watch": {
+    "mode": "paper",
+    "leaders": [
+      "0xcc6ae8be8689b168d9e14130b11b00eb6321e1fa",
+      "0xf917e3393bb41f04bccd629fbdba848eee26fdd6"
+    ],
+    "prevalidated_tokens": [
+      "0xec3ff0ab2f0260615f4f8e49fe8212db89d93517",
+      "0xca07d97e25a87a0acb4d51515b7ab892d3d43849"
+    ],
+    "requires_empty_aggregator_data_compatibility": true,
+    "status": "prepared_not_deployed"
+  },
   "live_eligibility_gate_passed": false,
-  "live_eligibility_blocker": "no production-eligible Noxa leader entry has been observed; both historically verified traders used zero amountOutMinimum and the current leader traded no active-Noxa token during the 60-minute watch",
+  "live_eligibility_blocker": "two production-eligible historical aggregator entries are now verified, but the compatibility rule and new leaders still require a clean fresh paper capture before any live canary",
   "result": "paper_runtime_infrastructure_clean_strategy_signal_not_live_ready"
 }

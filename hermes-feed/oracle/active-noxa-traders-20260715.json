@@ -89,5 +89,27 @@
       "copy_eligible": false
     }
   ],
-  "result": "one_observed_wallet_uses_the_allowlisted_route_but_no_observed_entry_is_production_copy_eligible"
+  "recent_market_scan": {
+    "recent_l2_blocks": 100000,
+    "active_noxa_pools": 18,
+    "swap_transactions": 98,
+    "wallets": 58,
+    "eligible_aggregator_entries": [
+      {
+        "address": "0xcc6ae8be8689b168d9e14130b11b00eb6321e1fa",
+        "transaction": "0x77f70b0e67cae3d3e7b0155389c6886817ff737f288c710eabad8bef51182298",
+        "token": "0xec3ff0ab2f0260615f4f8e49fe8212db89d93517",
+        "pool": "0x64910218a9e21f0e36f39edf59f6c5e5e75ad6cc",
+        "amount_out_minimum": "0x14ad5de897e8fdaafb8d2"
+      },
+      {
+        "address": "0xf917e3393bb41f04bccd629fbdba848eee26fdd6",
+        "transaction": "0xd0fd263162773560d01221b3dcf41887df6f038a2c42daa59754079378ca9d2e",
+        "token": "0xca07d97e25a87a0acb4d51515b7ab892d3d43849",
+        "pool": "0x55ec7d59f408be2d1c8996a9e7f5704d14639c76",
+        "amount_out_minimum": "0x373123ef35e6d63af3d85"
+      }
+    ]
+  },
+  "result": "two_recent_robinhood_aggregator_entries_pass_the_production_copy_policy_after_empty_data_value_compatibility"
 }

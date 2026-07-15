@@ -50,8 +50,9 @@ pub fn normalize_aggregator_copy_swap(
     {
         return Err(AggregatorCopyRejectReason::Extensions);
     }
-    let native_flag =
-        decode_native_flag(&leg.data).ok_or(AggregatorCopyRejectReason::Extensions)?;
+    let leader_used_native_eth = transaction_value != U256::ZERO;
+    let native_flag = decode_native_flag(&leg.data, leader_used_native_eth)
+        .ok_or(AggregatorCopyRejectReason::Extensions)?;
     if call.amount_in == U256::ZERO || call.minimum_return == U256::ZERO {
         return Err(AggregatorCopyRejectReason::ZeroAmount);
     }
@@ -78,7 +79,6 @@ pub fn normalize_aggregator_copy_swap(
     }
 
     let is_entry = leg.token_in == WETH;
-    let leader_used_native_eth = transaction_value != U256::ZERO;
     if (is_entry && leader_used_native_eth && transaction_value != call.amount_in)
         || (!is_entry && leader_used_native_eth)
         || native_flag != leader_used_native_eth
@@ -101,7 +101,13 @@ pub fn normalize_aggregator_copy_swap(
     })
 }
 
-fn decode_native_flag(data: &[u8]) -> Option<bool> {
+fn decode_native_flag(data: &[u8], inferred_from_value: bool) -> Option<bool> {
+    // Current Robinhood aggregator calldata omits the legacy redundant flag.
+    // Native input remains unambiguous because transaction value must exactly
+    // equal amountIn for an entry and must be zero for every token exit.
+    if data.is_empty() {
+        return Some(inferred_from_value);
+    }
     let word: &[u8; 32] = data.try_into().ok()?;
     if word[..31] != [0; 31] {
         return None;
@@ -172,9 +178,11 @@ mod tests {
         )
     }
 
-    fn calldata(token_in: Address, token_out: Address, native: bool) -> Vec<u8> {
-        let mut route_data = vec![0_u8; 32];
-        route_data[31] = u8::from(native);
+    fn calldata_with_route_data(
+        token_in: Address,
+        token_out: Address,
+        route_data: Vec<u8>,
+    ) -> Vec<u8> {
         swapCall {
             descs: vec![TestDescriptor {
                 dexId: 5,
@@ -196,6 +204,12 @@ mod tests {
         .abi_encode()
     }
 
+    fn calldata(token_in: Address, token_out: Address, native: bool) -> Vec<u8> {
+        let mut route_data = vec![0_u8; 32];
+        route_data[31] = u8::from(native);
+        calldata_with_route_data(token_in, token_out, route_data)
+    }
+
     #[test]
     fn normalizes_native_entry_to_a_direct_v3_intent() {
         let leader = Address::with_last_byte(7);
@@ -209,6 +223,26 @@ mod tests {
         assert_eq!(normalized.intent.recipient, leader);
         assert_eq!(normalized.intent.amount_in, U256::from(100));
         assert_eq!(normalized.intent.amount_out_minimum, U256::from(250));
+    }
+
+    #[test]
+    fn normalizes_current_empty_data_value_convention_and_still_checks_value() {
+        let leader = Address::with_last_byte(7);
+        let entry = calldata_with_route_data(WETH, token(), Vec::new());
+        let native = normalize_aggregator_copy_swap(&entry, U256::from(100), leader).unwrap();
+        assert!(native.leader_used_native_eth);
+        assert_eq!(native.intent.amount_in, U256::from(100));
+        assert_eq!(
+            normalize_aggregator_copy_swap(&entry, U256::from(99), leader),
+            Err(AggregatorCopyRejectReason::WrongValue)
+        );
+
+        let exit = calldata_with_route_data(token(), WETH, Vec::new());
+        assert!(normalize_aggregator_copy_swap(&exit, U256::ZERO, leader).is_ok());
+        assert_eq!(
+            normalize_aggregator_copy_swap(&exit, U256::from(100), leader),
+            Err(AggregatorCopyRejectReason::WrongValue)
+        );
     }
 
     #[test]

@@ -5,19 +5,20 @@ use alloy_primitives::{B256, U256};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use hermes_feed::robinhood::{
-    ACTIVE_NOXA_LAUNCH_FACTORY, CHAIN_ID, NOXA_POOL_FEE, PUBLIC_RPC_URL, UNISWAP_V3_FACTORY,
-    UNISWAP_V3_POOL_INIT_CODE_KECCAK256, UNISWAP_V3_SWAP_ROUTER_02, WETH,
+    ACTIVE_NOXA_LAUNCH_FACTORY, CHAIN_ID, NOXA_POOL_FEE, PUBLIC_RPC_URL, ROBINHOOD_SWAP_AGGREGATOR,
+    UNISWAP_V3_FACTORY, UNISWAP_V3_POOL_INIT_CODE_KECCAK256, UNISWAP_V3_SWAP_ROUTER_02, WETH,
 };
 use hermes_feed::{
     AutomatedPaperRuntime, ConditionalOptions, CopyDecision, NoxaRpcClient, ObservedCopySwap,
     PaperOrderKind, RiskLimits, WatchedWalletCopyPolicy, decode_v3_exact_input_single,
-    predict_v3_pool_address, validate_active_noxa_copy_token,
+    normalize_aggregator_copy_swap, predict_v3_pool_address, validate_active_noxa_copy_token,
 };
 use serde_json::json;
 
 const DEFAULT_REPLAY_TX: B256 =
-    alloy_primitives::b256!("fcf1b4a4d174dae3d2b857a47a197d941e52163c2f3b93e74db38257b39fe924");
+    alloy_primitives::b256!("77f70b0e67cae3d3e7b0155389c6886817ff737f288c710eabad8bef51182298");
 const FOLLOWER_AMOUNT_IN: u64 = 100_000_000_000_000;
+const MAX_LEADER_ENTRY_AMOUNT: u64 = 1_000_000_000_000_000_000;
 
 #[derive(Debug, Parser)]
 #[command(about = "Read-only replay benchmark for a verified active-Noxa copy transaction")]
@@ -45,25 +46,49 @@ async fn main() -> Result<()> {
         .transaction_by_hash(args.tx_hash)
         .await?
         .context("historical copy transaction is missing")?;
-    if transaction.to != Some(UNISWAP_V3_SWAP_ROUTER_02) || transaction.value != U256::ZERO {
-        bail!("historical transaction is not a zero-value canonical-router call");
-    }
-    let mut intent = decode_v3_exact_input_single(&transaction.input)
-        .context("historical transaction is not direct exactInputSingle")?;
+    let (intent, pool, normalized_value, source_route) =
+        if transaction.to == Some(UNISWAP_V3_SWAP_ROUTER_02) {
+            let intent = decode_v3_exact_input_single(&transaction.input)
+                .context("historical direct transaction is not exactInputSingle")?;
+            let token = intent.token_out;
+            let (token0, token1) = if token < WETH {
+                (token, WETH)
+            } else {
+                (WETH, token)
+            };
+            (
+                intent,
+                predict_v3_pool_address(
+                    UNISWAP_V3_FACTORY,
+                    token0,
+                    token1,
+                    NOXA_POOL_FEE,
+                    UNISWAP_V3_POOL_INIT_CODE_KECCAK256,
+                ),
+                transaction.value,
+                "direct_swap_router_02",
+            )
+        } else if transaction.to == Some(ROBINHOOD_SWAP_AGGREGATOR) {
+            let normalized = normalize_aggregator_copy_swap(
+                &transaction.input,
+                transaction.value,
+                transaction.from,
+            )?;
+            (
+                normalized.intent,
+                normalized.pool,
+                U256::ZERO,
+                "robinhood_aggregator",
+            )
+        } else {
+            bail!("historical transaction does not target an allowlisted copy route");
+        };
     if intent.token_in != WETH {
         bail!("historical replay transaction is not a Noxa entry");
     }
     let historical_amount_out_minimum = intent.amount_out_minimum;
-    let benchmark_limit_adjusted = historical_amount_out_minimum == U256::ZERO;
-    if benchmark_limit_adjusted {
-        // The observed leader disabled slippage protection. Production policy
-        // correctly rejects that trade. Use the smallest limit that survives
-        // proportional follower scaling only to benchmark the guarded hot path.
-        let follower_amount = U256::from(FOLLOWER_AMOUNT_IN);
-        intent.amount_out_minimum = intent
-            .amount_in
-            .saturating_add(follower_amount - U256::from(1))
-            / follower_amount;
+    if historical_amount_out_minimum == U256::ZERO {
+        bail!("historical replay transaction has no slippage protection");
     }
     let benchmark_amount_out_minimum = intent.amount_out_minimum;
     let receipt = rpc
@@ -75,18 +100,6 @@ async fn main() -> Result<()> {
     }
     let block = rpc.block_by_number(receipt.l2_block_number).await?;
     let token = intent.token_out;
-    let (token0, token1) = if token < WETH {
-        (token, WETH)
-    } else {
-        (WETH, token)
-    };
-    let pool = predict_v3_pool_address(
-        UNISWAP_V3_FACTORY,
-        token0,
-        token1,
-        NOXA_POOL_FEE,
-        UNISWAP_V3_POOL_INIT_CODE_KECCAK256,
-    );
     let (config, record, token_view, token_code, pool_code, pool_view) = tokio::try_join!(
         rpc.launch_config_at_for(
             ACTIVE_NOXA_LAUNCH_FACTORY,
@@ -109,14 +122,14 @@ async fn main() -> Result<()> {
         chain_id: Some(CHAIN_ID),
         from: transaction.from,
         to: UNISWAP_V3_SWAP_ROUTER_02,
-        value: transaction.value,
+        value: normalized_value,
         intent,
     };
     let policy = WatchedWalletCopyPolicy::new(
         HashSet::from([transaction.from]),
         HashSet::from([token]),
         U256::from(FOLLOWER_AMOUNT_IN),
-        U256::MAX,
+        U256::from(MAX_LEADER_ENTRY_AMOUNT),
         1,
     )?;
     let conditions = ConditionalOptions::first_eligible_window(
@@ -183,11 +196,12 @@ async fn main() -> Result<()> {
             "l1_block_number": block.l1_block_number,
             "factory": ACTIVE_NOXA_LAUNCH_FACTORY,
             "router": UNISWAP_V3_SWAP_ROUTER_02,
+            "source_route": source_route,
             "factory_and_pool_revalidated": true,
             "historical_amount_out_minimum": historical_amount_out_minimum,
-            "benchmark_limit_adjusted": benchmark_limit_adjusted,
+            "benchmark_limit_adjusted": false,
             "benchmark_amount_out_minimum": benchmark_amount_out_minimum,
-            "production_policy_would_accept_historical_trade": !benchmark_limit_adjusted,
+            "production_policy_would_accept_historical_trade": true,
             "iterations": args.iterations,
             "latency_ns": {
                 "min": samples[0],

@@ -1,8 +1,8 @@
 # NOXA canary gates
 
 This runbook separates the funded testnet exercise from any mainnet action.
-Hermes never reads or stores a private key: the canary command accepts only an
-externally signed EIP-2718 transaction file.
+The `hermes-noxa` testnet canary command never reads or stores a private key: it
+accepts only an externally signed EIP-2718 transaction file.
 
 ## Testnet canary
 
@@ -77,3 +77,41 @@ evidence is attached:
 After approval, broadcast only the reviewed bytes. Never automatically replace
 an ambiguous nonce, widen caps, change calldata, or retry a different signed
 transaction.
+
+### Enforced live-canary profile
+
+`hermes-noxa-runtime` fails closed before a signed mainnet broadcast unless all
+of these invariants hold:
+
+- deployment is `active-noxa`, whose factory is pinned to
+  `0x52453b4289a6c3a70bb8b4682bcd3d8731267e28`;
+- the launch DEX reports the allowlisted Uniswap V3 factory and SwapRouter02
+  `0xcaf681a66d020601342297493863e78c959e5cb2`;
+- entry amount, per-trade cap, and total open-exposure cap are all exactly
+  `100000000000000` wei (`0.0001 WETH`);
+- the configured and observed signer WETH balance is no more than
+  `1000000000000000` wei (`0.001 WETH`);
+- configured slippage and its cap are no more than `100` basis points;
+- the router allowance equals the single capped entry exactly;
+- the separately supplied kill-switch file is an owned, non-symlinked,
+  mode-0600 regular file containing exactly `ARMED` followed by a newline.
+
+The runtime checks the kill switch at startup, before every signed step, and
+again after the feed boundary releases a transaction but before sequencer
+submission. Changing or removing the file prevents new submissions. The live
+invocation must therefore include these explicit arguments in addition to the
+signer and one-time approval arguments:
+
+```text
+--deployment active-noxa
+--amount-in 100000000000000
+--max-trade-amount-in 100000000000000
+--max-open-exposure 100000000000000
+--max-wallet-weth-balance 1000000000000000
+--slippage-bps 100
+--max-slippage-bps 100
+--kill-switch-file /srv/codex-workspaces/.../live-canary.armed
+```
+
+Disarming the switch is an operator stop, not permission to replace or retry a
+transaction whose submission outcome is ambiguous.

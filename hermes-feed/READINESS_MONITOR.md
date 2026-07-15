@@ -24,6 +24,19 @@ jump remains a sequence gap and therefore fails closed. Its final record
 separates reconnects, skipped replay messages, forward resume gaps, cumulative
 sequence health, RPC metrics, and deadline versus SIGTERM/SIGINT completion.
 
+`hermes-active-noxa-targeted-copy-paper.service` is a separate 60-minute
+latency experiment. It pins the active Noxa deployment, reads the independently
+verified mode-0600 leader file, and prevalidates the known token so the next
+eligible swap can measure `detection_to_order_ns` without spending the first
+signal on dynamic token discovery. It is also paper-only, non-restarting, and
+cannot access the Hermes secrets directory.
+
+For the active deployment, dynamic validation is attempted only for a token and
+pool predicted from a launch transaction observed on the pinned Noxa factory.
+Unrelated tokens traded by a watched wallet are suppressed locally without RPC.
+Tokens launched before process startup must be supplied explicitly with
+`--copy-token` and pass the same startup proof.
+
 ## One-shot verification
 
 ```bash

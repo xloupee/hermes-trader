@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "checked_at_utc_date": "2026-07-15",
+  "network": "robinhood_chain_mainnet",
+  "chain_id": 4663,
+  "mode": "paper",
+  "broadcast": false,
+  "watched_wallet": "0xb36b00eb1b73e1396c2ea4dfe6108c2b15d582c8",
+  "prevalidated_tokens": [
+    {
+      "token": "0xb4d560a2e300255dd4f5a92e55321dec41cebca4",
+      "pool": "0x2fe353ca3cc6e04ca671390b67aee106d3f0903f"
+    },
+    {
+      "token": "0x24802ff6a9909288811ba95f50514f08f11ba1e6",
+      "pool": "0x6f637138c1f0ef165a5e759190e3f90449820532"
+    },
+    {
+      "token": "0xa1f3dc500a92898faeb2da7229ecc2c9866d17e5",
+      "pool": "0x05851b878f30e7c011d7a9aae94530f567a62c23",
+      "source": "learned_and_rpc_validated_during_targeted_run"
+    }
+  ],
+  "before_factory_observed_gate": {
+    "run_seconds": 30,
+    "rpc_logical_requests": 286
+  },
+  "after_factory_observed_gate": {
+    "run_seconds": 30,
+    "local_non_noxa_suppressions": 45,
+    "rpc_validation_rejections": 0,
+    "rpc_logical_requests": 46,
+    "rpc_request_reduction_percent": 83.9,
+    "feed_reconnects": 0,
+    "feed_replayed_messages": 0,
+    "feed_resume_forward_gaps": 0,
+    "sequence_first": 10143328,
+    "sequence_last": 10144286,
+    "sequence_gaps": 0,
+    "sequence_missing": 0,
+    "copy_triggers": 0
+  },
+  "detection_to_order_latency": null,
+  "latency_status": "no_verified_noxa_trade_during_sample",
+  "historical_guarded_path_replay": {
+    "live_measurement": false,
+    "measurement_scope": "normalized_verified_candidate_to_paper_order",
+    "historical_transaction": "0xfcf1b4a4d174dae3d2b857a47a197d941e52163c2f3b93e74db38257b39fe924",
+    "iterations": 10000,
+    "historical_amount_out_minimum": "0x0",
+    "benchmark_limit_adjusted": true,
+    "production_policy_would_accept_historical_trade": false,
+    "latency_ns": {
+      "min": 969,
+      "median": 1442,
+      "p95": 2447,
+      "p99": 2799,
+      "max": 33721
+    }
+  },
+  "targeted_30_minute_run": {
+    "run_seconds": 1800,
+    "new_active_noxa_launches_observed": 1,
+    "new_active_noxa_tokens_validated": 1,
+    "launch_prediction_ns": 289331,
+    "copy_triggers": 0,
+    "rpc_logical_requests": 70,
+    "rpc_rate_limited": 0,
+    "rpc_retries": 0,
+    "rpc_server_errors": 0,
+    "rpc_transport_errors": 0,
+    "feed_reconnects": 0,
+    "feed_replayed_messages": 0,
+    "feed_resume_forward_gaps": 0,
+    "sequence_first": 10144608,
+    "sequence_last": 10163144,
+    "sequence_gaps": 0,
+    "sequence_missing": 0,
+    "completion_reason": "duration_complete"
+  },
+  "result": "paper_runtime_ready_for_bounded_targeted_watch_no_production_eligible_leader_trade_not_ready_for_live_money"
+}

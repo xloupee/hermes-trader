@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "checked_at_utc_date": "2026-07-15",
+  "network": "robinhood_chain_mainnet",
+  "chain_id": 4663,
+  "rpc": "https://rpc.mainnet.chain.robinhood.com",
+  "active_noxa_factory": "0x52453b4289a6c3a70bb8b4682bcd3d8731267e28",
+  "token": "0xb4d560a2e300255dd4f5a92e55321dec41cebca4",
+  "pool": "0x2fe353ca3cc6e04ca671390b67aee106d3f0903f",
+  "launch_transaction": "0x907d01b6a0a367fd6a0158b444e527eefa7ef2dc065c583c284047306ef8e21b",
+  "queried_from_l2_block": "0x97e770",
+  "queried_to_l2_block": "0x9a9010",
+  "swap_event_topic": "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
+  "observed_pool_swaps": 8,
+  "additional_verified_active_noxa_pool": {
+    "launch_transaction": "0xe3f4f093806b5f7ab45905fff5819b009d6766cab25e51de5409bec67d6b0854",
+    "token": "0x24802ff6a9909288811ba95f50514f08f11ba1e6",
+    "pool": "0x6f637138c1f0ef165a5e759190e3f90449820532",
+    "launch_l2_block": "0x9838ee",
+    "observed_pool_swaps": 6
+  },
+  "later_verified_active_noxa_launch": {
+    "transaction": "0x84e22859b1662fb1d8c7089db29f5673dedb34da2a13fb72e21bf30e161ff678",
+    "token": "0xa1f3dc500a92898faeb2da7229ecc2c9866d17e5",
+    "pool": "0x05851b878f30e7c011d7a9aae94530f567a62c23",
+    "feed_l1_block": 25536015,
+    "feed_sequence": 10147191,
+    "prediction_ns": 289331,
+    "pinned_rpc_validation": true
+  },
+  "traders": [
+    {
+      "address": "0xb36b00eb1b73e1396c2ea4dfe6108c2b15d582c8",
+      "transactions": [
+        "0xc160b2b24211efeb1a3a803b358dcacb95d3246976ee47c82b081fc2e9b95f88",
+        "0xdb31e667cf1400b1c8374a2fed83aff02e16ca05e16114f1ac1e80473c3aaff5",
+        "0x12a1a88d908336936e387c9325afeb882ad3eb52297fce7cfa82554cbb617873",
+        "0xfcf1b4a4d174dae3d2b857a47a197d941e52163c2f3b93e74db38257b39fe924"
+      ],
+      "target": "0xcaf681a66d020601342297493863e78c959e5cb2",
+      "selector": "0x04e45aaf",
+      "route": "canonical_swap_router_02_exact_input_single",
+      "route_compatible": true,
+      "copy_eligible": false,
+      "reason": "observed entry transactions set amountOutMinimum to zero and are rejected by the production copy policy"
+    },
+    {
+      "address": "0x80f11b418a7f4283eb0d33267073bfefd846c7c4",
+      "transactions": [
+        "0x5dc2fb9d435eb5587fc04a33c9d50805713d24535e8aa3583c5ecde4c06bff5c",
+        "0xa90130a352f30d511d12405f5a07a7921a67e1b704ba1664bc029bb3cd0a2466",
+        "0x46c50654e92ac949a6a2a7870c3b5d7787360707b1fd7cd4df317f505326a342",
+        "0x5ff96c29fce36f1de9db258b7f9e7970ba9089094f107c38d837cecb95117948"
+      ],
+      "target": "0xcaf681a66d020601342297493863e78c959e5cb2",
+      "selector": "0x5ae401dc",
+      "route": "canonical_swap_router_02_multicall",
+      "copy_eligible": false,
+      "reason": "multicall decoding is not implemented"
+    },
+    {
+      "address": "0xae4c5c72d78621aa25773be5f594de6c4887b3b5",
+      "transactions": [
+        "0xac23b4858f28de12226c3c149bb6141bd73c9218ea19f9bc7ba5c4988db3f3a5",
+        "0xe0cd1c7d6d3b24ee32a507d64e72fd6d41d66b53e4ce4f6e99041059c348d3a2"
+      ],
+      "target": "0x5f10c47f2b81f0fbb70c8331cbb5e665358b7960",
+      "selectors": ["0xc122a2c9", "0xbce3a9cc"],
+      "route": "non_allowlisted_router",
+      "copy_eligible": false
+    },
+    {
+      "address": "0xd94851e869f6d668b552d9cc9d81453f89a8b3fc",
+      "transactions": [
+        "0xe3f4f093806b5f7ab45905fff5819b009d6766cab25e51de5409bec67d6b0854",
+        "0xe1fd7eb2ca957390be523c5e2262d6bcc31330311f73116ffa701f3719322b98"
+      ],
+      "route": "second_launch_deployer_internal_swaps",
+      "copy_eligible": false
+    },
+    {
+      "address": "0xed230f1a05d383e7407402c4aaf5aa6888f7a0e6",
+      "transactions": [
+        "0x907d01b6a0a367fd6a0158b444e527eefa7ef2dc065c583c284047306ef8e21b",
+        "0xcf6823238c07653f6d356ddc4e4248806c99827071abe3d59d5d90abf63edab5"
+      ],
+      "route": "launch_deployer_and_non_allowlisted_contract",
+      "copy_eligible": false
+    }
+  ],
+  "result": "one_observed_wallet_uses_the_allowlisted_route_but_no_observed_entry_is_production_copy_eligible"
+}

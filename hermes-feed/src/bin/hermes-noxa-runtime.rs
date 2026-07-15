@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
+use std::io::Read;
 use std::os::fd::FromRawFd;
-use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::mpsc::sync_channel;
@@ -18,7 +19,7 @@ use hermes_feed::feed::BroadcastMessage;
 use hermes_feed::robinhood::{
     ACTIVE_NOXA_FACTORY_RUNTIME_KECCAK256, ACTIVE_NOXA_LAUNCH_FACTORY, DIRECT_FEED_URL,
     NOXA_DEX_ID_UNISWAP, NOXA_FACTORY_RUNTIME_KECCAK256, NOXA_LAUNCH_CONFIG_ID_WETH,
-    NOXA_LAUNCH_FACTORY, PUBLIC_RPC_URL, ROBINHOOD_SWAP_AGGREGATOR, TESTNET_RPC_URL,
+    NOXA_LAUNCH_FACTORY, NOXA_POOL_FEE, PUBLIC_RPC_URL, ROBINHOOD_SWAP_AGGREGATOR, TESTNET_RPC_URL,
     TESTNET_SEQUENCER_URL, UNISWAP_V3_FACTORY, UNISWAP_V3_POOL_INIT_CODE_KECCAK256,
     UNISWAP_V3_SWAP_ROUTER_02, WETH,
 };
@@ -47,6 +48,10 @@ use tokio_tungstenite::{
 };
 
 const BROADCAST_APPROVAL: &str = "MAINNET_CANARY_APPROVED";
+const LIVE_CANARY_AMOUNT_IN_WEI: u64 = 100_000_000_000_000;
+const LIVE_CANARY_MAX_WETH_BALANCE_WEI: u64 = 1_000_000_000_000_000;
+const LIVE_CANARY_MAX_SLIPPAGE_BPS: u16 = 100;
+const KILL_SWITCH_ARMED: &[u8] = b"ARMED\n";
 const RECONCILIATION_QUEUE_CAPACITY: usize = 64;
 const FEED_RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const FEED_RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(5);
@@ -103,7 +108,7 @@ enum Deployment {
     ActiveNoxa,
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 #[command(version, about = "Feed-driven NOXA paper and signed trading runtime")]
 struct Cli {
     #[arg(long, value_enum, default_value_t = RuntimeMode::Paper)]
@@ -142,6 +147,9 @@ struct Cli {
     max_trade_amount_in: String,
     #[arg(long, default_value = "100000000000000")]
     max_open_exposure: String,
+    /// Maximum WETH the live signer may hold. A signed broadcast fails closed above this balance.
+    #[arg(long, default_value = "1000000000000000")]
+    max_wallet_weth_balance: String,
     #[arg(long, default_value = "100000000000000")]
     max_gas_cost_wei: String,
     #[arg(long, default_value = "200000000000000")]
@@ -178,6 +186,9 @@ struct Cli {
     broadcast: bool,
     #[arg(long)]
     approval_token: Option<String>,
+    /// Private mode-0600 file containing exactly `ARMED`; required for live broadcast.
+    #[arg(long)]
+    kill_switch_file: Option<PathBuf>,
     #[arg(long)]
     round_trip_exit_min_weth_out: Option<String>,
 }
@@ -251,26 +262,71 @@ struct CopyTokenProofMessage {
 #[derive(Debug, Default)]
 struct CopyTokenRegistry {
     validated: HashMap<Address, Address>,
+    observed_launches: HashMap<Address, Address>,
     pending: HashSet<Address>,
+    validation_retries: HashMap<Address, ValidationRetry>,
+}
+
+#[derive(Debug)]
+struct ValidationRetry {
+    failures: usize,
+    retry_at: Instant,
 }
 
 impl CopyTokenRegistry {
+    fn observe_launch(&mut self, token: Address, pool: Address) {
+        self.observed_launches.insert(token, pool);
+    }
+
+    fn launch_was_observed(&self, token: Address, pool: Address) -> bool {
+        self.observed_launches
+            .get(&token)
+            .is_some_and(|observed_pool| *observed_pool == pool)
+    }
+
     fn insert(&mut self, validation: CopyTokenValidation) {
         self.pending.remove(&validation.token);
+        self.validation_retries.remove(&validation.token);
         self.validated.insert(validation.token, validation.pool);
     }
 
     fn insert_verified_launch(&mut self, token: Address, pool: Address) {
         self.pending.remove(&token);
+        self.validation_retries.remove(&token);
         self.validated.insert(token, pool);
     }
 
     fn begin_validation(&mut self, token: Address) -> bool {
-        !self.validated.contains_key(&token) && self.pending.insert(token)
+        if self.validated.contains_key(&token) || self.pending.contains(&token) {
+            return false;
+        }
+        if self
+            .validation_retries
+            .get(&token)
+            .is_some_and(|retry| Instant::now() < retry.retry_at)
+        {
+            return false;
+        }
+        self.pending.insert(token)
     }
 
-    fn finish_failed_validation(&mut self, token: Address) {
+    fn defer_failed_validation(&mut self, token: Address) -> Duration {
+        const RETRY_BACKOFF_MS: [u64; 8] = [250, 500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
         self.pending.remove(&token);
+        let failures = self
+            .validation_retries
+            .get(&token)
+            .map_or(1, |retry| retry.failures.saturating_add(1));
+        let delay =
+            Duration::from_millis(RETRY_BACKOFF_MS[(failures - 1).min(RETRY_BACKOFF_MS.len() - 1)]);
+        self.validation_retries.insert(
+            token,
+            ValidationRetry {
+                failures,
+                retry_at: Instant::now() + delay,
+            },
+        );
+        delay
     }
 
     fn contains(&self, token: Address, pool: Address) -> bool {
@@ -284,6 +340,7 @@ impl CopyTokenRegistry {
 struct ObservedCopyCandidate {
     swap: ObservedCopySwap,
     pool: Address,
+    detected_at: Instant,
 }
 
 #[derive(Debug, Serialize)]
@@ -337,6 +394,7 @@ async fn main() -> Result<()> {
         max_slippage_bps: args.max_slippage_bps,
     };
     validate_caps(&args, amount_in, max_fee_per_gas, limits)?;
+    ensure_live_broadcast_armed(&args)?;
 
     let rpc = NoxaRpcClient::with_url(args.rpc_url.clone())?;
     let launch_factory = match args.deployment {
@@ -391,6 +449,13 @@ async fn main() -> Result<()> {
             .await?
         }
     };
+    if dex_config.factory != UNISWAP_V3_FACTORY
+        || dex_config.swap_router != UNISWAP_V3_SWAP_ROUTER_02
+        || dex_config.pool_fee != NOXA_POOL_FEE
+        || !dex_config.enabled
+    {
+        bail!("selected Noxa deployment does not use the allowlisted factory and router");
+    }
     let launch_runtime = rpc
         .code_at_l2_block(launch_factory, status.pinned_l2_block)
         .await?;
@@ -475,6 +540,7 @@ async fn main() -> Result<()> {
                 amount_in,
                 args.gas_limit,
                 max_fee_per_gas,
+                parse_u256(&args.max_wallet_weth_balance)?,
                 if args.round_trip_exit_min_weth_out.is_some()
                     || args.strategy == StrategyMode::Copy
                 {
@@ -512,11 +578,25 @@ async fn main() -> Result<()> {
         "factory_owner": factory_owner,
         "factory_owner_is_eoa": true,
         "runtime_hash_matches_pin": true,
+        "live_safeguards": {
+            "active_noxa_only": args.mode != RuntimeMode::Signed || !args.broadcast || args.deployment == Deployment::ActiveNoxa,
+            "allowlisted_factory": launch_factory,
+            "allowlisted_router": UNISWAP_V3_SWAP_ROUTER_02,
+            "fixed_entry_amount_wei": LIVE_CANARY_AMOUNT_IN_WEI,
+            "max_wallet_weth_balance": args.max_wallet_weth_balance,
+            "max_slippage_bps": args.max_slippage_bps,
+            "kill_switch_required": args.broadcast,
+        },
         "launch_enabled": status.launch_enabled,
         "copy_policy": copy_policy.as_ref().map(|policy| json!({
             "watched_wallets": policy.watched_wallets().len(),
             "bootstrap_tokens": policy.allowed_tokens().len(),
             "dynamic_token_validation": true,
+            "dynamic_token_candidate_source": if args.deployment == Deployment::ActiveNoxa {
+                "observed_pinned_factory_launch"
+            } else {
+                "watched_swap"
+            },
             "max_triggers": args.copy_max_triggers,
             "max_leader_entry_amount": args.copy_max_leader_entry_amount,
             "follower_entry_amount": amount_in,
@@ -1027,6 +1107,7 @@ async fn process_feed_frame(
                                         intent,
                                     },
                                     pool,
+                                    detected_at: Instant::now(),
                                 })
                             }
                             None => malformed_watched_copy_swaps.push((*tx.tx_hash(), from)),
@@ -1125,6 +1206,7 @@ async fn process_feed_frame(
             }
 
             if deployment == Deployment::ActiveNoxa {
+                copy_token_registry.observe_launch(predicted.token, predicted.pool);
                 emit(json!({
                     "record_type": "runtime_active_noxa_launch_observed",
                     "tx_hash": tx_hash,
@@ -1193,6 +1275,7 @@ async fn process_feed_frame(
             }))?;
         }
         for candidate in copy_swaps {
+            let candidate_started = candidate.detected_at;
             let observed = candidate.swap;
             if !emission_enabled {
                 emit(json!({
@@ -1206,6 +1289,18 @@ async fn process_feed_frame(
                 continue;
             };
             if !copy_token_registry.contains(token, candidate.pool) {
+                if deployment == Deployment::ActiveNoxa
+                    && !copy_token_registry.launch_was_observed(token, candidate.pool)
+                {
+                    emit(json!({
+                        "record_type": "runtime_copy_candidate_suppressed",
+                        "source_tx_hash": observed.tx_hash,
+                        "token": token,
+                        "pool": candidate.pool,
+                        "reason": "active_noxa_launch_not_observed",
+                    }))?;
+                    continue;
+                }
                 if copy_token_registry.begin_validation(token) {
                     let rpc = rpc.clone();
                     let sender = copy_token_proof_sender.clone();
@@ -1252,6 +1347,7 @@ async fn process_feed_frame(
                 max_fee_per_gas,
                 max_priority_fee_per_gas,
                 args,
+                candidate_started,
             )?;
         }
     }
@@ -1335,6 +1431,7 @@ fn handle_predicted_candidate(
             })),
         },
         Engine::Signed { runtime, .. } => {
+            ensure_live_broadcast_armed(args)?;
             match runtime.arm_trade(&candidate.plan, candidate.conditions, args.slippage_bps) {
                 Ok(tx_hash) => emit(json!({
                     "record_type": "runtime_signed_candidate_armed",
@@ -1367,6 +1464,7 @@ fn handle_copy_candidate(
     max_fee_per_gas: u128,
     max_priority_fee_per_gas: u128,
     args: &Cli,
+    candidate_started: Instant,
 ) -> Result<()> {
     let observed_token = if observed.intent.token_in == WETH {
         observed.intent.token_out
@@ -1449,6 +1547,7 @@ fn handle_copy_candidate(
                     "follower_minimum_out": follower_minimum_out,
                     "paper_fill_basis": "leader_limit_price_floor",
                     "order": order,
+                    "detection_to_order_ns": candidate_started.elapsed().as_nanos(),
                 }))?;
                 true
             }
@@ -1487,6 +1586,7 @@ fn handle_copy_candidate(
                     "follower_minimum_out": follower_minimum_out,
                     "paper_fill_basis": "leader_limit_price_floor",
                     "order": order,
+                    "detection_to_order_ns": candidate_started.elapsed().as_nanos(),
                 }))?;
                 true
             }
@@ -1504,6 +1604,7 @@ fn handle_copy_candidate(
                 follower_minimum_out,
             },
         ) => {
+            ensure_live_broadcast_armed(args)?;
             let plan = TradeTransactionPlan::exact_input(
                 runtime.snapshot().next_nonce,
                 args.gas_limit,
@@ -1529,6 +1630,7 @@ fn handle_copy_candidate(
                         "token": token,
                         "follower_amount_in": follower_amount_in,
                         "follower_minimum_out": follower_minimum_out,
+                        "detection_to_order_ns": candidate_started.elapsed().as_nanos(),
                         "raw_transaction_logged": false,
                     }))?;
                     true
@@ -1548,6 +1650,7 @@ fn handle_copy_candidate(
                 follower_minimum_out,
             },
         ) => {
+            ensure_live_broadcast_armed(args)?;
             let plan = TradeTransactionPlan::exact_input(
                 runtime.snapshot().next_nonce,
                 args.gas_limit,
@@ -1573,6 +1676,7 @@ fn handle_copy_candidate(
                         "token": token,
                         "follower_amount_in": follower_amount_in,
                         "follower_minimum_out": follower_minimum_out,
+                        "detection_to_order_ns": candidate_started.elapsed().as_nanos(),
                         "raw_transaction_logged": false,
                     }))?;
                     true
@@ -1657,22 +1761,24 @@ fn handle_copy_token_proof(
             registry.insert(validation);
         }
         Ok(validation) => {
-            registry.finish_failed_validation(message.token);
+            let retry_after = registry.defer_failed_validation(message.token);
             emit(json!({
                 "record_type": "runtime_copy_token_rejected",
                 "token": message.token,
                 "advertised_pool": message.advertised_pool,
                 "validated_pool": validation.pool,
                 "reason": "pool_mismatch",
+                "retry_after_ms": retry_after.as_millis(),
             }))?;
         }
         Err(error) => {
-            registry.finish_failed_validation(message.token);
+            let retry_after = registry.defer_failed_validation(message.token);
             emit(json!({
                 "record_type": "runtime_copy_token_rejected",
                 "token": message.token,
                 "advertised_pool": message.advertised_pool,
                 "reason": error,
+                "retry_after_ms": retry_after.as_millis(),
             }))?;
         }
     }
@@ -1733,6 +1839,18 @@ fn handle_boundary(
             if let Some(transaction) = release.transaction {
                 let tx_hash = transaction.hash;
                 if let Some(executor) = executor.clone() {
+                    if let Err(error) = ensure_live_broadcast_armed(args) {
+                        runtime.complete_dry_run(tx_hash)?;
+                        emit(json!({
+                            "record_type": "runtime_live_kill_switch_blocked",
+                            "tx_hash": tx_hash,
+                            "reason": error.to_string(),
+                            "broadcast": false,
+                            "raw_transaction_logged": false,
+                            "runtime": runtime.snapshot(),
+                        }))?;
+                        return Ok(());
+                    }
                     let sender = submit_sender.clone();
                     tasks.spawn(async move {
                         let report = executor
@@ -1921,6 +2039,7 @@ fn arm_copy_reconciled_step(
     let Engine::Signed { runtime, .. } = engine else {
         return Ok(());
     };
+    ensure_live_broadcast_armed(args)?;
     match action {
         ReconciledSignedAction::Entry(position) => {
             let boundary = last_boundary
@@ -1982,6 +2101,7 @@ fn arm_round_trip_step(
     let Engine::Signed { runtime, .. } = engine else {
         return Ok(());
     };
+    ensure_live_broadcast_armed(args)?;
     let boundary =
         last_boundary.ok_or_else(|| anyhow::anyhow!("round-trip has no feed boundary"))?;
     let conditions = ConditionalOptions::first_eligible_window(
@@ -2317,6 +2437,7 @@ async fn signed_preflight(
     amount_in: U256,
     gas_limit: u64,
     max_fee_per_gas: u128,
+    max_wallet_weth_balance: U256,
     required_transactions: u64,
 ) -> Result<()> {
     let (router_code, wrapped_balance, allowance, native_balance) = tokio::try_join!(
@@ -2328,16 +2449,37 @@ async fn signed_preflight(
     if router_code.is_empty() {
         bail!("canonical SwapRouter02 has no bytecode");
     }
-    if wrapped_balance < amount_in {
-        bail!("trading signer lacks pre-wrapped WETH for the capped input");
-    }
-    if allowance != amount_in {
-        bail!("trading signer must grant the router exactly the capped WETH input");
-    }
     let max_gas_cost = U256::from(gas_limit)
         .checked_mul(U256::from(max_fee_per_gas))
         .and_then(|value| value.checked_mul(U256::from(required_transactions)))
         .ok_or_else(|| anyhow::anyhow!("maximum gas cost overflow"))?;
+    validate_signed_funding(
+        wrapped_balance,
+        allowance,
+        native_balance,
+        amount_in,
+        max_wallet_weth_balance,
+        max_gas_cost,
+    )
+}
+
+fn validate_signed_funding(
+    wrapped_balance: U256,
+    allowance: U256,
+    native_balance: U256,
+    amount_in: U256,
+    max_wallet_weth_balance: U256,
+    max_gas_cost: U256,
+) -> Result<()> {
+    if wrapped_balance < amount_in {
+        bail!("trading signer lacks pre-wrapped WETH for the capped input");
+    }
+    if wrapped_balance > max_wallet_weth_balance {
+        bail!("trading signer WETH balance exceeds the live wallet cap");
+    }
+    if allowance != amount_in {
+        bail!("trading signer must grant the router exactly the capped WETH input");
+    }
     if native_balance < max_gas_cost {
         bail!("trading signer lacks native ETH for the complete capped transaction sequence");
     }
@@ -2559,6 +2701,7 @@ fn validate_args(args: &Cli) -> Result<()> {
             if args.broadcast
                 || args.keystore.is_some()
                 || args.expected_address.is_some()
+                || args.kill_switch_file.is_some()
                 || args.round_trip_exit_min_weth_out.is_some()
             {
                 bail!("paper mode refuses broadcast and keystore arguments");
@@ -2571,6 +2714,36 @@ fn validate_args(args: &Cli) -> Result<()> {
             if args.broadcast && args.approval_token.as_deref() != Some(BROADCAST_APPROVAL) {
                 bail!("broadcast requires the explicit mainnet canary approval token");
             }
+            if args.broadcast {
+                if args.deployment != Deployment::ActiveNoxa {
+                    bail!(
+                        "signed broadcast is restricted to the allowlisted active Noxa deployment"
+                    );
+                }
+                if args.kill_switch_file.is_none() {
+                    bail!("signed broadcast requires --kill-switch-file");
+                }
+                if parse_u256(&args.amount_in)? != U256::from(LIVE_CANARY_AMOUNT_IN_WEI)
+                    || parse_u256(&args.max_trade_amount_in)?
+                        != U256::from(LIVE_CANARY_AMOUNT_IN_WEI)
+                    || parse_u256(&args.max_open_exposure)? != U256::from(LIVE_CANARY_AMOUNT_IN_WEI)
+                {
+                    bail!(
+                        "signed broadcast requires the exact tiny live-canary entry and exposure cap"
+                    );
+                }
+                let wallet_cap = parse_u256(&args.max_wallet_weth_balance)?;
+                if wallet_cap < U256::from(LIVE_CANARY_AMOUNT_IN_WEI)
+                    || wallet_cap > U256::from(LIVE_CANARY_MAX_WETH_BALANCE_WEI)
+                {
+                    bail!("signed broadcast wallet WETH cap is outside the live-canary range");
+                }
+                if args.slippage_bps > LIVE_CANARY_MAX_SLIPPAGE_BPS
+                    || args.max_slippage_bps > LIVE_CANARY_MAX_SLIPPAGE_BPS
+                {
+                    bail!("signed broadcast slippage exceeds the live-canary cap");
+                }
+            }
             if let Some(minimum) = args.round_trip_exit_min_weth_out.as_deref()
                 && (!args.broadcast || parse_u256(minimum)? == U256::ZERO)
             {
@@ -2580,6 +2753,42 @@ fn validate_args(args: &Cli) -> Result<()> {
                 bail!("this executable has no canonical NOXA testnet deployment to trade");
             }
         }
+    }
+    Ok(())
+}
+
+fn ensure_live_broadcast_armed(args: &Cli) -> Result<()> {
+    if args.mode != RuntimeMode::Signed || !args.broadcast {
+        return Ok(());
+    }
+    validate_kill_switch(
+        args.kill_switch_file
+            .as_deref()
+            .context("signed broadcast requires --kill-switch-file")?,
+    )
+}
+
+fn validate_kill_switch(path: &Path) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("open live kill switch {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect live kill switch {}", path.display()))?;
+    if !metadata.file_type().is_file()
+        || metadata.permissions().mode() & 0o777 != 0o600
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.len() != KILL_SWITCH_ARMED.len() as u64
+    {
+        bail!("live kill switch must be an owned mode-0600 regular file containing ARMED");
+    }
+    let mut state = Vec::with_capacity(KILL_SWITCH_ARMED.len());
+    file.read_to_end(&mut state)
+        .context("read live kill switch")?;
+    if state != KILL_SWITCH_ARMED {
+        bail!("live kill switch is disarmed");
     }
     Ok(())
 }
@@ -2684,8 +2893,19 @@ fn unix_ns() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     const RECIPIENT: &str = "0xd7A41D7E502F5D63B36Ec59c84F59A3eFA6B99a0";
+
+    fn armed_kill_switch() -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))
+            .unwrap();
+        file.write_all(KILL_SWITCH_ARMED).unwrap();
+        file.flush().unwrap();
+        file
+    }
 
     #[test]
     fn paper_mode_refuses_every_broadcast_request() {
@@ -2777,12 +2997,32 @@ mod tests {
         let pool = Address::with_last_byte(0x45);
         let other_pool = Address::with_last_byte(0x46);
         let mut registry = CopyTokenRegistry::default();
+        assert!(!registry.launch_was_observed(token, pool));
+        registry.observe_launch(token, pool);
+        assert!(registry.launch_was_observed(token, pool));
+        assert!(!registry.launch_was_observed(token, other_pool));
         assert!(registry.begin_validation(token));
         assert!(!registry.begin_validation(token));
         assert!(!registry.contains(token, pool));
+        assert_eq!(
+            registry.defer_failed_validation(token),
+            Duration::from_millis(250)
+        );
+        assert!(!registry.begin_validation(token));
+        registry
+            .validation_retries
+            .get_mut(&token)
+            .unwrap()
+            .retry_at = Instant::now();
+        assert!(registry.begin_validation(token));
+        assert_eq!(
+            registry.defer_failed_validation(token),
+            Duration::from_millis(500)
+        );
         registry.insert_verified_launch(token, pool);
         assert!(registry.contains(token, pool));
         assert!(!registry.contains(token, other_pool));
+        assert!(!registry.validation_retries.contains_key(&token));
         assert!(!registry.begin_validation(token));
     }
 
@@ -2819,7 +3059,8 @@ mod tests {
 
     #[test]
     fn signed_copy_broadcast_requires_explicit_leader_limit_price_trust() {
-        let untrusted = Cli::try_parse_from([
+        let kill_switch = armed_kill_switch();
+        let parsed = Cli::try_parse_from([
             "hermes-noxa-runtime",
             "--mode",
             "signed",
@@ -2840,6 +3081,13 @@ mod tests {
             BROADCAST_APPROVAL,
         ])
         .unwrap();
+        let untrusted = Cli {
+            deployment: Deployment::ActiveNoxa,
+            max_slippage_bps: LIVE_CANARY_MAX_SLIPPAGE_BPS,
+            slippage_bps: LIVE_CANARY_MAX_SLIPPAGE_BPS,
+            kill_switch_file: Some(kill_switch.path().to_path_buf()),
+            ..parsed
+        };
         assert!(validate_args(&untrusted).is_err());
 
         let trusted = Cli {
@@ -2847,6 +3095,7 @@ mod tests {
             ..untrusted
         };
         assert!(validate_args(&trusted).is_ok());
+        assert!(ensure_live_broadcast_armed(&trusted).is_ok());
     }
 
     #[test]
@@ -2930,6 +3179,7 @@ mod tests {
             1,
             0,
             &args,
+            Instant::now(),
         )
         .unwrap();
         let Engine::Paper { runtime, .. } = &mut engine else {
@@ -2955,6 +3205,7 @@ mod tests {
             1,
             0,
             &args,
+            Instant::now(),
         )
         .unwrap();
         let Engine::Paper { runtime, .. } = &mut engine else {
@@ -3094,7 +3345,8 @@ mod tests {
         .unwrap();
         assert!(validate_args(&missing).is_err());
 
-        let approved = Cli::try_parse_from([
+        let kill_switch = armed_kill_switch();
+        let parsed = Cli::try_parse_from([
             "hermes-noxa-runtime",
             "--mode",
             "signed",
@@ -3109,13 +3361,108 @@ mod tests {
             BROADCAST_APPROVAL,
         ])
         .unwrap();
+        let approved = Cli {
+            deployment: Deployment::ActiveNoxa,
+            max_slippage_bps: LIVE_CANARY_MAX_SLIPPAGE_BPS,
+            slippage_bps: LIVE_CANARY_MAX_SLIPPAGE_BPS,
+            kill_switch_file: Some(kill_switch.path().to_path_buf()),
+            ..parsed
+        };
         assert!(validate_args(&approved).is_ok());
+        assert!(ensure_live_broadcast_armed(&approved).is_ok());
 
         let testnet = Cli {
             rpc_url: TESTNET_RPC_URL.into(),
             ..approved
         };
         assert!(validate_args(&testnet).is_err());
+    }
+
+    #[test]
+    fn live_kill_switch_fails_closed_on_content_mode_and_symlink() {
+        let mut switch = armed_kill_switch();
+        assert!(validate_kill_switch(switch.path()).is_ok());
+
+        switch.as_file_mut().set_len(0).unwrap();
+        switch.write_all(b"DISARMED\n").unwrap();
+        switch.flush().unwrap();
+        assert!(validate_kill_switch(switch.path()).is_err());
+
+        switch
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o640))
+            .unwrap();
+        assert!(validate_kill_switch(switch.path()).is_err());
+
+        let link_dir = tempfile::tempdir().unwrap();
+        let link = link_dir.path().join("switch");
+        std::os::unix::fs::symlink(switch.path(), &link).unwrap();
+        assert!(validate_kill_switch(&link).is_err());
+    }
+
+    #[test]
+    fn live_broadcast_profile_rejects_legacy_oversized_and_loose_configuration() {
+        let kill_switch = armed_kill_switch();
+        let approved = Cli {
+            mode: RuntimeMode::Signed,
+            deployment: Deployment::ActiveNoxa,
+            broadcast: true,
+            approval_token: Some(BROADCAST_APPROVAL.into()),
+            expected_address: Some(RECIPIENT.into()),
+            keystore: Some("/srv/codex-workspaces/hermes-secrets/trader.json".into()),
+            kill_switch_file: Some(kill_switch.path().to_path_buf()),
+            max_slippage_bps: LIVE_CANARY_MAX_SLIPPAGE_BPS,
+            slippage_bps: LIVE_CANARY_MAX_SLIPPAGE_BPS,
+            ..Cli::try_parse_from(["hermes-noxa-runtime", "--recipient", RECIPIENT]).unwrap()
+        };
+        assert!(validate_args(&approved).is_ok());
+
+        let legacy = Cli {
+            deployment: Deployment::LegacyNoxa,
+            ..approved.clone()
+        };
+        assert!(validate_args(&legacy).is_err());
+
+        let oversized = Cli {
+            amount_in: (LIVE_CANARY_AMOUNT_IN_WEI + 1).to_string(),
+            ..approved.clone()
+        };
+        assert!(validate_args(&oversized).is_err());
+
+        let loose_slippage = Cli {
+            max_slippage_bps: LIVE_CANARY_MAX_SLIPPAGE_BPS + 1,
+            ..approved.clone()
+        };
+        assert!(validate_args(&loose_slippage).is_err());
+
+        let overfunded = Cli {
+            max_wallet_weth_balance: (LIVE_CANARY_MAX_WETH_BALANCE_WEI + 1).to_string(),
+            ..approved
+        };
+        assert!(validate_args(&overfunded).is_err());
+    }
+
+    #[test]
+    fn signed_funding_enforces_exact_allowance_and_wallet_balance_cap() {
+        let amount = U256::from(LIVE_CANARY_AMOUNT_IN_WEI);
+        let wallet_cap = U256::from(LIVE_CANARY_MAX_WETH_BALANCE_WEI);
+        let gas = U256::from(10_000_u64);
+        assert!(validate_signed_funding(amount, amount, gas, amount, wallet_cap, gas).is_ok());
+        assert!(
+            validate_signed_funding(
+                wallet_cap + U256::from(1),
+                amount,
+                gas,
+                amount,
+                wallet_cap,
+                gas,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_signed_funding(amount, amount + U256::from(1), gas, amount, wallet_cap, gas)
+                .is_err()
+        );
     }
 
     #[test]
@@ -3141,6 +3488,7 @@ mod tests {
 
     #[test]
     fn round_trip_requires_the_separately_approved_broadcast_mode() {
+        let kill_switch = armed_kill_switch();
         let args = Cli::try_parse_from([
             "hermes-noxa-runtime",
             "--mode",
@@ -3160,9 +3508,14 @@ mod tests {
         let approved = Cli {
             broadcast: true,
             approval_token: Some(BROADCAST_APPROVAL.into()),
+            deployment: Deployment::ActiveNoxa,
+            max_slippage_bps: LIVE_CANARY_MAX_SLIPPAGE_BPS,
+            slippage_bps: LIVE_CANARY_MAX_SLIPPAGE_BPS,
+            kill_switch_file: Some(kill_switch.path().to_path_buf()),
             ..args
         };
         assert!(validate_args(&approved).is_ok());
+        assert!(ensure_live_broadcast_armed(&approved).is_ok());
     }
 
     #[test]

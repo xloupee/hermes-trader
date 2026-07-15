@@ -123,7 +123,7 @@ impl WatchedWalletCopyPolicy {
         follower_position: Option<CopyPosition>,
         admitted_triggers: u64,
     ) -> Result<CopyDecision, CopyRejectReason> {
-        self.evaluate_inner(observed, follower_position, admitted_triggers, false)
+        self.evaluate_inner(observed, follower_position, admitted_triggers, false, true)
     }
 
     /// Evaluate a candidate whose token/pool identity was independently
@@ -135,7 +135,19 @@ impl WatchedWalletCopyPolicy {
         follower_position: Option<CopyPosition>,
         admitted_triggers: u64,
     ) -> Result<CopyDecision, CopyRejectReason> {
-        self.evaluate_inner(observed, follower_position, admitted_triggers, true)
+        self.evaluate_inner(observed, follower_position, admitted_triggers, true, true)
+    }
+
+    /// Evaluate an independently validated candidate without a preselected
+    /// leader. This is intended only for paper discovery; signed runtimes must
+    /// continue to use `evaluate_validated` and its explicit wallet allowlist.
+    pub fn evaluate_validated_discovered(
+        &self,
+        observed: &ObservedCopySwap,
+        follower_position: Option<CopyPosition>,
+        admitted_triggers: u64,
+    ) -> Result<CopyDecision, CopyRejectReason> {
+        self.evaluate_inner(observed, follower_position, admitted_triggers, true, false)
     }
 
     fn evaluate_inner(
@@ -144,6 +156,7 @@ impl WatchedWalletCopyPolicy {
         follower_position: Option<CopyPosition>,
         admitted_triggers: u64,
         independently_validated_token: bool,
+        require_watched_wallet: bool,
     ) -> Result<CopyDecision, CopyRejectReason> {
         if admitted_triggers >= self.max_triggers {
             return Err(CopyRejectReason::TriggerLimit);
@@ -154,7 +167,7 @@ impl WatchedWalletCopyPolicy {
         if observed.to != UNISWAP_V3_SWAP_ROUTER_02 {
             return Err(CopyRejectReason::WrongRouter);
         }
-        if !self.watched_wallets.contains(&observed.from) {
+        if require_watched_wallet && !self.watched_wallets.contains(&observed.from) {
             return Err(CopyRejectReason::UnwatchedWallet);
         }
         if observed.intent.recipient != observed.from {
@@ -306,6 +319,21 @@ mod tests {
                 follower_minimum_out: U256::from(250),
             }
         );
+    }
+
+    #[test]
+    fn paper_discovery_can_admit_an_unlisted_leader_without_weakening_normal_policy() {
+        let mut candidate = observed(WETH, token(), 200, 500);
+        candidate.from = Address::with_last_byte(99);
+        candidate.intent.recipient = candidate.from;
+        assert_eq!(
+            policy().evaluate_validated(&candidate, None, 0),
+            Err(CopyRejectReason::UnwatchedWallet)
+        );
+        assert!(matches!(
+            policy().evaluate_validated_discovered(&candidate, None, 0),
+            Ok(CopyDecision::Entry { leader, .. }) if leader == candidate.from
+        ));
     }
 
     #[test]

@@ -31,6 +31,12 @@ eligible swap can measure `detection_to_order_ns` without spending the first
 signal on dynamic token discovery. It is also paper-only, non-restarting, and
 cannot access the Hermes secrets directory.
 
+`hermes-active-noxa-discovery-paper.service` is a paper-only all-leader
+latency capture. It bypasses only the leader allowlist after strict calldata
+normalization; every token must still be prevalidated or learned from an
+observed active-factory launch. Argument validation refuses this mode for any
+signed runtime, and the unit makes the keystore directory inaccessible.
+
 For the active deployment, dynamic validation is attempted only for a token and
 pool predicted from a launch transaction observed on the pinned Noxa factory.
 Unrelated tokens traded by a watched wallet are suppressed locally without RPC.

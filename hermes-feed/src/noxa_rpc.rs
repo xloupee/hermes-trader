@@ -59,6 +59,8 @@ const LAUNCH_FEE_SELECTOR: &str = "0xcf3cf573";
 const OWNER_SELECTOR: &str = "0x8da5cb5b";
 const TOKEN_LAUNCHED_TOPIC: B256 =
     alloy_primitives::b256!("db51ea9ad51ab453a65a4cb7e60c3cb378c9501bb002609f8f97778fb6c4235a");
+const V3_SWAP_TOPIC: B256 =
+    alloy_primitives::b256!("c42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67");
 const RPC_ATTEMPTS: usize = 6;
 const RPC_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const RPC_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -133,6 +135,14 @@ pub struct NoxaReceipt {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ObservedLaunchLog {
+    pub l2_block_number: u64,
+    pub transaction_hash: B256,
+    pub transaction_index: u64,
+    pub log: ReceiptLog,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ObservedPoolSwapLog {
     pub l2_block_number: u64,
     pub transaction_hash: B256,
     pub transaction_index: u64,
@@ -579,6 +589,16 @@ impl NoxaRpcClient {
         from_l2_block: u64,
         to_l2_block: u64,
     ) -> Result<Vec<ObservedLaunchLog>> {
+        self.token_launched_logs_for(NOXA_LAUNCH_FACTORY, from_l2_block, to_l2_block)
+            .await
+    }
+
+    pub async fn token_launched_logs_for(
+        &self,
+        factory: Address,
+        from_l2_block: u64,
+        to_l2_block: u64,
+    ) -> Result<Vec<ObservedLaunchLog>> {
         if from_l2_block > to_l2_block {
             bail!("log range start exceeds end");
         }
@@ -588,7 +608,7 @@ impl NoxaRpcClient {
                 json!([{
                     "fromBlock": hex_u64(from_l2_block),
                     "toBlock": hex_u64(to_l2_block),
-                    "address": NOXA_LAUNCH_FACTORY,
+                    "address": factory,
                     "topics": [TOKEN_LAUNCHED_TOPIC],
                 }]),
             )
@@ -597,6 +617,35 @@ impl NoxaRpcClient {
             .as_array()
             .ok_or_else(|| anyhow!("eth_getLogs result is not an array"))?;
         logs.iter().map(parse_observed_launch_log).collect()
+    }
+
+    pub async fn v3_swap_logs(
+        &self,
+        pools: &[Address],
+        from_l2_block: u64,
+        to_l2_block: u64,
+    ) -> Result<Vec<ObservedPoolSwapLog>> {
+        if pools.is_empty() {
+            return Ok(Vec::new());
+        }
+        if from_l2_block > to_l2_block {
+            bail!("log range start exceeds end");
+        }
+        let value = self
+            .request(
+                "eth_getLogs",
+                json!([{
+                    "fromBlock": hex_u64(from_l2_block),
+                    "toBlock": hex_u64(to_l2_block),
+                    "address": pools,
+                    "topics": [V3_SWAP_TOPIC],
+                }]),
+            )
+            .await?;
+        let logs = value
+            .as_array()
+            .ok_or_else(|| anyhow!("eth_getLogs result is not an array"))?;
+        logs.iter().map(parse_observed_pool_swap_log).collect()
     }
 
     async fn eth_call(&self, to: Address, data: &str, block_tag: &str) -> Result<Bytes> {
@@ -842,6 +891,17 @@ fn parse_observed_launch_log(value: &Value) -> Result<ObservedLaunchLog> {
     })
 }
 
+fn parse_observed_pool_swap_log(value: &Value) -> Result<ObservedPoolSwapLog> {
+    Ok(ObservedPoolSwapLog {
+        l2_block_number: parse_hex_u64(field_str(value, "blockNumber")?)?,
+        transaction_hash: field_str(value, "transactionHash")?
+            .parse()
+            .context("parse log transaction hash")?,
+        transaction_index: parse_hex_u64(field_str(value, "transactionIndex")?)?,
+        log: parse_receipt_log(value)?,
+    })
+}
+
 fn field_str<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
     value
         .get(field)
@@ -1001,6 +1061,26 @@ mod tests {
             parsed.log.address,
             address!("d9ec2db5f3d1b236843925949fe5bd8a3836fccb")
         );
+    }
+
+    #[test]
+    fn parses_v3_swap_rpc_log_identity() {
+        let pool = address!("94787c100973b364f9419c07764da81d49002610");
+        let hash = b256!("021f73d6f8842e4175909a04de062fa6b419a5d7da26822ea21a216280393ac1");
+        let value = json!({
+            "address": pool,
+            "blockNumber": "0x9c008a",
+            "transactionHash": hash,
+            "transactionIndex": "0x2",
+            "logIndex": "0x7",
+            "topics": [V3_SWAP_TOPIC],
+            "data": "0x"
+        });
+        let parsed = parse_observed_pool_swap_log(&value).unwrap();
+        assert_eq!(parsed.l2_block_number, 10_223_754);
+        assert_eq!(parsed.transaction_hash, hash);
+        assert_eq!(parsed.log.address, pool);
+        assert_eq!(parsed.log.log_index, 7);
     }
 
     #[test]

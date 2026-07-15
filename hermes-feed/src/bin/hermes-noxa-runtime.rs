@@ -133,6 +133,9 @@ struct Cli {
     /// Local mode-0600 file containing one leader address per line.
     #[arg(long)]
     watch_wallet_file: Option<PathBuf>,
+    /// Paper-only market discovery across all leaders. Never valid in signed mode.
+    #[arg(long, default_value_t = false)]
+    copy_discover_all_wallets: bool,
     /// Optional repeatable token bootstrap allowlist. New NOXA tokens are learned dynamically.
     #[arg(long = "copy-token")]
     copy_tokens: Vec<String>,
@@ -377,7 +380,11 @@ async fn main() -> Result<()> {
     let copy_policy = match args.strategy {
         StrategyMode::Launch => None,
         StrategyMode::Copy => Some(WatchedWalletCopyPolicy::new(
-            load_watched_wallets(&args)?,
+            if args.copy_discover_all_wallets {
+                HashSet::from([recipient])
+            } else {
+                load_watched_wallets(&args)?
+            },
             parse_address_set(&args.copy_tokens, "--copy-token")?,
             amount_in,
             parse_u256(&args.copy_max_leader_entry_amount)?,
@@ -589,7 +596,8 @@ async fn main() -> Result<()> {
         },
         "launch_enabled": status.launch_enabled,
         "copy_policy": copy_policy.as_ref().map(|policy| json!({
-            "watched_wallets": policy.watched_wallets().len(),
+            "watched_wallets": if args.copy_discover_all_wallets { 0 } else { policy.watched_wallets().len() },
+            "discover_all_wallets": args.copy_discover_all_wallets,
             "bootstrap_tokens": policy.allowed_tokens().len(),
             "dynamic_token_validation": true,
             "dynamic_token_candidate_source": if args.deployment == Deployment::ActiveNoxa {
@@ -1080,8 +1088,9 @@ async fn process_feed_frame(
             if args.strategy == StrategyMode::Copy && (direct_copy || aggregator_copy) {
                 match tx.recover_signer() {
                     Ok(from)
-                        if copy_policy
-                            .is_some_and(|policy| policy.watched_wallets().contains(&from)) =>
+                        if args.copy_discover_all_wallets
+                            || copy_policy
+                                .is_some_and(|policy| policy.watched_wallets().contains(&from)) =>
                     {
                         let normalized = if direct_copy {
                             decode_v3_exact_input_single(tx.input()).and_then(|intent| {
@@ -1110,7 +1119,10 @@ async fn process_feed_frame(
                                     detected_at: Instant::now(),
                                 })
                             }
-                            None => malformed_watched_copy_swaps.push((*tx.tx_hash(), from)),
+                            None if !args.copy_discover_all_wallets => {
+                                malformed_watched_copy_swaps.push((*tx.tx_hash(), from))
+                            }
+                            None => {}
                         }
                     }
                     Ok(_) => {}
@@ -1277,6 +1289,15 @@ async fn process_feed_frame(
         for candidate in copy_swaps {
             let candidate_started = candidate.detected_at;
             let observed = candidate.swap;
+            let Some(token) = copy_token(&observed.intent) else {
+                continue;
+            };
+            if args.copy_discover_all_wallets
+                && !copy_token_registry.contains(token, candidate.pool)
+                && !copy_token_registry.launch_was_observed(token, candidate.pool)
+            {
+                continue;
+            }
             if !emission_enabled {
                 emit(json!({
                     "record_type": "runtime_copy_candidate_suppressed",
@@ -1285,9 +1306,6 @@ async fn process_feed_frame(
                 }))?;
                 continue;
             }
-            let Some(token) = copy_token(&observed.intent) else {
-                continue;
-            };
             if !copy_token_registry.contains(token, candidate.pool) {
                 if deployment == Deployment::ActiveNoxa
                     && !copy_token_registry.launch_was_observed(token, candidate.pool)
@@ -1496,7 +1514,11 @@ fn handle_copy_candidate(
                 })
         }
     };
-    let decision = match policy.evaluate_validated(&observed, follower_position, *copy_triggers) {
+    let decision = match if args.copy_discover_all_wallets {
+        policy.evaluate_validated_discovered(&observed, follower_position, *copy_triggers)
+    } else {
+        policy.evaluate_validated(&observed, follower_position, *copy_triggers)
+    } {
         Ok(decision) => decision,
         Err(reason) => {
             return emit(json!({
@@ -2672,13 +2694,28 @@ fn validate_args(args: &Cli) -> Result<()> {
                 || args.watch_wallet_file.is_some()
                 || !args.copy_tokens.is_empty()
                 || args.copy_trust_leader_limit_price
+                || args.copy_discover_all_wallets
             {
                 bail!("copy allowlists require --strategy copy");
             }
         }
         StrategyMode::Copy => {
-            if args.watched_wallets.is_empty() && args.watch_wallet_file.is_none() {
+            if args.copy_discover_all_wallets
+                && (!args.watched_wallets.is_empty() || args.watch_wallet_file.is_some())
+            {
+                bail!("paper discovery cannot be combined with a wallet allowlist");
+            }
+            if !args.copy_discover_all_wallets
+                && args.watched_wallets.is_empty()
+                && args.watch_wallet_file.is_none()
+            {
                 bail!("copy strategy requires --watch-wallet or --watch-wallet-file");
+            }
+            if args.copy_discover_all_wallets && args.mode != RuntimeMode::Paper {
+                bail!("all-wallet copy discovery is restricted to paper mode");
+            }
+            if args.copy_discover_all_wallets && args.deployment != Deployment::ActiveNoxa {
+                bail!("all-wallet copy discovery requires the pinned active Noxa deployment");
             }
             if args.copy_max_triggers == 0 {
                 bail!("copy trigger cap must be non-zero");
@@ -2927,6 +2964,8 @@ mod tests {
             "hermes-noxa-runtime",
             "--strategy",
             "copy",
+            "--deployment",
+            "active-noxa",
             "--recipient",
             RECIPIENT,
         ])
@@ -2970,6 +3009,48 @@ mod tests {
             ..configured
         };
         assert!(validate_args(&launch_with_copy_flags).is_err());
+    }
+
+    #[test]
+    fn all_wallet_discovery_is_paper_only_and_excludes_explicit_watchlists() {
+        let discovery = Cli::try_parse_from([
+            "hermes-noxa-runtime",
+            "--strategy",
+            "copy",
+            "--deployment",
+            "active-noxa",
+            "--recipient",
+            RECIPIENT,
+            "--copy-discover-all-wallets",
+            "--copy-token",
+            "0x2222222222222222222222222222222222222222",
+        ])
+        .unwrap();
+        assert!(validate_args(&discovery).is_ok());
+
+        let mixed = Cli {
+            watched_wallets: vec!["0x1111111111111111111111111111111111111111".into()],
+            ..discovery.clone()
+        };
+        assert!(validate_args(&mixed).is_err());
+
+        let legacy = Cli {
+            deployment: Deployment::LegacyNoxa,
+            watched_wallets: Vec::new(),
+            ..discovery.clone()
+        };
+        assert!(validate_args(&legacy).is_err());
+
+        let signed = Cli {
+            mode: RuntimeMode::Signed,
+            watched_wallets: Vec::new(),
+            keystore: Some(PathBuf::from(
+                "/srv/codex-workspaces/hermes-secrets/trader.json",
+            )),
+            expected_address: Some(RECIPIENT.into()),
+            ..discovery
+        };
+        assert!(validate_args(&signed).is_err());
     }
 
     #[test]

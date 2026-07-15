@@ -91,10 +91,33 @@
   ],
   "recent_market_scan": {
     "recent_l2_blocks": 100000,
-    "active_noxa_pools": 18,
-    "swap_transactions": 98,
-    "wallets": 58,
+    "factory_launch_pools_backfilled": 2170,
+    "swap_transactions": 304,
+    "wallets": 172,
+    "production_eligible_entries": 49,
+    "repeat_entry_and_exit_leader": {
+      "address": "0x26ed2f8f0bbc6dbb4071a2da6d7bdd0c3c32bd35",
+      "safe_entries": 2,
+      "exits": 5,
+      "token": "0x7ca559897c59689614ae03f5e6124ecba5557398"
+    },
     "eligible_aggregator_entries": [
+      {
+        "address": "0x26ed2f8f0bbc6dbb4071a2da6d7bdd0c3c32bd35",
+        "transaction": "0x3f550d25fc8a67e689038eca7730117e4175d4131414f1f23d88f86549c90668",
+        "l2_block": 10233465,
+        "token": "0x7ca559897c59689614ae03f5e6124ecba5557398",
+        "pool": "0x17ad550ab52fc5d72a61284ab2c6d5eca28b0bee",
+        "amount_out_minimum": "0x1bd65a1125fb44278ac53"
+      },
+      {
+        "address": "0x182213fd510a7bb9f6f1c1b1ed4a1bcd655c0df9",
+        "transaction": "0x2ffb8a723112ba1474f121d4c293bbd49325c5bee65a66a67685805b3b2ab177",
+        "l2_block": 10231249,
+        "token": "0xec3ff0ab2f0260615f4f8e49fe8212db89d93517",
+        "pool": "0x64910218a9e21f0e36f39edf59f6c5e5e75ad6cc",
+        "amount_out_minimum": "0x26289b937697ba7eda319"
+      },
       {
         "address": "0xcc6ae8be8689b168d9e14130b11b00eb6321e1fa",
         "transaction": "0x77f70b0e67cae3d3e7b0155389c6886817ff737f288c710eabad8bef51182298",
@@ -109,7 +132,20 @@
         "pool": "0x55ec7d59f408be2d1c8996a9e7f5704d14639c76",
         "amount_out_minimum": "0x373123ef35e6d63af3d85"
       }
-    ]
+    ],
+    "eligible_entry_during_deployed_watch_interval": {
+      "address": "0xbc7a9028acec6d69f170bb86eb2f9bded02da053",
+      "transaction": "0x0e4bdf93808f65b30f86fbafb68598e1abddc963202acc29467fae250f976ab3",
+      "l2_block": 10249054,
+      "token": "0xac2ceeda7072982fe34f231025d2e919a7e07863",
+      "pool": "0x48f7ac5aebcb3bb8b64ecd454cff3a8718fce7ab",
+      "deployed_watchlist_match": false,
+      "replay_detection_to_order_latency_ns": {
+        "median": 2735,
+        "p95": 4912,
+        "p99": 5759
+      }
+    }
   },
-  "result": "two_recent_robinhood_aggregator_entries_pass_the_production_copy_policy_after_empty_data_value_compatibility"
+  "result": "many_active_noxa_wallets_confirmed_and_one_policy_safe_entry_occurred_during_the_deployed_watch_but_outside_its_stale_allowlist"
 }

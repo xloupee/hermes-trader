@@ -115,6 +115,25 @@ async fn main() -> Result<()> {
         let record = rpc
             .active_noxa_launch_record(ACTIVE_NOXA_LAUNCH_FACTORY, token, status.pinned_l2_block)
             .await?;
+        if record.token != token || record.pool != pool {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "record_type": "active_noxa_copy_candidate_audit",
+                    "tx_hash": tx_hash,
+                    "leader": transaction.from,
+                    "target": transaction.to,
+                    "route": route,
+                    "receipt_status": receipt.status,
+                    "token": token,
+                    "pool": pool,
+                    "token_valid": false,
+                    "eligible": false,
+                    "reason": "token is not registered to the expected pool by the active Noxa factory",
+                }))?
+            );
+            continue;
+        }
         let (token_view, token_code, pool_code, pool_view) = tokio::try_join!(
             rpc.active_noxa_token_snapshot(token, status.pinned_l2_block),
             rpc.code_at_l2_block(token, status.pinned_l2_block),

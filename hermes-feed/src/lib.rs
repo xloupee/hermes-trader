@@ -67,8 +67,8 @@ pub use noxa_predict::{
 };
 pub use noxa_rpc::{
     ActiveNoxaLaunchRecord, ActiveNoxaTokenSnapshot, FactoryStatus, NoxaReceipt, NoxaRpcClient,
-    ObservedLaunchLog, RobinhoodBlock, RobinhoodTransaction, RpcMetricsSnapshot,
-    TokenRestrictionSnapshot, V3PoolSnapshot,
+    ObservedLaunchLog, ObservedPoolSwapLog, RobinhoodBlock, RobinhoodTransaction,
+    RpcMetricsSnapshot, TokenRestrictionSnapshot, V3PoolSnapshot,
 };
 pub use noxa_trade::{
     ApprovalTransactionPlan, PreparedRawTransaction, TradePlanError, TradeTransactionPlan,

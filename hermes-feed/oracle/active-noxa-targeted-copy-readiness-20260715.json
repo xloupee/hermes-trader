@@ -41,25 +41,25 @@
     "copy_triggers": 0
   },
   "detection_to_order_latency": null,
-  "latency_status": "no_verified_noxa_trade_during_sample",
+  "latency_status": "eligible_trade_found_in_watch_interval_but_leader_was_not_in_the_deployed_allowlist_replay_only",
   "historical_guarded_path_replay": {
     "live_measurement": false,
     "measurement_scope": "normalized_verified_candidate_to_paper_order",
     "source_route": "robinhood_aggregator",
-    "historical_transaction": "0x77f70b0e67cae3d3e7b0155389c6886817ff737f288c710eabad8bef51182298",
-    "leader": "0xcc6ae8be8689b168d9e14130b11b00eb6321e1fa",
-    "token": "0xec3ff0ab2f0260615f4f8e49fe8212db89d93517",
-    "pool": "0x64910218a9e21f0e36f39edf59f6c5e5e75ad6cc",
+    "historical_transaction": "0x0e4bdf93808f65b30f86fbafb68598e1abddc963202acc29467fae250f976ab3",
+    "leader": "0xbc7a9028acec6d69f170bb86eb2f9bded02da053",
+    "token": "0xac2ceeda7072982fe34f231025d2e919a7e07863",
+    "pool": "0x48f7ac5aebcb3bb8b64ecd454cff3a8718fce7ab",
     "iterations": 10000,
-    "historical_amount_out_minimum": "0x14ad5de897e8fdaafb8d2",
+    "historical_amount_out_minimum": "0x2c922a6677dc19f0e139",
     "benchmark_limit_adjusted": false,
     "production_policy_would_accept_historical_trade": true,
     "latency_ns": {
-      "min": 1152,
-      "median": 1770,
-      "p95": 3979,
-      "p99": 5370,
-      "max": 93895
+      "min": 1132,
+      "median": 2735,
+      "p95": 4912,
+      "p99": 5759,
+      "max": 111492
     }
   },
   "targeted_30_minute_run": {
@@ -118,35 +118,75 @@
     }
   },
   "recent_active_noxa_market_scan": {
-    "factory_launches_backfilled": 1014,
-    "last_launch_l2_block": "0x9ad577",
-    "last_launch_token": "0xa1f3dc500a92898faeb2da7229ecc2c9866d17e5",
+    "factory_launches_backfilled": 2170,
+    "first_launch_l2_block": 8147432,
+    "last_launch_l2_block": 10225469,
+    "last_launch_token": "0x034e2a33c1bab02b31043ff79768c0e060ecff51",
+    "last_launch_pool": "0x92d6de37ab1ee1517a925ef45bcce88d43e9ee63",
     "recent_l2_blocks_scanned": 100000,
-    "active_pools": 18,
-    "swap_transactions": 98,
-    "wallets": 58,
-    "production_eligible_direct_entries": 0,
-    "canonical_aggregator_transactions_audited": 11,
-    "production_eligible_aggregator_entries": 2,
-    "eligible_leaders": [
-      "0xcc6ae8be8689b168d9e14130b11b00eb6321e1fa",
-      "0xf917e3393bb41f04bccd629fbdba848eee26fdd6"
-    ]
+    "swap_transactions": 304,
+    "wallets": 172,
+    "production_eligible_entries": 49,
+    "most_recent_repeat_entry_and_exit_leader": "0x26ed2f8f0bbc6dbb4071a2da6d7bdd0c3c32bd35"
+  },
+  "current_targeted_watch_interval_scan": {
+    "runtime_started_at_utc": "2026-07-15T08:13:16Z",
+    "runtime_start_l2_block": 10239444,
+    "scan_to_l2_block": 10251503,
+    "canonical_pool_swap_transactions": 17,
+    "wallets": 12,
+    "production_eligible_entries": 1,
+    "eligible_entry": {
+      "transaction": "0x0e4bdf93808f65b30f86fbafb68598e1abddc963202acc29467fae250f976ab3",
+      "l2_block": 10249054,
+      "leader": "0xbc7a9028acec6d69f170bb86eb2f9bded02da053",
+      "token": "0xac2ceeda7072982fe34f231025d2e919a7e07863",
+      "pool": "0x48f7ac5aebcb3bb8b64ecd454cff3a8718fce7ab",
+      "deployed_watchlist_match": false
+    }
+  },
+  "completed_targeted_watch": {
+    "runtime_started_at_utc": "2026-07-15T08:13:16Z",
+    "runtime_stopped_at_utc": "2026-07-15T09:13:18Z",
+    "run_seconds": 3600,
+    "completion_reason": "duration_complete",
+    "copy_triggers": 0,
+    "rpc": {
+      "logical_requests": 46,
+      "http_attempts": 46,
+      "rate_limited": 0,
+      "retries": 0,
+      "server_errors": 0,
+      "transport_errors": 0
+    },
+    "feed": {
+      "sequence_first": 10238700,
+      "sequence_last": 10275571,
+      "sequence_gaps": 0,
+      "sequence_missing": 0,
+      "duplicates_or_reordered": 0,
+      "reconnects": 0,
+      "replayed_messages": 0,
+      "resume_forward_gaps": 0
+    },
+    "live_detection_to_order_latency_captured": false,
+    "latency_blocker": "the deployed two-wallet allowlist produced no eligible trigger"
   },
   "next_targeted_watch": {
     "mode": "paper",
-    "leaders": [
-      "0xcc6ae8be8689b168d9e14130b11b00eb6321e1fa",
-      "0xf917e3393bb41f04bccd629fbdba848eee26fdd6"
-    ],
+    "discover_all_wallets": true,
     "prevalidated_tokens": [
-      "0xec3ff0ab2f0260615f4f8e49fe8212db89d93517",
-      "0xca07d97e25a87a0acb4d51515b7ab892d3d43849"
+      "0xac2ceeda7072982fe34f231025d2e919a7e07863",
+      "0x23345757dc6c48152bc7a4cbe1f1c7afdd33eaa2",
+      "0x7ca559897c59689614ae03f5e6124ecba5557398",
+      "0x59cd0ed22a7db4667d552539380e326226fcd3a4",
+      "0x76acd431f6aec99f04f49d1add91ff70d038f9c5",
+      "0x07bccfa8f6a267b1f574a19f0a74d1396ed827d7"
     ],
-    "requires_empty_aggregator_data_compatibility": true,
-    "status": "prepared_not_deployed"
+    "signed_mode_permitted": false,
+    "status": "implemented_tested_not_deployed"
   },
   "live_eligibility_gate_passed": false,
-  "live_eligibility_blocker": "two production-eligible historical aggregator entries are now verified, but the compatibility rule and new leaders still require a clean fresh paper capture before any live canary",
-  "result": "paper_runtime_infrastructure_clean_strategy_signal_not_live_ready"
+  "live_eligibility_blocker": "an eligible trade occurred during the current watch but the stale two-wallet allowlist missed it; the paper-only all-wallet discovery build must capture a fresh eligible trade and record live detection_to_order_ns before any live canary",
+  "result": "eligible_market_signal_confirmed_live_latency_capture_still_required"
 }

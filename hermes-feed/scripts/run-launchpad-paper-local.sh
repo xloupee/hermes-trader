@@ -70,8 +70,9 @@ pipeline_pid=
 
 # Receipt/event work begins only after the feed pipeline has closed. The
 # collector also appends fully validated Bow/LaunchHood V3, Clanker V4,
-# Bankr/Doppler V4, and current-generation Pons V3 quote records, using the
-# same reviewed-vs-observed startup pin boundary.
+# Bankr/Doppler V4, current-generation Pons V3, Hood curve quote records, and
+# quote-blocked Hood migration identity evidence, using the same
+# reviewed-vs-observed startup pin boundary.
 "$reconcile_bin" \
   --input "$observer_output" \
   --expected-pins "$expected_pins" \

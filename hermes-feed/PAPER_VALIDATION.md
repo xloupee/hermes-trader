@@ -75,8 +75,9 @@ scripts/run-launchpad-paper-local.sh \
 Receipt/event evidence must be collected independently and may be supplied
 after feed EOF with `--reconciliation-input <evidence.jsonl>`. Each JSONL row
 contains `tx_hash`, `launchpad`, `receipt_status`, `protocol_event_match`, and
-`observed_unix_ns`. For fully validated Bow and LaunchHood V3 receipts, the
-same stream also includes a typed `launchpad_v3_paper_quote` row. The final
+`observed_unix_ns`. Fully validated Bow/LaunchHood V3, Clanker, Bankr/Doppler,
+current Pons, and Hood curve receipts also include protocol-specific typed
+quote rows. The final
 metrics distinguish confirmed observations, false positives, missed
 transactions, unreconciled observations, and p50/p95/p99 reconciliation
 latency. Missing evidence is `unreconciled`, never silently counted as a false
@@ -87,6 +88,8 @@ The read-only collector produces that evidence directly from observer output:
 ```sh
 target/release/hermes-launchpad-reconcile \
   --input .runtime/launchpad-paper-session/launchpad-paper.jsonl \
+  --expected-pins config/launchpad-expected-pins.production.json \
+  --observed-startup-snapshot .runtime/launchpad-observed-startup.json \
   > .runtime/launchpad-paper-session/reconciliation-evidence.jsonl
 ```
 
@@ -108,9 +111,40 @@ The default independent paper size is 0.001 WETH with 1% slippage and a hard
 immediate full-position exit quote. Feeding the mixed evidence stream back to
 `hermes-launchpad-paper --reconciliation-input` emits a
 `launchpad_paper_finalized_plan` row joined to the original feed sequence.
-These plans remain `quoted_restriction_gated`, `execution_eligible: false`,
-and `broadcast: false`; receipt-end quoting does not claim that Bow token
-limits or LaunchHood's 366-L1-block wallet restriction have cleared.
+Bow/LaunchHood plans remain `quoted_restriction_gated`; the other admitted
+paper quotes remain `quoted_execution_gated`. All are
+`execution_eligible: false` and `broadcast: false`; receipt-end quoting does
+not claim that Bow token limits or LaunchHood's 366-L1-block wallet
+restriction have cleared.
+
+Hood is also strict rather than topic-only. The collector fetches the original
+direct factory transaction, decodes the exact `TokenCreated`/`Trade` event,
+checks token transfers and direction, hydrates the token supply split and
+factory configuration at the confirmed block, and reconstructs receipt-end
+curve state from the event plus the source-pinned custom-supply invariant. The
+receipt-derived state must exactly equal the independently hydrated
+end-of-block virtual reserves, real reserves, fee, and migration flags. A
+later same-token trade in the block therefore rejects the earlier receipt.
+Direct and atomic-buy calldata minimum outputs and
+`TokenCreated`-before-`Trade` ordering are enforced. The historical 10% launch
+guard is accepted only before its reviewed disable boundary; the transition
+block fails closed because a block-tagged call cannot recover
+transaction-index state.
+
+An admitted curve receipt emits `launchpad_hood_curve_paper_quote` with a
+fixed 0.001 ETH entry, an independent slippage floor, and an immediate
+full-position exit. The finalizer recomputes both legs before accepting the
+record. Live proofs cover normal buy/sell rounding, launch-time atomic buy,
+and graduation cap/refund math. The sell proof also demonstrates the
+terminality gate: its arithmetic is exact, but its quote is rejected because
+a later same-token trade changed the block-terminal state.
+
+Aggregator-wrapped graduations are verified separately through pinned
+factory, migrator, V3, NFPM, locker, transfer, fee, token-ID, and ordered-event
+relationships and emit `launchpad_hood_migration_evidence`. They remain
+quote-blocked because the proof's declared LP allocation differs from actual
+minted liquidity and no independent post-block V3 pool/position snapshot is
+admitted; they are never misquoted as a live curve.
 
 One proof transaction can also be inspected directly without writing any
 state:

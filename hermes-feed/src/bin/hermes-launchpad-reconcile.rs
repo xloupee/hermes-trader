@@ -26,10 +26,11 @@ use hermes_feed::robinhood::{
 use hermes_feed::tier2_curve::HOOD_FACTORY;
 use hermes_feed::{
     BankrDopplerExpectedProfile, BankrDopplerQuotePolicy, BankrDopplerReceiptPaperQuote,
-    ClankerQuotePolicy, ClankerReceiptPaperQuote, ClankerV4ExpectedProfile, NoxaRpcClient,
-    PonsQuoteError, PonsQuotePolicy, PonsReceiptPaperQuote, V3ReceiptPaperQuote,
-    V3ReceiptQuotePolicy, quote_bankr_doppler_launch_receipt, quote_clanker_launch_receipt,
-    quote_pons_launch_receipt, quote_v3_launch_receipt,
+    ClankerQuotePolicy, ClankerReceiptPaperQuote, ClankerV4ExpectedProfile, HoodExpectedProfile,
+    HoodMigrationEvidence, HoodQuotePolicy, HoodReceiptPaperQuote, NoxaRpcClient, PonsQuoteError,
+    PonsQuotePolicy, PonsReceiptPaperQuote, V3ReceiptPaperQuote, V3ReceiptQuotePolicy,
+    quote_bankr_doppler_launch_receipt, quote_clanker_launch_receipt, quote_hood_curve_receipt,
+    quote_pons_launch_receipt, quote_v3_launch_receipt, verify_hood_graduation_receipt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -101,13 +102,16 @@ struct ReconciledCandidate {
     clanker_quote: Option<ClankerReceiptPaperQuote>,
     bankr_quote: Option<BankrDopplerReceiptPaperQuote>,
     pons_quote: Option<PonsReceiptPaperQuote>,
+    hood_quote: Option<HoodReceiptPaperQuote>,
+    hood_migration: Option<HoodMigrationEvidence>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ReconcileProfiles {
     clanker: Option<ClankerV4ExpectedProfile>,
     bankr: Option<BankrDopplerExpectedProfile>,
     pons: hermes_feed::PonsExpectedProfile,
+    hood: HoodExpectedProfile,
 }
 
 struct PonsReconciliationOutcome {
@@ -162,10 +166,16 @@ async fn main() -> Result<()> {
         .map(|configured| configured.expected_profile())
         .transpose()?;
     let pons_profile = expected.pons_v3.expected_profile()?;
+    let hood_profile = expected
+        .hood_curve
+        .as_ref()
+        .context("complete reviewed Hood profile is required")?;
+    hood_profile.validate()?;
     let profiles = ReconcileProfiles {
         clanker: clanker_profile,
         bankr: bankr_profile,
         pons: pons_profile,
+        hood: hood_profile.clone(),
     };
     let rpc = NoxaRpcClient::with_url(args.rpc_url)?;
     let chain_id = rpc.chain_id().await?;
@@ -181,6 +191,7 @@ async fn main() -> Result<()> {
     };
     let mut reconciled = stream::iter(candidates.into_values().map(|candidate| {
         let rpc = rpc.clone();
+        let profiles = profiles.clone();
         async move {
             reconcile_candidate(
                 &rpc,
@@ -209,6 +220,12 @@ async fn main() -> Result<()> {
         }
         if let Some(quote) = result.pons_quote {
             println!("{}", serde_json::to_string(&quote)?);
+        }
+        if let Some(quote) = result.hood_quote {
+            println!("{}", serde_json::to_string(&quote)?);
+        }
+        if let Some(migration) = result.hood_migration {
+            println!("{}", serde_json::to_string(&migration)?);
         }
     }
     Ok(())
@@ -284,6 +301,8 @@ async fn reconcile_candidate(
             let mut clanker_quote = None;
             let mut bankr_quote = None;
             let mut pons_quote = None;
+            let mut hood_quote = None;
+            let mut hood_migration = None;
             let mut pons_generation = None;
             let mut protocol_blocker = None;
             if receipt.status
@@ -377,6 +396,89 @@ async fn reconcile_candidate(
                 pons_quote = outcome.quote;
                 protocol_blocker = outcome.blocker;
             }
+            if receipt.status && candidate.launchpad == LaunchpadId::HoodFun {
+                let transaction = rpc
+                    .transaction_by_hash(candidate.tx_hash)
+                    .await?
+                    .with_context(|| format!("missing transaction {}", candidate.tx_hash))?;
+                let block = rpc.block_by_number(receipt.l2_block_number).await?;
+                match hood_token_from_receipt(&receipt.logs) {
+                    Some(token) => {
+                        let snapshot = rpc
+                            .hood_market_snapshot_at(HOOD_FACTORY, token, receipt.l2_block_number)
+                            .await?;
+                        let pre = if snapshot.curve.graduated || snapshot.curve.migrated {
+                            Some(
+                                rpc.hood_market_snapshot_at(
+                                    HOOD_FACTORY,
+                                    token,
+                                    receipt
+                                        .l2_block_number
+                                        .checked_sub(1)
+                                        .context("Hood graduation block has no predecessor")?,
+                                )
+                                .await?,
+                            )
+                        } else {
+                            None
+                        };
+                        let stable_block = rpc.block_by_number(receipt.l2_block_number).await?;
+                        if stable_block.hash != block.hash {
+                            protocol_match = false;
+                            protocol_blocker = Some("hood_block_reorg_during_snapshot".into());
+                        } else if let Some(pre) = pre {
+                            match verify_hood_graduation_receipt(
+                                &transaction,
+                                &receipt,
+                                &block,
+                                &pre,
+                                &snapshot,
+                                &profiles.hood,
+                            ) {
+                                Ok(evidence) => {
+                                    protocol_match = true;
+                                    protocol_blocker = Some(
+                                        "hood_migration_topology_verified_v3_quote_unavailable"
+                                            .into(),
+                                    );
+                                    hood_migration = Some(evidence);
+                                }
+                                Err(error) => {
+                                    protocol_match = false;
+                                    protocol_blocker =
+                                        Some(format!("hood_migration_verification:{error}"));
+                                }
+                            }
+                        } else {
+                            match quote_hood_curve_receipt(
+                                &transaction,
+                                &receipt,
+                                &block,
+                                &snapshot,
+                                profiles.hood.semantic,
+                                HoodQuotePolicy {
+                                    amount_in: quote_policy.amount_in,
+                                    max_amount_in: quote_policy.max_amount_in,
+                                    slippage_bps: quote_policy.slippage_bps,
+                                },
+                            ) {
+                                Ok(quote) => {
+                                    protocol_match = true;
+                                    hood_quote = Some(quote);
+                                }
+                                Err(error) => {
+                                    protocol_match = false;
+                                    protocol_blocker = Some(format!("hood_strict_quote:{error}"));
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        protocol_match = false;
+                        protocol_blocker = Some("hood_token_identity_missing".into());
+                    }
+                }
+            }
             return Ok(ReconciledCandidate {
                 evidence: ReconciliationEvidence {
                     tx_hash: candidate.tx_hash,
@@ -391,6 +493,8 @@ async fn reconcile_candidate(
                 clanker_quote,
                 bankr_quote,
                 pons_quote,
+                hood_quote,
+                hood_migration,
             });
         }
         if Instant::now() >= deadline {
@@ -408,6 +512,8 @@ async fn reconcile_candidate(
                 clanker_quote: None,
                 bankr_quote: None,
                 pons_quote: None,
+                hood_quote: None,
+                hood_migration: None,
             });
         }
         sleep(poll_interval).await;
@@ -469,6 +575,31 @@ fn quote_current_pons(
         },
     )
     .map(Some)
+}
+
+fn hood_token_from_receipt(logs: &[ReceiptLog]) -> Option<alloy_primitives::Address> {
+    let created = keccak256(HOOD_TOKEN_CREATED_SIGNATURE.as_bytes());
+    let trade = keccak256(HOOD_TRADE_SIGNATURE.as_bytes());
+    let tokens = logs
+        .iter()
+        .filter(|log| {
+            log.address == HOOD_FACTORY
+                && matches!(log.topics.first(), Some(topic) if *topic == created || *topic == trade)
+        })
+        .map(|log| topic_address(log, 1))
+        .collect::<Option<Vec<_>>>()?;
+    let first = *tokens.first()?;
+    tokens.iter().all(|token| *token == first).then_some(first)
+}
+
+fn topic_address(log: &ReceiptLog, index: usize) -> Option<alloy_primitives::Address> {
+    let topic = log.topics.get(index)?;
+    if topic.as_slice()[..12].iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    Some(alloy_primitives::Address::from_slice(
+        &topic.as_slice()[12..],
+    ))
 }
 
 fn protocol_event_match(launchpad: LaunchpadId, logs: &[ReceiptLog]) -> bool {
@@ -631,5 +762,27 @@ mod tests {
         assert!(protocol_event_match(LaunchpadId::Pons, &[current]));
         let lookalike = log(Address::with_last_byte(0xee), PONS_TOKEN_LAUNCHED_TOPIC);
         assert!(!protocol_event_match(LaunchpadId::Pons, &[lookalike]));
+    }
+
+    #[derive(Deserialize)]
+    struct HoodLiveFixture {
+        receipt: NoxaReceipt,
+    }
+
+    #[test]
+    fn hood_collector_extracts_one_exact_factory_token_and_rejects_lookalikes() {
+        let fixture: HoodLiveFixture = serde_json::from_str(include_str!(
+            "../../tests/fixtures/hood-normal-buy-live-proof.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            hood_token_from_receipt(&fixture.receipt.logs),
+            Some(alloy_primitives::address!(
+                "21c2ed1755d26cc99607c7b76469ee480087600d"
+            ))
+        );
+        let mut lookalike = fixture.receipt.logs;
+        lookalike[0].address = Address::with_last_byte(0xee);
+        assert_eq!(hood_token_from_receipt(&lookalike), None);
     }
 }

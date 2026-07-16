@@ -16,6 +16,10 @@ snapshot must match before the observer starts.
 | Bow | factory `0xc70e510e14710ea535cab7b2414860af63feab79` | `0x8d56cbcdf72dbf04ed8170d55878cc894997ccc54c2ab0aec782274eb7fe7a14` | Official/research address plus fixed-block code commitment; explorer source is not verified. |
 | LaunchHood V3 | factory `0x62b33a039d289cbda50ebeb72fe4261449e61bcf` | `0x9b785dd157fe757dd427822df3e2bc3a1b6134f1d338b21c36c3de279bb67766` | Verified explorer ABI and fixed-block code commitment. |
 | Hood | factory `0x5fcc1df0dc020cf454e742e9a8ae2554c37a452c` | `0x4aa0ce56b5b67d27f2fab59dcb796fa552d10ceafdecb06e088cdd254c92c0fc` | Verified `HoodCustomLaunchpad` explorer source and fixed-block code commitment. |
+| Hood | V3 migrator `0x5790...edbe` | `0x88b7c4f6dfb99df8493cf7b7905a538212fc1c7eb176ffbbcaade5a6988c83d6` | Verified source, exact factory link, and complete graduation proof `0x946fea...f645`. |
+| Hood | permanent locker `0xad69...06aa` | `0xee4522db997a71e396e90ef14a123f3a4a857268040b17a618ff2f47e204eb4a` | Verified source and exact LP-NFT recipient in the graduation proof. |
+| Hood | fallback V2 factory `0x8bce...937f` | `0xbab145d02e7005f0d84c6c1639d39b799b0ea16df99ebbdaf5a14d9da820b4e0` | Immutable factory link; retained because `migrator == 0` changes the migration generation. |
+| Hood | owner Safe proxy / singleton | `0xd7d408...fb4c` / `0xb1f926...81ff` | Owner and slot-0 singleton are pinned as a required pair. |
 | Pons current | factory `0x0c37...77a4` | `0x921a0d1b2d854de5435804e8ee118658f05173a0eeebca5f41b41385b97cd1b5` | Deployment/proof receipts plus fixed-block code commitment; current source remains unverified. |
 | Pons legacy | factory `0xa5aa...1feb` | `0x0a62b8ed1d88d30c7b342ea8361dfaf0ac336706992cf0c8ba38b129f06391d4` | Explorer-verified legacy factory and fixed-block code commitment; observation only. |
 | Pons current | locker `0x31ca...54b5` | `0x5bfb52957c2df2cc05b894cd707811c811ee0e38b4a26ea59bae08cd65b39bbd` | Exact LP-NFT recipient and `PositionLocked` emitter in complete proof receipts. |
@@ -40,10 +44,15 @@ snapshot must match before the observer starts.
 | Clanker | descending-MEV module `0xea1f...299e` | `0x0815a0af5e056adaf07a1941b92082caa886b207676bd42c89ea6bde3956bc13` | Official source semantics plus fixed-block code commitment. |
 | Clanker | extension `0x6f27...34b5` | `0xf742a12de7ec06481d0e98942d1830d8bf33502d854e5d97062ef5fda6f5e004` | Exact launch receipt identity and fixed-block code commitment. |
 
-Schema version 3 serializes the complete Clanker identity profile, reviewed
-fee bounds, and all seven Pons runtime identities separately from fresh
+Schema version 3 serializes the complete Clanker and Hood identity profiles,
+reviewed fee/configuration semantics, and all seven Pons runtime identities separately from fresh
 observations. The Pons fields are reviewed expected configuration; observed
 startup code remains a different document and cannot populate them. The
+reviewed-production provenance requires complete Clanker, Bankr/Doppler, and
+Hood profiles; deleting one rejects startup rather than silently disabling its
+strict receipt path. The Hood semantic profile also serializes the historical
+guard value, disable block, transition transaction index, and fail-closed
+transition-block policy instead of leaving that authority only in code. The
 Clanker fee values emitted for an individual pool remain receipt-local state;
 the expected document pins the official contract bounds instead of copying an
 observed pool's values into expected configuration: static LP fees are capped
@@ -64,6 +73,29 @@ Pons identities remain the exact commitments recorded in `PONS_FAMILY.md` and
 are now serialized in the production expected document. The current factory's
 source remains unverified, so this strengthens identity drift detection without
 changing Pons from paper-only to execution-ready.
+
+The Hood profile contains ten independently reviewed identities: factory,
+migrator, locker, NFPM, V3 factory, SwapRouter02, WETH, latent V2 factory,
+owner Safe proxy, and Safe singleton. It also pins the live factory config,
+active migrator, owner/pending-owner, migrator/locker/NFPM/router links, 1% V3
+fee, full-range ticks, fee-share semantics, and canonical V3 init-code hash.
+The startup snapshot independently reads and compares every runtime, the Safe
+slot-0 singleton, and all callable mutable/immutable links. A factory-only pin,
+zero or changed migrator, partial Safe pair, or any link/config drift rejects
+startup rather than silently falling back to a different migration route.
+Receipt-side configuration applies the independently reviewed guard epoch:
+`guardMaxWalletBps=1000` before L2 block 5,780,966 and `0` afterward. The
+transition block fails closed because the setting changes at transaction index
+3 while a block-tagged `eth_call` exposes only block-terminal state.
+
+Graduation proof `0x946fea...f645` is admitted only as migration-identity
+evidence. Its ordered factory/migrator/V3/NFPM/locker topology, CREATE2 pool,
+fees, full-range ticks, NFT token ID, and declared liquidity agree across the
+pinned contracts. Actual pool minting consumes approximately 6.270463008 ETH
+and one token, however, rather than the declared 200 million-token LP
+allocation. The collector records that mismatch and keeps V3 quoting and
+execution unavailable pending an independent post-block pool/position
+snapshot path.
 
 ## Explicit gaps
 

@@ -64,7 +64,7 @@ pub enum WrapperKind {
     Erc4337,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionKind {
     Launch,

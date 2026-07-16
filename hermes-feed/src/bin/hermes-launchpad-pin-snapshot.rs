@@ -14,6 +14,7 @@ use hermes_feed::flap_identity::{
     FLAP_PORTAL_IMPLEMENTATION, FLAP_PORTAL_PROXY, FLAP_VAULT_PORTAL_IMPLEMENTATION,
     FLAP_VAULT_PORTAL_PROXY,
 };
+use hermes_feed::hood_receipt_quote::HoodIdentityRole;
 use hermes_feed::launchpad_adapters::{
     CLANKER_FACTORY, CLANKER_LOCKER, DOPPLER_CREATE_EMITTER, V4_POOL_MANAGER,
 };
@@ -172,6 +173,30 @@ async fn main() -> Result<()> {
             code_bytes: Some(code.len()),
         });
     }
+    let hood_protocol =
+        if let Some(profile) = expected.as_ref().and_then(|pins| pins.hood_curve.as_ref()) {
+            profile.validate()?;
+            let address = |role| {
+                profile
+                    .identity(role)
+                    .map(|identity| identity.address)
+                    .with_context(|| format!("Hood {role:?} identity missing"))
+            };
+            Some(
+                rpc.hood_protocol_snapshot_at(
+                    address(HoodIdentityRole::Factory)?,
+                    address(HoodIdentityRole::Migrator)?,
+                    address(HoodIdentityRole::Locker)?,
+                    address(HoodIdentityRole::PositionManager)?,
+                    address(HoodIdentityRole::SwapRouter)?,
+                    address(HoodIdentityRole::OwnerSafeProxy)?,
+                    pinned_l2_block,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
     let snapshot = PaperObservedStartupSnapshot {
         schema_version: 3,
         document_role: ObservedPinsDocumentRole::ObservedStartupSnapshot,
@@ -179,6 +204,7 @@ async fn main() -> Result<()> {
         fixture_id: None,
         chain_id,
         pins,
+        hood_protocol,
     };
 
     let proof = inspect_bankr_proof(&rpc, pinned_l2_block, args.bankr_proof_tx).await?;
@@ -247,6 +273,19 @@ fn pin_requests(expected: Option<&PaperExpectedPins>) -> Result<Vec<PinRequest>>
     );
 
     if let Some(expected) = expected {
+        if let Some(profile) = &expected.hood_curve {
+            profile.validate()?;
+            let singleton = profile
+                .identity(HoodIdentityRole::OwnerSafeSingleton)
+                .context("Hood Safe singleton identity missing")?;
+            requests.extend(profile.identities.iter().map(|identity| {
+                request(
+                    identity.address,
+                    (identity.role == HoodIdentityRole::OwnerSafeProxy)
+                        .then_some(singleton.address),
+                )
+            }));
+        }
         if let Some(configured) = expected.clanker_v4 {
             configured.expected_profile()?;
             requests.extend([

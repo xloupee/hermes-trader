@@ -204,6 +204,74 @@ pub struct V3PoolSnapshot {
     pub liquidity: u128,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct HoodCurveStateSnapshot {
+    pub virtual_eth: U256,
+    pub virtual_tokens: U256,
+    pub real_eth: U256,
+    pub real_tokens: U256,
+    pub creator: Address,
+    /// Hood stores the Robinhood L1 block number in this field.
+    pub created_at_block: u64,
+    pub graduated: bool,
+    pub migrated: bool,
+    pub trade_fee_bps: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct HoodConfigSnapshot {
+    pub virtual_eth_seed: U256,
+    pub creation_fee: U256,
+    pub default_trade_fee_bps: u16,
+    pub migration_fee: U256,
+    pub migration_fee_bps: u16,
+    pub guard_blocks: u16,
+    pub guard_max_wallet_bps: u16,
+    pub creator_fee_share_bps: u16,
+    pub vanity_enforced: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct HoodMarketSnapshot {
+    pub factory: Address,
+    pub token: Address,
+    pub l2_block_number: u64,
+    pub curve: HoodCurveStateSnapshot,
+    pub config: HoodConfigSnapshot,
+    pub token_curve_supply: U256,
+    pub token_lp_supply: U256,
+    pub migrator: Address,
+    pub uniswap_factory: Address,
+    pub weth: Address,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct HoodProtocolSnapshot {
+    pub factory: Address,
+    pub l2_block_number: u64,
+    pub config: HoodConfigSnapshot,
+    pub migrator: Address,
+    pub fallback_factory: Address,
+    pub weth: Address,
+    pub owner: Address,
+    pub pending_owner: Address,
+    pub owner_safe_singleton: Address,
+    pub migrator_launchpad: Address,
+    pub migrator_position_manager: Address,
+    pub migrator_locker: Address,
+    pub migrator_weth: Address,
+    pub migrator_protocol: Address,
+    pub migrator_creator_share_bps: u16,
+    pub migrator_v3_fee: u32,
+    pub locker_position_manager: Address,
+    pub locker_weth: Address,
+    pub locker_burn_bps: u16,
+    pub position_manager_factory: Address,
+    pub position_manager_weth: Address,
+    pub router_factory: Address,
+    pub router_weth: Address,
+}
+
 impl NoxaRpcClient {
     pub fn new() -> Result<Self> {
         Self::with_url(PUBLIC_RPC_URL)
@@ -394,6 +462,183 @@ impl NoxaRpcClient {
     ) -> Result<V3PoolSnapshot> {
         self.v3_pool_snapshot_at_tag(pool, &hex_u64(l2_block_number))
             .await
+    }
+
+    /// Hydrate the exact Hood curve and semantic configuration at a confirmed
+    /// L2 block. This is receipt-side evidence collection only; it is never
+    /// used on the candidate decision path.
+    pub async fn hood_market_snapshot_at(
+        &self,
+        factory: Address,
+        token: Address,
+        l2_block_number: u64,
+    ) -> Result<HoodMarketSnapshot> {
+        let block_tag = hex_u64(l2_block_number);
+        let address_call = |signature: &str| {
+            let digest = keccak256(signature.as_bytes());
+            let mut call = Vec::with_capacity(36);
+            call.extend_from_slice(&digest[..4]);
+            call.extend_from_slice(&[0_u8; 12]);
+            call.extend_from_slice(token.as_slice());
+            call
+        };
+        let selector_call = |signature: &str| keccak256(signature.as_bytes())[..4].to_vec();
+        let curves_call = address_call("curves(address)");
+        let curve_supply_call = address_call("tokenCurveSupply(address)");
+        let lp_supply_call = address_call("tokenLpSupply(address)");
+        let config_call = selector_call("config()");
+        let migrator_call = selector_call("migrator()");
+        let factory_call = selector_call("uniswapFactory()");
+        let weth_call = selector_call("weth()");
+        let (curve, curve_supply, lp_supply, config, migrator, uniswap_factory, weth) = tokio::try_join!(
+            self.eth_call_data(factory, &curves_call, &block_tag),
+            self.eth_call_data(factory, &curve_supply_call, &block_tag),
+            self.eth_call_data(factory, &lp_supply_call, &block_tag),
+            self.eth_call_data(factory, &config_call, &block_tag),
+            self.eth_call_data(factory, &migrator_call, &block_tag),
+            self.eth_call_data(factory, &factory_call, &block_tag),
+            self.eth_call_data(factory, &weth_call, &block_tag),
+        )?;
+        let curve_words = fixed_words(&curve, 9, "Hood curves(address)")?;
+        let config_words = fixed_words(&config, 9, "Hood config()")?;
+        Ok(HoodMarketSnapshot {
+            factory,
+            token,
+            l2_block_number,
+            curve: HoodCurveStateSnapshot {
+                virtual_eth: curve_words[0],
+                virtual_tokens: curve_words[1],
+                real_eth: curve_words[2],
+                real_tokens: curve_words[3],
+                creator: address_from_word(curve_words[4], "Hood creator")?,
+                created_at_block: u64::try_from(curve_words[5])
+                    .context("Hood createdAtBlock does not fit u64")?,
+                graduated: bool_from_word(curve_words[6], "Hood graduated")?,
+                migrated: bool_from_word(curve_words[7], "Hood migrated")?,
+                trade_fee_bps: u16::try_from(curve_words[8])
+                    .context("Hood tradeFeeBps does not fit u16")?,
+            },
+            config: HoodConfigSnapshot {
+                virtual_eth_seed: config_words[0],
+                creation_fee: config_words[1],
+                default_trade_fee_bps: u16::try_from(config_words[2])
+                    .context("Hood defaultTradeFeeBps does not fit u16")?,
+                migration_fee: config_words[3],
+                migration_fee_bps: u16::try_from(config_words[4])
+                    .context("Hood migrationFeeBps does not fit u16")?,
+                guard_blocks: u16::try_from(config_words[5])
+                    .context("Hood guardBlocks does not fit u16")?,
+                guard_max_wallet_bps: u16::try_from(config_words[6])
+                    .context("Hood guardMaxWalletBps does not fit u16")?,
+                creator_fee_share_bps: u16::try_from(config_words[7])
+                    .context("Hood creatorFeeShareBps does not fit u16")?,
+                vanity_enforced: bool_from_word(config_words[8], "Hood vanityEnforced")?,
+            },
+            token_curve_supply: parse_u256_bytes(&curve_supply)?,
+            token_lp_supply: parse_u256_bytes(&lp_supply)?,
+            migrator: parse_address_word(&migrator)?,
+            uniswap_factory: parse_address_word(&uniswap_factory)?,
+            weth: parse_address_word(&weth)?,
+        })
+    }
+
+    /// Capture Hood's mutable configuration and every cross-contract link used
+    /// by the curve-to-V3 path at one startup block. Runtime bytes are captured
+    /// separately by the pin snapshot; both layers must agree.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn hood_protocol_snapshot_at(
+        &self,
+        factory: Address,
+        migrator: Address,
+        locker: Address,
+        position_manager: Address,
+        router: Address,
+        owner_safe: Address,
+        l2_block_number: u64,
+    ) -> Result<HoodProtocolSnapshot> {
+        let block_tag = hex_u64(l2_block_number);
+        let selector = |signature: &str| keccak256(signature.as_bytes())[..4].to_vec();
+        let selectors = [
+            selector("config()"),
+            selector("migrator()"),
+            selector("uniswapFactory()"),
+            selector("weth()"),
+            selector("owner()"),
+            selector("pendingOwner()"),
+            selector("launchpad()"),
+            selector("nfpm()"),
+            selector("locker()"),
+            selector("protocol()"),
+            selector("creatorShareBps()"),
+            selector("FEE()"),
+            selector("WETH()"),
+            selector("BURN_BPS()"),
+            selector("factory()"),
+            selector("WETH9()"),
+        ];
+        let calls = tokio::try_join!(
+            self.eth_call_data(factory, &selectors[0], &block_tag),
+            self.eth_call_data(factory, &selectors[1], &block_tag),
+            self.eth_call_data(factory, &selectors[2], &block_tag),
+            self.eth_call_data(factory, &selectors[3], &block_tag),
+            self.eth_call_data(factory, &selectors[4], &block_tag),
+            self.eth_call_data(factory, &selectors[5], &block_tag),
+            self.eth_call_data(migrator, &selectors[6], &block_tag),
+            self.eth_call_data(migrator, &selectors[7], &block_tag),
+            self.eth_call_data(migrator, &selectors[8], &block_tag),
+            self.eth_call_data(migrator, &selectors[3], &block_tag),
+            self.eth_call_data(migrator, &selectors[9], &block_tag),
+            self.eth_call_data(migrator, &selectors[10], &block_tag),
+            self.eth_call_data(migrator, &selectors[11], &block_tag),
+            self.eth_call_data(locker, &selectors[7], &block_tag),
+            self.eth_call_data(locker, &selectors[12], &block_tag),
+            self.eth_call_data(locker, &selectors[13], &block_tag),
+            self.eth_call_data(position_manager, &selectors[14], &block_tag),
+            self.eth_call_data(position_manager, &selectors[15], &block_tag),
+            self.eth_call_data(router, &selectors[14], &block_tag),
+            self.eth_call_data(router, &selectors[15], &block_tag),
+        )?;
+        let config_words = fixed_words(&calls.0, 9, "Hood config()")?;
+        let storage = parse_bytes_value(
+            &self
+                .request("eth_getStorageAt", json!([owner_safe, "0x0", block_tag]))
+                .await?,
+        )?;
+        Ok(HoodProtocolSnapshot {
+            factory,
+            l2_block_number,
+            config: HoodConfigSnapshot {
+                virtual_eth_seed: config_words[0],
+                creation_fee: config_words[1],
+                default_trade_fee_bps: u16::try_from(config_words[2])?,
+                migration_fee: config_words[3],
+                migration_fee_bps: u16::try_from(config_words[4])?,
+                guard_blocks: u16::try_from(config_words[5])?,
+                guard_max_wallet_bps: u16::try_from(config_words[6])?,
+                creator_fee_share_bps: u16::try_from(config_words[7])?,
+                vanity_enforced: bool_from_word(config_words[8], "Hood vanityEnforced")?,
+            },
+            migrator: parse_address_word(&calls.1)?,
+            fallback_factory: parse_address_word(&calls.2)?,
+            weth: parse_address_word(&calls.3)?,
+            owner: parse_address_word(&calls.4)?,
+            pending_owner: parse_address_word(&calls.5)?,
+            owner_safe_singleton: parse_address_word(&storage)?,
+            migrator_launchpad: parse_address_word(&calls.6)?,
+            migrator_position_manager: parse_address_word(&calls.7)?,
+            migrator_locker: parse_address_word(&calls.8)?,
+            migrator_weth: parse_address_word(&calls.9)?,
+            migrator_protocol: parse_address_word(&calls.10)?,
+            migrator_creator_share_bps: u16::try_from(parse_u256_bytes(&calls.11)?)?,
+            migrator_v3_fee: u32::try_from(parse_u256_bytes(&calls.12)?)?,
+            locker_position_manager: parse_address_word(&calls.13)?,
+            locker_weth: parse_address_word(&calls.14)?,
+            locker_burn_bps: u16::try_from(parse_u256_bytes(&calls.15)?)?,
+            position_manager_factory: parse_address_word(&calls.16)?,
+            position_manager_weth: parse_address_word(&calls.17)?,
+            router_factory: parse_address_word(&calls.18)?,
+            router_weth: parse_address_word(&calls.19)?,
+        })
     }
 
     async fn v3_pool_snapshot_at_tag(
@@ -1012,6 +1257,35 @@ fn parse_address_word(value: &[u8]) -> Result<Address> {
 fn parse_u32_word(value: &[u8]) -> Result<u32> {
     let value = parse_u256_bytes(value)?;
     u32::try_from(value).context("ABI word does not fit u32")
+}
+
+fn fixed_words(value: &[u8], count: usize, label: &str) -> Result<Vec<U256>> {
+    let expected = count
+        .checked_mul(32)
+        .ok_or_else(|| anyhow!("{label} ABI length overflow"))?;
+    if value.len() != expected {
+        bail!(
+            "{label} returned {} bytes, expected {expected}",
+            value.len()
+        );
+    }
+    Ok(value.chunks_exact(32).map(U256::from_be_slice).collect())
+}
+
+fn address_from_word(value: U256, label: &str) -> Result<Address> {
+    if value >> 160 != U256::ZERO {
+        bail!("{label} ABI address word has non-zero padding");
+    }
+    let bytes = value.to_be_bytes::<32>();
+    Ok(Address::from_slice(&bytes[12..]))
+}
+
+fn bool_from_word(value: U256, label: &str) -> Result<bool> {
+    match value {
+        value if value == U256::ZERO => Ok(false),
+        value if value == U256::from(1_u8) => Ok(true),
+        _ => bail!("{label} ABI value is not a canonical bool"),
+    }
 }
 
 fn decode_active_noxa_launch_record(bytes: &[u8]) -> Result<ActiveNoxaLaunchRecord> {

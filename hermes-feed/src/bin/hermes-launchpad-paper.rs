@@ -14,7 +14,8 @@ use hermes_feed::paper_observer::{
 };
 use hermes_feed::{
     BankrDopplerExpectedProfile, BankrDopplerReceiptPaperQuote, ClankerReceiptPaperQuote,
-    PonsReceiptPaperQuote, V3ReceiptPaperQuote, bankr_hook_fee_ppm,
+    HoodExpectedProfile, HoodMigrationEvidence, HoodReceiptPaperQuote, PonsReceiptPaperQuote,
+    V3ReceiptPaperQuote, bankr_hook_fee_ppm, quote_hood_curve_buy, quote_hood_curve_sell,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -91,6 +92,8 @@ struct ReconciliationRecords {
     clanker_quotes: Vec<ClankerReceiptPaperQuote>,
     bankr_quotes: Vec<BankrDopplerReceiptPaperQuote>,
     pons_quotes: Vec<PonsReceiptPaperQuote>,
+    hood_quotes: Vec<HoodReceiptPaperQuote>,
+    hood_migrations: Vec<HoodMigrationEvidence>,
 }
 
 #[derive(Debug, Default)]
@@ -146,6 +149,12 @@ fn main() -> Result<()> {
         )
     })?;
     let pons_profile = expected.pons_v3.expected_profile()?;
+    let hood_profile = expected
+        .hood_curve
+        .as_ref()
+        .context("complete reviewed Hood profile is required")?
+        .clone();
+    hood_profile.validate()?;
     if args
         .reconciliation_input
         .as_ref()
@@ -171,6 +180,7 @@ fn main() -> Result<()> {
         }
         let observed_candidates = read_observed_output_candidates(observer_path)?;
         let records = read_reconciliation_records(reconciliation_path)?;
+        validate_hood_migration_records(&records.evidence, &records.hood_migrations)?;
         println!(
             "{}",
             serde_json::to_string(&reconciliation_metrics(
@@ -208,6 +218,15 @@ fn main() -> Result<()> {
             records.pons_quotes,
             plan_policy,
             pons_profile,
+        )? {
+            println!("{}", serde_json::to_string(&plan)?);
+        }
+        for plan in finalized_hood_plans(
+            &observed_candidates.feed_sequences,
+            &records.evidence,
+            records.hood_quotes,
+            plan_policy,
+            &hood_profile,
         )? {
             println!("{}", serde_json::to_string(&plan)?);
         }
@@ -266,6 +285,7 @@ fn main() -> Result<()> {
     }
     if let Some(path) = args.reconciliation_input {
         let records = read_reconciliation_records(&path)?;
+        validate_hood_migration_records(&records.evidence, &records.hood_migrations)?;
         println!(
             "{}",
             serde_json::to_string(&reconciliation_metrics(
@@ -303,6 +323,15 @@ fn main() -> Result<()> {
             records.pons_quotes,
             plan_policy,
             pons_profile,
+        )? {
+            println!("{}", serde_json::to_string(&plan)?);
+        }
+        for plan in finalized_hood_plans(
+            &observed_sequences,
+            &records.evidence,
+            records.hood_quotes,
+            plan_policy,
+            &hood_profile,
         )? {
             println!("{}", serde_json::to_string(&plan)?);
         }
@@ -430,6 +459,28 @@ fn read_reconciliation_records(path: &Path) -> Result<ReconciliationRecords> {
                             )
                         })?)
                 }
+                Some("launchpad_hood_curve_paper_quote") => {
+                    records
+                        .hood_quotes
+                        .push(serde_json::from_value(value).with_context(|| {
+                            format!(
+                                "decode Hood quote line {} from {}",
+                                index + 1,
+                                path.display()
+                            )
+                        })?)
+                }
+                Some("launchpad_hood_migration_evidence") => {
+                    records
+                        .hood_migrations
+                        .push(serde_json::from_value(value).with_context(|| {
+                            format!(
+                                "decode Hood migration line {} from {}",
+                                index + 1,
+                                path.display()
+                            )
+                        })?)
+                }
                 Some(other) => anyhow::bail!(
                     "unknown reconciliation record type {other} at line {}",
                     index + 1
@@ -443,6 +494,74 @@ fn read_reconciliation_records(path: &Path) -> Result<ReconciliationRecords> {
         }
     }
     Ok(records)
+}
+
+fn validate_hood_migration_records(
+    evidence: &[ReconciliationEvidence],
+    migrations: &[HoodMigrationEvidence],
+) -> Result<()> {
+    let evidence = evidence
+        .iter()
+        .map(|record| ((record.tx_hash, record.launchpad), record))
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashMap::new();
+    for migration in migrations {
+        let key = (migration.tx_hash, migration.launchpad);
+        let confirmed = evidence.get(&key).is_some_and(|record| {
+            record.receipt_status
+                && record.protocol_event_match
+                && record.protocol_blocker.as_deref()
+                    == Some("hood_migration_topology_verified_v3_quote_unavailable")
+        });
+        let expected_blocker = if migration.declared_and_actual_liquidity_match {
+            "migration_topology_only_missing_independent_v3_state_quote"
+        } else {
+            "declared_actual_liquidity_mismatch_and_missing_independent_v3_state_quote"
+        };
+        let liquidity_match = migration.actual_eth_liquidity == migration.declared_eth_liquidity
+            && migration.actual_token_liquidity == migration.declared_token_liquidity;
+        if seen.insert(key, ()).is_some()
+            || !confirmed
+            || migration.record_type != "launchpad_hood_migration_evidence"
+            || migration.launchpad != LaunchpadId::HoodFun
+            || migration.token == alloy_primitives::Address::ZERO
+            || migration.pool == alloy_primitives::Address::ZERO
+            || migration.leader == alloy_primitives::Address::ZERO
+            || migration.trader == alloy_primitives::Address::ZERO
+            || migration.token_id == U256::ZERO
+            || migration.raised_eth == U256::ZERO
+            || migration.declared_eth_liquidity == U256::ZERO
+            || migration.declared_token_liquidity == U256::ZERO
+            || migration.actual_eth_liquidity == U256::ZERO
+            || migration.actual_token_liquidity == U256::ZERO
+            || migration.declared_and_actual_liquidity_match != liquidity_match
+            || !migration.expected_profile_validated
+            || !migration.receipt_topology_verified
+            || migration.pool_state_reconciled
+            || migration.v3_quote_available
+            || migration.execution_eligible
+            || migration.execution_blocker != expected_blocker
+            || migration.broadcast
+        {
+            anyhow::bail!("unsafe or inconsistent Hood migration evidence for {key:?}");
+        }
+    }
+    for record in evidence.values().filter(|record| {
+        record.launchpad == LaunchpadId::HoodFun
+            && record.protocol_blocker.as_deref()
+                == Some("hood_migration_topology_verified_v3_quote_unavailable")
+    }) {
+        let key = (record.tx_hash, record.launchpad);
+        if migrations
+            .iter()
+            .filter(|migration| (migration.tx_hash, migration.launchpad) == key)
+            .count()
+            != 1
+        {
+            anyhow::bail!("Hood migration confirmation has no unique topology record for {key:?}");
+        }
+    }
+    Ok(())
 }
 
 fn finalized_v3_plans(
@@ -720,6 +839,170 @@ fn finalized_pons_plans(
         });
     }
     Ok(plans)
+}
+
+fn finalized_hood_plans(
+    observed_sequences: &HashMap<(B256, LaunchpadId), u64>,
+    evidence: &[ReconciliationEvidence],
+    quotes: Vec<HoodReceiptPaperQuote>,
+    policy: PaperPlanPolicy,
+    expected_profile: &HoodExpectedProfile,
+) -> Result<Vec<FinalizedV3PaperPlan>> {
+    expected_profile.validate()?;
+    let evidence = evidence
+        .iter()
+        .map(|record| ((record.tx_hash, record.launchpad), record))
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashMap::new();
+    let mut plans = Vec::new();
+    for quote in quotes {
+        let key = (quote.tx_hash, quote.launchpad);
+        if seen.insert(key, ()).is_some() {
+            anyhow::bail!("duplicate Hood curve paper quote for {key:?}");
+        }
+        let Some(feed_sequence) = observed_sequences.get(&key).copied() else {
+            continue;
+        };
+        let confirmed = evidence.get(&key).is_some_and(|record| {
+            record.receipt_status
+                && record.protocol_event_match
+                && record.protocol_blocker.is_none()
+        });
+        if !confirmed
+            || quote.record_type != "launchpad_hood_curve_paper_quote"
+            || quote.launchpad != LaunchpadId::HoodFun
+            || quote.entry.amount_in_requested == U256::ZERO
+            || quote.entry.amount_in_requested > policy.max_input_wei
+            || quote.entry.amount_in_consumed != quote.entry.amount_in_requested
+            || quote.entry.refund != U256::ZERO
+            || quote.entry.slippage_bps != policy.slippage_bps
+            || quote.entry.expected_output == U256::ZERO
+            || quote.entry.min_receive == U256::ZERO
+            || quote.entry.min_receive > quote.entry.expected_output
+            || quote.full_position_exit.amount_in != quote.entry.expected_output
+            || quote.full_position_exit.expected_output == U256::ZERO
+            || quote.full_position_exit.min_receive == U256::ZERO
+            || quote.full_position_exit.min_receive > quote.full_position_exit.expected_output
+            || quote.broadcast
+            || quote.execution_eligible
+            || quote.state_version.chain_id != hermes_feed::robinhood::CHAIN_ID
+            || quote.state_version.l2_block_number != quote.l2_block_number
+            || !hood_quote_arithmetic_is_consistent(&quote, policy, expected_profile)
+        {
+            anyhow::bail!("unsafe or inconsistent Hood curve quote evidence for {key:?}");
+        }
+        plans.push(FinalizedV3PaperPlan {
+            record_type: "launchpad_paper_finalized_plan",
+            tx_hash: quote.tx_hash,
+            launchpad: quote.launchpad,
+            feed_sequence,
+            status: "quoted_execution_gated",
+            amount_in: quote.entry.amount_in_requested,
+            expected_output: quote.entry.expected_output,
+            min_receive: quote.entry.min_receive,
+            quote_source: quote.quote_source,
+            quote_state_version: serde_json::to_value(quote.state_version)?,
+            exit_full_position: true,
+            exit_expected_output: quote.full_position_exit.expected_output,
+            exit_min_receive: quote.full_position_exit.min_receive,
+            simulated_round_trip_return_bps: quote.simulated_round_trip_return_bps,
+            leader_amounts_reused: false,
+            execution_eligible: false,
+            execution_blocker: quote.execution_blocker,
+            broadcast: false,
+        });
+    }
+    Ok(plans)
+}
+
+fn hood_quote_arithmetic_is_consistent(
+    quote: &HoodReceiptPaperQuote,
+    policy: PaperPlanPolicy,
+    expected_profile: &HoodExpectedProfile,
+) -> bool {
+    if expected_profile.validate().is_err()
+        || quote.quote_source != "confirmed_receipt_and_fixed_block_hood_curve_state"
+        || quote.sizing_source != "independent_fixed_wei_policy_not_leader_amount"
+        || quote.execution_blocker != "paper_only_no_signer_or_broadcast_capability"
+        || quote.token == alloy_primitives::Address::ZERO
+        || quote.leader == alloy_primitives::Address::ZERO
+        || quote.entry.slippage_bps != policy.slippage_bps
+        || quote.full_position_exit.slippage_bps != policy.slippage_bps
+        || quote.token_curve_supply == U256::ZERO
+        || quote.token_lp_supply == U256::ZERO
+        || !(expected_profile.semantic.min_trade_fee_bps
+            ..=expected_profile.semantic.max_trade_fee_bps)
+            .contains(&quote.receipt_end_curve.fee_bps)
+        || quote.receipt_end_curve.virtual_quote_reserve != quote.observed.virtual_eth_after
+        || quote.receipt_end_curve.virtual_token_reserve != quote.observed.virtual_tokens_after
+    {
+        return false;
+    }
+    let Some(total_supply) = quote.token_curve_supply.checked_add(quote.token_lp_supply) else {
+        return false;
+    };
+    let Some(expected_curve_supply) = total_supply
+        .checked_mul(U256::from(expected_profile.semantic.curve_allocation_bps))
+        .map(|value| value / U256::from(10_000_u16))
+    else {
+        return false;
+    };
+    let default_supply = U256::from(1_000_000_000_u64) * U256::from(1_000_000_000_000_000_000_u64);
+    let default_virtual_tokens =
+        U256::from(1_145_000_000_u64) * U256::from(1_000_000_000_000_000_000_u64);
+    let Some(virtual_seed) = default_virtual_tokens
+        .checked_mul(total_supply)
+        .map(|value| value / default_supply)
+    else {
+        return false;
+    };
+    let Some(virtual_real_offset) = virtual_seed.checked_sub(quote.token_curve_supply) else {
+        return false;
+    };
+    let Some(expected_remaining) = quote
+        .observed
+        .virtual_tokens_after
+        .checked_sub(virtual_real_offset)
+    else {
+        return false;
+    };
+    if quote.token_curve_supply != expected_curve_supply
+        || quote.receipt_end_curve.remaining_curve_tokens != expected_remaining
+    {
+        return false;
+    }
+    let Ok(entry) = quote_hood_curve_buy(quote.receipt_end_curve, quote.entry.amount_in_requested)
+    else {
+        return false;
+    };
+    if entry.graduates {
+        return false;
+    }
+    let Ok(exit) = quote_hood_curve_sell(entry.state_after, entry.amount_out) else {
+        return false;
+    };
+    let slippage = |amount: U256| {
+        amount
+            .checked_mul(U256::from(10_000_u16 - policy.slippage_bps))
+            .map(|value| value / U256::from(10_000_u16))
+    };
+    let round_trip = exit
+        .amount_out
+        .checked_mul(U256::from(10_000_u16))
+        .map(|value| value / quote.entry.amount_in_requested);
+    quote.entry.amount_in_consumed == entry.amount_in_consumed
+        && quote.entry.refund == entry.refund
+        && quote.entry.fee == entry.fee
+        && quote.entry.expected_output == entry.amount_out
+        && quote.entry.min_receive == slippage(entry.amount_out).unwrap_or_default()
+        && quote.entry.state_after == entry.state_after
+        && quote.full_position_exit.amount_in == exit.amount_in
+        && quote.full_position_exit.gross_output == exit.gross_output
+        && quote.full_position_exit.fee == exit.fee
+        && quote.full_position_exit.expected_output == exit.amount_out
+        && quote.full_position_exit.min_receive == slippage(exit.amount_out).unwrap_or_default()
+        && quote.full_position_exit.state_after == exit.state_after
+        && Some(quote.simulated_round_trip_return_bps) == round_trip
 }
 
 fn pons_quote_arithmetic_is_consistent(
@@ -1642,5 +1925,202 @@ mod tests {
         let mut schedule = bankr_quote_fixture();
         schedule.market.hook_end_fee_ppm += 1;
         assert!(finalize_bankr_quote(schedule).is_err());
+    }
+
+    #[derive(serde::Deserialize)]
+    struct HoodLiveFixture {
+        transaction: RobinhoodTransaction,
+        block: RobinhoodBlock,
+        receipt: NoxaReceipt,
+        state: HoodFixtureState,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct HoodFixtureState {
+        token: Address,
+        post_block: u64,
+        post_curve: HoodFixtureCurve,
+        config: hermes_feed::HoodConfigSnapshot,
+        token_curve_supply: U256,
+        token_lp_supply: U256,
+        factory: Address,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct HoodFixtureCurve {
+        virtual_eth: U256,
+        virtual_tokens: U256,
+        real_eth: U256,
+        real_tokens: U256,
+        creator: Address,
+        created_at_block: U256,
+        graduated: bool,
+        migrated: bool,
+        trade_fee_bps: u16,
+    }
+
+    fn hood_quote_fixture() -> HoodReceiptPaperQuote {
+        let fixture: HoodLiveFixture = serde_json::from_str(include_str!(
+            "../../tests/fixtures/hood-normal-buy-live-proof.json"
+        ))
+        .unwrap();
+        let profile = HoodExpectedProfile::production();
+        let snapshot = hermes_feed::HoodMarketSnapshot {
+            factory: fixture.state.factory,
+            token: fixture.state.token,
+            l2_block_number: fixture.state.post_block,
+            curve: hermes_feed::HoodCurveStateSnapshot {
+                virtual_eth: fixture.state.post_curve.virtual_eth,
+                virtual_tokens: fixture.state.post_curve.virtual_tokens,
+                real_eth: fixture.state.post_curve.real_eth,
+                real_tokens: fixture.state.post_curve.real_tokens,
+                creator: fixture.state.post_curve.creator,
+                created_at_block: u64::try_from(fixture.state.post_curve.created_at_block).unwrap(),
+                graduated: fixture.state.post_curve.graduated,
+                migrated: fixture.state.post_curve.migrated,
+                trade_fee_bps: fixture.state.post_curve.trade_fee_bps,
+            },
+            config: fixture.state.config,
+            token_curve_supply: fixture.state.token_curve_supply,
+            token_lp_supply: fixture.state.token_lp_supply,
+            migrator: profile.semantic.active_migrator,
+            uniswap_factory: profile.semantic.fallback_factory,
+            weth: profile.semantic.weth,
+        };
+        hermes_feed::quote_hood_curve_receipt(
+            &fixture.transaction,
+            &fixture.receipt,
+            &fixture.block,
+            &snapshot,
+            profile.semantic,
+            hermes_feed::HoodQuotePolicy {
+                amount_in: U256::from(1_000_000_000_000_000_u64),
+                max_amount_in: U256::from(10_000_000_000_000_000_u64),
+                slippage_bps: 100,
+            },
+        )
+        .unwrap()
+    }
+
+    fn finalize_hood_quote(quote: HoodReceiptPaperQuote) -> Result<Vec<FinalizedV3PaperPlan>> {
+        let key = (quote.tx_hash, quote.launchpad);
+        finalized_hood_plans(
+            &HashMap::from([(key, 71)]),
+            &[ReconciliationEvidence {
+                tx_hash: key.0,
+                launchpad: key.1,
+                receipt_status: true,
+                protocol_event_match: true,
+                observed_unix_ns: 1,
+                pons_generation: None,
+                protocol_blocker: None,
+            }],
+            vec![quote],
+            PaperPlanPolicy::default(),
+            &HoodExpectedProfile::production(),
+        )
+    }
+
+    #[test]
+    fn strict_hood_quote_finalizes_with_real_entry_and_exit() {
+        let plans = finalize_hood_quote(hood_quote_fixture()).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].launchpad, LaunchpadId::HoodFun);
+        assert!(plans[0].expected_output > U256::ZERO);
+        assert!(plans[0].exit_expected_output > U256::ZERO);
+        assert!(!plans[0].execution_eligible);
+        assert!(!plans[0].broadcast);
+    }
+
+    #[test]
+    fn tampered_hood_quote_or_profile_cannot_finalize() {
+        let mut output = hood_quote_fixture();
+        output.entry.expected_output += U256::from(1_u8);
+        assert!(finalize_hood_quote(output).is_err());
+
+        let mut round_trip = hood_quote_fixture();
+        round_trip.simulated_round_trip_return_bps += U256::from(1_u8);
+        assert!(finalize_hood_quote(round_trip).is_err());
+
+        let mut observed_state = hood_quote_fixture();
+        observed_state.observed.virtual_eth_after += U256::from(1_u8);
+        assert!(finalize_hood_quote(observed_state).is_err());
+
+        let mut supplies = hood_quote_fixture();
+        supplies.token_curve_supply += U256::from(1_u8);
+        assert!(finalize_hood_quote(supplies).is_err());
+
+        let quote = hood_quote_fixture();
+        let key = (quote.tx_hash, quote.launchpad);
+        let mut profile = HoodExpectedProfile::production();
+        profile.identities[0].runtime_hash = B256::with_last_byte(0xee);
+        assert!(
+            finalized_hood_plans(
+                &HashMap::from([(key, 1)]),
+                &[],
+                vec![quote],
+                PaperPlanPolicy::default(),
+                &profile,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn hood_migration_evidence_parses_end_to_end_but_never_finalizes_as_a_quote() {
+        let tx_hash = B256::with_last_byte(0x44);
+        let evidence = serde_json::json!({
+            "tx_hash": tx_hash,
+            "launchpad": "hood_fun",
+            "receipt_status": true,
+            "protocol_event_match": true,
+            "observed_unix_ns": 9,
+            "protocol_blocker": "hood_migration_topology_verified_v3_quote_unavailable"
+        });
+        let migration = serde_json::json!({
+            "record_type": "launchpad_hood_migration_evidence",
+            "tx_hash": tx_hash,
+            "launchpad": "hood_fun",
+            "token": Address::with_last_byte(1),
+            "pool": Address::with_last_byte(2),
+            "leader": Address::with_last_byte(3),
+            "trader": Address::with_last_byte(4),
+            "l2_block_number": 10,
+            "token_id": "1",
+            "raised_eth": "2",
+            "declared_eth_liquidity": "3",
+            "declared_token_liquidity": "4",
+            "actual_eth_liquidity": "5",
+            "actual_token_liquidity": "6",
+            "declared_and_actual_liquidity_match": false,
+            "pool_initialize_sqrt_price_x96": "7",
+            "pool_initialize_tick": -1,
+            "expected_profile_validated": true,
+            "receipt_topology_verified": true,
+            "pool_state_reconciled": false,
+            "v3_quote_available": false,
+            "execution_eligible": false,
+            "execution_blocker": "declared_actual_liquidity_mismatch_and_missing_independent_v3_state_quote",
+            "broadcast": false
+        });
+        let path = std::env::temp_dir().join(format!(
+            "hermes-hood-migration-{}-{}.jsonl",
+            std::process::id(),
+            tx_hash
+        ));
+        std::fs::write(&path, format!("{}\n{}\n", evidence, migration)).unwrap();
+        let records = read_reconciliation_records(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(records.evidence.len(), 1);
+        assert_eq!(records.hood_migrations.len(), 1);
+        validate_hood_migration_records(&records.evidence, &records.hood_migrations).unwrap();
+        assert!(records.hood_quotes.is_empty());
+        assert!(validate_hood_migration_records(&records.evidence, &[]).is_err());
+
+        let mut forged = records.hood_migrations.clone();
+        forged[0].declared_and_actual_liquidity_match = true;
+        forged[0].execution_blocker =
+            "migration_topology_only_missing_independent_v3_state_quote".into();
+        assert!(validate_hood_migration_records(&records.evidence, &forged).is_err());
     }
 }

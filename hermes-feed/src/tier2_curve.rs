@@ -6,7 +6,7 @@
 //! registry; candidate handling only reads the resulting immutable snapshot.
 
 use alloy_primitives::{Address, B256, U256};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::launchpad_adapter::{
@@ -62,7 +62,7 @@ pub enum MarketPhase {
     MigratedV3,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum CurveFormula {
     HoodConstantProductFeeOnInputV1,
 }
@@ -160,13 +160,34 @@ impl OpportunityEvidence {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct CurveState {
     pub formula: CurveFormula,
     pub virtual_quote_reserve: U256,
     pub virtual_token_reserve: U256,
     pub remaining_curve_tokens: U256,
     pub fee_bps: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct HoodCurveBuyQuote {
+    pub amount_in_requested: U256,
+    pub amount_in_consumed: U256,
+    pub refund: U256,
+    pub fee: U256,
+    pub amount_for_curve: U256,
+    pub amount_out: U256,
+    pub graduates: bool,
+    pub state_after: CurveState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct HoodCurveSellQuote {
+    pub amount_in: U256,
+    pub gross_output: U256,
+    pub fee: U256,
+    pub amount_out: U256,
+    pub state_after: CurveState,
 }
 
 #[derive(Debug, Clone)]
@@ -669,29 +690,111 @@ fn observe_v3(
 }
 
 fn quote_curve_buy(state: CurveState, amount_quote: U256) -> Result<U256, CurveAdapterError> {
+    Ok(quote_hood_curve_buy(state, amount_quote)?.amount_out)
+}
+
+fn quote_curve_sell(state: CurveState, amount_token: U256) -> Result<U256, CurveAdapterError> {
+    Ok(quote_hood_curve_sell(state, amount_token)?.amount_out)
+}
+
+/// Source-exact Hood buy quote, including the graduation cap, consumed ETH and
+/// refund. This mirrors `HoodCustomLaunchpad._buy` rather than its UI.
+pub fn quote_hood_curve_buy(
+    state: CurveState,
+    amount_quote: U256,
+) -> Result<HoodCurveBuyQuote, CurveAdapterError> {
     validate_curve(state)?;
-    let net_quote = deduct_fee(amount_quote, state.fee_bps)?;
+    if amount_quote == U256::ZERO {
+        return Err(CurveAdapterError::InvalidState);
+    }
+    let initial_fee = floor_fee(amount_quote, state.fee_bps)?;
+    let initial_curve_amount = amount_quote
+        .checked_sub(initial_fee)
+        .ok_or(CurveAdapterError::Arithmetic)?;
     let invariant = state
         .virtual_quote_reserve
         .checked_mul(state.virtual_token_reserve)
         .ok_or(CurveAdapterError::Arithmetic)?;
-    let next_quote = state
+    let initial_next_quote = state
         .virtual_quote_reserve
-        .checked_add(net_quote)
+        .checked_add(initial_curve_amount)
         .ok_or(CurveAdapterError::Arithmetic)?;
-    let next_token = div_ceil(invariant, next_quote)?;
-    let output = state
+    let initial_next_token = invariant / initial_next_quote;
+    let mut amount_out = state
         .virtual_token_reserve
-        .checked_sub(next_token)
+        .checked_sub(initial_next_token)
         .ok_or(CurveAdapterError::Arithmetic)?;
-    if output == U256::ZERO || output > state.remaining_curve_tokens {
+    let mut fee = initial_fee;
+    let mut amount_for_curve = initial_curve_amount;
+    let mut amount_consumed = amount_quote;
+    let mut refund = U256::ZERO;
+    let graduates = amount_out >= state.remaining_curve_tokens;
+    if graduates {
+        amount_out = state.remaining_curve_tokens;
+        let terminal_virtual_tokens = state
+            .virtual_token_reserve
+            .checked_sub(amount_out)
+            .filter(|value| *value != U256::ZERO)
+            .ok_or(CurveAdapterError::InvalidState)?;
+        let exact_curve_amount = div_ceil(invariant, terminal_virtual_tokens)?
+            .checked_sub(state.virtual_quote_reserve)
+            .ok_or(CurveAdapterError::Arithmetic)?
+            .min(initial_curve_amount);
+        let gross = div_ceil(
+            exact_curve_amount
+                .checked_mul(U256::from(10_000_u16))
+                .ok_or(CurveAdapterError::Arithmetic)?,
+            U256::from(10_000_u16 - state.fee_bps),
+        )?
+        .min(amount_quote);
+        refund = amount_quote
+            .checked_sub(gross)
+            .ok_or(CurveAdapterError::Arithmetic)?;
+        fee = gross
+            .checked_sub(exact_curve_amount)
+            .ok_or(CurveAdapterError::Arithmetic)?;
+        amount_for_curve = exact_curve_amount;
+        amount_consumed = gross;
+    }
+    if amount_out == U256::ZERO {
         return Err(CurveAdapterError::InvalidState);
     }
-    Ok(output)
+    Ok(HoodCurveBuyQuote {
+        amount_in_requested: amount_quote,
+        amount_in_consumed: amount_consumed,
+        refund,
+        fee,
+        amount_for_curve,
+        amount_out,
+        graduates,
+        state_after: CurveState {
+            formula: state.formula,
+            virtual_quote_reserve: state
+                .virtual_quote_reserve
+                .checked_add(amount_for_curve)
+                .ok_or(CurveAdapterError::Arithmetic)?,
+            virtual_token_reserve: state
+                .virtual_token_reserve
+                .checked_sub(amount_out)
+                .ok_or(CurveAdapterError::Arithmetic)?,
+            remaining_curve_tokens: state
+                .remaining_curve_tokens
+                .checked_sub(amount_out)
+                .ok_or(CurveAdapterError::Arithmetic)?,
+            fee_bps: state.fee_bps,
+        },
+    })
 }
 
-fn quote_curve_sell(state: CurveState, amount_token: U256) -> Result<U256, CurveAdapterError> {
+/// Source-exact Hood sell quote and deterministic post-trade curve state.
+pub fn quote_hood_curve_sell(
+    state: CurveState,
+    amount_token: U256,
+) -> Result<HoodCurveSellQuote, CurveAdapterError> {
     validate_curve(state)?;
+    if amount_token == U256::ZERO {
+        return Err(CurveAdapterError::InvalidState);
+    }
     let invariant = state
         .virtual_quote_reserve
         .checked_mul(state.virtual_token_reserve)
@@ -705,11 +808,29 @@ fn quote_curve_sell(state: CurveState, amount_token: U256) -> Result<U256, Curve
         .virtual_quote_reserve
         .checked_sub(next_quote)
         .ok_or(CurveAdapterError::Arithmetic)?;
-    let output = deduct_fee(gross, state.fee_bps)?;
+    let fee = floor_fee(gross, state.fee_bps)?;
+    let output = gross
+        .checked_sub(fee)
+        .ok_or(CurveAdapterError::Arithmetic)?;
     if output == U256::ZERO {
         return Err(CurveAdapterError::InvalidState);
     }
-    Ok(output)
+    Ok(HoodCurveSellQuote {
+        amount_in: amount_token,
+        gross_output: gross,
+        fee,
+        amount_out: output,
+        state_after: CurveState {
+            formula: state.formula,
+            virtual_quote_reserve: next_quote,
+            virtual_token_reserve: next_token,
+            remaining_curve_tokens: state
+                .remaining_curve_tokens
+                .checked_add(amount_token)
+                .ok_or(CurveAdapterError::Arithmetic)?,
+            fee_bps: state.fee_bps,
+        },
+    })
 }
 
 fn validate_curve(state: CurveState) -> Result<(), CurveAdapterError> {
@@ -747,9 +868,9 @@ fn validate_observed_market_phase(
     Ok(())
 }
 
-fn deduct_fee(value: U256, fee_bps: u16) -> Result<U256, CurveAdapterError> {
+fn floor_fee(value: U256, fee_bps: u16) -> Result<U256, CurveAdapterError> {
     value
-        .checked_mul(U256::from(10_000_u16 - fee_bps))
+        .checked_mul(U256::from(fee_bps))
         .and_then(|value| value.checked_div(U256::from(10_000_u16)))
         .ok_or(CurveAdapterError::Arithmetic)
 }
@@ -1011,6 +1132,70 @@ mod tests {
             U256::from_be_slice(&plan.plan.calldata[36..68]),
             plan.plan.min_receive
         );
+    }
+
+    #[test]
+    fn hood_curve_quotes_match_deployed_floor_and_ceil_boundaries() {
+        let state = CurveState {
+            formula: CurveFormula::HoodConstantProductFeeOnInputV1,
+            virtual_quote_reserve: U256::from(281_u16),
+            virtual_token_reserve: U256::from(1_145_u16),
+            remaining_curve_tokens: U256::from(800_u16),
+            fee_bps: 100,
+        };
+
+        // buy: fee=floor(101/100)=1, net=100,
+        // newVTok=floor(281*1145/(281+100))=844, output=301.
+        assert_eq!(
+            quote_curve_buy(state, U256::from(101_u8)).unwrap(),
+            U256::from(301_u16)
+        );
+
+        // sell: newVEth=ceil(281*1145/(1145+100))=259,
+        // gross=22, fee=floor(22/100)=0, output=22.
+        assert_eq!(
+            quote_curve_sell(state, U256::from(100_u8)).unwrap(),
+            U256::from(22_u8)
+        );
+    }
+
+    #[test]
+    fn hood_graduation_quote_matches_live_cap_consumption_and_refund() {
+        let state = CurveState {
+            formula: CurveFormula::HoodConstantProductFeeOnInputV1,
+            virtual_quote_reserve: U256::from(3_217_079_090_000_000_000_u128),
+            virtual_token_reserve: U256::from_str_radix("1000115294025923372620596652", 10)
+                .unwrap(),
+            remaining_curve_tokens: U256::from_str_radix("655115294025923372620596652", 10)
+                .unwrap(),
+            fee_bps: 100,
+        };
+        let quote =
+            quote_hood_curve_buy(state, U256::from(7_000_000_000_000_000_000_u128)).unwrap();
+        assert!(quote.graduates);
+        assert_eq!(
+            quote.amount_out,
+            U256::from_str_radix("655115294025923372620596652", 10).unwrap()
+        );
+        assert_eq!(
+            quote.amount_in_consumed,
+            U256::from(6_170_568_625_237_886_109_u128)
+        );
+        assert_eq!(quote.refund, U256::from(829_431_374_762_113_891_u128));
+        assert_eq!(quote.fee, U256::from(61_705_686_252_378_862_u128));
+        assert_eq!(
+            quote.amount_for_curve,
+            U256::from(6_108_862_938_985_507_247_u128)
+        );
+        assert_eq!(
+            quote.state_after.virtual_quote_reserve,
+            U256::from(9_325_942_028_985_507_247_u128)
+        );
+        assert_eq!(
+            quote.state_after.virtual_token_reserve,
+            U256::from_str_radix("345000000000000000000000000", 10).unwrap()
+        );
+        assert_eq!(quote.state_after.remaining_curve_tokens, U256::ZERO);
     }
 
     #[test]

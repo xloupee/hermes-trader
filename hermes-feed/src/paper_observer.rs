@@ -24,6 +24,7 @@ use crate::flap_identity::{
     FLAP_VAULT_PORTAL_IMPLEMENTATION_RUNTIME_KECCAK256, FLAP_VAULT_PORTAL_PROXY,
     FLAP_VAULT_PORTAL_PROXY_RUNTIME_KECCAK256,
 };
+use crate::hood_receipt_quote::{HoodExpectedProfile, HoodIdentityRole};
 use crate::launchpad_adapter::{
     AdapterKind, AttributionSource, LaunchpadId, RouteKind, WrapperKind,
 };
@@ -36,6 +37,7 @@ use crate::launchpad_registry::{
     StartupPinSnapshot, StaticLaunchpadRegistry,
 };
 use crate::noxa_abi::{LAUNCH_TOKEN_SELECTOR, decode_launch_call};
+use crate::noxa_rpc::HoodProtocolSnapshot;
 use crate::pons::{
     PONS_CURRENT_FACTORY, PONS_LAUNCH_SELECTOR, PONS_LEGACY_FACTORY, PonsExpectedProfile,
     RuntimeIdentity,
@@ -227,6 +229,8 @@ pub struct PaperExpectedPins {
     pub bow_factory_runtime_hash: B256,
     pub launchhood_v3_factory_runtime_hash: B256,
     pub hood_factory_runtime_hash: Option<B256>,
+    #[serde(default)]
+    pub hood_curve: Option<HoodExpectedProfile>,
     pub leavehood_factory_proxy_runtime_hash: Option<B256>,
     pub leavehood_factory_implementation_runtime_hash: Option<B256>,
     pub leavehood_core_proxy_runtime_hash: Option<B256>,
@@ -421,6 +425,8 @@ pub struct PaperObservedStartupSnapshot {
     pub fixture_id: Option<String>,
     pub chain_id: u64,
     pub pins: Vec<ObservedRuntimePin>,
+    #[serde(default)]
+    pub hood_protocol: Option<HoodProtocolSnapshot>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -662,6 +668,34 @@ impl PaperLaunchpadObserver {
         validate_document_pair(&expected, &observed)?;
         validate_observed_pins(&observed)?;
         let pons_profile = expected.pons_v3.expected_profile()?;
+        let hood_profile = match (expected.provenance, expected.hood_curve.as_ref()) {
+            (ExpectedPinsProvenance::ReviewedProtocolPins, Some(profile)) => {
+                profile
+                    .validate()
+                    .map_err(|error| PaperObserverError::Startup(error.to_string()))?;
+                let factory = profile.identity(HoodIdentityRole::Factory).ok_or_else(|| {
+                    PaperObserverError::Startup("Hood factory identity missing".into())
+                })?;
+                if expected.hood_factory_runtime_hash != Some(factory.runtime_hash) {
+                    return Err(PaperObserverError::Startup(
+                        "Hood scalar factory pin and complete profile disagree".into(),
+                    ));
+                }
+                Some(profile.clone())
+            }
+            (ExpectedPinsProvenance::ReviewedProtocolPins, None) => {
+                return Err(PaperObserverError::Startup(
+                    "reviewed production pins require the complete Hood profile".into(),
+                ));
+            }
+            (_, Some(profile)) => {
+                profile
+                    .validate()
+                    .map_err(|error| PaperObserverError::Startup(error.to_string()))?;
+                Some(profile.clone())
+            }
+            (_, None) => None,
+        };
         if let Some(clanker) = expected.clanker_v4 {
             clanker.expected_profile()?;
         }
@@ -674,6 +708,41 @@ impl PaperLaunchpadObserver {
             runtime_code_hash: find_observed_pin(&observed.pins, address, None)
                 .map_or(B256::ZERO, |pin| pin.runtime_hash),
         };
+        if let Some(profile) = &hood_profile {
+            let singleton = profile
+                .identity(HoodIdentityRole::OwnerSafeSingleton)
+                .ok_or_else(|| {
+                    PaperObserverError::Startup("Hood Safe singleton pin missing".into())
+                })?;
+            for identity in &profile.identities {
+                let implementation = (identity.role == HoodIdentityRole::OwnerSafeProxy)
+                    .then_some(singleton.address);
+                let observed_identity =
+                    find_observed_pin(&observed.pins, identity.address, implementation)
+                        .ok_or_else(|| {
+                            PaperObserverError::Startup(format!(
+                                "missing observed Hood {:?} identity",
+                                identity.role
+                            ))
+                        })?;
+                if observed_identity.runtime_hash != identity.runtime_hash
+                    || observed_identity.code_bytes != Some(identity.code_bytes)
+                {
+                    return Err(PaperObserverError::Startup(format!(
+                        "observed Hood {:?} identity drifted",
+                        identity.role
+                    )));
+                }
+            }
+            validate_hood_protocol_snapshot(
+                profile,
+                observed.hood_protocol.as_ref().ok_or_else(|| {
+                    PaperObserverError::Startup(
+                        "fresh startup snapshot is missing Hood semantic state".into(),
+                    )
+                })?,
+            )?;
+        }
         let v3 = V3LaunchAtBirthAdapter::new(
             CHAIN_ID,
             &[
@@ -1647,6 +1716,67 @@ fn validate_document_pair(
             "expected and observed pin provenance is incompatible".into(),
         ));
     }
+    if expected.provenance == ExpectedPinsProvenance::ReviewedProtocolPins
+        && (expected.clanker_v4.is_none()
+            || expected.bankr_doppler_v4.is_none()
+            || expected.hood_curve.is_none())
+    {
+        return Err(PaperObserverError::Startup(
+            "reviewed production pins require complete Clanker, Bankr/Doppler, and Hood profiles"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_hood_protocol_snapshot(
+    profile: &HoodExpectedProfile,
+    observed: &HoodProtocolSnapshot,
+) -> Result<(), PaperObserverError> {
+    let address = |role| {
+        profile
+            .identity(role)
+            .map(|identity| identity.address)
+            .ok_or_else(|| PaperObserverError::Startup(format!("Hood {role:?} identity missing")))
+    };
+    let semantic = profile.semantic;
+    let config = observed.config;
+    let exact = observed.l2_block_number != 0
+        && observed.factory == semantic.factory
+        && observed.migrator == semantic.active_migrator
+        && observed.fallback_factory == semantic.fallback_factory
+        && observed.weth == semantic.weth
+        && observed.owner == profile.owner
+        && observed.pending_owner == profile.pending_owner
+        && observed.owner_safe_singleton == address(HoodIdentityRole::OwnerSafeSingleton)?
+        && config.virtual_eth_seed == semantic.virtual_eth_seed
+        && config.creation_fee == semantic.creation_fee
+        && config.default_trade_fee_bps == semantic.default_trade_fee_bps
+        && config.migration_fee == semantic.migration_fee
+        && config.migration_fee_bps == semantic.migration_fee_bps
+        && config.guard_blocks == semantic.guard_blocks
+        && config.guard_max_wallet_bps == semantic.current_guard_max_wallet_bps
+        && config.creator_fee_share_bps == semantic.creator_fee_share_bps
+        && config.vanity_enforced == semantic.vanity_enforced
+        && observed.migrator_launchpad == semantic.factory
+        && observed.migrator_position_manager == address(HoodIdentityRole::PositionManager)?
+        && observed.migrator_locker == address(HoodIdentityRole::Locker)?
+        && observed.migrator_weth == semantic.weth
+        && observed.migrator_protocol == profile.owner
+        && observed.migrator_creator_share_bps == profile.migrator_creator_share_bps
+        && observed.migrator_v3_fee == profile.v3_fee
+        && observed.locker_position_manager == address(HoodIdentityRole::PositionManager)?
+        && observed.locker_weth == semantic.weth
+        && observed.locker_burn_bps == profile.locker_token_fee_burn_bps
+        && observed.position_manager_factory == address(HoodIdentityRole::V3Factory)?
+        && observed.position_manager_weth == semantic.weth
+        && observed.router_factory == address(HoodIdentityRole::V3Factory)?
+        && observed.router_weth == semantic.weth;
+    if !exact {
+        return Err(PaperObserverError::Startup(
+            "fresh Hood semantic snapshot disagrees with reviewed production profile".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -1893,6 +2023,7 @@ mod tests {
             bow_factory_runtime_hash: B256::with_last_byte(10),
             launchhood_v3_factory_runtime_hash: B256::with_last_byte(11),
             hood_factory_runtime_hash: Some(B256::with_last_byte(1)),
+            hood_curve: None,
             leavehood_factory_proxy_runtime_hash: Some(B256::with_last_byte(2)),
             leavehood_factory_implementation_runtime_hash: Some(B256::with_last_byte(3)),
             leavehood_core_proxy_runtime_hash: Some(B256::with_last_byte(4)),
@@ -1993,6 +2124,7 @@ mod tests {
                 ),
                 observed(LEAVEHOOD_CORE_IMPLEMENTATION, None, B256::with_last_byte(5)),
             ],
+            hood_protocol: None,
         };
         snapshot.pins.extend([
             observed(WETH, None, WETH_RUNTIME_KECCAK256),
@@ -2187,6 +2319,104 @@ mod tests {
         find_observed_mut(&mut observed.pins, crate::pons::PONS_CURRENT_FACTORY).runtime_hash =
             B256::with_last_byte(0xee);
         assert!(PaperLaunchpadObserver::from_startup_snapshots(expected, observed).is_err());
+    }
+
+    #[test]
+    fn reviewed_production_hood_profile_is_complete_and_tamper_evident() {
+        let expected: PaperExpectedPins = serde_json::from_str(include_str!(
+            "../config/launchpad-expected-pins.production.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            expected.provenance,
+            ExpectedPinsProvenance::ReviewedProtocolPins
+        );
+        let profile = expected.hood_curve.unwrap();
+        profile.validate().unwrap();
+        assert_eq!(profile.identities.len(), 10);
+        assert_eq!(
+            expected.hood_factory_runtime_hash,
+            profile
+                .identity(crate::hood_receipt_quote::HoodIdentityRole::Factory)
+                .map(|identity| identity.runtime_hash)
+        );
+
+        let mut tampered = profile;
+        tampered.identities[0].runtime_hash = B256::with_last_byte(0xee);
+        assert!(tampered.validate().is_err());
+        tampered = crate::hood_receipt_quote::HoodExpectedProfile::production();
+        tampered.identities.pop();
+        assert!(tampered.validate().is_err());
+
+        let (_, mut observed) = startup();
+        observed.provenance = ObservedPinsProvenance::StartupObservation;
+        observed.fixture_id = None;
+        let mut incomplete: PaperExpectedPins = serde_json::from_str(include_str!(
+            "../config/launchpad-expected-pins.production.json"
+        ))
+        .unwrap();
+        incomplete.clanker_v4 = None;
+        assert!(validate_document_pair(&incomplete, &observed).is_err());
+        incomplete = serde_json::from_str(include_str!(
+            "../config/launchpad-expected-pins.production.json"
+        ))
+        .unwrap();
+        incomplete.bankr_doppler_v4 = None;
+        assert!(validate_document_pair(&incomplete, &observed).is_err());
+        incomplete = serde_json::from_str(include_str!(
+            "../config/launchpad-expected-pins.production.json"
+        ))
+        .unwrap();
+        incomplete.hood_curve = None;
+        assert!(validate_document_pair(&incomplete, &observed).is_err());
+    }
+
+    #[test]
+    fn hood_semantic_startup_snapshot_rejects_mutable_link_or_config_drift() {
+        let profile = crate::hood_receipt_quote::HoodExpectedProfile::production();
+        let role = |role| profile.identity(role).unwrap().address;
+        let semantic = profile.semantic;
+        let mut snapshot = HoodProtocolSnapshot {
+            factory: semantic.factory,
+            l2_block_number: 1,
+            config: crate::noxa_rpc::HoodConfigSnapshot {
+                virtual_eth_seed: semantic.virtual_eth_seed,
+                creation_fee: semantic.creation_fee,
+                default_trade_fee_bps: semantic.default_trade_fee_bps,
+                migration_fee: semantic.migration_fee,
+                migration_fee_bps: semantic.migration_fee_bps,
+                guard_blocks: semantic.guard_blocks,
+                guard_max_wallet_bps: semantic.current_guard_max_wallet_bps,
+                creator_fee_share_bps: semantic.creator_fee_share_bps,
+                vanity_enforced: semantic.vanity_enforced,
+            },
+            migrator: semantic.active_migrator,
+            fallback_factory: semantic.fallback_factory,
+            weth: semantic.weth,
+            owner: profile.owner,
+            pending_owner: profile.pending_owner,
+            owner_safe_singleton: role(HoodIdentityRole::OwnerSafeSingleton),
+            migrator_launchpad: semantic.factory,
+            migrator_position_manager: role(HoodIdentityRole::PositionManager),
+            migrator_locker: role(HoodIdentityRole::Locker),
+            migrator_weth: semantic.weth,
+            migrator_protocol: profile.owner,
+            migrator_creator_share_bps: profile.migrator_creator_share_bps,
+            migrator_v3_fee: profile.v3_fee,
+            locker_position_manager: role(HoodIdentityRole::PositionManager),
+            locker_weth: semantic.weth,
+            locker_burn_bps: profile.locker_token_fee_burn_bps,
+            position_manager_factory: role(HoodIdentityRole::V3Factory),
+            position_manager_weth: semantic.weth,
+            router_factory: role(HoodIdentityRole::V3Factory),
+            router_weth: semantic.weth,
+        };
+        validate_hood_protocol_snapshot(&profile, &snapshot).unwrap();
+        snapshot.migrator = Address::with_last_byte(0xee);
+        assert!(validate_hood_protocol_snapshot(&profile, &snapshot).is_err());
+        snapshot.migrator = semantic.active_migrator;
+        snapshot.config.guard_max_wallet_bps = 1;
+        assert!(validate_hood_protocol_snapshot(&profile, &snapshot).is_err());
     }
 
     #[test]

@@ -1,0 +1,100 @@
+{
+  "transaction": {
+    "hash": "0x6c7a3516bdfc95b7229c3134e6f4ab3d2025c1f799cc5f7270f5d1c0f4f99a92",
+    "from": "0x0a5f25a3dd2d707abe9b43393f01fc80655a733f",
+    "to": "0x5fcc1df0dc020cf454e742e9a8ae2554c37a452c",
+    "input": "0xcce7ec1300000000000000000000000021c2ed1755d26cc99607c7b76469ee480087600d00000000000000000000000000000000000000000000f0a647ad3dae8ec3ef21",
+    "value": "0xaa87bee538000",
+    "chain_id": 4663,
+    "nonce": 40,
+    "l2_block_number": 11400340,
+    "transaction_index": 11
+  },
+  "block": {
+    "l2_block_number": 11400340,
+    "l1_block_number": 25546416,
+    "timestamp": 1784219231,
+    "hash": "0xb6214e31e53dca09481e23d24aef897ec4629da3b9c17a3b14aef8acbfce6581",
+    "parent_hash": "0x9774871055ecd3e67a371ce82da4a632df72fd5061b99a5af697ec31fd0cd73b"
+  },
+  "receipt": {
+    "transaction_hash": "0x6c7a3516bdfc95b7229c3134e6f4ab3d2025c1f799cc5f7270f5d1c0f4f99a92",
+    "block_hash": "0xb6214e31e53dca09481e23d24aef897ec4629da3b9c17a3b14aef8acbfce6581",
+    "status": true,
+    "l2_block_number": 11400340,
+    "l1_block_number": 25546416,
+    "transaction_index": 11,
+    "logs": [
+      {
+        "address": "0x5fcc1df0dc020cf454e742e9a8ae2554c37a452c",
+        "log_index": 56,
+        "topics": [
+          "0x2c76e7a47fd53e2854856ac3f0a5f3ee40d15cfaa82266357ea9779c486ab9c3",
+          "0x00000000000000000000000021c2ed1755d26cc99607c7b76469ee480087600d",
+          "0x0000000000000000000000000a5f25a3dd2d707abe9b43393f01fc80655a733f"
+        ],
+        "data": "0x0000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000aa87bee53800000000000000000000000000000000000000000000000fd50b73d1881d9a5d34c00000000000000000000000000000000000000000000000000001b48eb57e000000000000000000000000000000000000000000000000000273e6f4ebcbec000000000000000000000000000000000000000000003ad2741d855c6d420b526ff"
+      },
+      {
+        "address": "0x21c2ed1755d26cc99607c7b76469ee480087600d",
+        "log_index": 57,
+        "topics": [
+          "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "0x0000000000000000000000005fcc1df0dc020cf454e742e9a8ae2554c37a452c",
+          "0x0000000000000000000000000a5f25a3dd2d707abe9b43393f01fc80655a733f"
+        ],
+        "data": "0x00000000000000000000000000000000000000000000fd50b73d1881d9a5d34c"
+      }
+    ]
+  },
+  "state": {
+    "token": "0x21c2ed1755d26cc99607c7b76469ee480087600d",
+    "pre_block": 11400339,
+    "post_block": 11400340,
+    "pre_curve": {
+      "virtual_eth": "2824850000000000000",
+      "virtual_tokens": "1138980830840575605784377931",
+      "real_eth": "14850000000000000",
+      "real_tokens": "793980830840575605784377931",
+      "creator": "0x0a5F25a3dd2d707aBE9b43393f01Fc80655a733F",
+      "created_at_block": "25546390",
+      "graduated": false,
+      "migrated": false,
+      "trade_fee_bps": 100
+    },
+    "post_curve": {
+      "virtual_eth": "2827820000000000000",
+      "virtual_tokens": "1137784583177147060279650047",
+      "real_eth": "17820000000000000",
+      "real_tokens": "792784583177147060279650047",
+      "creator": "0x0a5F25a3dd2d707aBE9b43393f01Fc80655a733F",
+      "created_at_block": "25546390",
+      "graduated": false,
+      "migrated": false,
+      "trade_fee_bps": 100
+    },
+    "config": {
+      "virtual_eth_seed": "2810000000000000000",
+      "creation_fee": "0",
+      "default_trade_fee_bps": 100,
+      "migration_fee": "50000000000000000",
+      "migration_fee_bps": 300,
+      "guard_blocks": 100,
+      "guard_max_wallet_bps": 0,
+      "creator_fee_share_bps": 8000,
+      "vanity_enforced": true
+    },
+    "token_curve_supply": "800000000000000000000000000",
+    "token_lp_supply": "200000000000000000000000000",
+    "quote": {
+      "kind": "buy",
+      "requested_amount": "3000000000000000",
+      "result": [
+        "1196247663428545504727884",
+        30000000000000,
+        3000000000000000
+      ]
+    },
+    "factory": "0x5fcc1df0dc020cf454e742e9a8ae2554c37a452c"
+  }
+}

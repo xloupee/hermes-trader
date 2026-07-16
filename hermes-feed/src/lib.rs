@@ -10,6 +10,7 @@ pub mod feed;
 pub mod flap_abi;
 pub mod flap_identity;
 pub mod flap_safety;
+pub mod hood_receipt_quote;
 pub mod hot_path;
 mod hot_path_safety;
 pub mod launchpad_adapter;
@@ -68,6 +69,13 @@ pub use decoder::{
     Candidate, DecodeError, DecodeReport, FeedDecoder, Filter, TransactionContext,
     TransactionFingerprint,
 };
+pub use hood_receipt_quote::{
+    HOOD_GRADUATED_TOPIC, HOOD_MIGRATED_TOPIC, HOOD_TOKEN_CREATED_TOPIC, HOOD_TRADE_TOPIC,
+    HoodExpectedProfile, HoodIdentityRole, HoodMigrationEvidence, HoodPaperEntryQuote,
+    HoodPaperExitQuote, HoodQuoteError, HoodQuotePolicy, HoodReceiptPaperQuote,
+    HoodRuntimeIdentity, HoodSemanticProfile, HoodStateVersion, quote_hood_curve_receipt,
+    verify_hood_graduation_receipt,
+};
 pub use hot_path::{
     ArmedHotTransaction, HotPathError, HotPathExecutor, HotPathReport, HotPathStrategy,
     HotTransaction, ReconciliationJob, SubmissionResult,
@@ -104,7 +112,8 @@ pub use noxa_predict::{
     decode_active_dex_config, decode_dex_config, decode_launch_config, predict_v3_pool_address,
 };
 pub use noxa_rpc::{
-    ActiveNoxaLaunchRecord, ActiveNoxaTokenSnapshot, FactoryStatus, NoxaReceipt, NoxaRpcClient,
+    ActiveNoxaLaunchRecord, ActiveNoxaTokenSnapshot, FactoryStatus, HoodConfigSnapshot,
+    HoodCurveStateSnapshot, HoodMarketSnapshot, HoodProtocolSnapshot, NoxaReceipt, NoxaRpcClient,
     ObservedLaunchLog, ObservedPoolSwapLog, RobinhoodBlock, RobinhoodTransaction,
     RpcMetricsSnapshot, TokenRestrictionSnapshot, V3PoolSnapshot,
 };
@@ -149,9 +158,10 @@ pub use testnet_orchestrator::{
 };
 pub use tier2_curve::{
     CurveAdapterError, CurveCandidateCall, CurveFormula, CurveObservation, CurvePaperPlan,
-    CurveState, FactoryGeneration, MarketPhase, MarketSnapshot as Tier2MarketSnapshot,
-    OpportunityEvidence, OpportunityQuality, RuntimePin as Tier2RuntimePin,
-    StartupPins as Tier2StartupPins, Tier2CurveAdapter,
+    CurveState, FactoryGeneration, HoodCurveBuyQuote, HoodCurveSellQuote, MarketPhase,
+    MarketSnapshot as Tier2MarketSnapshot, OpportunityEvidence, OpportunityQuality,
+    RuntimePin as Tier2RuntimePin, StartupPins as Tier2StartupPins, Tier2CurveAdapter,
+    quote_hood_curve_buy, quote_hood_curve_sell,
 };
 pub use trading_runtime::{
     SignedBoundaryRelease, SignedPendingKind, SignedPosition, SignedRuntimeError,

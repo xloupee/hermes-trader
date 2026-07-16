@@ -173,7 +173,7 @@ async fn main() -> Result<()> {
         });
     }
     let snapshot = PaperObservedStartupSnapshot {
-        schema_version: 2,
+        schema_version: 3,
         document_role: ObservedPinsDocumentRole::ObservedStartupSnapshot,
         provenance: ObservedPinsProvenance::StartupObservation,
         fixture_id: None,

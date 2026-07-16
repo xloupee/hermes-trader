@@ -16,6 +16,13 @@ snapshot must match before the observer starts.
 | Bow | factory `0xc70e510e14710ea535cab7b2414860af63feab79` | `0x8d56cbcdf72dbf04ed8170d55878cc894997ccc54c2ab0aec782274eb7fe7a14` | Official/research address plus fixed-block code commitment; explorer source is not verified. |
 | LaunchHood V3 | factory `0x62b33a039d289cbda50ebeb72fe4261449e61bcf` | `0x9b785dd157fe757dd427822df3e2bc3a1b6134f1d338b21c36c3de279bb67766` | Verified explorer ABI and fixed-block code commitment. |
 | Hood | factory `0x5fcc1df0dc020cf454e742e9a8ae2554c37a452c` | `0x4aa0ce56b5b67d27f2fab59dcb796fa552d10ceafdecb06e088cdd254c92c0fc` | Verified `HoodCustomLaunchpad` explorer source and fixed-block code commitment. |
+| Pons current | factory `0x0c37...77a4` | `0x921a0d1b2d854de5435804e8ee118658f05173a0eeebca5f41b41385b97cd1b5` | Deployment/proof receipts plus fixed-block code commitment; current source remains unverified. |
+| Pons legacy | factory `0xa5aa...1feb` | `0x0a62b8ed1d88d30c7b342ea8361dfaf0ac336706992cf0c8ba38b129f06391d4` | Explorer-verified legacy factory and fixed-block code commitment; observation only. |
+| Pons current | locker `0x31ca...54b5` | `0x5bfb52957c2df2cc05b894cd707811c811ee0e38b4a26ea59bae08cd65b39bbd` | Exact LP-NFT recipient and `PositionLocked` emitter in complete proof receipts. |
+| Pons dependency | V3 factory `0x1f7d...2efa` | `0xec72b1abd1f2faee020cfea9c646bd8994f9fb389054f6e574f103a895091739` | Exact `PoolCreated` emitter and CREATE2 dependency in proof receipts. |
+| Pons dependency | position manager `0x7399...e0d3` | `0x0a493d1af3d0f25fed8efa205244ebee14114267a08647fc38c515c7cd6ead4f` | Exact mint/LP-NFT manager in proof receipts. |
+| Pons dependency | SwapRouter02 `0xcaf6...5cb2` | `0x6f36c378e272c6324c48f045182bcb54bd8ad654cf9ebd42e8893d52c4cb25dc` | Exact launch-time initial-buy sender and shared reviewed router commitment. |
+| Pons dependency | WETH `0x0bd7...ad73` | `0x5706be52f64875fee65a2cec0d80e47a23d8793cbe85d214b48445e2d05f5353` | Exact pair token in configuration and all current proof receipts. |
 | Bankr/Doppler | Create emitter `0xeb7c034704ef8dcd2d32324c1545f62fb4ad0862` | `0x86b37100cbe9841771c452a592985b4e921254b127a380246073b84ec953f7f8` | Proof receipt and fixed-block code commitment; only selector `0x882db707` is admitted. |
 | Bankr/Doppler | V4 PoolManager `0x8366...0951` | `0xbd3881180b547f5fe817545743cfb4343e96b1bc6640dcd70c106b0066e95626` | Canonical pool event emitter, proof receipt, and fixed-block code commitment. |
 | Bankr/Doppler | `DopplerHookInitializer` `0x4e34...a544` | `0xc41a91106002f15bf70ae266824317f3f3ac638ac72ca5253bae395fa47ee631` | Verified explorer source matching official Whetstone source and fixed-block code commitment. |
@@ -33,9 +40,10 @@ snapshot must match before the observer starts.
 | Clanker | descending-MEV module `0xea1f...299e` | `0x0815a0af5e056adaf07a1941b92082caa886b207676bd42c89ea6bde3956bc13` | Official source semantics plus fixed-block code commitment. |
 | Clanker | extension `0x6f27...34b5` | `0xf742a12de7ec06481d0e98942d1830d8bf33502d854e5d97062ef5fda6f5e004` | Exact launch receipt identity and fixed-block code commitment. |
 
-Schema version 2 serializes the complete Clanker identity profile and reviewed
-fee bounds separately from fresh observations. Historical block `10980306` and
-fresh block `11507862` both matched all 26 requested startup identities. The
+Schema version 3 serializes the complete Clanker identity profile, reviewed
+fee bounds, and all seven Pons runtime identities separately from fresh
+observations. The Pons fields are reviewed expected configuration; observed
+startup code remains a different document and cannot populate them. The
 Clanker fee values emitted for an individual pool remain receipt-local state;
 the expected document pins the official contract bounds instead of copying an
 observed pool's values into expected configuration: static LP fees are capped
@@ -52,14 +60,14 @@ profile also fixes 200 tick spacing, 85% pool allocation, 99%/1% curves,
 standard-profile invariants, not broad bounds for arbitrary Doppler launches;
 variants remain rejected until independently reviewed.
 
-Pons and Flap identities remain the exact constants recorded in
-`PONS_FAMILY.md` and `FLAP_SH_EVIDENCE.json`. They are validated by the registry
-and fresh observed snapshot, but are not yet serialized in the expected
-document.
+Pons identities remain the exact commitments recorded in `PONS_FAMILY.md` and
+are now serialized in the production expected document. The current factory's
+source remains unverified, so this strengthens identity drift detection without
+changing Pons from paper-only to execution-ready.
 
 ## Explicit gaps
 
-- Schema version 2 still has no configurable fields for Pons, Flap, or Permit2
+- Schema version 3 still has no configurable fields for Flap or Permit2
   identities. They must not be described as centrally reviewed configuration
   until the schema is extended again.
 - Bow's explorer source is unverified; its reviewed hash is a fixed-block code

@@ -1,8 +1,19 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "document_role": "expected_protocol_pins",
   "provenance": "reviewed_protocol_pins",
   "fixture_id": null,
+  "pons_v3": {
+    "identities": [
+      {"address": "0x0c37a24f5d23a486fa692d1500881d698b1f77a4", "code_bytes": 24192, "runtime_hash": "0x921a0d1b2d854de5435804e8ee118658f05173a0eeebca5f41b41385b97cd1b5"},
+      {"address": "0xa5aab3f0c6eeadf30ef1d3eb997108e976351feb", "code_bytes": 24353, "runtime_hash": "0x0a62b8ed1d88d30c7b342ea8361dfaf0ac336706992cf0c8ba38b129f06391d4"},
+      {"address": "0x31ca5e101941a93a7dd6d0497928700625cf54b5", "code_bytes": 4861, "runtime_hash": "0x5bfb52957c2df2cc05b894cd707811c811ee0e38b4a26ea59bae08cd65b39bbd"},
+      {"address": "0x1f7d7550b1b028f7571e69a784071f0205fd2efa", "code_bytes": 24535, "runtime_hash": "0xec72b1abd1f2faee020cfea9c646bd8994f9fb389054f6e574f103a895091739"},
+      {"address": "0x73991a25c818bf1f1128deaab1492d45638de0d3", "code_bytes": 24384, "runtime_hash": "0x0a493d1af3d0f25fed8efa205244ebee14114267a08647fc38c515c7cd6ead4f"},
+      {"address": "0xcaf681a66d020601342297493863e78c959e5cb2", "code_bytes": 24497, "runtime_hash": "0x6f36c378e272c6324c48f045182bcb54bd8ad654cf9ebd42e8893d52c4cb25dc"},
+      {"address": "0x0bd7d308f8e1639fab988df18a8011f41eacad73", "code_bytes": 2202, "runtime_hash": "0x5706be52f64875fee65a2cec0d80e47a23d8793cbe85d214b48445e2d05f5353"}
+    ]
+  },
   "bow_factory_runtime_hash": "0x8d56cbcdf72dbf04ed8170d55878cc894997ccc54c2ab0aec782274eb7fe7a14",
   "launchhood_v3_factory_runtime_hash": "0x9b785dd157fe757dd427822df3e2bc3a1b6134f1d338b21c36c3de279bb67766",
   "hood_factory_runtime_hash": "0x4aa0ce56b5b67d27f2fab59dcb796fa552d10ceafdecb06e088cdd254c92c0fc",

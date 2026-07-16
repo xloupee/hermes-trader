@@ -37,7 +37,8 @@ use crate::launchpad_registry::{
 };
 use crate::noxa_abi::{LAUNCH_TOKEN_SELECTOR, decode_launch_call};
 use crate::pons::{
-    PONS_CURRENT_FACTORY, PONS_LAUNCH_SELECTOR, PONS_LEGACY_FACTORY, RuntimeIdentity,
+    PONS_CURRENT_FACTORY, PONS_LAUNCH_SELECTOR, PONS_LEGACY_FACTORY, PonsExpectedProfile,
+    RuntimeIdentity,
 };
 use crate::robinhood::{
     ACTIVE_NOXA_FACTORY_RUNTIME_KECCAK256, ACTIVE_NOXA_LAUNCH_FACTORY, BOW_LAUNCH_FACTORY,
@@ -222,6 +223,7 @@ pub struct PaperExpectedPins {
     pub document_role: ExpectedPinsDocumentRole,
     pub provenance: ExpectedPinsProvenance,
     pub fixture_id: Option<String>,
+    pub pons_v3: ConfiguredPonsV3,
     pub bow_factory_runtime_hash: B256,
     pub launchhood_v3_factory_runtime_hash: B256,
     pub hood_factory_runtime_hash: Option<B256>,
@@ -239,6 +241,52 @@ pub struct PaperExpectedPins {
     #[serde(default)]
     pub bankr_doppler_calls: Vec<ConfiguredCallPin>,
     pub erc4337: Option<ConfiguredSmartAccounts>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfiguredPonsV3 {
+    pub identities: Vec<ConfiguredPonsRuntimeIdentity>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfiguredPonsRuntimeIdentity {
+    pub address: Address,
+    pub code_bytes: usize,
+    pub runtime_hash: B256,
+}
+
+impl ConfiguredPonsV3 {
+    pub fn expected_profile(&self) -> Result<PonsExpectedProfile, PaperObserverError> {
+        let production = PonsExpectedProfile::production();
+        let required = production.identities();
+        if self.identities.len() != required.len() {
+            return Err(PaperObserverError::Startup(
+                "reviewed Pons profile must contain every exact identity once".into(),
+            ));
+        }
+        for expected in required {
+            let matches = self
+                .identities
+                .iter()
+                .filter(|configured| configured.address == expected.address)
+                .collect::<Vec<_>>();
+            if matches.len() != 1
+                || matches[0].code_bytes != expected.code_bytes
+                || matches[0].runtime_hash != expected.runtime_hash
+            {
+                return Err(PaperObserverError::Startup(
+                    "configured Pons identity disagrees with the independently reviewed profile"
+                        .into(),
+                ));
+            }
+        }
+        production
+            .validate()
+            .map_err(|error| PaperObserverError::Startup(error.to_string()))?;
+        Ok(production)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -439,6 +487,7 @@ pub struct PaperLaunchpadObserver {
     registry: StaticLaunchpadRegistry,
     v3: V3LaunchAtBirthAdapter,
     pons: PonsAdapter,
+    pons_profile: PonsExpectedProfile,
     curves: Tier2CurveAdapter,
     smart_accounts: Option<OwnedValidatedSmartAccountPins>,
 }
@@ -612,6 +661,7 @@ impl PaperLaunchpadObserver {
     ) -> Result<Self, PaperObserverError> {
         validate_document_pair(&expected, &observed)?;
         validate_observed_pins(&observed)?;
+        let pons_profile = expected.pons_v3.expected_profile()?;
         if let Some(clanker) = expected.clanker_v4 {
             clanker.expected_profile()?;
         }
@@ -701,18 +751,36 @@ impl PaperLaunchpadObserver {
             ),
         })
         .map_err(|error| PaperObserverError::Startup(error.to_string()))?;
-        let pons_identities = PonsAdapter::required_startup_identities()
-            .iter()
-            .filter_map(|required| {
-                find_observed_pin(&observed.pins, required.address, None).and_then(|pin| {
-                    pin.code_bytes.map(|code_bytes| RuntimeIdentity {
-                        address: pin.address,
-                        code_bytes,
-                        runtime_hash: pin.runtime_hash,
-                    })
+        let pons_identities = pons_profile
+            .identities()
+            .into_iter()
+            .map(|required| {
+                let observed = find_observed_pin(&observed.pins, required.address, None)
+                    .ok_or_else(|| {
+                        PaperObserverError::Startup(
+                            "fresh startup snapshot is missing a reviewed Pons identity".into(),
+                        )
+                    })?;
+                let code_bytes = observed.code_bytes.ok_or_else(|| {
+                    PaperObserverError::Startup(
+                        "fresh Pons startup observation is missing code length".into(),
+                    )
+                })?;
+                if observed.runtime_hash != required.runtime_hash
+                    || code_bytes != required.code_bytes
+                {
+                    return Err(PaperObserverError::Startup(
+                        "fresh Pons startup observation disagrees with reviewed expected pins"
+                            .into(),
+                    ));
+                }
+                Ok(RuntimeIdentity {
+                    address: observed.address,
+                    code_bytes,
+                    runtime_hash: observed.runtime_hash,
                 })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, PaperObserverError>>()?;
         let pons = PonsAdapter::from_startup_identities(&pons_identities)
             .map_err(|error| PaperObserverError::Startup(error.to_string()))?;
         let wrappers = if expected.erc4337.is_some() {
@@ -720,7 +788,7 @@ impl PaperLaunchpadObserver {
         } else {
             vec![WrapperKind::Direct]
         };
-        let specs = paper_specs(&expected, &v4, &wrappers)?;
+        let specs = paper_specs(&expected, &v4, &wrappers, pons_profile)?;
         let registry = StaticLaunchpadRegistry::from_specs(
             StartupPinSnapshot {
                 chain_id: observed.chain_id,
@@ -757,6 +825,7 @@ impl PaperLaunchpadObserver {
             registry,
             v3,
             pons,
+            pons_profile,
             curves,
             smart_accounts,
         })
@@ -954,13 +1023,11 @@ impl PaperLaunchpadObserver {
                 )
             }
             (LaunchpadId::Pons, AdapterKind::V3LaunchAtBirth) => {
-                let runtime_hash = if destination == PONS_CURRENT_FACTORY {
-                    crate::pons::PONS_CURRENT_FACTORY_RUNTIME
-                } else if destination == PONS_LEGACY_FACTORY {
-                    crate::pons::PONS_LEGACY_FACTORY_RUNTIME
-                } else {
-                    return Err(PaperObserverError::UnknownDispatch);
-                };
+                let runtime_hash = self
+                    .pons_profile
+                    .identity(destination)
+                    .ok_or(PaperObserverError::UnknownDispatch)?
+                    .runtime_hash;
                 let observed = self
                     .pons
                     .observe_launch(crate::pons::PonsObservationInput {
@@ -977,7 +1044,11 @@ impl PaperLaunchpadObserver {
                 (
                     LaunchpadId::Pons,
                     "launch",
-                    ExecutionMode::ExecutionGated,
+                    if observed.generation == crate::pons::PonsGeneration::Current {
+                        ExecutionMode::ExecutionGated
+                    } else {
+                        ExecutionMode::DiscoveryOnly
+                    },
                     serde_json::to_value(observed).expect("serializable Pons observation"),
                 )
             }
@@ -1142,6 +1213,7 @@ fn paper_specs(
     expected: &PaperExpectedPins,
     v4: &V4AdapterSet,
     v4_wrappers: &[WrapperKind],
+    pons_profile: PonsExpectedProfile,
 ) -> Result<Vec<LaunchpadSpec>, PaperObserverError> {
     let direct = [WrapperKind::Direct];
     let shared_v3_pins = || {
@@ -1176,8 +1248,9 @@ fn paper_specs(
         pins.extend(shared_v3_pins());
         pins
     };
-    let pons_pins = PonsAdapter::required_startup_identities()
-        .iter()
+    let pons_pins = pons_profile
+        .identities()
+        .into_iter()
         .map(|identity| {
             contract_pin(
                 if matches!(identity.address, PONS_LEGACY_FACTORY | PONS_CURRENT_FACTORY) {
@@ -1552,7 +1625,7 @@ fn validate_document_pair(
     expected: &PaperExpectedPins,
     observed: &PaperObservedStartupSnapshot,
 ) -> Result<(), PaperObserverError> {
-    if expected.schema_version != 2 || observed.schema_version != 2 || observed.chain_id != CHAIN_ID
+    if expected.schema_version != 3 || observed.schema_version != 3 || observed.chain_id != CHAIN_ID
     {
         return Err(PaperObserverError::Startup(
             "unsupported pin schema or chain".into(),
@@ -1802,10 +1875,21 @@ mod tests {
 
     fn startup() -> (PaperExpectedPins, PaperObservedStartupSnapshot) {
         let expected = PaperExpectedPins {
-            schema_version: 2,
+            schema_version: 3,
             document_role: ExpectedPinsDocumentRole::ExpectedProtocolPins,
             provenance: ExpectedPinsProvenance::SyntheticOfflineFixture,
-            fixture_id: Some("launchpad-paper-offline-v2".into()),
+            fixture_id: Some("launchpad-paper-offline-v3".into()),
+            pons_v3: ConfiguredPonsV3 {
+                identities: PonsExpectedProfile::production()
+                    .identities()
+                    .into_iter()
+                    .map(|identity| ConfiguredPonsRuntimeIdentity {
+                        address: identity.address,
+                        code_bytes: identity.code_bytes,
+                        runtime_hash: identity.runtime_hash,
+                    })
+                    .collect(),
+            },
             bow_factory_runtime_hash: B256::with_last_byte(10),
             launchhood_v3_factory_runtime_hash: B256::with_last_byte(11),
             hood_factory_runtime_hash: Some(B256::with_last_byte(1)),
@@ -1826,10 +1910,10 @@ mod tests {
             erc4337: None,
         };
         let mut snapshot = PaperObservedStartupSnapshot {
-            schema_version: 2,
+            schema_version: 3,
             document_role: ObservedPinsDocumentRole::ObservedStartupSnapshot,
             provenance: ObservedPinsProvenance::SyntheticOfflineFixture,
-            fixture_id: Some("launchpad-paper-offline-v2".into()),
+            fixture_id: Some("launchpad-paper-offline-v3".into()),
             chain_id: CHAIN_ID,
             pins: vec![
                 observed(NOXA_LAUNCH_FACTORY, None, NOXA_FACTORY_RUNTIME_KECCAK256),
@@ -2090,6 +2174,22 @@ mod tests {
     }
 
     #[test]
+    fn configured_pons_profile_is_separate_from_and_must_match_fresh_observation() {
+        let (mut expected, observed) = startup();
+        expected.pons_v3.identities[0].runtime_hash = B256::with_last_byte(0xee);
+        assert!(PaperLaunchpadObserver::from_startup_snapshots(expected, observed).is_err());
+
+        let (mut expected, observed) = startup();
+        expected.pons_v3.identities.pop();
+        assert!(PaperLaunchpadObserver::from_startup_snapshots(expected, observed).is_err());
+
+        let (expected, mut observed) = startup();
+        find_observed_mut(&mut observed.pins, crate::pons::PONS_CURRENT_FACTORY).runtime_hash =
+            B256::with_last_byte(0xee);
+        assert!(PaperLaunchpadObserver::from_startup_snapshots(expected, observed).is_err());
+    }
+
+    #[test]
     fn proxy_implementation_mismatch_and_duplicate_observation_fail_closed() {
         let (expected, mut observed) = startup();
         find_observed_mut(&mut observed.pins, LEAVEHOOD_FACTORY_PROXY).implementation =
@@ -2302,10 +2402,10 @@ mod tests {
     #[test]
     fn expected_document_cannot_self_attest_as_observed_snapshot() {
         let value = serde_json::json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "document_role": "expected_protocol_pins",
             "provenance": "synthetic_offline_fixture",
-            "fixture_id": "launchpad-paper-offline-v2",
+            "fixture_id": "launchpad-paper-offline-v3",
             "chain_id": CHAIN_ID,
             "pins": []
         });

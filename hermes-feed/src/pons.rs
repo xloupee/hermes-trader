@@ -182,6 +182,45 @@ pub enum PonsPinError {
     MissingOrDriftedIdentity,
 }
 
+/// Independently reviewed Pons runtime commitments. Observed startup code must
+/// be supplied separately and match every identity before observation or
+/// receipt quoting is enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PonsExpectedProfile {
+    identities: [RuntimeIdentity; 7],
+}
+
+impl PonsExpectedProfile {
+    pub const fn production() -> Self {
+        Self {
+            identities: REQUIRED_CURRENT_IDENTITIES,
+        }
+    }
+
+    pub fn from_identities(identities: [RuntimeIdentity; 7]) -> Result<Self, PonsPinError> {
+        let profile = Self { identities };
+        profile.validate()?;
+        Ok(profile)
+    }
+
+    pub fn validate(self) -> Result<(), PonsPinError> {
+        if self.identities != REQUIRED_CURRENT_IDENTITIES {
+            return Err(PonsPinError::MissingOrDriftedIdentity);
+        }
+        Ok(())
+    }
+
+    pub const fn identities(self) -> [RuntimeIdentity; 7] {
+        self.identities
+    }
+
+    pub fn identity(self, address: Address) -> Option<RuntimeIdentity> {
+        self.identities
+            .into_iter()
+            .find(|identity| identity.address == address)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct PonsAdapter {
     _validated: (),
@@ -759,7 +798,7 @@ mod tests {
 
     fn current_market() -> VerifiedPonsMarket {
         let token = address!("432c99bbd9dc1d9040087598d7cf40502d7cc20b");
-        let pool = address!("f28f09dfe76860a9962a6915f356be2ce29c760d");
+        let pool = address!("a1ad01da59552689835902b878ce6f5ea37f2b0b");
         let (token0, token1) = if PONS_WETH < token {
             (PONS_WETH, token)
         } else {

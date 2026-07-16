@@ -14,7 +14,7 @@ use hermes_feed::paper_observer::{
 };
 use hermes_feed::{
     BankrDopplerExpectedProfile, BankrDopplerReceiptPaperQuote, ClankerReceiptPaperQuote,
-    V3ReceiptPaperQuote, bankr_hook_fee_ppm,
+    PonsReceiptPaperQuote, V3ReceiptPaperQuote, bankr_hook_fee_ppm,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -56,7 +56,7 @@ struct Cli {
     paper_max_hold_seconds: u64,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReconciliationEvidence {
     tx_hash: B256,
@@ -64,6 +64,10 @@ struct ReconciliationEvidence {
     receipt_status: bool,
     protocol_event_match: bool,
     observed_unix_ns: u64,
+    #[serde(default)]
+    pons_generation: Option<hermes_feed::PonsGeneration>,
+    #[serde(default)]
+    protocol_blocker: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,6 +90,7 @@ struct ReconciliationRecords {
     v3_quotes: Vec<V3ReceiptPaperQuote>,
     clanker_quotes: Vec<ClankerReceiptPaperQuote>,
     bankr_quotes: Vec<BankrDopplerReceiptPaperQuote>,
+    pons_quotes: Vec<PonsReceiptPaperQuote>,
 }
 
 #[derive(Debug, Default)]
@@ -140,6 +145,7 @@ fn main() -> Result<()> {
             args.observed_startup_snapshot.display()
         )
     })?;
+    let pons_profile = expected.pons_v3.expected_profile()?;
     if args
         .reconciliation_input
         .as_ref()
@@ -193,6 +199,15 @@ fn main() -> Result<()> {
             &records.evidence,
             records.bankr_quotes,
             plan_policy,
+        )? {
+            println!("{}", serde_json::to_string(&plan)?);
+        }
+        for plan in finalized_pons_plans(
+            &observed_candidates.feed_sequences,
+            &records.evidence,
+            records.pons_quotes,
+            plan_policy,
+            pons_profile,
         )? {
             println!("{}", serde_json::to_string(&plan)?);
         }
@@ -279,6 +294,15 @@ fn main() -> Result<()> {
             &records.evidence,
             records.bankr_quotes,
             plan_policy,
+        )? {
+            println!("{}", serde_json::to_string(&plan)?);
+        }
+        for plan in finalized_pons_plans(
+            &observed_sequences,
+            &records.evidence,
+            records.pons_quotes,
+            plan_policy,
+            pons_profile,
         )? {
             println!("{}", serde_json::to_string(&plan)?);
         }
@@ -390,6 +414,17 @@ fn read_reconciliation_records(path: &Path) -> Result<ReconciliationRecords> {
                         .push(serde_json::from_value(value).with_context(|| {
                             format!(
                                 "decode Bankr/Doppler V4 quote line {} from {}",
+                                index + 1,
+                                path.display()
+                            )
+                        })?)
+                }
+                Some("launchpad_pons_v3_paper_quote") => {
+                    records
+                        .pons_quotes
+                        .push(serde_json::from_value(value).with_context(|| {
+                            format!(
+                                "decode Pons V3 quote line {} from {}",
                                 index + 1,
                                 path.display()
                             )
@@ -613,6 +648,314 @@ fn finalized_bankr_plans(
         });
     }
     Ok(plans)
+}
+
+fn finalized_pons_plans(
+    observed_sequences: &HashMap<(B256, LaunchpadId), u64>,
+    evidence: &[ReconciliationEvidence],
+    quotes: Vec<PonsReceiptPaperQuote>,
+    policy: PaperPlanPolicy,
+    expected_profile: hermes_feed::PonsExpectedProfile,
+) -> Result<Vec<FinalizedV3PaperPlan>> {
+    let evidence = evidence
+        .iter()
+        .map(|record| ((record.tx_hash, record.launchpad), record))
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashMap::new();
+    let mut plans = Vec::new();
+    for quote in quotes {
+        let key = (quote.tx_hash, quote.launchpad);
+        if seen.insert(key, ()).is_some() {
+            anyhow::bail!("duplicate Pons V3 paper quote for {key:?}");
+        }
+        let Some(feed_sequence) = observed_sequences.get(&key).copied() else {
+            continue;
+        };
+        let confirmed = evidence.get(&key).is_some_and(|record| {
+            record.receipt_status
+                && record.protocol_event_match
+                && record.pons_generation == Some(hermes_feed::PonsGeneration::Current)
+                && record.protocol_blocker.is_none()
+        });
+        if !confirmed
+            || quote.record_type != "launchpad_pons_v3_paper_quote"
+            || quote.launchpad != LaunchpadId::Pons
+            || quote.entry.amount_in == U256::ZERO
+            || quote.entry.amount_in > policy.max_input_wei
+            || quote.entry.slippage_bps != policy.slippage_bps
+            || quote.entry.expected_output == U256::ZERO
+            || quote.entry.min_receive == U256::ZERO
+            || quote.entry.min_receive > quote.entry.expected_output
+            || quote.full_position_exit.amount_in != quote.entry.expected_output
+            || quote.full_position_exit.expected_output == U256::ZERO
+            || quote.full_position_exit.min_receive == U256::ZERO
+            || quote.full_position_exit.min_receive > quote.full_position_exit.expected_output
+            || quote.broadcast
+            || quote.execution_eligible
+            || quote.state_version.chain_id != hermes_feed::robinhood::CHAIN_ID
+            || quote.state_version.l2_block_number != quote.l2_block_number
+            || !pons_quote_arithmetic_is_consistent(&quote, policy, expected_profile)
+        {
+            anyhow::bail!("unsafe or inconsistent Pons V3 quote evidence for {key:?}");
+        }
+        plans.push(FinalizedV3PaperPlan {
+            record_type: "launchpad_paper_finalized_plan",
+            tx_hash: quote.tx_hash,
+            launchpad: quote.launchpad,
+            feed_sequence,
+            status: "quoted_execution_gated",
+            amount_in: quote.entry.amount_in,
+            expected_output: quote.entry.expected_output,
+            min_receive: quote.entry.min_receive,
+            quote_source: quote.quote_source,
+            quote_state_version: serde_json::to_value(quote.state_version)?,
+            exit_full_position: true,
+            exit_expected_output: quote.full_position_exit.expected_output,
+            exit_min_receive: quote.full_position_exit.min_receive,
+            simulated_round_trip_return_bps: quote.simulated_round_trip_return_bps,
+            leader_amounts_reused: false,
+            execution_eligible: false,
+            execution_blocker: quote.execution_blocker,
+            broadcast: false,
+        });
+    }
+    Ok(plans)
+}
+
+fn pons_quote_arithmetic_is_consistent(
+    quote: &PonsReceiptPaperQuote,
+    policy: PaperPlanPolicy,
+    expected_profile: hermes_feed::PonsExpectedProfile,
+) -> bool {
+    use hermes_feed::pons::{
+        PONS_CURRENT_FACTORY, PONS_CURRENT_LOCKER, PONS_POOL_FEE, PONS_POSITION_MANAGER,
+        PONS_SWAP_ROUTER_02, PONS_TICK_SPACING, PONS_V3_FACTORY, PONS_WETH, PonsGeneration,
+    };
+    use hermes_feed::robinhood::UNISWAP_V3_POOL_INIT_CODE_KECCAK256;
+    use uniswap_v3_math::sqrt_price_math::{_get_amount_0_delta, _get_amount_1_delta};
+    use uniswap_v3_math::tick_math::get_sqrt_ratio_at_tick;
+
+    const MAX_WALLET_BPS: u16 = 200;
+    const RESTRICTION_L1_BLOCKS: u64 = 366;
+    let market = &quote.market;
+    let entry = &quote.entry;
+    let exit = &quote.full_position_exit;
+    let token0 = market.token.min(PONS_WETH);
+    let token1 = market.token.max(PONS_WETH);
+    let expected_pool = hermes_feed::noxa_predict::predict_v3_pool_address(
+        PONS_V3_FACTORY,
+        token0,
+        token1,
+        PONS_POOL_FEE,
+        UNISWAP_V3_POOL_INIT_CODE_KECCAK256,
+    );
+    let (expected_initialize_tick, expected_range) = if market.token < PONS_WETH {
+        (-204_200, (-204_200, 887_200))
+    } else {
+        (204_200, (-887_200, 204_200))
+    };
+    let Ok(position_liquidity) = u128::try_from(market.position_liquidity) else {
+        return false;
+    };
+    let Ok(receipt_end_liquidity) = u128::try_from(market.receipt_end_liquidity) else {
+        return false;
+    };
+    if expected_profile.validate().is_err() {
+        return false;
+    }
+    let expected_runtime_hash = |address| {
+        expected_profile
+            .identity(address)
+            .map(|identity| identity.runtime_hash)
+    };
+    let Some(expected_first_eligible_l1) =
+        quote.state_version.launch_l1_block_number.checked_add(1)
+    else {
+        return false;
+    };
+    let Some(expected_restriction_end_l1) = quote
+        .state_version
+        .launch_l1_block_number
+        .checked_add(RESTRICTION_L1_BLOCKS)
+    else {
+        return false;
+    };
+    if quote.quote_source != "confirmed_receipt_end_pons_v3_state"
+        || quote.sizing_source != "independent_fixed_tiny_weth_fresh_wallet_policy"
+        || quote.execution_blocker
+            != "paper_only_current_factory_source_prediction_restriction_and_route_gates_not_satisfied"
+        || market.generation != PonsGeneration::Current
+        || market.leader == alloy_primitives::Address::ZERO
+        || market.token == alloy_primitives::Address::ZERO
+        || market.token == PONS_WETH
+        || market.pool != expected_pool
+        || market.quote_asset != PONS_WETH
+        || market.factory != PONS_CURRENT_FACTORY
+        || Some(market.factory_runtime_hash) != expected_runtime_hash(PONS_CURRENT_FACTORY)
+        || market.locker != PONS_CURRENT_LOCKER
+        || Some(market.locker_runtime_hash) != expected_runtime_hash(PONS_CURRENT_LOCKER)
+        || market.position_manager != PONS_POSITION_MANAGER
+        || Some(market.position_manager_runtime_hash)
+            != expected_runtime_hash(PONS_POSITION_MANAGER)
+        || Some(market.v3_factory_runtime_hash) != expected_runtime_hash(PONS_V3_FACTORY)
+        || Some(market.swap_router_runtime_hash) != expected_runtime_hash(PONS_SWAP_ROUTER_02)
+        || Some(market.quote_asset_runtime_hash) != expected_runtime_hash(PONS_WETH)
+        || market.position_id == U256::ZERO
+        || market.fee != PONS_POOL_FEE
+        || market.tick_spacing != PONS_TICK_SPACING
+        || market.initialize_tick != expected_initialize_tick
+        || (market.position_tick_lower, market.position_tick_upper) != expected_range
+        || position_liquidity == 0
+        || market.mint_count != 1
+        || market.launch_swap_count > 1
+        || !(market.initialize_log_index < market.mint_log_index
+            && market.mint_log_index < market.locker_log_index
+            && market.locker_log_index < market.launch_log_index)
+        || quote.tx_hash == B256::ZERO
+        || quote.state_version.block_hash == B256::ZERO
+        || quote.state_version.first_eligible_l1_block_number != expected_first_eligible_l1
+        || quote.state_version.restriction_end_l1_block_number != expected_restriction_end_l1
+        || entry.state_after.token_in != PONS_WETH
+        || entry.state_after.token_out != market.token
+        || exit.state_after.token_in != market.token
+        || exit.state_after.token_out != PONS_WETH
+        || exit.slippage_bps != policy.slippage_bps
+        || (token0 == PONS_WETH
+            && (market.position_amount0 != U256::ZERO || market.position_amount1 == U256::ZERO))
+        || (token1 == PONS_WETH
+            && (market.position_amount1 != U256::ZERO || market.position_amount0 == U256::ZERO))
+    {
+        return false;
+    }
+
+    let Ok(expected_initialize_sqrt) = get_sqrt_ratio_at_tick(expected_initialize_tick) else {
+        return false;
+    };
+    let Ok(lower_sqrt) = get_sqrt_ratio_at_tick(market.position_tick_lower) else {
+        return false;
+    };
+    let Ok(upper_sqrt) = get_sqrt_ratio_at_tick(market.position_tick_upper) else {
+        return false;
+    };
+    let expected_position_amounts = if token0 == PONS_WETH {
+        let Ok(amount1) = _get_amount_1_delta(lower_sqrt, upper_sqrt, position_liquidity, true)
+        else {
+            return false;
+        };
+        (U256::ZERO, amount1)
+    } else {
+        let Ok(amount0) = _get_amount_0_delta(lower_sqrt, upper_sqrt, position_liquidity, true)
+        else {
+            return false;
+        };
+        (amount0, U256::ZERO)
+    };
+    if (market.position_amount0, market.position_amount1) != expected_position_amounts {
+        return false;
+    }
+
+    let Ok(mut state) = hermes_feed::V3PoolState::new(
+        market.pool,
+        token0,
+        token1,
+        market.fee,
+        market.tick_spacing,
+        expected_initialize_sqrt,
+        expected_initialize_tick,
+        0,
+    ) else {
+        return false;
+    };
+    if state
+        .add_position(
+            market.position_tick_lower,
+            market.position_tick_upper,
+            position_liquidity,
+        )
+        .is_err()
+    {
+        return false;
+    }
+    if market.initial_buy_amount == U256::ZERO {
+        if market.launch_swap_count != 0
+            || market.initial_buy_swap_log_index.is_some()
+            || market.initial_buy_state_after.is_some()
+            || quote.state_version.terminal_log_index != market.launch_log_index
+            || market.receipt_end_sqrt_price_x96 != state.sqrt_price_x96
+            || market.receipt_end_tick != state.tick
+            || receipt_end_liquidity != state.liquidity
+        {
+            return false;
+        }
+    } else {
+        let Some(swap_log_index) = market.initial_buy_swap_log_index else {
+            return false;
+        };
+        let Ok(initial_buy_state) =
+            state.quote_exact_input(PONS_WETH, market.initial_buy_amount, None)
+        else {
+            return false;
+        };
+        if market.launch_swap_count != 1
+            || swap_log_index <= market.launch_log_index
+            || quote.state_version.terminal_log_index != swap_log_index
+            || market.initial_buy_state_after.as_ref() != Some(&initial_buy_state)
+            || market.receipt_end_sqrt_price_x96 != initial_buy_state.sqrt_price_x96_after
+            || market.receipt_end_tick != initial_buy_state.tick_after
+            || receipt_end_liquidity != initial_buy_state.liquidity_after
+            || state
+                .set_observation(
+                    initial_buy_state.sqrt_price_x96_after,
+                    initial_buy_state.tick_after,
+                    initial_buy_state.liquidity_after,
+                )
+                .is_err()
+        {
+            return false;
+        }
+    }
+    let Ok(expected_entry_state) = state.quote_exact_input(PONS_WETH, entry.amount_in, None) else {
+        return false;
+    };
+    if expected_entry_state != entry.state_after {
+        return false;
+    }
+    let mut post_entry = state;
+    if post_entry
+        .set_observation(
+            expected_entry_state.sqrt_price_x96_after,
+            expected_entry_state.tick_after,
+            expected_entry_state.liquidity_after,
+        )
+        .is_err()
+    {
+        return false;
+    }
+    let Ok(expected_exit_state) =
+        post_entry.quote_exact_input(market.token, expected_entry_state.amount_out, None)
+    else {
+        return false;
+    };
+    let retained_bps = U256::from(10_000_u16 - policy.slippage_bps);
+    let expected_entry_min =
+        expected_entry_state.amount_out * retained_bps / U256::from(10_000_u16);
+    let expected_exit_min = expected_exit_state.amount_out * retained_bps / U256::from(10_000_u16);
+    let expected_round_trip =
+        expected_exit_state.amount_out * U256::from(10_000_u16) / entry.amount_in;
+    let supply = U256::from(1_000_000_000_u64) * U256::from(1_000_000_000_000_000_000_u64);
+    let max_fresh_wallet_output = supply * U256::from(MAX_WALLET_BPS) / U256::from(10_000_u16);
+
+    entry.amount_in <= policy.max_input_wei
+        && entry.amount_in == entry.state_after.amount_in_requested
+        && entry.amount_in == entry.state_after.amount_in_consumed
+        && entry.expected_output == expected_entry_state.amount_out
+        && entry.min_receive == expected_entry_min
+        && entry.expected_output <= max_fresh_wallet_output
+        && exit.amount_in == expected_entry_state.amount_out
+        && exit.state_after == expected_exit_state
+        && exit.expected_output == expected_exit_state.amount_out
+        && exit.min_receive == expected_exit_min
+        && quote.simulated_round_trip_return_bps == expected_round_trip
 }
 
 fn bankr_quote_arithmetic_is_consistent(
@@ -856,9 +1199,10 @@ mod tests {
     use alloy_primitives::Address;
     use hermes_feed::{
         BankrDopplerExpectedProfile, BankrDopplerQuotePolicy, ClankerQuotePolicy,
-        ClankerV4ExpectedProfile, NoxaReceipt, RobinhoodBlock, RobinhoodTransaction,
-        V3PaperSwapQuote, V3Quote, V3QuoteStateVersion, V3ReceiptMarketEvidence,
-        quote_bankr_doppler_launch_receipt, quote_clanker_launch_receipt,
+        ClankerV4ExpectedProfile, NoxaReceipt, PonsQuotePolicy, RobinhoodBlock,
+        RobinhoodTransaction, V3PaperSwapQuote, V3Quote, V3QuoteStateVersion,
+        V3ReceiptMarketEvidence, quote_bankr_doppler_launch_receipt, quote_clanker_launch_receipt,
+        quote_pons_launch_receipt,
     };
 
     use super::*;
@@ -881,6 +1225,8 @@ mod tests {
                 receipt_status: true,
                 protocol_event_match: true,
                 observed_unix_ns: 150,
+                pons_generation: None,
+                protocol_blocker: None,
             },
             ReconciliationEvidence {
                 tx_hash: false_positive_key.0,
@@ -888,6 +1234,8 @@ mod tests {
                 receipt_status: true,
                 protocol_event_match: false,
                 observed_unix_ns: 250,
+                pons_generation: None,
+                protocol_blocker: None,
             },
             ReconciliationEvidence {
                 tx_hash: missed_key.0,
@@ -895,6 +1243,8 @@ mod tests {
                 receipt_status: true,
                 protocol_event_match: true,
                 observed_unix_ns: 400,
+                pons_generation: None,
+                protocol_blocker: None,
             },
         ];
 
@@ -1021,6 +1371,39 @@ mod tests {
         .unwrap()
     }
 
+    fn pons_quote_fixture() -> PonsReceiptPaperQuote {
+        pons_quote_from_fixture(include_str!(
+            "../../tests/fixtures/pons-current-live-proof.json"
+        ))
+    }
+
+    fn pons_initial_buy_quote_fixture() -> PonsReceiptPaperQuote {
+        pons_quote_from_fixture(include_str!(
+            "../../tests/fixtures/pons-current-initial-buy-live-proof.json"
+        ))
+    }
+
+    fn pons_below_weth_quote_fixture() -> PonsReceiptPaperQuote {
+        pons_quote_from_fixture(include_str!(
+            "../../tests/fixtures/pons-current-token-below-weth-live-proof.json"
+        ))
+    }
+
+    fn pons_quote_from_fixture(contents: &str) -> PonsReceiptPaperQuote {
+        let fixture: ClankerLiveFixture = serde_json::from_str(contents).unwrap();
+        quote_pons_launch_receipt(
+            &fixture.transaction,
+            &fixture.receipt,
+            hermes_feed::PonsExpectedProfile::production(),
+            PonsQuotePolicy {
+                amount_in: U256::from(1_000_000_000_000_000_u64),
+                max_amount_in: U256::from(1_000_000_000_000_000_u64),
+                slippage_bps: 100,
+            },
+        )
+        .unwrap()
+    }
+
     fn finalize_bankr_quote(
         quote: BankrDopplerReceiptPaperQuote,
     ) -> Result<Vec<FinalizedV3PaperPlan>> {
@@ -1033,6 +1416,8 @@ mod tests {
                 receipt_status: true,
                 protocol_event_match: true,
                 observed_unix_ns: 100,
+                pons_generation: None,
+                protocol_blocker: None,
             }],
             vec![quote],
             PaperPlanPolicy {
@@ -1040,6 +1425,29 @@ mod tests {
                 slippage_bps: 100,
                 ..PaperPlanPolicy::default()
             },
+        )
+    }
+
+    fn finalize_pons_quote(quote: PonsReceiptPaperQuote) -> Result<Vec<FinalizedV3PaperPlan>> {
+        let key = (quote.tx_hash, quote.launchpad);
+        finalized_pons_plans(
+            &HashMap::from([(key, 99)]),
+            &[ReconciliationEvidence {
+                tx_hash: key.0,
+                launchpad: key.1,
+                receipt_status: true,
+                protocol_event_match: true,
+                observed_unix_ns: 100,
+                pons_generation: Some(hermes_feed::PonsGeneration::Current),
+                protocol_blocker: None,
+            }],
+            vec![quote],
+            PaperPlanPolicy {
+                max_input_wei: U256::from(1_000_000_000_000_000_u64),
+                slippage_bps: 100,
+                ..PaperPlanPolicy::default()
+            },
+            hermes_feed::PonsExpectedProfile::production(),
         )
     }
 
@@ -1055,6 +1463,8 @@ mod tests {
                 receipt_status: true,
                 protocol_event_match: true,
                 observed_unix_ns: 100,
+                pons_generation: None,
+                protocol_blocker: None,
             }],
             vec![quote],
             PaperPlanPolicy {
@@ -1087,6 +1497,8 @@ mod tests {
                     receipt_status: true,
                     protocol_event_match: true,
                     observed_unix_ns: 100,
+                    pons_generation: None,
+                    protocol_blocker: None,
                 }],
                 vec![quote],
                 PaperPlanPolicy {
@@ -1111,6 +1523,8 @@ mod tests {
                 receipt_status: true,
                 protocol_event_match: true,
                 observed_unix_ns: 100,
+                pons_generation: None,
+                protocol_blocker: None,
             }],
             vec![quote],
             PaperPlanPolicy {
@@ -1139,6 +1553,62 @@ mod tests {
         assert!(plans[0].min_receive > U256::ZERO);
         assert!(!plans[0].execution_eligible);
         assert!(!plans[0].broadcast);
+    }
+
+    #[test]
+    fn confirmed_pons_quote_becomes_rederived_execution_gated_plan() {
+        let plans = finalize_pons_quote(pons_quote_fixture()).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].launchpad, LaunchpadId::Pons);
+        assert_eq!(plans[0].status, "quoted_execution_gated");
+        assert_eq!(plans[0].feed_sequence, 99);
+        assert!(plans[0].expected_output > U256::ZERO);
+        assert!(plans[0].exit_expected_output > U256::ZERO);
+        assert!(!plans[0].execution_eligible);
+        assert!(!plans[0].broadcast);
+
+        let initial_buy = finalize_pons_quote(pons_initial_buy_quote_fixture()).unwrap();
+        assert_eq!(initial_buy.len(), 1);
+        assert!(initial_buy[0].expected_output > U256::ZERO);
+
+        let below_weth = finalize_pons_quote(pons_below_weth_quote_fixture()).unwrap();
+        assert_eq!(below_weth.len(), 1);
+        assert!(below_weth[0].exit_expected_output > U256::ZERO);
+    }
+
+    #[test]
+    fn tampered_pons_quote_or_pins_cannot_finalize() {
+        let mut output = pons_quote_fixture();
+        output.entry.expected_output += U256::from(1_u8);
+        assert!(finalize_pons_quote(output).is_err());
+
+        let mut pool = pons_quote_fixture();
+        pool.market.pool = Address::with_last_byte(0xee);
+        assert!(finalize_pons_quote(pool).is_err());
+
+        let mut restriction = pons_quote_fixture();
+        restriction.state_version.restriction_end_l1_block_number += 1;
+        assert!(finalize_pons_quote(restriction).is_err());
+
+        let mut liquidity = pons_quote_fixture();
+        liquidity.market.position_liquidity += U256::from(1_u8);
+        assert!(finalize_pons_quote(liquidity).is_err());
+
+        let mut round_trip = pons_quote_fixture();
+        round_trip.simulated_round_trip_return_bps += U256::from(1_u8);
+        assert!(finalize_pons_quote(round_trip).is_err());
+
+        let mut canonical_state = pons_quote_fixture();
+        canonical_state.market.receipt_end_sqrt_price_x96 += U256::from(1_u8);
+        assert!(finalize_pons_quote(canonical_state).is_err());
+
+        let mut initial_buy = pons_initial_buy_quote_fixture();
+        initial_buy.market.initial_buy_amount += U256::from(1_u8);
+        assert!(finalize_pons_quote(initial_buy).is_err());
+
+        let mut runtime_pin = pons_quote_fixture();
+        runtime_pin.market.factory_runtime_hash = B256::with_last_byte(0xee);
+        assert!(finalize_pons_quote(runtime_pin).is_err());
     }
 
     #[test]

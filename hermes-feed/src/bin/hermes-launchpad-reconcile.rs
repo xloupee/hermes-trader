@@ -27,8 +27,9 @@ use hermes_feed::tier2_curve::HOOD_FACTORY;
 use hermes_feed::{
     BankrDopplerExpectedProfile, BankrDopplerQuotePolicy, BankrDopplerReceiptPaperQuote,
     ClankerQuotePolicy, ClankerReceiptPaperQuote, ClankerV4ExpectedProfile, NoxaRpcClient,
-    V3ReceiptPaperQuote, V3ReceiptQuotePolicy, quote_bankr_doppler_launch_receipt,
-    quote_clanker_launch_receipt, quote_v3_launch_receipt,
+    PonsQuoteError, PonsQuotePolicy, PonsReceiptPaperQuote, V3ReceiptPaperQuote,
+    V3ReceiptQuotePolicy, quote_bankr_doppler_launch_receipt, quote_clanker_launch_receipt,
+    quote_pons_launch_receipt, quote_v3_launch_receipt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -80,13 +81,17 @@ struct ObservedCandidate {
     observer_received_unix_ns: u64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ReconciliationEvidence {
     tx_hash: B256,
     launchpad: LaunchpadId,
     receipt_status: bool,
     protocol_event_match: bool,
     observed_unix_ns: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pons_generation: Option<hermes_feed::PonsGeneration>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    protocol_blocker: Option<String>,
 }
 
 #[derive(Debug)]
@@ -95,6 +100,21 @@ struct ReconciledCandidate {
     v3_quote: Option<V3ReceiptPaperQuote>,
     clanker_quote: Option<ClankerReceiptPaperQuote>,
     bankr_quote: Option<BankrDopplerReceiptPaperQuote>,
+    pons_quote: Option<PonsReceiptPaperQuote>,
+}
+
+#[derive(Clone, Copy)]
+struct ReconcileProfiles {
+    clanker: Option<ClankerV4ExpectedProfile>,
+    bankr: Option<BankrDopplerExpectedProfile>,
+    pons: hermes_feed::PonsExpectedProfile,
+}
+
+struct PonsReconciliationOutcome {
+    generation: Option<hermes_feed::PonsGeneration>,
+    protocol_match: bool,
+    quote: Option<PonsReceiptPaperQuote>,
+    blocker: Option<String>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -141,6 +161,12 @@ async fn main() -> Result<()> {
         .bankr_doppler_v4
         .map(|configured| configured.expected_profile())
         .transpose()?;
+    let pons_profile = expected.pons_v3.expected_profile()?;
+    let profiles = ReconcileProfiles {
+        clanker: clanker_profile,
+        bankr: bankr_profile,
+        pons: pons_profile,
+    };
     let rpc = NoxaRpcClient::with_url(args.rpc_url)?;
     let chain_id = rpc.chain_id().await?;
     if chain_id != CHAIN_ID {
@@ -162,8 +188,7 @@ async fn main() -> Result<()> {
                 timeout,
                 poll_interval,
                 quote_policy,
-                clanker_profile,
-                bankr_profile,
+                profiles,
             )
             .await
         }
@@ -180,6 +205,9 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&quote)?);
         }
         if let Some(quote) = result.bankr_quote {
+            println!("{}", serde_json::to_string(&quote)?);
+        }
+        if let Some(quote) = result.pons_quote {
             println!("{}", serde_json::to_string(&quote)?);
         }
     }
@@ -239,8 +267,7 @@ async fn reconcile_candidate(
     timeout: Duration,
     poll_interval: Duration,
     quote_policy: V3ReceiptQuotePolicy,
-    clanker_profile: Option<ClankerV4ExpectedProfile>,
-    bankr_profile: Option<BankrDopplerExpectedProfile>,
+    profiles: ReconcileProfiles,
 ) -> Result<ReconciledCandidate> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -256,6 +283,9 @@ async fn reconcile_candidate(
             let mut v3_quote = None;
             let mut clanker_quote = None;
             let mut bankr_quote = None;
+            let mut pons_quote = None;
+            let mut pons_generation = None;
+            let mut protocol_blocker = None;
             if receipt.status
                 && matches!(
                     candidate.launchpad,
@@ -285,7 +315,7 @@ async fn reconcile_candidate(
                     .await?
                     .with_context(|| format!("missing transaction {}", candidate.tx_hash))?;
                 let block = rpc.block_by_number(receipt.l2_block_number).await?;
-                if let Some(profile) = clanker_profile {
+                if let Some(profile) = profiles.clanker {
                     match quote_clanker_launch_receipt(
                         &transaction,
                         &receipt,
@@ -313,7 +343,7 @@ async fn reconcile_candidate(
                     .await?
                     .with_context(|| format!("missing transaction {}", candidate.tx_hash))?;
                 let block = rpc.block_by_number(receipt.l2_block_number).await?;
-                if let Some(profile) = bankr_profile {
+                if let Some(profile) = profiles.bankr {
                     match quote_bankr_doppler_launch_receipt(
                         &transaction,
                         &receipt,
@@ -335,6 +365,18 @@ async fn reconcile_candidate(
                     protocol_match = false;
                 }
             }
+            if receipt.status && candidate.launchpad == LaunchpadId::Pons {
+                let transaction = rpc
+                    .transaction_by_hash(candidate.tx_hash)
+                    .await?
+                    .with_context(|| format!("missing transaction {}", candidate.tx_hash))?;
+                let outcome =
+                    strict_pons_reconciliation(&transaction, &receipt, profiles.pons, quote_policy);
+                protocol_match = outcome.protocol_match;
+                pons_generation = outcome.generation;
+                pons_quote = outcome.quote;
+                protocol_blocker = outcome.blocker;
+            }
             return Ok(ReconciledCandidate {
                 evidence: ReconciliationEvidence {
                     tx_hash: candidate.tx_hash,
@@ -342,10 +384,13 @@ async fn reconcile_candidate(
                     receipt_status: receipt.status,
                     protocol_event_match: protocol_match,
                     observed_unix_ns: unix_now_ns(),
+                    pons_generation,
+                    protocol_blocker,
                 },
                 v3_quote,
                 clanker_quote,
                 bankr_quote,
+                pons_quote,
             });
         }
         if Instant::now() >= deadline {
@@ -356,14 +401,74 @@ async fn reconcile_candidate(
                     receipt_status: false,
                     protocol_event_match: false,
                     observed_unix_ns: unix_now_ns(),
+                    pons_generation: None,
+                    protocol_blocker: Some("receipt_timeout".into()),
                 },
                 v3_quote: None,
                 clanker_quote: None,
                 bankr_quote: None,
+                pons_quote: None,
             });
         }
         sleep(poll_interval).await;
     }
+}
+
+fn strict_pons_reconciliation(
+    transaction: &hermes_feed::RobinhoodTransaction,
+    receipt: &hermes_feed::NoxaReceipt,
+    expected_profile: hermes_feed::PonsExpectedProfile,
+    policy: V3ReceiptQuotePolicy,
+) -> PonsReconciliationOutcome {
+    let generation = match transaction.to {
+        Some(PONS_CURRENT_FACTORY) => Some(hermes_feed::PonsGeneration::Current),
+        Some(PONS_LEGACY_FACTORY) => Some(hermes_feed::PonsGeneration::Legacy),
+        _ => None,
+    };
+    match quote_current_pons(transaction, receipt, expected_profile, policy) {
+        Ok(Some(quote)) => PonsReconciliationOutcome {
+            generation,
+            protocol_match: true,
+            quote: Some(quote),
+            blocker: None,
+        },
+        Ok(None) => PonsReconciliationOutcome {
+            generation,
+            protocol_match: false,
+            quote: None,
+            blocker: Some(
+                "legacy_pons_generation_is_discovery_only_without_strict_receipt_profile".into(),
+            ),
+        },
+        Err(error) => PonsReconciliationOutcome {
+            generation,
+            protocol_match: false,
+            quote: None,
+            blocker: Some(format!("pons_quote_error:{error}")),
+        },
+    }
+}
+
+fn quote_current_pons(
+    transaction: &hermes_feed::RobinhoodTransaction,
+    receipt: &hermes_feed::NoxaReceipt,
+    expected_profile: hermes_feed::PonsExpectedProfile,
+    policy: V3ReceiptQuotePolicy,
+) -> std::result::Result<Option<PonsReceiptPaperQuote>, PonsQuoteError> {
+    if transaction.to != Some(PONS_CURRENT_FACTORY) {
+        return Ok(None);
+    }
+    quote_pons_launch_receipt(
+        transaction,
+        receipt,
+        expected_profile,
+        PonsQuotePolicy {
+            amount_in: policy.amount_in,
+            max_amount_in: policy.max_amount_in,
+            slippage_bps: policy.slippage_bps,
+        },
+    )
+    .map(Some)
 }
 
 fn protocol_event_match(launchpad: LaunchpadId, logs: &[ReceiptLog]) -> bool {
@@ -425,6 +530,7 @@ fn unix_now_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{Address, Bytes};
+    use hermes_feed::{NoxaReceipt, RobinhoodTransaction};
 
     use super::*;
 
@@ -468,5 +574,62 @@ mod tests {
             keccak256(HOOD_TOKEN_CREATED_SIGNATURE.as_bytes()),
             keccak256(HOOD_TRADE_SIGNATURE.as_bytes())
         );
+    }
+
+    #[derive(Deserialize)]
+    struct PonsLiveFixture {
+        transaction: RobinhoodTransaction,
+        receipt: NoxaReceipt,
+    }
+
+    #[test]
+    fn collector_emits_quote_only_for_strict_current_pons_proof() {
+        let fixture: PonsLiveFixture = serde_json::from_str(include_str!(
+            "../../tests/fixtures/pons-current-live-proof.json"
+        ))
+        .unwrap();
+        let policy = V3ReceiptQuotePolicy {
+            amount_in: U256::from(1_000_000_000_000_000_u64),
+            max_amount_in: U256::from(10_000_000_000_000_000_u64),
+            slippage_bps: 100,
+        };
+        let outcome = strict_pons_reconciliation(
+            &fixture.transaction,
+            &fixture.receipt,
+            hermes_feed::PonsExpectedProfile::production(),
+            policy,
+        );
+        assert!(outcome.protocol_match);
+        assert_eq!(
+            outcome.generation,
+            Some(hermes_feed::PonsGeneration::Current)
+        );
+        assert!(outcome.blocker.is_none());
+        let quote = outcome.quote.unwrap();
+        assert_eq!(quote.launchpad, LaunchpadId::Pons);
+        assert!(quote.entry.expected_output > U256::ZERO);
+        assert!(!quote.execution_eligible);
+        assert!(!quote.broadcast);
+
+        let mut legacy = fixture.transaction;
+        legacy.to = Some(PONS_LEGACY_FACTORY);
+        let legacy = strict_pons_reconciliation(
+            &legacy,
+            &fixture.receipt,
+            hermes_feed::PonsExpectedProfile::production(),
+            policy,
+        );
+        assert!(!legacy.protocol_match);
+        assert_eq!(legacy.generation, Some(hermes_feed::PonsGeneration::Legacy));
+        assert!(legacy.quote.is_none());
+        assert!(legacy.blocker.unwrap().contains("discovery_only"));
+    }
+
+    #[test]
+    fn pons_event_reconciliation_requires_a_pinned_factory() {
+        let current = log(PONS_CURRENT_FACTORY, PONS_TOKEN_LAUNCHED_TOPIC);
+        assert!(protocol_event_match(LaunchpadId::Pons, &[current]));
+        let lookalike = log(Address::with_last_byte(0xee), PONS_TOKEN_LAUNCHED_TOPIC);
+        assert!(!protocol_event_match(LaunchpadId::Pons, &[lookalike]));
     }
 }

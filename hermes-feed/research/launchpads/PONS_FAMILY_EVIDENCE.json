@@ -31,7 +31,7 @@
     "uniswap_swap_router_02": {"bytes": 24497, "keccak256": "0x6f36c378e272c6324c48f045182bcb54bd8ad654cf9ebd42e8893d52c4cb25dc"},
     "weth": {"bytes": 2202, "keccak256": "0x5706be52f64875fee65a2cec0d80e47a23d8793cbe85d214b48445e2d05f5353"},
     "example_token_0x432c99": {"bytes": 5274, "keccak256": "0x6a6e5415effa82c5d552033ae9d09e8d94409b939f3b59fd829fecf363aafe74"},
-    "example_pool_0xf28f09": {"bytes": 22142, "keccak256": "0xe32918db05b28e3a9479147bfefd144a13d1f191c6199a48e63e300386810a30"}
+    "proof_pool_0xa1ad01": {"bytes": 22142, "keccak256": "0x2e70e6b2e6201475cd3eee698bd00f5db4eab8a05c4aeb0bc3897a182515b72e"}
   },
   "selectors": {
     "launch_token": "0x686399cb",
@@ -39,6 +39,12 @@
     "exact_input_single": "0x04e45aaf",
     "exact_output_single": "0x5023b4df",
     "aggregator_swap": "0x4d819a2a"
+  },
+  "paper_quote_proofs": {
+    "no_initial_buy_token_above_weth": "0xcce2b414f04ad3caab0ad38bc10cc1ac0741ed95ac740495535b71c8302fcc41",
+    "initial_buy_token_above_weth": "0xb77e066e1ea469831e09540f1f787e84bcc118695533ff6b7df679a6bf00bc47",
+    "initial_buy_token_below_weth": "0xeb622138cfa790e89e3f55338569463f37b15e9ec67d6395c9ade46dd45dc519",
+    "first_public_swap_differential": "0xa4f0f75573936d8ad2d9fe0efa555b65fee212c90a2c54a457a41bfc23a06b10"
   },
   "event_topics": {
     "token_deployed": "0x1461370115e1c2be79cb529f8cfcbd11316e789d9c6099fc83417b0b4c48c62a",

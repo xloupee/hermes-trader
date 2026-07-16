@@ -82,11 +82,11 @@ Robinhood RPC. They are evidence pins, not an official Pons commitment.
 | WETH | 2,202 | `0x5706be52f64875fee65a2cec0d80e47a23d8793cbe85d214b48445e2d05f5353` |
 
 Token and pool runtimes contain deployment-specific immutables, so a single
-raw runtime hash is not universal. Reproducible examples are Ponshood token
+raw runtime hash is not universal. The receipt-linked Ponshood proof pair is token
 `0x432C99bBD9dc1d9040087598d7Cf40502d7cC20b` (5,274 bytes,
 `0x6a6e5415effa82c5d552033ae9d09e8d94409b939f3b59fd829fecf363aafe74`)
-and pool `0xF28F09dfe76860a9962a6915F356Be2Ce29c760d` (22,142 bytes,
-`0xe32918db05b28e3a9479147bfefd144a13d1f191c6199a48e63e300386810a30`).
+and pool `0xA1ad01da59552689835902B878ce6F5eA37F2B0B` (22,142 bytes,
+`0x2e70e6b2e6201475cd3eee698bd00f5db4eab8a05c4aeb0bc3897a182515b72e`).
 Tier 2 should additionally derive and pin normalized creation-code hashes before
 predictive admission.
 
@@ -136,6 +136,12 @@ predictive admission.
   `amountOutMinimum = 0`. The factory approves the position manager for supply,
   mints, and clears that approval. Ordinary frontend sell multicall/unwrap
   details remain unverified.
+- Complete current-generation receipts now cover both launch orientations and
+  atomic buying. Transaction `0xb77e066e...00bc47` proves a token-above-WETH
+  launch with a 0.001 WETH initial buy; transaction `0xeb622138...dc519`
+  proves token-below-WETH initialization and a nonzero initial buy. Their
+  initialize, one-sided mint, locked LP NFT, and terminal V3 swap states are
+  reproduced exactly by the paper quote verifier.
 - Verified costs/restrictions are the 0.0005 ETH launch fee, 1% Uniswap pool
   fee, 2% max wallet, 2.2% max transaction, and 366-L1-block restriction
   window. The contract-level meanings of the three config flags, creator-fee
@@ -277,7 +283,8 @@ Hermes can reuse these seams without adding hot-path I/O:
 - **Tier 2 now:** factory launch observer, receipt proof, pool registry, and
   paper quotes/trades with runtime/config drift halting the observer.
 - **Tier 1 later:** independently prove normalized token creation code and
-  CREATE2 formula; characterize both token orientations and initial buys;
+  CREATE2 formula; expand both-orientation and initial-buy sampling beyond the
+  retained live proofs;
   define graduation from onchain state; audit restriction flags and locker fee
   claims; verify buy/sell calldata/value/approval variants; obtain a quiet-window
   sample with zero prediction/quote mismatches; then require separate explicit

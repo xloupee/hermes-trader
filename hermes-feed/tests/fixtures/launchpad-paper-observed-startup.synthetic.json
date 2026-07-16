@@ -1,8 +1,8 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "document_role": "observed_startup_snapshot",
   "provenance": "synthetic_offline_fixture",
-  "fixture_id": "launchpad-paper-offline-v2",
+  "fixture_id": "launchpad-paper-offline-v3",
   "chain_id": 4663,
   "pins": [
     {"address":"0xd9ec2db5f3d1b236843925949fe5bd8a3836fccb","implementation":null,"runtime_hash":"0xadcfca67f5d7df9f26974a07be2b5d83894765e6e5e9b9f0a232223f25c795e6"},

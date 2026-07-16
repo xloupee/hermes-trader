@@ -4,6 +4,7 @@
 //! contains no RPC, filesystem, signing, submission, or control-plane capability.
 
 use std::collections::HashSet;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use alloy_consensus::{Transaction, TxEnvelope, transaction::SignerRecoverable};
 use alloy_primitives::{Address, B256, U256};
@@ -100,20 +101,92 @@ pub struct PaperLaunchpadObservation {
     pub kind: &'static str,
     pub planning_mode: ExecutionMode,
     pub live_execution_enabled: bool,
+    pub feed_sequence: Option<u64>,
+    pub l1_block_number: Option<u64>,
+    pub l1_timestamp: Option<u64>,
+    pub observer_received_unix_ns: Option<u64>,
+    pub observer_latency_ns: Option<u64>,
     pub detail: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
 pub struct PaperFeedRejection {
     pub tx_hash: B256,
+    pub feed_sequence: u64,
+    pub l1_block_number: u64,
+    pub l1_timestamp: u64,
+    pub observer_received_unix_ns: u64,
+    pub observer_latency_ns: u64,
     pub reason: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct PaperFeedReport {
+    pub frame_received_unix_ns: u64,
+    pub frame_decode_elapsed_ns: u64,
     pub decode: PaperDecodeSummary,
     pub observations: Vec<PaperLaunchpadObservation>,
+    pub trade_plans: Vec<PaperTradePlan>,
+    pub reconciliation_requests: Vec<PaperReconciliationRequest>,
     pub rejections: Vec<PaperFeedRejection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperTradePlanStatus {
+    AwaitingIndependentWarmQuote,
+    UnavailableDiscoveryOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaperPlanPolicy {
+    pub max_input_wei: U256,
+    pub slippage_bps: u16,
+    pub take_profit_bps: u16,
+    pub stop_loss_bps: u16,
+    pub max_hold_seconds: u64,
+}
+
+impl Default for PaperPlanPolicy {
+    fn default() -> Self {
+        Self {
+            max_input_wei: U256::from(1_000_000_000_000_000_u64),
+            slippage_bps: 100,
+            take_profit_bps: 2_000,
+            stop_loss_bps: 1_000,
+            max_hold_seconds: 300,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PaperTradePlan {
+    pub tx_hash: B256,
+    pub launchpad: LaunchpadId,
+    pub feed_sequence: u64,
+    pub status: PaperTradePlanStatus,
+    pub max_input_wei: U256,
+    pub slippage_bps: u16,
+    pub expected_output: Option<U256>,
+    pub min_receive: Option<U256>,
+    pub quote_source: &'static str,
+    pub leader_amounts_reused: bool,
+    pub exit_full_position: bool,
+    pub take_profit_bps: u16,
+    pub stop_loss_bps: u16,
+    pub max_hold_seconds: u64,
+    pub broadcast: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PaperReconciliationRequest {
+    pub tx_hash: B256,
+    pub launchpad: LaunchpadId,
+    pub feed_sequence: u64,
+    pub l1_block_number: u64,
+    pub l1_timestamp: u64,
+    pub evidence_source: &'static str,
+    pub initial_decision_dependency: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -248,6 +321,7 @@ pub struct PaperLaunchpadObserver {
 pub struct PaperFeedRuntime {
     decoder: FeedDecoder,
     observer: PaperLaunchpadObserver,
+    plan_policy: PaperPlanPolicy,
 }
 
 impl PaperFeedRuntime {
@@ -255,7 +329,31 @@ impl PaperFeedRuntime {
         Self {
             decoder: FeedDecoder::new(Filter::default()),
             observer,
+            plan_policy: PaperPlanPolicy::default(),
         }
+    }
+
+    pub fn with_plan_policy(
+        observer: PaperLaunchpadObserver,
+        plan_policy: PaperPlanPolicy,
+    ) -> Result<Self, PaperObserverError> {
+        if plan_policy.max_input_wei == U256::ZERO
+            || plan_policy.slippage_bps == 0
+            || plan_policy.slippage_bps >= 10_000
+            || plan_policy.take_profit_bps == 0
+            || plan_policy.stop_loss_bps == 0
+            || plan_policy.stop_loss_bps >= 10_000
+            || plan_policy.max_hold_seconds == 0
+        {
+            return Err(PaperObserverError::Startup(
+                "paper plan policy contains zero or out-of-range bounds".into(),
+            ));
+        }
+        Ok(Self {
+            decoder: FeedDecoder::new(Filter::default()),
+            observer,
+            plan_policy,
+        })
     }
 
     pub fn capabilities(&self) -> Vec<LaunchpadCapability> {
@@ -263,27 +361,121 @@ impl PaperFeedRuntime {
     }
 
     pub fn decode(&mut self, feed: &BroadcastMessage) -> Result<PaperFeedReport, DecodeError> {
+        let frame_started = Instant::now();
+        let frame_received_unix_ns = unix_now_ns();
         let mut observations = Vec::new();
         let mut rejections = Vec::new();
         let report: DecodeReport = self.decoder.decode_with(feed, |context| {
             match self.observer.observe_transaction(context.transaction) {
-                Ok(Some(observation)) => observations.push(observation),
+                Ok(Some(mut observation)) => {
+                    observation.feed_sequence = Some(context.sequence_number);
+                    observation.l1_block_number = Some(context.l1_block_number);
+                    observation.l1_timestamp = Some(context.l1_timestamp);
+                    observation.observer_received_unix_ns = Some(frame_received_unix_ns);
+                    observation.observer_latency_ns = Some(elapsed_ns(frame_started));
+                    observations.push(observation);
+                }
                 Ok(None) => {}
                 Err(error) => rejections.push(PaperFeedRejection {
                     tx_hash: *context.transaction.tx_hash(),
+                    feed_sequence: context.sequence_number,
+                    l1_block_number: context.l1_block_number,
+                    l1_timestamp: context.l1_timestamp,
+                    observer_received_unix_ns: frame_received_unix_ns,
+                    observer_latency_ns: elapsed_ns(frame_started),
                     reason: error.to_string(),
                 }),
             }
         })?;
+        let trade_plans = observations
+            .iter()
+            .map(|observation| paper_trade_plan(observation, self.plan_policy))
+            .collect();
+        let reconciliation_requests = observations
+            .iter()
+            .map(paper_reconciliation_request)
+            .collect();
         Ok(PaperFeedReport {
+            frame_received_unix_ns,
+            frame_decode_elapsed_ns: elapsed_ns(frame_started),
             decode: PaperDecodeSummary {
                 messages: report.messages,
                 signed_transactions: report.signed_transactions,
                 envelope_decode_ns: report.envelope_decode_ns,
             },
             observations,
+            trade_plans,
+            reconciliation_requests,
             rejections,
         })
+    }
+}
+
+fn unix_now_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn paper_trade_plan(
+    observation: &PaperLaunchpadObservation,
+    policy: PaperPlanPolicy,
+) -> PaperTradePlan {
+    let (status, quote_source) = if observation.planning_mode == ExecutionMode::DiscoveryOnly {
+        (
+            PaperTradePlanStatus::UnavailableDiscoveryOnly,
+            "adapter_semantics_incomplete",
+        )
+    } else {
+        (
+            PaperTradePlanStatus::AwaitingIndependentWarmQuote,
+            "independent_warm_market_snapshot_required",
+        )
+    };
+    PaperTradePlan {
+        tx_hash: observation.tx_hash,
+        launchpad: observation.launchpad,
+        feed_sequence: observation
+            .feed_sequence
+            .expect("runtime attaches sequence before planning"),
+        status,
+        max_input_wei: policy.max_input_wei,
+        slippage_bps: policy.slippage_bps,
+        expected_output: None,
+        min_receive: None,
+        quote_source,
+        leader_amounts_reused: false,
+        exit_full_position: true,
+        take_profit_bps: policy.take_profit_bps,
+        stop_loss_bps: policy.stop_loss_bps,
+        max_hold_seconds: policy.max_hold_seconds,
+        broadcast: false,
+    }
+}
+
+fn paper_reconciliation_request(
+    observation: &PaperLaunchpadObservation,
+) -> PaperReconciliationRequest {
+    PaperReconciliationRequest {
+        tx_hash: observation.tx_hash,
+        launchpad: observation.launchpad,
+        feed_sequence: observation
+            .feed_sequence
+            .expect("runtime attaches sequence before reconciliation"),
+        l1_block_number: observation
+            .l1_block_number
+            .expect("runtime attaches L1 block before reconciliation"),
+        l1_timestamp: observation
+            .l1_timestamp
+            .expect("runtime attaches L1 timestamp before reconciliation"),
+        evidence_source: "independent_receipt_and_protocol_events",
+        initial_decision_dependency: false,
     }
 }
 
@@ -705,6 +897,11 @@ impl PaperLaunchpadObserver {
             kind,
             planning_mode,
             live_execution_enabled: false,
+            feed_sequence: None,
+            l1_block_number: None,
+            l1_timestamp: None,
+            observer_received_unix_ns: None,
+            observer_latency_ns: None,
             detail,
         })
     }
@@ -1548,11 +1745,25 @@ mod tests {
         assert_eq!(report.observations.len(), 1);
         assert_eq!(report.observations[0].launchpad, LaunchpadId::HoodFun);
         assert_eq!(report.observations[0].leader, expected_leader);
+        assert_eq!(report.observations[0].feed_sequence, Some(42));
+        assert_eq!(report.observations[0].l1_block_number, Some(9));
+        assert_eq!(report.observations[0].l1_timestamp, Some(10));
+        assert!(report.observations[0].observer_received_unix_ns.is_some());
+        assert!(report.observations[0].observer_latency_ns.is_some());
         assert_eq!(
             report.observations[0].leader_origin,
             LeaderOrigin::DirectSigner
         );
         assert!(!report.observations[0].live_execution_enabled);
+        assert_eq!(report.trade_plans.len(), 1);
+        assert_eq!(report.trade_plans[0].feed_sequence, 42);
+        assert!(!report.trade_plans[0].leader_amounts_reused);
+        assert!(report.trade_plans[0].expected_output.is_none());
+        assert!(report.trade_plans[0].min_receive.is_none());
+        assert!(!report.trade_plans[0].broadcast);
+        assert_eq!(report.reconciliation_requests.len(), 1);
+        assert_eq!(report.reconciliation_requests[0].feed_sequence, 42);
+        assert!(!report.reconciliation_requests[0].initial_decision_dependency);
     }
 
     #[test]

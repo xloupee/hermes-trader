@@ -54,11 +54,12 @@ set until its semantics are complete.
   two action matches, and two finalized non-broadcast paper plans. Replay
   latency is intentionally excluded because replay wall time is not live
   observation latency.
-- Both Bow launches were correctly observed but the strict quote rejected a
-  payable embedded initial buy. The receipts coherently bind transaction
-  value, WETH pool delta, token pool delta, and recipient. This is a quote
-  implementation gap, not evidence of an unsafe receipt. Bow remains blocked
-  until the embedded-buy reconstruction is implemented and negatively tested.
+- Both Bow launches were correctly observed but the original strict quote
+  rejected a payable embedded initial buy. The corrected quoter derives WETH
+  input from transaction value and token output from the pool delta, then
+  requires independent V3 replay to match both deltas and terminal state. A
+  captured-window replay admitted both quotes and finalized two non-broadcast
+  paper plans; value, swap, and missing-swap mutations fail closed.
 - Four Bankr misses used the exact reviewed ERC-7579 selector, zero mode/value,
   Airlock target, and inner selector, but rotated EIP-7702 accounts with the
   same reviewed designator and Kernel. The fifth was a direct Airlock call.
@@ -83,10 +84,23 @@ tiny policy outcome after the embedded launch swap:
 These are paper simulations from receipt-end state, not executable or live
 quotes. The token restriction and runtime checks remain unsatisfied.
 
+## Bow independent paper outcomes
+
+The two payable Bow receipts produced distinct receipt-end quotes under the
+same fixed tiny policy:
+
+| Transaction | Entry output | Entry minimum | Full exit | Exit minimum | Return |
+|---|---:|---:|---:|---:|---:|
+| `0x6ee43f...8458` | `616344.855547336185380396` | `610181.406991862823526592` | `0.000980106129042453 WETH` | `0.000970305067752028 WETH` | `9801 bps` |
+| `0xf84259...ab6b` | `618664.675371529997585409` | `612478.028617814697609554` | `0.000980106140562431 WETH` | `0.000970305079156806 WETH` | `9801 bps` |
+
+Each entry size is `0.001 WETH`, each minimum applies 1% slippage, and each
+plan remains `execution_eligible: false` and `broadcast: false`.
+
 ## Promotion decision
 
-No launchpad is ready for a canary from this sample. LaunchHood needs a fresh
-post-fix live window with valid latency and a larger confirmed sample. Bow and
-Bankr require the quote/envelope gaps above to be closed. Pons activity was
+No launchpad is ready for a canary from this sample. Bow and LaunchHood need a
+fresh post-fix live window with valid latency and a larger confirmed sample.
+Bankr requires the account/envelope gaps above to be closed. Pons activity was
 legacy discovery-only. Clanker and Hood had no events in this window. Any
 canary remains separately approval-gated and out of scope for local work.

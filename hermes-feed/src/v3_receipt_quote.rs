@@ -161,7 +161,9 @@ struct LaunchIdentity {
     log_index: u64,
     restriction_end_block: Option<U256>,
     initial_buy_amount: U256,
-    initial_buy_tokens: U256,
+    /// LaunchHood declares this in its launch event. Bow does not, so Bow's
+    /// output must be derived from the pool delta and independent V3 replay.
+    initial_buy_tokens: Option<U256>,
 }
 
 /// Reconstruct the exact pool state at the end of a confirmed launch receipt,
@@ -175,7 +177,7 @@ pub fn quote_v3_launch_receipt(
     policy: V3ReceiptQuotePolicy,
 ) -> Result<V3ReceiptPaperQuote, V3ReceiptQuoteError> {
     validate_receipt_and_policy(transaction, receipt, launchpad, policy)?;
-    let launch = exact_launch_identity(launchpad, &receipt.logs)?;
+    let mut launch = exact_launch_identity(launchpad, &receipt.logs)?;
     let expected_factory = match launchpad {
         LaunchpadId::Bow => BOW_LAUNCH_FACTORY,
         LaunchpadId::LaunchHoodV3 => LAUNCHHOOD_V3_FACTORY,
@@ -185,8 +187,8 @@ pub fn quote_v3_launch_receipt(
         return Err(V3ReceiptQuoteError::TransactionEnvelope);
     }
     match launchpad {
-        LaunchpadId::Bow if transaction.value != U256::ZERO => {
-            return Err(V3ReceiptQuoteError::EmbeddedSwapMismatch);
+        LaunchpadId::Bow => {
+            launch.initial_buy_amount = transaction.value;
         }
         LaunchpadId::LaunchHoodV3 => {
             if transaction.value != launch.initial_buy_amount {
@@ -245,7 +247,7 @@ pub fn quote_v3_launch_receipt(
     let mut swap_count = 0_usize;
     for log in receipt.logs.iter().filter(|log| log.address == launch.pool) {
         let event = decode_v3_pool_event(log).ok_or(V3ReceiptQuoteError::UnknownPoolEvent)?;
-        if log.log_index <= *pool_created_log_index || log.log_index >= launch.log_index {
+        if log.log_index <= *pool_created_log_index {
             return Err(V3ReceiptQuoteError::InvalidStateSequence);
         }
         match event {
@@ -253,7 +255,7 @@ pub fn quote_v3_launch_receipt(
                 sqrt_price_x96,
                 tick,
             } => {
-                if state.is_some() {
+                if state.is_some() || log.log_index >= launch.log_index {
                     return Err(V3ReceiptQuoteError::InvalidStateSequence);
                 }
                 state = Some(V3PoolState::new(
@@ -273,6 +275,9 @@ pub fn quote_v3_launch_receipt(
                 tick_upper,
                 amount,
             } => {
+                if log.log_index >= launch.log_index {
+                    return Err(V3ReceiptQuoteError::InvalidStateSequence);
+                }
                 let pool = state
                     .as_mut()
                     .ok_or(V3ReceiptQuoteError::InvalidStateSequence)?;
@@ -288,7 +293,12 @@ pub fn quote_v3_launch_receipt(
                 liquidity,
                 tick,
             } => {
-                if mint_count == 0 || launchpad == LaunchpadId::Bow || swap_count != 0 {
+                let valid_side_of_launch = match launchpad {
+                    LaunchpadId::Bow => log.log_index > launch.log_index,
+                    LaunchpadId::LaunchHoodV3 => log.log_index < launch.log_index,
+                    _ => false,
+                };
+                if mint_count == 0 || !valid_side_of_launch || swap_count != 0 {
                     return Err(V3ReceiptQuoteError::InvalidStateSequence);
                 }
                 let pool = state
@@ -316,17 +326,10 @@ pub fn quote_v3_launch_receipt(
     if mint_count == 0 {
         return Err(V3ReceiptQuoteError::InvalidStateSequence);
     }
-    match launchpad {
-        LaunchpadId::Bow if swap_count != 0 => {
-            return Err(V3ReceiptQuoteError::EmbeddedSwapMismatch);
-        }
-        LaunchpadId::LaunchHoodV3
-            if (launch.initial_buy_amount == U256::ZERO && swap_count != 0)
-                || (launch.initial_buy_amount != U256::ZERO && swap_count != 1) =>
-        {
-            return Err(V3ReceiptQuoteError::EmbeddedSwapMismatch);
-        }
-        _ => {}
+    if (launch.initial_buy_amount == U256::ZERO && swap_count != 0)
+        || (launch.initial_buy_amount != U256::ZERO && swap_count != 1)
+    {
+        return Err(V3ReceiptQuoteError::EmbeddedSwapMismatch);
     }
     let entry_state = state.quote_exact_input(WETH, policy.amount_in, None)?;
     validate_complete_quote(&entry_state)?;
@@ -357,7 +360,9 @@ pub fn quote_v3_launch_receipt(
             block_hash: receipt.block_hash,
             l2_block_number: receipt.l2_block_number,
             transaction_index: receipt.transaction_index,
-            terminal_log_index: launch.log_index,
+            terminal_log_index: launch
+                .log_index
+                .max(last_state_log_index.ok_or(V3ReceiptQuoteError::InvalidStateSequence)?),
         },
         quote_source: "confirmed_receipt_end_v3_state".into(),
         sizing_source: "independent_fixed_tiny_weth_policy".into(),
@@ -465,7 +470,7 @@ fn decode_launch_identity(launchpad: LaunchpadId, log: &ReceiptLog) -> Option<La
                 log_index: log.log_index,
                 restriction_end_block: None,
                 initial_buy_amount: U256::ZERO,
-                initial_buy_tokens: U256::ZERO,
+                initial_buy_tokens: None,
             })
         }
         LaunchpadId::LaunchHoodV3 if log.address == LAUNCHHOOD_V3_FACTORY => {
@@ -485,7 +490,7 @@ fn decode_launch_identity(launchpad: LaunchpadId, log: &ReceiptLog) -> Option<La
                 log_index: log.log_index,
                 restriction_end_block: Some(event.restrictionsEndBlock),
                 initial_buy_amount: event.initialBuyAmount,
-                initial_buy_tokens: event.initialBuyTokens,
+                initial_buy_tokens: Some(event.initialBuyTokens),
             })
         }
         _ => None,
@@ -518,13 +523,17 @@ fn validate_embedded_swap(
     if weth_delta.is_negative()
         || weth_delta.into_raw() != launch.initial_buy_amount
         || !token_delta.is_negative()
-        || token_delta.unsigned_abs() != launch.initial_buy_tokens
+        || token_delta.unsigned_abs() == U256::ZERO
     {
         return Err(V3ReceiptQuoteError::EmbeddedSwapMismatch);
     }
     let reconstructed = pool.quote_exact_input(WETH, launch.initial_buy_amount, None)?;
+    let actual_token_output = token_delta.unsigned_abs();
     if reconstructed.amount_in_consumed != launch.initial_buy_amount
-        || reconstructed.amount_out != launch.initial_buy_tokens
+        || reconstructed.amount_out != actual_token_output
+        || launch
+            .initial_buy_tokens
+            .is_some_and(|declared| declared != actual_token_output)
         || reconstructed.sqrt_price_x96_after != sqrt_price_x96
         || reconstructed.tick_after != tick
         || reconstructed.liquidity_after != liquidity
@@ -667,6 +676,84 @@ mod tests {
         (transaction, receipt)
     }
 
+    fn bow_payable_fixture() -> (RobinhoodTransaction, NoxaReceipt) {
+        let tx_hash =
+            parse_b256("f842590f4b6abcda2e838397ceca82f07566d4256137a2ea88549cf331d1ab6b");
+        let logs = vec![
+            live_log(
+                "1f7d7550b1b028f7571e69a784071f0205fd2efa",
+                18,
+                &[
+                    "783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118",
+                    "0000000000000000000000000bd7d308f8e1639fab988df18a8011f41eacad73",
+                    "000000000000000000000000cede14a428b954333ba0e9a6df68d0e6fd786b03",
+                    "0000000000000000000000000000000000000000000000000000000000002710",
+                ],
+                "00000000000000000000000000000000000000000000000000000000000000c8000000000000000000000000effe014849fb7056fd5aedd923e6dc0777d850ad",
+            ),
+            live_log(
+                "effe014849fb7056fd5aedd923e6dc0777d850ad",
+                19,
+                &["98636036cb66a9c19a37435efc1e90142190214e8abeb821bdba3f2990dd4c95"],
+                "00000000000000000000000000000000000064dbe3946352a8ef28c04d549e7800000000000000000000000000000000000000000000000000000000000319b4",
+            ),
+            live_log(
+                "effe014849fb7056fd5aedd923e6dc0777d850ad",
+                23,
+                &[
+                    "7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde",
+                    "00000000000000000000000073991a25c818bf1f1128deaab1492d45638de0d3",
+                    "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff27660",
+                    "0000000000000000000000000000000000000000000000000000000000031830",
+                ],
+                "00000000000000000000000073991a25c818bf1f1128deaab1492d45638de0d300000000000000000000000000000000000000000000085cb16d31e60a6c05e200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000033b2e3c9fd0803ce7ffc283",
+            ),
+            live_log(
+                "c70e510e14710ea535cab7b2414860af63feab79",
+                29,
+                &[
+                    "ec774f0683e9ac48e8d835f412f9f877a8a5dee9af3170d78cf3ef33149d15e7",
+                    "000000000000000000000000cede14a428b954333ba0e9a6df68d0e6fd786b03",
+                    "000000000000000000000000d27664a94b801e912ef2051646f29ce76a8a3fb9",
+                ],
+                "000000000000000000000000effe014849fb7056fd5aedd923e6dc0777d850ad000000000000000000000000000000000000000000000000000000000002bf630000000000000000000000000000000000000000000000000000000000000483",
+            ),
+            live_log(
+                "effe014849fb7056fd5aedd923e6dc0777d850ad",
+                35,
+                &[
+                    "c42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
+                    "000000000000000000000000caf681a66d020601342297493863e78c959e5cb2",
+                    "000000000000000000000000d27664a94b801e912ef2051646f29ce76a8a3fb9",
+                ],
+                "00000000000000000000000000000000000000000000000000470de4df820000fffffffffffffffffffffffffffffffffffffffffff5a0eba652442d64c90a8000000000000000000000000000000000000061ae1c60f0281b10a4b8a9eadd3900000000000000000000000000000000000000000000085cb16d31e60a6c05e20000000000000000000000000000000000000000000000000000000000031733",
+            ),
+        ];
+        let transaction = RobinhoodTransaction {
+            hash: tx_hash,
+            from: parse_address("d27664a94b801e912ef2051646f29ce76a8a3fb9"),
+            to: Some(BOW_LAUNCH_FACTORY),
+            input: Bytes::new(),
+            value: U256::from(20_000_000_000_000_000_u64),
+            l2_block_number: Some(11_624_477),
+            transaction_index: Some(5),
+        };
+        let receipt = NoxaReceipt {
+            transaction_hash: tx_hash,
+            block_hash: parse_b256(
+                "2b8a8fb0552a2434068a1c60631b2ed60988a13a666e6231ec12f0ceadfc731e",
+            ),
+            status: true,
+            l2_block_number: 11_624_477,
+            l1_block_number: None,
+            transaction_index: 5,
+            gas_used: None,
+            effective_gas_price: None,
+            logs,
+        };
+        (transaction, receipt)
+    }
+
     fn launchhood_fixture() -> (RobinhoodTransaction, NoxaReceipt) {
         let tx_hash = parse_b256(LAUNCHHOOD_TX);
         let logs = vec![
@@ -761,6 +848,20 @@ mod tests {
     }
 
     #[test]
+    fn bow_payable_live_proof_reconstructs_embedded_buy_before_quoting() {
+        let (transaction, receipt) = bow_payable_fixture();
+        let quote =
+            quote_v3_launch_receipt(&transaction, &receipt, LaunchpadId::Bow, policy()).unwrap();
+        assert_eq!(quote.market.swap_count, 1);
+        assert_eq!(quote.market.last_state_log_index, 35);
+        assert_eq!(quote.state_version.terminal_log_index, 35);
+        assert!(quote.entry.expected_output > U256::ZERO);
+        assert!(quote.full_position_exit.expected_output < quote.entry.amount_in);
+        assert!(!quote.execution_eligible);
+        assert!(!quote.broadcast);
+    }
+
+    #[test]
     fn launchhood_live_proof_reproduces_embedded_swap_before_quoting() {
         let (transaction, receipt) = launchhood_fixture();
         let quote =
@@ -813,6 +914,29 @@ mod tests {
         assert!(matches!(
             quote_v3_launch_receipt(&transaction, &receipt, LaunchpadId::LaunchHoodV3, policy()),
             Err(V3ReceiptQuoteError::RestrictionEvidence)
+        ));
+
+        let (mut transaction, receipt) = bow_payable_fixture();
+        transaction.value += U256::from(1_u8);
+        assert!(matches!(
+            quote_v3_launch_receipt(&transaction, &receipt, LaunchpadId::Bow, policy()),
+            Err(V3ReceiptQuoteError::EmbeddedSwapMismatch)
+        ));
+
+        let (transaction, mut receipt) = bow_payable_fixture();
+        let mut corrupted_swap = receipt.logs[4].data.to_vec();
+        corrupted_swap[31] ^= 1;
+        receipt.logs[4].data = corrupted_swap.into();
+        assert!(matches!(
+            quote_v3_launch_receipt(&transaction, &receipt, LaunchpadId::Bow, policy()),
+            Err(V3ReceiptQuoteError::EmbeddedSwapMismatch)
+        ));
+
+        let (transaction, mut receipt) = bow_payable_fixture();
+        receipt.logs.pop();
+        assert!(matches!(
+            quote_v3_launch_receipt(&transaction, &receipt, LaunchpadId::Bow, policy()),
+            Err(V3ReceiptQuoteError::EmbeddedSwapMismatch)
         ));
     }
 

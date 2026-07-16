@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use alloy_primitives::{Address, I256, U256};
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 use uniswap_v3_math::error::UniswapV3MathError;
 use uniswap_v3_math::liquidity_math::add_delta;
@@ -35,7 +35,7 @@ pub struct V3PoolState {
     tick_bitmap: HashMap<i16, U256>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct V3Quote {
     pub token_in: Address,
     pub token_out: Address,
@@ -44,7 +44,10 @@ pub struct V3Quote {
     pub amount_out: U256,
     pub sqrt_price_x96_after: U256,
     pub tick_after: i32,
-    #[serde(serialize_with = "serialize_u128_hex")]
+    #[serde(
+        serialize_with = "serialize_u128_hex",
+        deserialize_with = "deserialize_u128_hex"
+    )]
     pub liquidity_after: u128,
     pub initialized_ticks_crossed: usize,
     pub steps: usize,
@@ -55,6 +58,17 @@ where
     S: Serializer,
 {
     serializer.serialize_str(&format!("0x{value:x}"))
+}
+
+fn deserialize_u128_hex<'de, D>(deserializer: D) -> Result<u128, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    let digits = value
+        .strip_prefix("0x")
+        .ok_or_else(|| serde::de::Error::custom("u128 hex value must start with 0x"))?;
+    u128::from_str_radix(digits, 16).map_err(serde::de::Error::custom)
 }
 
 #[derive(Debug, Error)]

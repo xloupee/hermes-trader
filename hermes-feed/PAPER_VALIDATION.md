@@ -63,7 +63,8 @@ expected/observed pin documents:
 cargo build --release \
   --bin hermes-feed \
   --bin hermes-launchpad-paper \
-  --bin hermes-launchpad-reconcile
+  --bin hermes-launchpad-reconcile \
+  --bin hermes-launchpad-v3-paper-quote
 
 scripts/run-launchpad-paper-local.sh \
   config/launchpad-expected-pins.production.json \
@@ -74,10 +75,12 @@ scripts/run-launchpad-paper-local.sh \
 Receipt/event evidence must be collected independently and may be supplied
 after feed EOF with `--reconciliation-input <evidence.jsonl>`. Each JSONL row
 contains `tx_hash`, `launchpad`, `receipt_status`, `protocol_event_match`, and
-`observed_unix_ns`. The final metrics distinguish confirmed observations,
-false positives, missed transactions, unreconciled observations, and p50/p95
-reconciliation latency. Missing evidence is `unreconciled`, never silently
-counted as a false positive.
+`observed_unix_ns`. For fully validated Bow and LaunchHood V3 receipts, the
+same stream also includes a typed `launchpad_v3_paper_quote` row. The final
+metrics distinguish confirmed observations, false positives, missed
+transactions, unreconciled observations, and p50/p95/p99 reconciliation
+latency. Missing evidence is `unreconciled`, never silently counted as a false
+positive.
 
 The read-only collector produces that evidence directly from observer output:
 
@@ -91,3 +94,29 @@ It accepts only successful chain-4663 receipts with exact protocol emitter and
 event signatures for Bow, LaunchHood V3, Clanker, Bankr/Doppler, Pons, Hood,
 Flap, Noxa, and Klik. Trench and LeaveHood remain unmatched until their event
 semantics are independently verified.
+
+Bow and LaunchHood V3 receive stronger reconciliation than topic matching.
+The collector fetches the original transaction off-path, verifies its exact
+factory/sender/value/block envelope, reconstructs canonical V3 state from
+ordered `PoolCreated`, `Initialize`, `Mint`, and `Swap` logs, and binds the
+quote version to the receipt block hash. LaunchHood's embedded buy is accepted
+only when the local V3 model exactly reproduces its input, output, ending
+price, tick, and liquidity. Bow's proven zero-value profile rejects any swap.
+
+The default independent paper size is 0.001 WETH with 1% slippage and a hard
+0.01 WETH maximum. A quote row contains non-null entry output/minimum and an
+immediate full-position exit quote. Feeding the mixed evidence stream back to
+`hermes-launchpad-paper --reconciliation-input` emits a
+`launchpad_paper_finalized_plan` row joined to the original feed sequence.
+These plans remain `quoted_restriction_gated`, `execution_eligible: false`,
+and `broadcast: false`; receipt-end quoting does not claim that Bow token
+limits or LaunchHood's 366-L1-block wallet restriction have cleared.
+
+One proof transaction can also be inspected directly without writing any
+state:
+
+```sh
+target/release/hermes-launchpad-v3-paper-quote \
+  --tx-hash 0x1adcd30a5de19423f56b93d91df33d950179ed7ef4f9d4aae31fca13f72fc009 \
+  --launchpad bow
+```

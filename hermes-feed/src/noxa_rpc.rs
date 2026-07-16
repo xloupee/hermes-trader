@@ -125,8 +125,10 @@ pub struct RobinhoodTransaction {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct NoxaReceipt {
     pub transaction_hash: B256,
+    pub block_hash: B256,
     pub status: bool,
     pub l2_block_number: u64,
+    pub l1_block_number: Option<u64>,
     pub transaction_index: u64,
     pub gas_used: Option<u64>,
     pub effective_gas_price: Option<U256>,
@@ -856,8 +858,12 @@ fn parse_receipt(value: &Value) -> Result<NoxaReceipt> {
         transaction_hash: field_str(value, "transactionHash")?
             .parse()
             .context("parse receipt tx hash")?,
+        block_hash: field_str(value, "blockHash")?
+            .parse()
+            .context("parse receipt block hash")?,
         status: parse_hex_u64(field_str(value, "status")?)? == 1,
         l2_block_number: parse_hex_u64(field_str(value, "blockNumber")?)?,
+        l1_block_number: optional_hex_u64(value, "l1BlockNumber")?,
         transaction_index: parse_hex_u64(field_str(value, "transactionIndex")?)?,
         gas_used: optional_hex_u64(value, "gasUsed")?,
         effective_gas_price: value

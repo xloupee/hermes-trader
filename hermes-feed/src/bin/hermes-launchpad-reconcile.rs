@@ -4,11 +4,10 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use alloy_primitives::{B256, keccak256};
+use alloy_primitives::{B256, U256, keccak256};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use futures_util::{StreamExt, stream};
-use hermes_feed::NoxaRpcClient;
 use hermes_feed::flap_abi::{decode_flap_token_bought, decode_flap_token_created};
 use hermes_feed::launchpad_adapter::LaunchpadId;
 use hermes_feed::launchpad_adapters::{
@@ -22,6 +21,9 @@ use hermes_feed::robinhood::{
     NOXA_LAUNCH_FACTORY, PUBLIC_RPC_URL,
 };
 use hermes_feed::tier2_curve::HOOD_FACTORY;
+use hermes_feed::{
+    NoxaRpcClient, V3ReceiptPaperQuote, V3ReceiptQuotePolicy, quote_v3_launch_receipt,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::{Instant, sleep};
@@ -50,6 +52,13 @@ struct Cli {
     poll_interval_ms: u64,
     #[arg(long, default_value_t = 8)]
     concurrency: usize,
+    /// Independent fixed paper entry size used only for V3 quote evidence.
+    #[arg(long, default_value_t = 1_000_000_000_000_000_u64)]
+    paper_amount_in_wei: u64,
+    #[arg(long, default_value_t = 10_000_000_000_000_000_u64)]
+    paper_max_amount_in_wei: u64,
+    #[arg(long, default_value_t = 100)]
+    paper_slippage_bps: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
@@ -68,10 +77,22 @@ struct ReconciliationEvidence {
     observed_unix_ns: u64,
 }
 
+#[derive(Debug)]
+struct ReconciledCandidate {
+    evidence: ReconciliationEvidence,
+    v3_quote: Option<V3ReceiptPaperQuote>,
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args = Cli::parse();
-    if args.receipt_timeout_seconds == 0 || args.poll_interval_ms == 0 || args.concurrency == 0 {
+    if args.receipt_timeout_seconds == 0
+        || args.poll_interval_ms == 0
+        || args.concurrency == 0
+        || args.paper_amount_in_wei == 0
+        || args.paper_amount_in_wei > args.paper_max_amount_in_wei
+        || args.paper_slippage_bps >= 10_000
+    {
         bail!("timeout, poll interval, and concurrency must be non-zero");
     }
     let candidates = read_candidates(&args.input)?;
@@ -82,14 +103,26 @@ async fn main() -> Result<()> {
     }
     let timeout = Duration::from_secs(args.receipt_timeout_seconds);
     let poll_interval = Duration::from_millis(args.poll_interval_ms);
-    let mut reconciled = stream::iter(candidates.into_values().map(|candidate| {
-        let rpc = rpc.clone();
-        async move { reconcile_candidate(&rpc, candidate, timeout, poll_interval).await }
-    }))
-    .buffer_unordered(args.concurrency);
+    let quote_policy = V3ReceiptQuotePolicy {
+        amount_in: U256::from(args.paper_amount_in_wei),
+        max_amount_in: U256::from(args.paper_max_amount_in_wei),
+        slippage_bps: args.paper_slippage_bps,
+    };
+    let mut reconciled =
+        stream::iter(candidates.into_values().map(|candidate| {
+            let rpc = rpc.clone();
+            async move {
+                reconcile_candidate(&rpc, candidate, timeout, poll_interval, quote_policy).await
+            }
+        }))
+        .buffer_unordered(args.concurrency);
 
-    while let Some(evidence) = reconciled.next().await {
-        println!("{}", serde_json::to_string(&evidence?)?);
+    while let Some(result) = reconciled.next().await {
+        let result = result?;
+        println!("{}", serde_json::to_string(&result.evidence)?);
+        if let Some(quote) = result.v3_quote {
+            println!("{}", serde_json::to_string(&quote)?);
+        }
     }
     Ok(())
 }
@@ -146,7 +179,8 @@ async fn reconcile_candidate(
     candidate: ObservedCandidate,
     timeout: Duration,
     poll_interval: Duration,
-) -> Result<ReconciliationEvidence> {
+    quote_policy: V3ReceiptQuotePolicy,
+) -> Result<ReconciledCandidate> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(receipt) = rpc.receipt(candidate.tx_hash).await? {
@@ -156,22 +190,53 @@ async fn reconcile_candidate(
                     candidate.tx_hash
                 );
             }
-            return Ok(ReconciliationEvidence {
-                tx_hash: candidate.tx_hash,
-                launchpad: candidate.launchpad,
-                receipt_status: receipt.status,
-                protocol_event_match: receipt.status
-                    && protocol_event_match(candidate.launchpad, &receipt.logs),
-                observed_unix_ns: unix_now_ns(),
+            let mut protocol_match =
+                receipt.status && protocol_event_match(candidate.launchpad, &receipt.logs);
+            let mut v3_quote = None;
+            if receipt.status
+                && matches!(
+                    candidate.launchpad,
+                    LaunchpadId::Bow | LaunchpadId::LaunchHoodV3
+                )
+            {
+                let transaction = rpc
+                    .transaction_by_hash(candidate.tx_hash)
+                    .await?
+                    .with_context(|| format!("missing transaction {}", candidate.tx_hash))?;
+                match quote_v3_launch_receipt(
+                    &transaction,
+                    &receipt,
+                    candidate.launchpad,
+                    quote_policy,
+                ) {
+                    Ok(quote) => {
+                        protocol_match = true;
+                        v3_quote = Some(quote);
+                    }
+                    Err(_) => protocol_match = false,
+                }
+            }
+            return Ok(ReconciledCandidate {
+                evidence: ReconciliationEvidence {
+                    tx_hash: candidate.tx_hash,
+                    launchpad: candidate.launchpad,
+                    receipt_status: receipt.status,
+                    protocol_event_match: protocol_match,
+                    observed_unix_ns: unix_now_ns(),
+                },
+                v3_quote,
             });
         }
         if Instant::now() >= deadline {
-            return Ok(ReconciliationEvidence {
-                tx_hash: candidate.tx_hash,
-                launchpad: candidate.launchpad,
-                receipt_status: false,
-                protocol_event_match: false,
-                observed_unix_ns: unix_now_ns(),
+            return Ok(ReconciledCandidate {
+                evidence: ReconciliationEvidence {
+                    tx_hash: candidate.tx_hash,
+                    launchpad: candidate.launchpad,
+                    receipt_status: false,
+                    protocol_event_match: false,
+                    observed_unix_ns: unix_now_ns(),
+                },
+                v3_quote: None,
             });
         }
         sleep(poll_interval).await;

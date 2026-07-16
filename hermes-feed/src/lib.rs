@@ -40,6 +40,7 @@ pub mod uniswap_v4;
 pub mod v2_simulator;
 pub mod v3_launch_at_birth;
 pub mod v3_pool;
+pub mod v3_receipt_quote;
 
 pub use active_noxa::validate_active_noxa_copy_token;
 pub use boundary_gate::{BoundaryDecision, BoundaryGate, BoundaryGateError, FeedBoundary};
@@ -148,3 +149,7 @@ pub use v3_launch_at_birth::{
     MarketRestrictionState, V3LaunchAtBirthAdapter, V3LaunchError,
 };
 pub use v3_pool::{V3PoolError, V3PoolState, V3Quote};
+pub use v3_receipt_quote::{
+    V3PaperSwapQuote, V3QuoteStateVersion, V3ReceiptMarketEvidence, V3ReceiptPaperQuote,
+    V3ReceiptQuoteError, V3ReceiptQuotePolicy, quote_v3_launch_receipt,
+};

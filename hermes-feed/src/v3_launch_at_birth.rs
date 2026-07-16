@@ -2,11 +2,12 @@
 //! the launch transaction. This module observes launch calls and constructs
 //! paper plans only; it does not sign, submit, or perform network I/O.
 
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{SolCall, sol};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::launchpad_adapter::{FollowerTradePlan, LaunchpadId, MarketIdentity, RouteKind};
 use crate::noxa_abi::{V3ExactInputIntent, encode_v3_exact_input_single};
 use crate::noxa_predict::predict_v3_pool_address;
 use crate::robinhood::{
@@ -55,13 +56,6 @@ sol! {
         bytes32 userSalt,
         uint256 minTokensOut
     ) external payable returns (address token, address pool, uint256 positionId);
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LaunchpadId {
-    Bow,
-    LaunchHoodV3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,20 +108,8 @@ pub struct FollowerPlanInput {
     pub min_receive: U256,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct V3FollowerPaperPlan {
-    pub launchpad: LaunchpadId,
-    pub chain_id: u64,
-    pub destination: Address,
-    pub value: U256,
-    pub calldata: Bytes,
-    pub spend_limit: U256,
-    pub min_receive: U256,
-    pub expected_market: LaunchMarket,
-}
-
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum RegistryError {
+pub enum V3LaunchError {
     #[error("adapter requires Robinhood mainnet chain ID 4663")]
     WrongChain,
     #[error("a startup-pinned contract address or runtime code hash mismatched")]
@@ -154,9 +136,9 @@ pub struct V3LaunchAtBirthRegistry;
 impl V3LaunchAtBirthRegistry {
     /// Validate every code identity once during startup. The resulting registry
     /// contains no client handle and therefore cannot make candidate-time RPC.
-    pub fn new(chain_id: u64, code: &[ContractCodeSnapshot]) -> Result<Self, RegistryError> {
+    pub fn new(chain_id: u64, code: &[ContractCodeSnapshot]) -> Result<Self, V3LaunchError> {
         if chain_id != CHAIN_ID {
-            return Err(RegistryError::WrongChain);
+            return Err(V3LaunchError::WrongChain);
         }
         let expected = [
             (WETH, WETH_RUNTIME_KECCAK256),
@@ -174,7 +156,7 @@ impl V3LaunchAtBirthRegistry {
             code.iter()
                 .any(|got| (got.address, got.runtime_code_hash) == *pin)
         }) {
-            return Err(RegistryError::CodeIdentity);
+            return Err(V3LaunchError::CodeIdentity);
         }
         Ok(Self)
     }
@@ -186,16 +168,16 @@ impl V3LaunchAtBirthRegistry {
         deployer: Address,
         transaction_value: U256,
         input: &[u8],
-    ) -> Result<LaunchCallObservation, RegistryError> {
+    ) -> Result<LaunchCallObservation, V3LaunchError> {
         if chain_id != CHAIN_ID {
-            return Err(RegistryError::WrongChain);
+            return Err(V3LaunchError::WrongChain);
         }
         if input.len() > MAX_CALLDATA_BYTES {
-            return Err(RegistryError::MalformedCalldata);
+            return Err(V3LaunchError::MalformedCalldata);
         }
         if destination == BOW_LAUNCH_FACTORY {
             let call =
-                launchCall::abi_decode(input).map_err(|_| RegistryError::MalformedCalldata)?;
+                launchCall::abi_decode(input).map_err(|_| V3LaunchError::MalformedCalldata)?;
             if call.abi_encode().as_slice() != input
                 || call.p.totalSupply == U256::ZERO
                 || call.p.targetFdvWeth == U256::ZERO
@@ -212,7 +194,7 @@ impl V3LaunchAtBirthRegistry {
                 .iter()
                 .any(|value| value.len() > MAX_DYNAMIC_STRING_BYTES)
             {
-                return Err(RegistryError::MalformedCalldata);
+                return Err(V3LaunchError::MalformedCalldata);
             }
             // Bow exposes tokenInitCodeHash(params, creator), but the checked-in
             // evidence does not pin enough local bytecode/constructor semantics
@@ -230,9 +212,9 @@ impl V3LaunchAtBirthRegistry {
         }
         if destination == LAUNCHHOOD_V3_FACTORY {
             let call =
-                launchTokenCall::abi_decode(input).map_err(|_| RegistryError::MalformedCalldata)?;
+                launchTokenCall::abi_decode(input).map_err(|_| V3LaunchError::MalformedCalldata)?;
             if call.abi_encode().as_slice() != input {
-                return Err(RegistryError::MalformedCalldata);
+                return Err(V3LaunchError::MalformedCalldata);
             }
             if call.configId != U256::from(LAUNCHHOOD_CONFIG_ID)
                 || call.p.name.is_empty()
@@ -243,7 +225,7 @@ impl V3LaunchAtBirthRegistry {
                 || deployer == Address::ZERO
                 || (transaction_value != U256::ZERO && call.minTokensOut == U256::ZERO)
             {
-                return Err(RegistryError::UnsupportedLaunchConfig);
+                return Err(V3LaunchError::UnsupportedLaunchConfig);
             }
             return Ok(LaunchCallObservation {
                 launchpad: LaunchpadId::LaunchHoodV3,
@@ -258,26 +240,23 @@ impl V3LaunchAtBirthRegistry {
                 execution_ready: false,
             });
         }
-        Err(RegistryError::UnknownDispatch)
+        Err(V3LaunchError::UnknownDispatch)
     }
 
     pub fn pre_receipt_market(
         &self,
         observation: &LaunchCallObservation,
-    ) -> Result<LaunchMarket, RegistryError> {
+    ) -> Result<LaunchMarket, V3LaunchError> {
         observation
             .predicted_market
             .clone()
-            .ok_or(RegistryError::PlanUnavailable)
+            .ok_or(V3LaunchError::PlanUnavailable)
     }
 
     /// Construct a paper plan only after asynchronous reconciliation has
     /// admitted a market into warm state. Receipt decoding remains gated until
     /// exact protocol event evidence is checked in.
-    pub fn paper_plan(
-        &self,
-        input: FollowerPlanInput,
-    ) -> Result<V3FollowerPaperPlan, RegistryError> {
+    pub fn paper_plan(&self, input: FollowerPlanInput) -> Result<FollowerTradePlan, V3LaunchError> {
         if input.market.token == Address::ZERO
             || input.market.quote_asset != WETH
             || input.market.fee != V3_FEE
@@ -288,7 +267,7 @@ impl V3LaunchAtBirthRegistry {
             || input.min_receive == U256::ZERO
             || input.min_receive > input.locally_quoted_receive
         {
-            return Err(RegistryError::UnsafeFollowerPlan);
+            return Err(V3LaunchError::UnsafeFollowerPlan);
         }
         let intent = V3ExactInputIntent {
             token_in: WETH,
@@ -300,16 +279,20 @@ impl V3LaunchAtBirthRegistry {
             sqrt_price_limit_x96: U256::ZERO,
         };
         let calldata =
-            encode_v3_exact_input_single(&intent).ok_or(RegistryError::UnsafeFollowerPlan)?;
-        Ok(V3FollowerPaperPlan {
+            encode_v3_exact_input_single(&intent).ok_or(V3LaunchError::UnsafeFollowerPlan)?;
+        Ok(FollowerTradePlan {
             launchpad: input.market.launchpad,
-            chain_id: CHAIN_ID,
+            route: RouteKind::V3SingleHop,
             destination: UNISWAP_V3_SWAP_ROUTER_02,
             value: U256::ZERO,
             calldata: calldata.into(),
             spend_limit: input.spend_limit,
             min_receive: input.min_receive,
-            expected_market: input.market,
+            expected_market: MarketIdentity {
+                token: input.market.token,
+                quote_asset: input.market.quote_asset,
+                pool: input.market.pool,
+            },
         })
     }
 }
@@ -440,7 +423,7 @@ mod tests {
         assert_eq!(hood.leader_min_tokens_out, U256::from(888));
         assert_eq!(
             r.pre_receipt_market(&hood),
-            Err(RegistryError::PlanUnavailable)
+            Err(V3LaunchError::PlanUnavailable)
         );
     }
 
@@ -456,7 +439,7 @@ mod tests {
                 U256::ZERO,
                 &launchhood_calldata(U256::ZERO)
             ),
-            Err(RegistryError::MalformedCalldata)
+            Err(V3LaunchError::MalformedCalldata)
         );
         assert_eq!(
             r.observe_launch_call(
@@ -466,7 +449,7 @@ mod tests {
                 U256::ZERO,
                 &bow_calldata()
             ),
-            Err(RegistryError::MalformedCalldata)
+            Err(V3LaunchError::MalformedCalldata)
         );
         let mut malformed = launchhood_calldata(U256::ZERO);
         malformed.pop();
@@ -478,7 +461,7 @@ mod tests {
                 U256::ZERO,
                 &malformed
             ),
-            Err(RegistryError::MalformedCalldata)
+            Err(V3LaunchError::MalformedCalldata)
         );
         assert_eq!(
             r.observe_launch_call(
@@ -488,7 +471,7 @@ mod tests {
                 U256::ZERO,
                 &bow_calldata()
             ),
-            Err(RegistryError::UnknownDispatch)
+            Err(V3LaunchError::UnknownDispatch)
         );
     }
 
@@ -496,13 +479,13 @@ mod tests {
     fn chain_and_code_identity_mismatch_fail_closed() {
         assert_eq!(
             V3LaunchAtBirthRegistry::new(8453, &pins()).unwrap_err(),
-            RegistryError::WrongChain
+            V3LaunchError::WrongChain
         );
         let mut bad = pins();
         bad[0].runtime_code_hash = B256::ZERO;
         assert_eq!(
             V3LaunchAtBirthRegistry::new(CHAIN_ID, &bad).unwrap_err(),
-            RegistryError::CodeIdentity
+            V3LaunchError::CodeIdentity
         );
         assert_eq!(
             registry().observe_launch_call(
@@ -512,7 +495,7 @@ mod tests {
                 U256::ZERO,
                 &bow_calldata()
             ),
-            Err(RegistryError::WrongChain)
+            Err(V3LaunchError::WrongChain)
         );
     }
 
@@ -573,7 +556,7 @@ mod tests {
                 locally_quoted_receive: U256::from(500),
                 min_receive: U256::from(501)
             }),
-            Err(RegistryError::UnsafeFollowerPlan)
+            Err(V3LaunchError::UnsafeFollowerPlan)
         );
 
         let restricted = LaunchMarket {
@@ -592,7 +575,7 @@ mod tests {
                 locally_quoted_receive: U256::from(500),
                 min_receive: U256::from(400)
             }),
-            Err(RegistryError::UnsafeFollowerPlan)
+            Err(V3LaunchError::UnsafeFollowerPlan)
         );
     }
 
@@ -604,12 +587,12 @@ mod tests {
         trailing.extend_from_slice(&[0_u8; 32]);
         assert_eq!(
             r.observe_launch_call(CHAIN_ID, BOW_LAUNCH_FACTORY, leader, U256::ZERO, &trailing),
-            Err(RegistryError::MalformedCalldata)
+            Err(V3LaunchError::MalformedCalldata)
         );
         let oversized = vec![0_u8; MAX_CALLDATA_BYTES + 1];
         assert_eq!(
             r.observe_launch_call(CHAIN_ID, BOW_LAUNCH_FACTORY, leader, U256::ZERO, &oversized),
-            Err(RegistryError::MalformedCalldata)
+            Err(V3LaunchError::MalformedCalldata)
         );
         let unsupported = launchTokenCall {
             p: LaunchHoodTokenParams {
@@ -632,7 +615,7 @@ mod tests {
                 U256::ZERO,
                 &unsupported
             ),
-            Err(RegistryError::UnsupportedLaunchConfig)
+            Err(V3LaunchError::UnsupportedLaunchConfig)
         );
     }
 }

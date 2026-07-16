@@ -19,6 +19,8 @@ use crate::v3_pool::{V3PoolError, V3PoolState};
 #[serde(rename_all = "snake_case")]
 pub enum LaunchpadId {
     Noxa,
+    Bow,
+    LaunchHoodV3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]

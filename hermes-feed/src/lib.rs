@@ -122,7 +122,7 @@ pub use v2_simulator::{
     HopQuote, OrderedCopyQuote, PairSnapshot, QuoteError, ReserveBook, ReserveCache, get_amount_out,
 };
 pub use v3_launch_at_birth::{
-    ContractCodeSnapshot, FollowerPlanInput, LaunchCallObservation, LaunchMarket, LaunchpadId,
-    MarketRestrictionState, RegistryError, V3FollowerPaperPlan, V3LaunchAtBirthRegistry,
+    ContractCodeSnapshot, FollowerPlanInput, LaunchCallObservation, LaunchMarket,
+    MarketRestrictionState, V3LaunchAtBirthRegistry, V3LaunchError,
 };
 pub use v3_pool::{V3PoolError, V3PoolState, V3Quote};

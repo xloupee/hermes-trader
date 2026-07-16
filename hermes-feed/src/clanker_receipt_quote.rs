@@ -226,7 +226,9 @@ pub struct ClankerMarketEvidence {
     pub hook: Address,
     pub locker: Address,
     pub mev_module: Address,
-    pub extension: Address,
+    pub extension: Option<Address>,
+    pub extensions_supply: U256,
+    pub liquidity_profile: ClankerLiquidityProfile,
     pub dynamic_fee_flag: u32,
     pub tick_spacing: i32,
     pub starting_tick: i32,
@@ -237,6 +239,13 @@ pub struct ClankerMarketEvidence {
     pub position_count: usize,
     pub static_fee_config: ClankerStaticFeeConfig,
     pub mev_fee_config: ClankerMevFeeConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClankerLiquidityProfile {
+    ExtensionlessSinglePosition,
+    PinnedExtensionFivePosition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -313,7 +322,7 @@ struct LaunchIdentity {
     paired_token: Address,
     locker: Address,
     mev_module: Address,
-    extension: Address,
+    extension: Option<Address>,
     extensions_supply: U256,
     log_index: u64,
 }
@@ -339,6 +348,17 @@ pub fn quote_clanker_launch_receipt(
     profile.validate()?;
     validate_envelope(transaction, receipt, block, policy)?;
     let launch = exact_launch_identity(&receipt.logs)?;
+    let liquidity_profile = match (launch.extension, launch.extensions_supply) {
+        (None, supply) if supply == U256::ZERO => {
+            ClankerLiquidityProfile::ExtensionlessSinglePosition
+        }
+        (Some(extension), supply)
+            if extension == profile.extension.address && supply != U256::ZERO =>
+        {
+            ClankerLiquidityProfile::PinnedExtensionFivePosition
+        }
+        _ => return Err(ClankerQuoteError::MarketIdentity),
+    };
     if launch.sender != transaction.from
         || launch.token == Address::ZERO
         || launch.token == WETH
@@ -347,8 +367,6 @@ pub fn quote_clanker_launch_receipt(
         || launch.hook != profile.hook.address
         || launch.locker != profile.locker.address
         || launch.mev_module != profile.mev_module.address
-        || launch.extension != profile.extension.address
-        || launch.extensions_supply == U256::ZERO
     {
         return Err(ClankerQuoteError::MarketIdentity);
     }
@@ -441,8 +459,12 @@ pub fn quote_clanker_launch_receipt(
     } else {
         launch.starting_tick
     };
+    let expected_position_count = match liquidity_profile {
+        ClankerLiquidityProfile::ExtensionlessSinglePosition => 1,
+        ClankerLiquidityProfile::PinnedExtensionFivePosition => 5,
+    };
     if initialize_tick != expected_initialize_tick
-        || positions.len() != 5
+        || positions.len() != expected_position_count
         || positions
             .iter()
             .any(|position| position.log_index <= initialize_log_index)
@@ -573,6 +595,8 @@ pub fn quote_clanker_launch_receipt(
             locker: launch.locker,
             mev_module: launch.mev_module,
             extension: launch.extension,
+            extensions_supply: launch.extensions_supply,
+            liquidity_profile,
             dynamic_fee_flag: DYNAMIC_FEE_FLAG,
             tick_spacing: key.tick_spacing,
             starting_tick: launch.starting_tick,
@@ -668,7 +692,7 @@ fn exact_launch_identity(logs: &[ReceiptLog]) -> Result<LaunchIdentity, ClankerQ
     let event =
         events::TokenCreated::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
             .map_err(|_| ClankerQuoteError::TokenCreatedIdentity)?;
-    if event.extensions.len() != 1 {
+    if event.extensions.len() > 1 {
         return Err(ClankerQuoteError::MarketIdentity);
     }
     Ok(LaunchIdentity {
@@ -682,7 +706,7 @@ fn exact_launch_identity(logs: &[ReceiptLog]) -> Result<LaunchIdentity, ClankerQ
         paired_token: event.pairedToken,
         locker: event.locker,
         mev_module: event.mevModule,
-        extension: event.extensions[0],
+        extension: event.extensions.first().copied(),
         extensions_supply: event.extensionsSupply,
         log_index: log.log_index,
     })
@@ -903,6 +927,13 @@ mod tests {
         serde_json::from_str(include_str!("../tests/fixtures/clanker-v4-live-proof.json")).unwrap()
     }
 
+    fn extensionless_live_fixture() -> LiveFixture {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/clanker-v4-extensionless-live-proof.json"
+        ))
+        .unwrap()
+    }
+
     fn swap_differential_fixture() -> SwapDifferentialFixture {
         serde_json::from_str(include_str!(
             "../tests/fixtures/clanker-v4-first-swap-differential.json"
@@ -945,6 +976,20 @@ mod tests {
         let mut data = log.data.to_vec();
         data[61..64].copy_from_slice(&starting_fee.to_be_bytes()[1..]);
         data[93..96].copy_from_slice(&ending_fee.to_be_bytes()[1..]);
+        log.data = data.into();
+    }
+
+    fn set_extensions_supply(receipt: &mut NoxaReceipt, supply: U256) {
+        let log = receipt
+            .logs
+            .iter_mut()
+            .find(|log| {
+                log.address == CLANKER_FACTORY
+                    && log.topics.first() == Some(&events::TokenCreated::SIGNATURE_HASH)
+            })
+            .unwrap();
+        let mut data = log.data.to_vec();
+        data[384..416].copy_from_slice(&supply.to_be_bytes::<32>());
         log.data = data.into();
     }
 
@@ -1080,6 +1125,33 @@ mod tests {
             U256::from(84_919_129_125_191_u64)
         );
         assert_eq!(quote.simulated_round_trip_return_bps, U256::from(849));
+        assert!(!quote.execution_eligible);
+        assert!(!quote.broadcast);
+    }
+
+    #[test]
+    fn recent_extensionless_launch_reconstructs_single_position_quote() {
+        let fixture = extensionless_live_fixture();
+        let quote = quote_clanker_launch_receipt(
+            &fixture.transaction,
+            &fixture.receipt,
+            &fixture.block,
+            ClankerV4ExpectedProfile::production(),
+            policy(),
+        )
+        .unwrap();
+        assert_eq!(quote.tx_hash, fixture.receipt.transaction_hash);
+        assert_eq!(quote.market.extension, None);
+        assert_eq!(quote.market.extensions_supply, U256::ZERO);
+        assert_eq!(
+            quote.market.liquidity_profile,
+            ClankerLiquidityProfile::ExtensionlessSinglePosition
+        );
+        assert_eq!(quote.market.position_count, 1);
+        assert_eq!(quote.market.static_fee_config.clanker_fee_ppm, 10_000);
+        assert_eq!(quote.market.static_fee_config.paired_fee_ppm, 10_000);
+        assert_eq!(quote.entry.lp_fee_ppm, 666_777);
+        assert_eq!(quote.state_version.terminal_log_index, 39);
         assert!(!quote.execution_eligible);
         assert!(!quote.broadcast);
     }
@@ -1226,6 +1298,32 @@ mod tests {
                 policy()
             ),
             Err(ClankerQuoteError::TokenCreatedIdentity)
+        ));
+
+        let mut fixture = extensionless_live_fixture();
+        set_extensions_supply(&mut fixture.receipt, U256::from(1_u8));
+        assert!(matches!(
+            quote_clanker_launch_receipt(
+                &fixture.transaction,
+                &fixture.receipt,
+                &fixture.block,
+                profile,
+                policy()
+            ),
+            Err(ClankerQuoteError::MarketIdentity)
+        ));
+
+        let mut fixture = live_fixture();
+        set_extensions_supply(&mut fixture.receipt, U256::ZERO);
+        assert!(matches!(
+            quote_clanker_launch_receipt(
+                &fixture.transaction,
+                &fixture.receipt,
+                &fixture.block,
+                profile,
+                policy()
+            ),
+            Err(ClankerQuoteError::MarketIdentity)
         ));
     }
 }

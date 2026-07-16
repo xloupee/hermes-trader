@@ -16,9 +16,9 @@ use hermes_feed::paper_observer::{
 };
 use hermes_feed::{
     BankrCreateProfileVersion, BankrDopplerExpectedProfile, BankrDopplerReceiptPaperQuote,
-    BankrEnvelopeKind, ClankerReceiptPaperQuote, HoodExpectedProfile, HoodMigrationEvidence,
-    HoodReceiptPaperQuote, PonsReceiptPaperQuote, V3ReceiptPaperQuote, bankr_hook_fee_ppm,
-    quote_hood_curve_buy, quote_hood_curve_sell,
+    BankrEnvelopeKind, ClankerLiquidityProfile, ClankerReceiptPaperQuote, ClankerV4ExpectedProfile,
+    HoodExpectedProfile, HoodMigrationEvidence, HoodReceiptPaperQuote, PonsReceiptPaperQuote,
+    V3ReceiptPaperQuote, bankr_hook_fee_ppm, quote_hood_curve_buy, quote_hood_curve_sell,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1000,6 +1000,7 @@ fn finalized_clanker_plans(
             || quote.state_version.l2_block_number != quote.l2_block_number
             || quote.state_version.first_eligible_quote_timestamp
                 <= quote.state_version.receipt_timestamp
+            || !clanker_quote_profile_is_consistent(&quote)
         {
             anyhow::bail!("unsafe or inconsistent Clanker V4 quote evidence for {key:?}");
         }
@@ -1025,6 +1026,58 @@ fn finalized_clanker_plans(
         });
     }
     Ok(plans)
+}
+
+fn clanker_quote_profile_is_consistent(quote: &ClankerReceiptPaperQuote) -> bool {
+    let profile = ClankerV4ExpectedProfile::production();
+    if profile.validate().is_err() {
+        return false;
+    }
+    let market = &quote.market;
+    let shape_matches = match market.liquidity_profile {
+        ClankerLiquidityProfile::ExtensionlessSinglePosition => {
+            market.extension.is_none()
+                && market.extensions_supply == U256::ZERO
+                && market.position_count == 1
+        }
+        ClankerLiquidityProfile::PinnedExtensionFivePosition => {
+            market.extension == Some(profile.extension.address)
+                && market.extensions_supply != U256::ZERO
+                && market.position_count == 5
+        }
+    };
+    let Some(expected_first_eligible) = quote
+        .state_version
+        .receipt_timestamp
+        .checked_add(profile.mev_delay_guard_seconds)
+    else {
+        return false;
+    };
+    shape_matches
+        && quote.quote_source == "confirmed_receipt_end_clanker_v4_first_eligible_state"
+        && quote.sizing_source == "independent_fixed_tiny_weth_policy"
+        && quote.execution_blocker == "paper_only_clanker_hook_mev_and_router_execution_not_enabled"
+        && market.token != Address::ZERO
+        && market.token != hermes_feed::robinhood::WETH
+        && market.pool_id != B256::ZERO
+        && market.pool_manager == profile.pool_manager.address
+        && market.quote_asset == hermes_feed::robinhood::WETH
+        && market.hook == profile.hook.address
+        && market.locker == profile.locker.address
+        && market.mev_module == profile.mev_module.address
+        && market.dynamic_fee_flag == hermes_feed::uniswap_v4::DYNAMIC_FEE_FLAG
+        && market.tick_spacing == 200
+        && market.initialize_log_index < market.last_liquidity_log_index
+        && market.last_liquidity_log_index < market.launch_log_index
+        && quote.state_version.terminal_log_index == market.launch_log_index
+        && quote.state_version.first_eligible_quote_timestamp == expected_first_eligible
+        && market.static_fee_config.clanker_fee_ppm <= profile.max_static_fee_ppm
+        && market.static_fee_config.paired_fee_ppm <= profile.max_static_fee_ppm
+        && market.mev_fee_config.starting_fee_ppm != 0
+        && market.mev_fee_config.starting_fee_ppm <= profile.max_mev_fee_ppm
+        && market.mev_fee_config.ending_fee_ppm <= market.mev_fee_config.starting_fee_ppm
+        && market.mev_fee_config.seconds_to_decay != 0
+        && market.mev_fee_config.seconds_to_decay <= profile.max_mev_seconds_to_decay
 }
 
 fn finalized_bankr_plans(
@@ -2524,6 +2577,50 @@ mod tests {
         .unwrap()
     }
 
+    fn clanker_extensionless_quote_fixture() -> ClankerReceiptPaperQuote {
+        let fixture: ClankerLiveFixture = serde_json::from_str(include_str!(
+            "../../tests/fixtures/clanker-v4-extensionless-live-proof.json"
+        ))
+        .unwrap();
+        quote_clanker_launch_receipt(
+            &fixture.transaction,
+            &fixture.receipt,
+            &fixture.block,
+            ClankerV4ExpectedProfile::production(),
+            ClankerQuotePolicy {
+                amount_in: U256::from(1_000_u64),
+                max_amount_in: U256::from(1_000_u64),
+                slippage_bps: 100,
+            },
+        )
+        .unwrap()
+    }
+
+    fn finalize_clanker_quote(
+        quote: ClankerReceiptPaperQuote,
+    ) -> Result<Vec<FinalizedV3PaperPlan>> {
+        let key = (quote.tx_hash, quote.launchpad);
+        let ground_truth = quote_authority(
+            key,
+            ActionKind::Launch,
+            quote.market.token,
+            None,
+            quote.state_version.l2_block_number,
+            quote.state_version.block_hash,
+            quote.state_version.transaction_index,
+        );
+        finalized_clanker_plans(
+            &HashMap::from([(key, 77)]),
+            &ground_truth,
+            vec![quote],
+            PaperPlanPolicy {
+                max_input_wei: U256::from(1_000_u64),
+                slippage_bps: 100,
+                ..PaperPlanPolicy::default()
+            },
+        )
+    }
+
     fn bankr_quote_fixture() -> BankrDopplerReceiptPaperQuote {
         let fixture: ClankerLiveFixture = serde_json::from_str(include_str!(
             "../../tests/fixtures/bankr-doppler-live-proof.json"
@@ -2690,32 +2787,25 @@ mod tests {
     #[test]
     fn confirmed_clanker_quote_becomes_execution_gated_finalized_plan() {
         let quote = clanker_quote_fixture();
-        let key = (quote.tx_hash, quote.launchpad);
-        let ground_truth = quote_authority(
-            key,
-            ActionKind::Launch,
-            quote.market.token,
-            None,
-            quote.state_version.l2_block_number,
-            quote.state_version.block_hash,
-            quote.state_version.transaction_index,
-        );
-        let plans = finalized_clanker_plans(
-            &HashMap::from([(key, 77)]),
-            &ground_truth,
-            vec![quote],
-            PaperPlanPolicy {
-                max_input_wei: U256::from(1_000_u64),
-                slippage_bps: 100,
-                ..PaperPlanPolicy::default()
-            },
-        )
-        .unwrap();
+        let plans = finalize_clanker_quote(quote).unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].status, "quoted_execution_gated");
         assert_eq!(plans[0].feed_sequence, 77);
         assert!(!plans[0].execution_eligible);
         assert!(!plans[0].broadcast);
+    }
+
+    #[test]
+    fn extensionless_clanker_quote_finalizes_but_profile_tampering_fails_closed() {
+        let quote = clanker_extensionless_quote_fixture();
+        let plans = finalize_clanker_quote(quote.clone()).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert!(!plans[0].execution_eligible);
+        assert!(!plans[0].broadcast);
+
+        let mut tampered = quote;
+        tampered.market.extensions_supply = U256::from(1_u8);
+        assert!(finalize_clanker_quote(tampered).is_err());
     }
 
     #[test]

@@ -50,6 +50,7 @@ pub const TRENCH_UNPROVEN_SELECTOR_A: [u8; 4] = [0x2c, 0xe7, 0xa0, 0xfa];
 pub const TRENCH_UNPROVEN_SELECTOR_B: [u8; 4] = [0xae, 0x87, 0xc3, 0x97];
 
 const MAX_DISCOVERY_CALLDATA: usize = 128 * 1024;
+const MAX_OBSERVED_ROUTE_BYTES: usize = 32 * 1024;
 
 sol! {
     function deployCoin(
@@ -173,16 +174,25 @@ impl V4AdapterSet {
                 mode: ExecutionMode::ExecutionGated,
             });
         }
-        if entries.iter().any(|entry| !entry.destination.complete()) {
-            return Err(V4AdapterError::InvalidStartupPin);
-        }
-        Ok(Self { entries })
+        Self::validate_entries(entries)
     }
 
     #[cfg(test)]
     fn from_entries(entries: Vec<DispatchEntry>) -> Result<Self, V4AdapterError> {
+        Self::validate_entries(entries)
+    }
+
+    fn validate_entries(entries: Vec<DispatchEntry>) -> Result<Self, V4AdapterError> {
         if entries.iter().any(|entry| !entry.destination.complete()) {
             return Err(V4AdapterError::InvalidStartupPin);
+        }
+        for (index, entry) in entries.iter().enumerate() {
+            if entries[..index].iter().any(|existing| {
+                existing.destination.address == entry.destination.address
+                    && existing.selector == entry.selector
+            }) {
+                return Err(V4AdapterError::Ambiguous);
+            }
         }
         Ok(Self { entries })
     }
@@ -200,26 +210,26 @@ impl V4AdapterSet {
             .ok_or(V4AdapterError::MalformedCalldata)?
             .try_into()
             .expect("four-byte slice");
-        let matches = self
-            .entries
-            .iter()
-            .filter(|entry| {
-                entry.destination.address == candidate.destination
-                    && entry.destination.runtime_code_hash == candidate.destination_runtime_hash
-                    && entry.selector == selector
-                    && match (entry.implementation, candidate.implementation) {
-                        (None, None) => true,
-                        (Some(expected), Some(observed)) => expected == observed,
-                        _ => false,
-                    }
-            })
-            .copied()
-            .collect::<Vec<_>>();
-        match matches.as_slice() {
-            [] => Err(V4AdapterError::NoMatch),
-            [entry] => Ok(*entry),
-            _ => Err(V4AdapterError::Ambiguous),
+        let mut matched = None;
+        for entry in self.entries.iter().copied().filter(|entry| {
+            entry.destination.address == candidate.destination
+                && entry.destination.runtime_code_hash == candidate.destination_runtime_hash
+                && entry.selector == selector
+                && match (entry.implementation, candidate.implementation) {
+                    (None, None) => true,
+                    (Some(expected), Some(observed)) => expected == observed,
+                    _ => false,
+                }
+        }) {
+            if matched.replace(entry).is_some() {
+                return Err(V4AdapterError::Ambiguous);
+            }
         }
+        matched.ok_or(V4AdapterError::NoMatch)
+    }
+
+    pub fn entries(&self) -> &[DispatchEntry] {
+        &self.entries
     }
 
     pub fn observe(
@@ -227,6 +237,26 @@ impl V4AdapterSet {
         candidate: &V4CandidateCall<'_>,
     ) -> Result<LaunchObservation, V4AdapterError> {
         let entry = self.dispatch(candidate)?;
+        Self::observe_resolved(entry, candidate)
+    }
+
+    /// Decode a V4-family call already resolved by the canonical launchpad
+    /// registry. This validates the resolved identity but performs no second
+    /// destination/selector search.
+    pub fn observe_resolved(
+        entry: DispatchEntry,
+        candidate: &V4CandidateCall<'_>,
+    ) -> Result<LaunchObservation, V4AdapterError> {
+        if candidate.chain_id != CHAIN_ID {
+            return Err(V4AdapterError::WrongChain);
+        }
+        if candidate.destination != entry.destination.address
+            || candidate.destination_runtime_hash != entry.destination.runtime_code_hash
+            || candidate.implementation != entry.implementation
+            || candidate.input.get(..4) != Some(&entry.selector)
+        {
+            return Err(V4AdapterError::NoMatch);
+        }
         match entry.launchpad {
             LaunchpadId::Clanker => {
                 validate_opaque_abi(candidate.input, CLANKER_DEPLOY_SELECTOR)?;
@@ -338,6 +368,8 @@ pub struct ObservedV4Action {
 pub struct ValidatedAdapterMarket {
     launchpad: LaunchpadId,
     pool_id: B256,
+    currency0: Address,
+    currency1: Address,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -353,16 +385,25 @@ pub struct V4ActionObservationInput<'a> {
 }
 
 pub fn normalize_v4_action(
-    market: &V4MarketSnapshot,
+    validated: ValidatedAdapterMarket,
     input: V4ActionObservationInput<'_>,
 ) -> Result<ObservedV4Action, V4AdapterError> {
+    if input.launchpad != validated.launchpad
+        || !matches!(
+            input.launchpad,
+            LaunchpadId::Clanker | LaunchpadId::BankrDoppler
+        )
+        || input.observed_route.len() > MAX_OBSERVED_ROUTE_BYTES
+    {
+        return Err(V4AdapterError::InvalidObservation);
+    }
     if input.attribution.is_some() && input.launchpad != LaunchpadId::BankrDoppler {
         return Err(V4AdapterError::InvalidAttribution);
     }
     if input.leader == Address::ZERO
         || input.asset_in == input.asset_out
-        || !market.key.contains(input.asset_in)
-        || !market.key.contains(input.asset_out)
+        || ![validated.currency0, validated.currency1].contains(&input.asset_in)
+        || ![validated.currency0, validated.currency1].contains(&input.asset_out)
         || input.observed_amount_in == U256::ZERO
     {
         return Err(V4AdapterError::InvalidObservation);
@@ -371,7 +412,7 @@ pub fn normalize_v4_action(
         launchpad: input.launchpad,
         attribution: input.attribution,
         leader: input.leader,
-        pool_id: market.pool_id,
+        pool_id: validated.pool_id,
         asset_in: input.asset_in,
         asset_out: input.asset_out,
         observed_amount_in: input.observed_amount_in,
@@ -425,6 +466,8 @@ pub fn validate_clanker_market(
     Ok(ValidatedAdapterMarket {
         launchpad: LaunchpadId::Clanker,
         pool_id: market.pool_id,
+        currency0: market.key.currency0,
+        currency1: market.key.currency1,
     })
 }
 
@@ -441,6 +484,8 @@ pub fn validate_doppler_market(
     Ok(ValidatedAdapterMarket {
         launchpad: LaunchpadId::BankrDoppler,
         pool_id: market.pool_id,
+        currency0: market.key.currency0,
+        currency1: market.key.currency1,
     })
 }
 
@@ -552,6 +597,22 @@ mod tests {
         }
     }
 
+    fn validated_clanker(market: &V4MarketSnapshot) -> ValidatedAdapterMarket {
+        validate_clanker_market(
+            RuntimeCodePin {
+                address: CLANKER_FACTORY,
+                runtime_code_hash: CLANKER_FACTORY_RUNTIME_HASH,
+            },
+            pin(CLANKER_LOCKER, 0x99),
+            market,
+        )
+        .unwrap()
+    }
+
+    fn validated_bankr(market: &V4MarketSnapshot) -> ValidatedAdapterMarket {
+        validate_doppler_market(pin(DOPPLER_CREATE_EMITTER, 0x98), market).unwrap()
+    }
+
     #[test]
     fn observes_exact_clanker_and_rejects_lookalikes() {
         let registry = research_registry();
@@ -657,10 +718,17 @@ mod tests {
             implementation: None,
             mode: ExecutionMode::ExecutionGated,
         };
-        let ambiguous = V4AdapterSet::from_entries(vec![entry, entry]).unwrap();
-        let input = [entry.selector.as_slice(), &[0_u8; 32]].concat();
-        let call = candidate(entry.destination.address, hash(1), None, &input);
-        assert_eq!(ambiguous.dispatch(&call), Err(V4AdapterError::Ambiguous));
+        assert!(matches!(
+            V4AdapterSet::from_entries(vec![entry, entry]),
+            Err(V4AdapterError::Ambiguous)
+        ));
+
+        let mut drifted_duplicate = entry;
+        drifted_duplicate.destination.runtime_code_hash = hash(2);
+        assert!(matches!(
+            V4AdapterSet::from_entries(vec![entry, drifted_duplicate]),
+            Err(V4AdapterError::Ambiguous)
+        ));
     }
 
     #[test]
@@ -668,7 +736,7 @@ mod tests {
         let market = market();
         assert_eq!(
             normalize_v4_action(
-                &market,
+                validated_clanker(&market),
                 V4ActionObservationInput {
                     launchpad: LaunchpadId::Clanker,
                     attribution: Some(AttributionSource::Virtuals),
@@ -683,7 +751,7 @@ mod tests {
             Err(V4AdapterError::InvalidAttribution)
         );
         let bankr = normalize_v4_action(
-            &market,
+            validated_bankr(&market),
             V4ActionObservationInput {
                 launchpad: LaunchpadId::BankrDoppler,
                 attribution: Some(AttributionSource::Virtuals),
@@ -703,9 +771,10 @@ mod tests {
     #[test]
     fn follower_plan_never_inherits_leader_min_out_or_route() {
         let market = market();
+        let validated = validated_clanker(&market);
         let make_action = |min_out, route: &[u8]| {
             normalize_v4_action(
-                &market,
+                validated,
                 V4ActionObservationInput {
                     launchpad: LaunchpadId::Clanker,
                     attribution: None,
@@ -733,15 +802,6 @@ mod tests {
             spend_limit: U256::from(100),
             max_slippage_bps: 100,
         };
-        let validated = validate_clanker_market(
-            RuntimeCodePin {
-                address: CLANKER_FACTORY,
-                runtime_code_hash: CLANKER_FACTORY_RUNTIME_HASH,
-            },
-            pin(CLANKER_LOCKER, 0x99),
-            &market,
-        )
-        .unwrap();
         let first = build_adapter_paper_plan(
             validated,
             &make_action(U256::from(1), &[0xaa]),
@@ -784,5 +844,54 @@ mod tests {
             &klik_input,
         );
         assert_eq!(registry.observe(&at_clanker), Err(V4AdapterError::NoMatch));
+    }
+
+    #[test]
+    fn v4_action_normalization_rejects_unvalidated_markets_foreign_protocols_and_large_routes() {
+        let valid_market = market();
+        fn action<'a>(
+            launchpad: LaunchpadId,
+            observed_route: &'a [u8],
+        ) -> V4ActionObservationInput<'a> {
+            V4ActionObservationInput {
+                launchpad,
+                attribution: None,
+                leader: Address::with_last_byte(9),
+                asset_in: WETH,
+                asset_out: TOKEN,
+                observed_amount_in: U256::from(1),
+                observed_min_out: U256::from(1),
+                observed_route,
+            }
+        }
+
+        let mut drifted = valid_market.clone();
+        drifted.pool_manager.runtime_code_hash = B256::ZERO;
+        assert!(matches!(
+            validate_clanker_market(
+                RuntimeCodePin {
+                    address: CLANKER_FACTORY,
+                    runtime_code_hash: CLANKER_FACTORY_RUNTIME_HASH,
+                },
+                pin(CLANKER_LOCKER, 0x99),
+                &drifted,
+            ),
+            Err(V4AdapterError::V4(V4Error::PoolManagerPinMismatch))
+        ));
+        assert_eq!(
+            normalize_v4_action(
+                validated_clanker(&valid_market),
+                action(LaunchpadId::Flap, &[])
+            ),
+            Err(V4AdapterError::InvalidObservation)
+        );
+        let oversized = vec![0_u8; MAX_OBSERVED_ROUTE_BYTES + 1];
+        assert_eq!(
+            normalize_v4_action(
+                validated_bankr(&valid_market),
+                action(LaunchpadId::BankrDoppler, &oversized),
+            ),
+            Err(V4AdapterError::InvalidObservation)
+        );
     }
 }

@@ -27,6 +27,8 @@ pub enum ContractRole {
     V3Factory,
     Router,
     Aggregator,
+    Implementation,
+    ProtocolDependency,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,7 +53,16 @@ pub struct LaunchpadSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartupPinSnapshot {
     pub chain_id: u64,
-    pub pins: Vec<ContractPin>,
+    pub pins: Vec<ObservedContractPin>,
+}
+
+/// Runtime identity independently observed during startup. It deliberately has no protocol role;
+/// roles and expected hashes belong only to reviewed [`LaunchpadSpec`] definitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ObservedContractPin {
+    pub address: Address,
+    pub implementation: Option<Address>,
+    pub runtime_code_hash: B256,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,13 +147,17 @@ impl StaticLaunchpadRegistry {
         {
             return Err(RegistryError::WrongChain);
         }
-        let actual: HashSet<ContractPin> = startup.pins.into_iter().collect();
+        let actual: HashSet<ObservedContractPin> = startup.pins.into_iter().collect();
         if specs
             .iter()
             .flat_map(|spec| spec.contract_pins.iter())
-            .any(|pin| !actual.contains(pin))
+            .any(|pin| !actual.contains(&pin.observed_identity()))
         {
             return Err(RegistryError::PinMismatch);
+        }
+        let mut launchpad_ids = HashSet::new();
+        if specs.iter().any(|spec| !launchpad_ids.insert(spec.id)) {
+            return Err(RegistryError::AmbiguousDispatch);
         }
         let mut dispatch = HashMap::new();
         for (index, spec) in specs.iter().enumerate() {
@@ -185,6 +200,32 @@ impl StaticLaunchpadRegistry {
 
     pub fn specs(&self) -> &[LaunchpadSpec] {
         &self.specs
+    }
+
+    pub fn might_dispatch(
+        &self,
+        destination: Address,
+        calldata: &[u8],
+        wrapper: WrapperKind,
+    ) -> bool {
+        let Some(selector) = calldata.get(..4).and_then(|bytes| bytes.try_into().ok()) else {
+            return false;
+        };
+        self.dispatch.contains_key(&DispatchKey {
+            destination,
+            selector,
+            wrapper,
+        })
+    }
+}
+
+impl ContractPin {
+    pub const fn observed_identity(self) -> ObservedContractPin {
+        ObservedContractPin {
+            address: self.address,
+            implementation: self.implementation,
+            runtime_code_hash: self.runtime_code_hash,
+        }
     }
 }
 
@@ -251,7 +292,11 @@ mod tests {
         let spec = noxa_spec(aggregator());
         StartupPinSnapshot {
             chain_id: CHAIN_ID,
-            pins: spec.contract_pins,
+            pins: spec
+                .contract_pins
+                .into_iter()
+                .map(ContractPin::observed_identity)
+                .collect(),
         }
     }
 
@@ -310,12 +355,42 @@ mod tests {
         let spec = noxa_spec(aggregator());
         let startup = StartupPinSnapshot {
             chain_id: CHAIN_ID,
-            pins: spec.contract_pins.clone(),
+            pins: spec
+                .contract_pins
+                .iter()
+                .copied()
+                .map(ContractPin::observed_identity)
+                .collect(),
         };
         assert!(matches!(
             StaticLaunchpadRegistry::from_specs(startup, vec![spec.clone(), spec]),
             Err(RegistryError::AmbiguousDispatch)
         ));
+    }
+
+    #[test]
+    fn duplicate_launchpad_authority_is_rejected_even_with_distinct_keys() {
+        let first = noxa_spec(aggregator());
+        let mut second = first.clone();
+        second.observation_keys = vec![DispatchKey {
+            destination: Address::with_last_byte(0xee),
+            selector: [0xaa, 0xbb, 0xcc, 0xdd],
+            wrapper: WrapperKind::Direct,
+        }];
+        let startup = StartupPinSnapshot {
+            chain_id: CHAIN_ID,
+            pins: first
+                .contract_pins
+                .iter()
+                .chain(second.contract_pins.iter())
+                .copied()
+                .map(ContractPin::observed_identity)
+                .collect(),
+        };
+        assert_eq!(
+            StaticLaunchpadRegistry::from_specs(startup, vec![first, second]).unwrap_err(),
+            RegistryError::AmbiguousDispatch
+        );
     }
 
     #[test]
@@ -379,6 +454,7 @@ mod tests {
             pins: specs
                 .iter()
                 .flat_map(|spec| spec.contract_pins.iter().copied())
+                .map(ContractPin::observed_identity)
                 .collect(),
         };
         let registry = StaticLaunchpadRegistry::from_specs(startup.clone(), specs.clone()).unwrap();
@@ -420,7 +496,12 @@ mod tests {
         let mut collision_specs = specs;
         collision_specs.push(duplicate.clone());
         let mut collision_startup = startup;
-        collision_startup.pins.extend(duplicate.contract_pins);
+        collision_startup.pins.extend(
+            duplicate
+                .contract_pins
+                .into_iter()
+                .map(ContractPin::observed_identity),
+        );
         assert_eq!(
             StaticLaunchpadRegistry::from_specs(collision_startup, collision_specs).unwrap_err(),
             RegistryError::AmbiguousDispatch

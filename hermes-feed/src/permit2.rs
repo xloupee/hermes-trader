@@ -95,6 +95,8 @@ fn validate_pin(pin: RuntimeContractPin) -> Result<(), Permit2PinError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Permit2WarmState {
     pub chain_id: u64,
+    /// Startup-verified local signer identity that owns every follower permit.
+    pub follower_owner: Address,
     pub permit2: Option<VerifiedRuntimeContractPin>,
     pub router: Option<VerifiedRuntimeContractPin>,
 }
@@ -103,6 +105,7 @@ impl Default for Permit2WarmState {
     fn default() -> Self {
         Self {
             chain_id: ROBINHOOD_CHAIN_ID,
+            follower_owner: Address::ZERO,
             permit2: None,
             router: None,
         }
@@ -146,6 +149,8 @@ pub enum Permit2PlanError {
     MissingRouterPin,
     #[error("owner is zero")]
     ZeroOwner,
+    #[error("permit owner is not the startup-verified follower signer")]
+    WrongOwner,
     #[error("token is zero")]
     ZeroToken,
     #[error("spender is zero")]
@@ -190,6 +195,9 @@ impl Permit2WarmState {
 
         if request.owner == Address::ZERO {
             return Err(Permit2PlanError::ZeroOwner);
+        }
+        if self.follower_owner == Address::ZERO || request.owner != self.follower_owner {
+            return Err(Permit2PlanError::WrongOwner);
         }
         if request.token == Address::ZERO {
             return Err(Permit2PlanError::ZeroToken);
@@ -270,6 +278,7 @@ mod tests {
     fn warm_state() -> Permit2WarmState {
         Permit2WarmState {
             chain_id: ROBINHOOD_CHAIN_ID,
+            follower_owner: Address::with_last_byte(3),
             permit2: Some(verified(pin(1, 11))),
             router: Some(verified(pin(2, 12))),
         }
@@ -411,6 +420,26 @@ mod tests {
         assert_eq!(
             state.plan(invalid, 1_000),
             Err(Permit2PlanError::WrongSpender)
+        );
+    }
+
+    #[test]
+    fn rejects_owner_other_than_the_verified_follower_signer() {
+        let state = warm_state();
+        let mut invalid = request();
+        invalid.owner = Address::with_last_byte(99);
+        assert_eq!(
+            state.plan(invalid, 1_000),
+            Err(Permit2PlanError::WrongOwner)
+        );
+
+        let unbound = Permit2WarmState {
+            follower_owner: Address::ZERO,
+            ..state
+        };
+        assert_eq!(
+            unbound.plan(request(), 1_000),
+            Err(Permit2PlanError::WrongOwner)
         );
     }
 

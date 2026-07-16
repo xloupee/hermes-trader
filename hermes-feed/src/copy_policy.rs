@@ -203,6 +203,7 @@ impl WatchedWalletCopyPolicy {
         independently_validated_token: bool,
         require_watched_wallet: bool,
     ) -> Result<CopyDecision, CopyRejectReason> {
+        validate_normalized_action(action)?;
         if require_watched_wallet && !self.watched_wallets.contains(&action.leader) {
             return Err(CopyRejectReason::UnwatchedWallet);
         }
@@ -246,6 +247,28 @@ impl WatchedWalletCopyPolicy {
             })
         }
     }
+}
+
+fn validate_normalized_action(action: &ObservedLeaderAction) -> Result<(), CopyRejectReason> {
+    if action.leader == Address::ZERO
+        || action.market.token == Address::ZERO
+        || action.market.quote_asset == Address::ZERO
+        || action.market.pool == Address::ZERO
+        || action.market.token == action.market.quote_asset
+        || action.observed_amounts.amount_in == U256::ZERO
+        || action.observed_amounts.minimum_out == U256::ZERO
+    {
+        return Err(CopyRejectReason::UnsupportedPair);
+    }
+    let expected_assets = match action.action {
+        ActionKind::Buy => (action.market.quote_asset, action.market.token),
+        ActionKind::Sell => (action.market.token, action.market.quote_asset),
+        ActionKind::Launch => return Err(CopyRejectReason::UnsupportedPair),
+    };
+    if (action.asset_in, action.asset_out) != expected_assets {
+        return Err(CopyRejectReason::UnsupportedPair);
+    }
+    Ok(())
 }
 
 fn map_adapter_rejection(error: AdapterError) -> CopyRejectReason {
@@ -499,6 +522,43 @@ mod tests {
         assert_eq!(
             policy().evaluate(&candidate, None, 0),
             Err(CopyRejectReason::ZeroAmount)
+        );
+    }
+
+    #[test]
+    fn rejects_forged_or_non_trade_normalized_actions() {
+        let candidate = observed(WETH, token(), 100, 100);
+        let mut action = NoxaV3Adapter
+            .observe_direct_intent(
+                candidate.tx_hash,
+                candidate.chain_id,
+                candidate.from,
+                candidate.to,
+                candidate.value,
+                candidate.intent,
+            )
+            .unwrap();
+
+        action.action = ActionKind::Launch;
+        assert_eq!(
+            policy().evaluate_action(&action, None, 0),
+            Err(CopyRejectReason::UnsupportedPair)
+        );
+
+        action.action = ActionKind::Buy;
+        action.asset_in = action.market.token;
+        action.asset_out = action.market.quote_asset;
+        assert_eq!(
+            policy().evaluate_action(&action, None, 0),
+            Err(CopyRejectReason::UnsupportedPair)
+        );
+
+        action.asset_in = action.market.quote_asset;
+        action.asset_out = action.market.token;
+        action.leader = Address::ZERO;
+        assert_eq!(
+            policy().evaluate_action(&action, None, 0),
+            Err(CopyRejectReason::UnsupportedPair)
         );
     }
 }

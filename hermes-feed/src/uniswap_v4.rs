@@ -6,6 +6,7 @@
 //! leader route bytes, deadline, hook data, or minimum output enter this API.
 
 use alloy_primitives::{Address, B256, U256, keccak256};
+#[cfg(test)]
 use alloy_sol_types::{SolValue, sol};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -16,6 +17,7 @@ pub const DYNAMIC_FEE_FLAG: u32 = 0x80_0000;
 pub const MAX_LP_FEE_PPM: u32 = 1_000_000;
 pub const MAX_TICK_SPACING: i32 = 32_767;
 
+#[cfg(test)]
 sol! {
     struct AbiPoolKey {
         address currency0;
@@ -92,15 +94,15 @@ impl V4PoolKey {
     }
 
     pub fn pool_id(self) -> B256 {
-        let encoded = AbiPoolKey {
-            currency0: self.currency0,
-            currency1: self.currency1,
-            fee: alloy_primitives::aliases::U24::from(self.fee),
-            tickSpacing: alloy_primitives::aliases::I24::try_from(self.tick_spacing)
-                .expect("validated v4 tick spacing fits int24"),
-            hooks: self.hooks,
-        }
-        .abi_encode();
+        // Five static ABI words can be encoded directly on the stack. Tick
+        // spacing is positive after validation, so its int24 sign extension is
+        // zero and the final three bytes are its canonical representation.
+        let mut encoded = [0_u8; 5 * 32];
+        encoded[12..32].copy_from_slice(self.currency0.as_slice());
+        encoded[44..64].copy_from_slice(self.currency1.as_slice());
+        encoded[93..96].copy_from_slice(&self.fee.to_be_bytes()[1..]);
+        encoded[125..128].copy_from_slice(&self.tick_spacing.to_be_bytes()[1..]);
+        encoded[140..160].copy_from_slice(self.hooks.as_slice());
         keccak256(encoded)
     }
 
@@ -374,6 +376,15 @@ mod tests {
             ..a
         };
         assert_ne!(a.pool_id(), changed.pool_id());
+        let alloy_encoded = AbiPoolKey {
+            currency0: a.currency0,
+            currency1: a.currency1,
+            fee: alloy_primitives::aliases::U24::from(a.fee),
+            tickSpacing: alloy_primitives::aliases::I24::try_from(a.tick_spacing).unwrap(),
+            hooks: a.hooks,
+        }
+        .abi_encode();
+        assert_eq!(a.pool_id(), keccak256(alloy_encoded));
     }
 
     #[test]

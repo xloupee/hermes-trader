@@ -321,18 +321,34 @@ pub fn decode_launch_header(input: &[u8], transaction_value: U256) -> Option<Nox
 }
 
 pub fn decode_v3_exact_input_single(input: &[u8]) -> Option<V3ExactInputIntent> {
-    let call = exactInputSingleCall::abi_decode(input).ok()?;
-    if call.abi_encode().as_slice() != input {
+    const WORDS: usize = 7;
+    if input.len() != 4 + WORDS * 32 || input.get(..4)? != EXACT_INPUT_SINGLE_SELECTOR {
+        return None;
+    }
+    let word = |index: usize| input.get(4 + index * 32..4 + (index + 1) * 32);
+    let address = |index: usize| {
+        let value = word(index)?;
+        value[..12]
+            .iter()
+            .all(|byte| *byte == 0)
+            .then(|| Address::from_slice(&value[12..]))
+    };
+    let fee_word = word(2)?;
+    if fee_word[..29].iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    let price_limit_word = word(6)?;
+    if price_limit_word[..12].iter().any(|byte| *byte != 0) {
         return None;
     }
     Some(V3ExactInputIntent {
-        token_in: call.params.tokenIn,
-        token_out: call.params.tokenOut,
-        fee: u32::try_from(call.params.fee).ok()?,
-        recipient: call.params.recipient,
-        amount_in: call.params.amountIn,
-        amount_out_minimum: call.params.amountOutMinimum,
-        sqrt_price_limit_x96: U256::from(call.params.sqrtPriceLimitX96),
+        token_in: address(0)?,
+        token_out: address(1)?,
+        fee: u32::from_be_bytes([0, fee_word[29], fee_word[30], fee_word[31]]),
+        recipient: address(3)?,
+        amount_in: U256::from_be_slice(word(4)?),
+        amount_out_minimum: U256::from_be_slice(word(5)?),
+        sqrt_price_limit_x96: U256::from_be_slice(price_limit_word),
     })
 }
 
@@ -605,6 +621,16 @@ mod tests {
         let mut trailing = encoded.clone();
         trailing.push(0);
         assert!(decode_v3_exact_input_single(&trailing).is_none());
+
+        let mut noncanonical_address = encoded.clone();
+        noncanonical_address[4] = 1;
+        assert!(decode_v3_exact_input_single(&noncanonical_address).is_none());
+        let mut overflowing_fee = encoded.clone();
+        overflowing_fee[4 + 2 * 32] = 1;
+        assert!(decode_v3_exact_input_single(&overflowing_fee).is_none());
+        let mut overflowing_price_limit = encoded;
+        overflowing_price_limit[4 + 6 * 32] = 1;
+        assert!(decode_v3_exact_input_single(&overflowing_price_limit).is_none());
     }
 
     #[test]

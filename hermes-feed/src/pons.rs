@@ -25,6 +25,8 @@ pub const PONS_TICK_SPACING: i32 = 200;
 pub const PONS_LAUNCH_CONFIG_ID: u64 = 0;
 pub const PONS_DEX_CONFIG_ID: u64 = 0;
 pub const PONS_LAUNCH_SELECTOR: [u8; 4] = [0x68, 0x63, 0x99, 0xcb];
+const MAX_PONS_CALLDATA_BYTES: usize = 64 * 1024;
+const MAX_PONS_DYNAMIC_STRING_BYTES: usize = 4 * 1024;
 
 pub const PONS_LEGACY_FACTORY: Address =
     alloy_primitives::address!("a5aab3f0c6eeadf30ef1d3eb997108e976351feb");
@@ -220,6 +222,9 @@ impl PonsAdapter {
         if input.destination_runtime_hash != generation.factory_runtime() {
             return Err(PonsObservationReject::RuntimeDrift);
         }
+        if input.calldata.len() > MAX_PONS_CALLDATA_BYTES {
+            return Err(PonsObservationReject::MalformedCalldata);
+        }
         if input.calldata.get(..4) != Some(&PONS_LAUNCH_SELECTOR) {
             return Err(PonsObservationReject::WrongSelector);
         }
@@ -229,6 +234,22 @@ impl PonsAdapter {
         let call = launchTokenCall::abi_decode(input.calldata)
             .map_err(|_| PonsObservationReject::MalformedCalldata)?;
         if call.abi_encode().as_slice() != input.calldata {
+            return Err(PonsObservationReject::MalformedCalldata);
+        }
+        if [
+            &call.params.name,
+            &call.params.symbol,
+            &call.params.logo,
+            &call.params.description,
+            &call.params.socials.telegram,
+            &call.params.socials.twitter,
+            &call.params.socials.discord,
+            &call.params.socials.website,
+            &call.params.socials.farcaster,
+        ]
+        .iter()
+        .any(|value| value.len() > MAX_PONS_DYNAMIC_STRING_BYTES)
+        {
             return Err(PonsObservationReject::MalformedCalldata);
         }
         if call.launchConfigId != U256::from(PONS_LAUNCH_CONFIG_ID)
@@ -447,6 +468,8 @@ pub enum PonsReceiptProvenance {
         emitter: Address,
         topic0: B256,
         lp_locker: Address,
+        token: Address,
+        pool: Address,
         no_unexpected_burn_or_migration: bool,
     },
     PageOrIndexerLabel,
@@ -507,6 +530,8 @@ fn validate_market(
         emitter,
         topic0,
         lp_locker,
+        token,
+        pool,
         no_unexpected_burn_or_migration,
     } = market.provenance
     else {
@@ -516,6 +541,8 @@ fn validate_market(
         || emitter != market.generation.factory()
         || topic0 != PONS_TOKEN_LAUNCHED_TOPIC
         || lp_locker != market.generation.locker()
+        || token != market.token
+        || pool != market.pool_state.pool
         || !no_unexpected_burn_or_migration
         || market.factory_runtime_hash != market.generation.factory_runtime()
         || market.token == Address::ZERO
@@ -681,6 +708,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rejects_oversized_calldata_and_dynamic_strings() {
+        let oversized = vec![0_u8; MAX_PONS_CALLDATA_BYTES + 1];
+        assert_eq!(
+            adapter()
+                .observe_launch(observation_input(PonsGeneration::Current, &oversized))
+                .unwrap_err(),
+            PonsObservationReject::MalformedCalldata
+        );
+
+        let oversized_string = launchTokenCall {
+            params: PonsLaunchParams {
+                name: "x".repeat(MAX_PONS_DYNAMIC_STRING_BYTES + 1),
+                symbol: "PONS".into(),
+                logo: "ipfs://fixture".into(),
+                description: "fixture".into(),
+                socials: PonsSocials {
+                    telegram: String::new(),
+                    twitter: String::new(),
+                    discord: String::new(),
+                    website: String::new(),
+                    farcaster: String::new(),
+                },
+                devWallet: Address::with_last_byte(1),
+            },
+            launchConfigId: U256::ZERO,
+            dexConfigId: U256::ZERO,
+            salt: B256::with_last_byte(1),
+        }
+        .abi_encode();
+        assert!(oversized_string.len() <= MAX_PONS_CALLDATA_BYTES);
+        assert_eq!(
+            adapter()
+                .observe_launch(observation_input(
+                    PonsGeneration::Current,
+                    &oversized_string,
+                ))
+                .unwrap_err(),
+            PonsObservationReject::MalformedCalldata
+        );
+    }
+
     fn current_observation() -> PonsLaunchObservation {
         let calldata = fixture_calldata();
         adapter()
@@ -690,13 +759,14 @@ mod tests {
 
     fn current_market() -> VerifiedPonsMarket {
         let token = address!("432c99bbd9dc1d9040087598d7cf40502d7cc20b");
+        let pool = address!("f28f09dfe76860a9962a6915f356be2ce29c760d");
         let (token0, token1) = if PONS_WETH < token {
             (PONS_WETH, token)
         } else {
             (token, PONS_WETH)
         };
         let mut pool_state = V3PoolState::new(
-            address!("f28f09dfe76860a9962a6915f356be2ce29c760d"),
+            pool,
             token0,
             token1,
             PONS_POOL_FEE,
@@ -723,6 +793,8 @@ mod tests {
                 emitter: PONS_CURRENT_FACTORY,
                 topic0: PONS_TOKEN_LAUNCHED_TOPIC,
                 lp_locker: PONS_CURRENT_LOCKER,
+                token,
+                pool,
                 no_unexpected_burn_or_migration: true,
             },
         }
@@ -790,6 +862,8 @@ mod tests {
             emitter: PONS_LEGACY_FACTORY,
             topic0: PONS_TOKEN_LAUNCHED_TOPIC,
             lp_locker: PONS_LEGACY_LOCKER,
+            token: market.token,
+            pool: market.pool_state.pool,
             no_unexpected_burn_or_migration: true,
         };
         assert!(matches!(
@@ -803,6 +877,25 @@ mod tests {
                 }
             ),
             Err(PonsPaperPlanError::LegacyRuntimeEvidenceIncomplete)
+        ));
+    }
+
+    #[test]
+    fn paper_planning_rejects_noncanonical_v3_pool_identity() {
+        let observed = current_observation();
+        let mut market = current_market();
+        market.pool_state.pool = Address::with_last_byte(0xee);
+        assert!(matches!(
+            adapter().plan_paper_entry(
+                &observed,
+                &market,
+                PonsPaperRequest {
+                    recipient: Address::with_last_byte(8),
+                    spend: U256::from(1),
+                    max_slippage_bps: 100,
+                },
+            ),
+            Err(PonsPaperPlanError::MarketConfigurationMismatch)
         ));
     }
 

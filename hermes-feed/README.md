@@ -24,6 +24,27 @@ records.
 
 It does not submit transactions and is safe to run without wallet keys.
 
+## Unified launchpad paper observer
+
+`hermes-launchpad-paper` loads runtime/code identity pins once at startup, emits the complete
+capability matrix, then applies cheap static dispatch, bounded ERC-4337 unwrapping when configured,
+leader recovery, and adapter decoding to Nitro transactions. It has no signer, sequencer client,
+or candidate-time RPC path.
+
+Reproduce the checked-in raw-feed fixture end to end:
+
+```sh
+cargo run --bin hermes-launchpad-paper -- \
+  --expected-pins tests/fixtures/launchpad-paper-expected-pins.synthetic.json \
+  --observed-startup-snapshot tests/fixtures/launchpad-paper-observed-startup.synthetic.json \
+  --input tests/fixtures/launchpad-paper-raw-feed.jsonl
+```
+
+The two fixture documents have distinct roles and explicit synthetic provenance. They only prove
+offline reachability. Production expected pins must be reviewed independently from the observed
+startup snapshot. Missing, duplicate, or mismatched observations fail startup. The existing
+`hermes-noxa-runtime` signed path is separate and unchanged.
+
 ## Feed topology
 
 Start with the official Nitro relay on the same host and leave its local output

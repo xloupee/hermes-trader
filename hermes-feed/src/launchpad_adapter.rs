@@ -242,23 +242,13 @@ impl NoxaV3Adapter {
             calldata: &[],
             wrapper: WrapperKind::Direct,
         };
-        Self::normalize_intent(
-            call,
-            &intent,
-            expected_noxa_pool(if intent.token_in == WETH {
-                intent.token_out
-            } else {
-                intent.token_in
-            }),
-            ObservedRoute::DirectV3,
-            value,
-        )
+        Self::normalize_intent(call, &intent, None, ObservedRoute::DirectV3, value)
     }
 
     fn normalize_intent(
         call: CandidateCall<'_>,
         intent: &V3ExactInputIntent,
-        pool: Address,
+        observed_pool: Option<Address>,
         route: ObservedRoute,
         normalized_value: U256,
     ) -> Result<ObservedLeaderAction, AdapterError> {
@@ -283,7 +273,7 @@ impl NoxaV3Adapter {
             intent.token_in
         };
         let expected_pool = expected_noxa_pool(token);
-        if pool != expected_pool {
+        if observed_pool.is_some_and(|pool| pool != expected_pool) {
             return Err(AdapterError::WrongMarketIdentity);
         }
         Ok(ObservedLeaderAction {
@@ -298,7 +288,7 @@ impl NoxaV3Adapter {
             market: MarketIdentity {
                 token,
                 quote_asset: WETH,
-                pool,
+                pool: expected_pool,
             },
             asset_in: intent.token_in,
             asset_out: intent.token_out,
@@ -330,17 +320,7 @@ impl LaunchpadAdapter for NoxaV3Adapter {
             }
             let intent =
                 decode_v3_exact_input_single(call.calldata).ok_or(AdapterError::Malformed)?;
-            Self::normalize_intent(
-                call,
-                &intent,
-                expected_noxa_pool(if intent.token_in == WETH {
-                    intent.token_out
-                } else {
-                    intent.token_in
-                }),
-                ObservedRoute::DirectV3,
-                call.value,
-            )
+            Self::normalize_intent(call, &intent, None, ObservedRoute::DirectV3, call.value)
         } else if call.destination == ROBINHOOD_SWAP_AGGREGATOR {
             if selector != AGGREGATOR_SWAP_SELECTOR {
                 return Err(AdapterError::WrongSelector);
@@ -350,7 +330,7 @@ impl LaunchpadAdapter for NoxaV3Adapter {
             Self::normalize_intent(
                 call,
                 &normalized.intent,
-                normalized.pool,
+                Some(normalized.pool),
                 ObservedRoute::RobinhoodAggregator,
                 U256::ZERO,
             )

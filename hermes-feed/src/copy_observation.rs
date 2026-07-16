@@ -79,8 +79,7 @@ pub fn normalize_aggregator_copy_swap(
     }
 
     let is_entry = leg.token_in == WETH;
-    if (is_entry && leader_used_native_eth && transaction_value != call.amount_in)
-        || (!is_entry && leader_used_native_eth)
+    if (leader_used_native_eth && (!is_entry || transaction_value != call.amount_in))
         || native_flag != leader_used_native_eth
     {
         return Err(AggregatorCopyRejectReason::WrongValue);

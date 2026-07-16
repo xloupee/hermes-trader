@@ -46,6 +46,7 @@ pub const LEAVEHOOD_SELL_WITH_SLIPPAGE_SELECTOR: [u8; 4] = [0x0d, 0xda, 0x52, 0x
 pub const LEAVEHOOD_SELL_SELECTOR: [u8; 4] = [0x6c, 0x19, 0x7f, 0xf5];
 pub const LEAVEHOOD_CLAIM_FEES_SELECTOR: [u8; 4] = [0xd6, 0xae, 0x6e, 0x44];
 pub const HOOD_V3_FEE: u32 = 10_000;
+pub const MAX_CURVE_CANDIDATE_CALLDATA_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -258,6 +259,9 @@ impl Tier2CurveAdapter {
     ) -> Result<CurveObservation, CurveAdapterError> {
         if call.chain_id != CHAIN_ID {
             return Err(CurveAdapterError::WrongChain);
+        }
+        if call.input.len() > MAX_CURVE_CANDIDATE_CALLDATA_BYTES {
+            return Err(CurveAdapterError::Malformed);
         }
         let selector: [u8; 4] = call
             .input
@@ -530,11 +534,9 @@ impl Tier2CurveAdapter {
                 launchpad: market.protocol,
                 route: RouteKind::V3SingleHop,
                 destination: UNISWAP_V3_SWAP_ROUTER_02,
-                value: if token_in == WETH {
-                    amount_in
-                } else {
-                    U256::ZERO
-                },
+                // Hermes supplies pre-wrapped WETH to SwapRouter02. Native
+                // value is never attached to exactInputSingle.
+                value: U256::ZERO,
                 calldata: calldata.into(),
                 spend_limit: amount_in,
                 min_receive: minimum,
@@ -1230,6 +1232,34 @@ mod tests {
     }
 
     #[test]
+    fn rejects_oversized_candidate_calldata_before_opaque_observation() {
+        let adapter = registry();
+        for (destination, selector) in [
+            (LEAVEHOOD_FACTORY_PROXY, LEAVEHOOD_LAUNCH_SELECTORS[0]),
+            (LEAVEHOOD_CORE_PROXY, LEAVEHOOD_BUY_SELECTOR),
+            (HOOD_FACTORY, HOOD_BUY_SELECTOR),
+        ] {
+            // The payload is deliberately ABI-envelope aligned so the opaque
+            // LeaveHood checks would otherwise accept it based on shape alone.
+            let mut oversized = selector.to_vec();
+            oversized.extend_from_slice(&vec![0_u8; MAX_CURVE_CANDIDATE_CALLDATA_BYTES]);
+            assert_eq!((oversized.len() - 4) % 32, 0);
+            assert_eq!(
+                adapter.observe(
+                    CurveCandidateCall {
+                        chain_id: CHAIN_ID,
+                        destination,
+                        input: &oversized,
+                        value: U256::from(1),
+                    },
+                    &[],
+                ),
+                Err(CurveAdapterError::Malformed)
+            );
+        }
+    }
+
+    #[test]
     fn route_ambiguity_and_cross_adapter_negatives_fail_closed() {
         let adapter = registry();
         let wrong_selector =
@@ -1402,6 +1432,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(plan.plan.route, RouteKind::V3SingleHop);
+        assert_eq!(plan.plan.value, U256::ZERO);
         assert_ne!(plan.plan.min_receive, U256::from(1));
         assert!(!plan.execution_enabled);
 

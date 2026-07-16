@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use alloy_consensus::{Transaction, transaction::SignerRecoverable};
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, U256, keccak256};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use futures_util::{StreamExt, TryStreamExt, stream, stream::SplitStream};
@@ -21,7 +21,7 @@ use hermes_feed::robinhood::{
     NOXA_DEX_ID_UNISWAP, NOXA_FACTORY_RUNTIME_KECCAK256, NOXA_LAUNCH_CONFIG_ID_WETH,
     NOXA_LAUNCH_FACTORY, NOXA_POOL_FEE, PUBLIC_RPC_URL, ROBINHOOD_SWAP_AGGREGATOR, TESTNET_RPC_URL,
     TESTNET_SEQUENCER_URL, UNISWAP_V3_FACTORY, UNISWAP_V3_POOL_INIT_CODE_KECCAK256,
-    UNISWAP_V3_SWAP_ROUTER_02, WETH,
+    UNISWAP_V3_SWAP_ROUTER_02, UNISWAP_V3_SWAP_ROUTER_02_RUNTIME_KECCAK256, WETH,
 };
 use hermes_feed::{
     ApprovalTransactionPlan, AutomatedPaperRuntime, ConditionalOptions, CopyDecision, CopyPosition,
@@ -2732,8 +2732,8 @@ async fn signed_preflight(
         rpc.native_balance(signer),
         rpc.latest_base_fee_per_gas(),
     )?;
-    if router_code.is_empty() {
-        bail!("canonical SwapRouter02 has no bytecode");
+    if keccak256(&router_code) != UNISWAP_V3_SWAP_ROUTER_02_RUNTIME_KECCAK256 {
+        bail!("canonical SwapRouter02 runtime hash does not match its pinned implementation");
     }
     validate_live_fee_headroom(max_fee_per_gas, base_fee_per_gas)?;
     let max_gas_cost = U256::from(gas_limit)

@@ -68,6 +68,64 @@ pub struct SmartAccountPins<'a> {
     pub allowed_targets: &'a [ContractPin],
 }
 
+/// Startup-validated smart-account identities for allocation-free reuse by the
+/// candidate path. Construction performs all duplicate and overlap checks.
+#[derive(Debug, Clone, Copy)]
+pub struct ValidatedSmartAccountPins<'a> {
+    pins: SmartAccountPins<'a>,
+}
+
+impl<'a> ValidatedSmartAccountPins<'a> {
+    pub fn new(pins: SmartAccountPins<'a>) -> Result<Self, SmartAccountDecodeError> {
+        validate_pins(pins)?;
+        Ok(Self { pins })
+    }
+}
+
+/// Owned startup-validated smart-account identities. This is suitable for
+/// long-lived runtimes that cannot safely store a self-referential borrowed
+/// [`ValidatedSmartAccountPins`]. Candidate access only borrows the immutable
+/// slices and performs no allocation or repeated pin validation.
+#[derive(Debug, Clone)]
+pub struct OwnedValidatedSmartAccountPins {
+    entry_point: ContractPin,
+    accounts: Box<[SmartAccountPin]>,
+    allowed_targets: Box<[ContractPin]>,
+}
+
+impl OwnedValidatedSmartAccountPins {
+    pub fn new(
+        entry_point: ContractPin,
+        accounts: Vec<SmartAccountPin>,
+        allowed_targets: Vec<ContractPin>,
+    ) -> Result<Self, SmartAccountDecodeError> {
+        validate_pins(SmartAccountPins {
+            entry_point,
+            accounts: &accounts,
+            allowed_targets: &allowed_targets,
+        })?;
+        Ok(Self {
+            entry_point,
+            accounts: accounts.into_boxed_slice(),
+            allowed_targets: allowed_targets.into_boxed_slice(),
+        })
+    }
+
+    pub const fn entry_point(&self) -> ContractPin {
+        self.entry_point
+    }
+
+    pub fn validated(&self) -> ValidatedSmartAccountPins<'_> {
+        ValidatedSmartAccountPins {
+            pins: SmartAccountPins {
+                entry_point: self.entry_point,
+                accounts: &self.accounts,
+                allowed_targets: &self.allowed_targets,
+            },
+        }
+    }
+}
+
 /// The outer transaction facts plus the EntryPoint code identity observed in
 /// the validated warm snapshot.
 #[derive(Debug, Clone, Copy)]
@@ -132,6 +190,8 @@ pub enum SmartAccountDecodeError {
     MalformedAccountCall,
     #[error("inner target {target} is neither an allowed target nor a pinned smart account")]
     UnknownTarget { target: Address },
+    #[error("intermediate smart-account hop {target} carries non-zero native value")]
+    IntermediateValueNotAllowed { target: Address },
     #[error("inner call count exceeded fixed maximum {maximum}")]
     ExcessiveInnerCalls { maximum: usize },
     #[error("smart-account unwrap depth exceeded fixed maximum {maximum}")]
@@ -148,13 +208,22 @@ pub fn decode_entry_point_v07(
     observed: EntryPointCall<'_>,
     pins: SmartAccountPins<'_>,
 ) -> Result<UnwrappedSmartAccountCall, SmartAccountDecodeError> {
+    let pins = ValidatedSmartAccountPins::new(pins)?;
+    decode_entry_point_v07_prevalidated(observed, pins)
+}
+
+/// Candidate-time decoder for identities validated once during startup.
+pub fn decode_entry_point_v07_prevalidated(
+    observed: EntryPointCall<'_>,
+    validated: ValidatedSmartAccountPins<'_>,
+) -> Result<UnwrappedSmartAccountCall, SmartAccountDecodeError> {
+    let pins = validated.pins;
     if observed.chain_id != ROBINHOOD_CHAIN_ID {
         return Err(SmartAccountDecodeError::WrongChain {
             expected: ROBINHOOD_CHAIN_ID,
             actual: observed.chain_id,
         });
     }
-    validate_pins(pins)?;
     if observed.destination.address != pins.entry_point.address {
         return Err(SmartAccountDecodeError::EntryPointAddressMismatch);
     }
@@ -198,7 +267,8 @@ pub fn decode_entry_point_v07(
         });
     }
 
-    let operation = &call.ops[0];
+    let mut operations = call.ops;
+    let operation = operations.pop().expect("one operation checked above");
     if !operation.initCode.is_empty() {
         return Err(SmartAccountDecodeError::InitCodeNotAllowed {
             sender: operation.sender,
@@ -213,7 +283,7 @@ pub fn decode_entry_point_v07(
     let account_pin = find_account_pin(operation.sender, pins.accounts)?;
     let account_factory = account_pin.factory.map(|factory| factory.address);
     let (target, value, calldata, unwrap_depth, inner_call_count) =
-        unwrap_execute_chain(operation.callData.as_ref(), pins)?;
+        unwrap_execute_chain(operation.callData, pins)?;
 
     Ok(UnwrappedSmartAccountCall {
         leader: operation.sender,
@@ -254,10 +324,10 @@ fn bounded_operation_count(calldata: &[u8]) -> Result<usize, SmartAccountDecodeE
 }
 
 fn unwrap_execute_chain(
-    initial_calldata: &[u8],
+    initial_calldata: Bytes,
     pins: SmartAccountPins<'_>,
 ) -> Result<(Address, U256, Bytes, usize, usize), SmartAccountDecodeError> {
-    let mut current_calldata = Bytes::copy_from_slice(initial_calldata);
+    let mut current_calldata = initial_calldata;
     let mut depth = 0usize;
     let mut calls = 0usize;
 
@@ -294,6 +364,11 @@ fn unwrap_execute_chain(
             return Ok((call.dest, call.value, call.func, depth, calls));
         }
         if find_account_pin_optional(call.dest, pins.accounts)?.is_some() {
+            if call.value != U256::ZERO {
+                return Err(SmartAccountDecodeError::IntermediateValueNotAllowed {
+                    target: call.dest,
+                });
+            }
             current_calldata = call.func;
             continue;
         }
@@ -533,6 +608,59 @@ mod tests {
         assert_eq!(decoded.calldata, protocol_calldata);
         assert_eq!(decoded.unwrap_depth, 2);
         assert_eq!(decoded.inner_call_count, 2);
+    }
+
+    #[test]
+    fn prevalidated_pins_preserve_nested_fail_closed_decoding() {
+        let protocol_calldata = Bytes::from_static(&[0xaa, 0xbb, 0xcc, 0xdd]);
+        let nested = encode_execute(TARGET, U256::from(5), protocol_calldata.clone());
+        let outer = encode_execute(SECOND_ACCOUNT, U256::ZERO, nested);
+        let calldata = encode_handle_ops(vec![user_operation(LEADER, outer)]);
+        let accounts = [account(LEADER), account(SECOND_ACCOUNT)];
+        let targets = [contract(TARGET, TARGET_HASH)];
+        let pins = ValidatedSmartAccountPins::new(SmartAccountPins {
+            entry_point: contract(ENTRY_POINT, ENTRY_POINT_HASH),
+            accounts: &accounts,
+            allowed_targets: &targets,
+        })
+        .unwrap();
+
+        let decoded = decode_entry_point_v07_prevalidated(
+            EntryPointCall {
+                chain_id: ROBINHOOD_CHAIN_ID,
+                destination: contract(ENTRY_POINT, ENTRY_POINT_HASH),
+                outer_bundler: BUNDLER,
+                calldata: &calldata,
+            },
+            pins,
+        )
+        .unwrap();
+        assert_eq!(decoded.leader, LEADER);
+        assert_eq!(decoded.target, TARGET);
+        assert_eq!(decoded.calldata, protocol_calldata);
+        assert_eq!(decoded.unwrap_depth, 2);
+    }
+
+    #[test]
+    fn rejects_value_bearing_intermediate_account_hop() {
+        let protocol_calldata = Bytes::from_static(&[0xaa, 0xbb, 0xcc, 0xdd]);
+        let nested = encode_execute(TARGET, U256::from(5), protocol_calldata);
+        let outer = encode_execute(SECOND_ACCOUNT, U256::from(1), nested);
+        let calldata = encode_handle_ops(vec![user_operation(LEADER, outer)]);
+        let accounts = [account(LEADER), account(SECOND_ACCOUNT)];
+        let targets = [contract(TARGET, TARGET_HASH)];
+
+        assert_eq!(
+            decode_with(
+                &calldata,
+                contract(ENTRY_POINT, ENTRY_POINT_HASH),
+                &accounts,
+                &targets,
+            ),
+            Err(SmartAccountDecodeError::IntermediateValueNotAllowed {
+                target: SECOND_ACCOUNT,
+            })
+        );
     }
 
     #[test]

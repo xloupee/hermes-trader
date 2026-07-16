@@ -22,6 +22,7 @@ pub mod noxa_rpc;
 pub mod noxa_trade;
 pub mod noxa_verifier;
 pub mod paper;
+pub mod paper_observer;
 pub mod paper_runtime;
 pub mod permit2;
 pub mod pons;
@@ -65,8 +66,8 @@ pub use launchpad_adapter::{
 };
 pub use launchpad_registry::{
     BoundedCall, BoundedInnerCalls, ContractPin, ContractRole, DispatchKey, DynamicAggregatorPin,
-    LaunchpadSpec, MAX_INNER_CALLS, MAX_WRAPPER_DEPTH, RegistryError, StartupPinSnapshot,
-    StaticLaunchpadRegistry,
+    LaunchpadSpec, MAX_INNER_CALLS, MAX_WRAPPER_DEPTH, ObservedContractPin, RegistryError,
+    StartupPinSnapshot, StaticLaunchpadRegistry,
 };
 pub use noxa_abi::{
     AggregatorSwapIntent, AggregatorSwapLeg, NoxaLaunchEvent, NoxaLaunchHeader, NoxaLaunchIntent,

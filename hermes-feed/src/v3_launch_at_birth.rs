@@ -23,6 +23,9 @@ const LAUNCHHOOD_CONFIG_ID: u64 = 0;
 const MAX_CALLDATA_BYTES: usize = 32 * 1024;
 const MAX_DYNAMIC_STRING_BYTES: usize = 4 * 1024;
 
+pub const BOW_LAUNCH_SELECTOR: [u8; 4] = [0xf6, 0xef, 0xcc, 0xd9];
+pub const LAUNCHHOOD_V3_LAUNCH_SELECTOR: [u8; 4] = [0x41, 0x10, 0xa4, 0x1c];
+
 sol! {
     struct BowLaunchParams {
         string name;
@@ -257,7 +260,10 @@ impl V3LaunchAtBirthAdapter {
     /// admitted a market into warm state. Receipt decoding remains gated until
     /// exact protocol event evidence is checked in.
     pub fn paper_plan(&self, input: FollowerPlanInput) -> Result<FollowerTradePlan, V3LaunchError> {
-        if input.market.token == Address::ZERO
+        if !matches!(
+            input.market.launchpad,
+            LaunchpadId::Bow | LaunchpadId::LaunchHoodV3
+        ) || input.market.token == Address::ZERO
             || input.market.quote_asset != WETH
             || input.market.fee != V3_FEE
             || input.market.restriction_state != MarketRestrictionState::Clear
@@ -574,6 +580,25 @@ mod tests {
                 spend_limit: U256::from(100),
                 locally_quoted_receive: U256::from(500),
                 min_receive: U256::from(400)
+            }),
+            Err(V3LaunchError::UnsafeFollowerPlan)
+        );
+
+        let cross_adapter = LaunchMarket {
+            launchpad: LaunchpadId::Flap,
+            token,
+            pool: canonical_pool(token),
+            quote_asset: WETH,
+            fee: V3_FEE,
+            restriction_state: MarketRestrictionState::Clear,
+        };
+        assert_eq!(
+            r.paper_plan(FollowerPlanInput {
+                market: cross_adapter,
+                recipient: Address::with_last_byte(5),
+                spend_limit: U256::from(100),
+                locally_quoted_receive: U256::from(500),
+                min_receive: U256::from(400),
             }),
             Err(V3LaunchError::UnsafeFollowerPlan)
         );

@@ -325,7 +325,7 @@ pub fn get_amount_out(
 
 fn validate_path(path: &[Address]) -> Result<(), QuoteError> {
     if path.len() < 2
-        || path.iter().any(|token| *token == Address::ZERO)
+        || path.contains(&Address::ZERO)
         || path.windows(2).any(|hop| hop[0] == hop[1])
     {
         return Err(QuoteError::InvalidPath);

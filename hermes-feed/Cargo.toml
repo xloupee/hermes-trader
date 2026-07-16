@@ -32,6 +32,12 @@ zeroize = "1.8"
 rand = "0.8"
 tempfile = "3"
 
+[[bin]]
+name = "hermes-hot-path-bench"
+path = "src/bin/hermes-hot-path-bench.rs"
+test = false
+bench = false
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

@@ -26,6 +26,7 @@ pub enum LaunchpadId {
     KlikFinance,
     TrenchToday,
     Pons,
+    Flap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -79,6 +80,7 @@ pub struct ObservedAmounts {
 #[serde(rename_all = "snake_case")]
 pub enum ObservedRoute {
     PonsFactory,
+    FlapPortal,
     DirectV3,
     RobinhoodAggregator,
 }

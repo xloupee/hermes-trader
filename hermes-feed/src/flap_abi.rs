@@ -1,8 +1,12 @@
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{SolEvent, sol};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::flap_identity::{FLAP_PORTAL_PROXY, FLAP_VAULT_PORTAL_PROXY, FlapPortalVariant};
+use crate::launchpad_adapter::{
+    ActionKind, LaunchpadId, MarketIdentity, ObservedAmounts, ObservedLeaderAction, ObservedRoute,
+};
 use crate::noxa_abi::ReceiptLog;
 use crate::robinhood::CHAIN_ID;
 
@@ -52,6 +56,50 @@ pub struct FlapTokenBought {
     pub raw_quote_amount: U256,
     pub raw_fee: U256,
     pub circulating_supply: U256,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum FlapNormalizationError {
+    #[error("verified market does not match the observed Flap token")]
+    MarketMismatch,
+    #[error("normalized quote amount is unavailable")]
+    QuoteNormalizationUnavailable,
+}
+
+impl FlapTokenBought {
+    /// Normalize only after an asynchronously verified token profile has
+    /// supplied the quote asset, pool identity, and quote decimals. Raw event
+    /// fields are never relabeled as ETH in the candidate path.
+    pub fn normalize_observed_buy(
+        &self,
+        tx_hash: B256,
+        market: MarketIdentity,
+        normalized_quote_amount: U256,
+    ) -> Result<ObservedLeaderAction, FlapNormalizationError> {
+        if market.token != self.token
+            || market.quote_asset == Address::ZERO
+            || market.pool == Address::ZERO
+        {
+            return Err(FlapNormalizationError::MarketMismatch);
+        }
+        if normalized_quote_amount == U256::ZERO {
+            return Err(FlapNormalizationError::QuoteNormalizationUnavailable);
+        }
+        Ok(ObservedLeaderAction {
+            tx_hash,
+            launchpad: LaunchpadId::Flap,
+            leader: self.buyer,
+            action: ActionKind::Buy,
+            market,
+            asset_in: market.quote_asset,
+            asset_out: market.token,
+            observed_amounts: ObservedAmounts {
+                amount_in: normalized_quote_amount,
+                minimum_out: U256::ZERO,
+            },
+            observed_route: ObservedRoute::FlapPortal,
+        })
+    }
 }
 
 fn source_variant(address: Address) -> Option<FlapPortalVariant> {
@@ -171,6 +219,19 @@ mod tests {
 
         let buy = decode_flap_token_bought(CHAIN_ID, &bought_log(FLAP_PORTAL_PROXY)).unwrap();
         assert_eq!(buy.raw_quote_amount, U256::from(10));
+        let normalized = buy
+            .normalize_observed_buy(
+                B256::with_last_byte(0x44),
+                MarketIdentity {
+                    token: buy.token,
+                    quote_asset: Address::with_last_byte(0xaa),
+                    pool: Address::with_last_byte(0xbb),
+                },
+                U256::from(10),
+            )
+            .unwrap();
+        assert_eq!(normalized.launchpad, LaunchpadId::Flap);
+        assert_eq!(normalized.action, ActionKind::Buy);
     }
 
     #[test]

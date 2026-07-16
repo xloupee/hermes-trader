@@ -60,7 +60,7 @@ pub enum FlapQuoteVariant {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FlapPaperPlanInput {
+pub struct FlapPaperAssessmentInput {
     pub chain_id: u64,
     pub source: FlapPortalVariant,
     pub destination: Address,
@@ -81,7 +81,7 @@ pub struct FlapPaperPlanInput {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-pub struct FlapPaperPlan {
+pub struct FlapPaperAssessment {
     pub destination: Address,
     pub token: Address,
     pub amount_in: U256,
@@ -130,9 +130,9 @@ pub enum FlapSafetyError {
 /// The current verified evidence leaves every migration route incomplete, so
 /// the returned execution gate remains disabled until a later pinned startup
 /// snapshot proves the selected migrator and DEX semantics.
-pub fn prepare_flap_paper_plan(
-    input: FlapPaperPlanInput,
-) -> Result<FlapPaperPlan, FlapSafetyError> {
+pub fn prepare_flap_paper_assessment(
+    input: FlapPaperAssessmentInput,
+) -> Result<FlapPaperAssessment, FlapSafetyError> {
     if input.chain_id != CHAIN_ID {
         return Err(FlapSafetyError::ChainMismatch);
     }
@@ -179,7 +179,7 @@ pub fn prepare_flap_paper_plan(
     // UI-selected V2 migrator. A boolean supplied by candidate data cannot
     // promote that research gap into executable authority.
     let execution = FlapExecutionGate::Disabled(FlapExecutionBlocker::MigrationSemanticsIncomplete);
-    Ok(FlapPaperPlan {
+    Ok(FlapPaperAssessment {
         destination: FLAP_PORTAL_PROXY,
         token: input.token,
         amount_in: input.follower_amount_in,
@@ -194,8 +194,8 @@ pub fn prepare_flap_paper_plan(
 mod tests {
     use super::*;
 
-    fn input() -> FlapPaperPlanInput {
-        FlapPaperPlanInput {
+    fn input() -> FlapPaperAssessmentInput {
+        FlapPaperAssessmentInput {
             chain_id: CHAIN_ID,
             source: FlapPortalVariant::Portal,
             destination: FLAP_PORTAL_PROXY,
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn paper_plan_uses_fresh_follower_quote_and_disables_incomplete_migration() {
-        let plan = prepare_flap_paper_plan(input()).unwrap();
+        let plan = prepare_flap_paper_assessment(input()).unwrap();
         assert_eq!(plan.minimum_receive, U256::from(950));
         assert_ne!(plan.minimum_receive, input().leader_min_out);
         assert_eq!(
@@ -232,7 +232,7 @@ mod tests {
         let mut arbitrary_vault = input();
         arbitrary_vault.vault = FlapVaultVariant::External;
         assert_eq!(
-            prepare_flap_paper_plan(arbitrary_vault),
+            prepare_flap_paper_assessment(arbitrary_vault),
             Err(FlapSafetyError::VaultUnsupported)
         );
 
@@ -241,7 +241,7 @@ mod tests {
         vault_portal.destination = vault_portal.source.proxy();
         vault_portal.implementation_source_verified = false;
         assert_eq!(
-            prepare_flap_paper_plan(vault_portal),
+            prepare_flap_paper_assessment(vault_portal),
             Err(FlapSafetyError::WrongDestination)
         );
     }
@@ -251,7 +251,7 @@ mod tests {
         let mut tax = input();
         tax.tax = FlapTaxVariant::TaxV3;
         assert_eq!(
-            prepare_flap_paper_plan(tax),
+            prepare_flap_paper_assessment(tax),
             Err(FlapSafetyError::TaxUnsupported)
         );
 
@@ -261,21 +261,21 @@ mod tests {
             decimals: 6,
         };
         assert_eq!(
-            prepare_flap_paper_plan(quote),
+            prepare_flap_paper_assessment(quote),
             Err(FlapSafetyError::QuoteIncomplete)
         );
 
         let mut route = input();
         route.route = FlapRouteVariant::Ambiguous;
         assert_eq!(
-            prepare_flap_paper_plan(route),
+            prepare_flap_paper_assessment(route),
             Err(FlapSafetyError::RouteIncomplete)
         );
 
         let mut chain = input();
         chain.chain_id = 8_453;
         assert_eq!(
-            prepare_flap_paper_plan(chain),
+            prepare_flap_paper_assessment(chain),
             Err(FlapSafetyError::ChainMismatch)
         );
     }
@@ -293,7 +293,7 @@ mod tests {
             candidate.migration = migration;
             candidate.migration_route_pinned = true;
             assert_eq!(
-                prepare_flap_paper_plan(candidate).unwrap().execution,
+                prepare_flap_paper_assessment(candidate).unwrap().execution,
                 FlapExecutionGate::Disabled(FlapExecutionBlocker::MigrationSemanticsIncomplete)
             );
         }

@@ -32,6 +32,7 @@ pub mod sequencer;
 pub mod signer;
 pub mod smart_account;
 pub mod testnet_orchestrator;
+pub mod tier2_curve;
 pub mod trading_runtime;
 pub mod uniswap_v2;
 pub mod uniswap_v4;
@@ -126,6 +127,14 @@ pub use testnet_orchestrator::{
     TradePreflightInput, ValidatedTestnetCanary, ValidatedTestnetRoundTripStep,
     evaluate_testnet_preflight, reconcile_testnet_round_trip_step, validate_signed_testnet_canary,
     validate_signed_testnet_round_trip_step,
+};
+pub use tier2_curve::{
+    ActionKind as Tier2ActionKind, AdapterError as Tier2AdapterError,
+    AdapterRegistry as Tier2AdapterRegistry, CandidateCall as Tier2CandidateCall, CurveFormula,
+    CurveState, FactoryGeneration, MarketPhase, MarketSnapshot as Tier2MarketSnapshot,
+    ObservedAction as Tier2ObservedAction, OpportunityEvidence, OpportunityQuality,
+    PaperPlan as Tier2PaperPlan, PaperRoute, Protocol as Tier2Protocol,
+    RuntimePin as Tier2RuntimePin, StartupPins as Tier2StartupPins,
 };
 pub use trading_runtime::{
     SignedBoundaryRelease, SignedPendingKind, SignedPosition, SignedRuntimeError,

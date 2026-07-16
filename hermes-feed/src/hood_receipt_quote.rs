@@ -5,7 +5,7 @@
 //! passes it here for transaction/event/state reconciliation and an independent
 //! fixed-size entry plus immediate full-position exit simulation.
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, I256, U256};
 use alloy_sol_types::{SolCall, SolEvent};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -19,6 +19,7 @@ use crate::tier2_curve::{
     HOOD_FACTORY, HOOD_SELL_SELECTOR, HoodCurveBuyQuote, HoodCurveSellQuote, quote_hood_curve_buy,
     quote_hood_curve_sell,
 };
+use crate::v3_pool::V3PoolState;
 
 const BPS: u16 = 10_000;
 const TRANSFER_TOPIC: B256 =
@@ -75,6 +76,15 @@ mod events {
             uint128 amount,
             uint256 amount0,
             uint256 amount1
+        );
+        event Swap(
+            address indexed sender,
+            address indexed recipient,
+            int256 amount0,
+            int256 amount1,
+            uint160 sqrtPriceX96,
+            uint128 liquidity,
+            int24 tick
         );
         event IncreaseLiquidity(
             uint256 indexed tokenId,
@@ -476,6 +486,14 @@ pub struct HoodMigrationEvidence {
     pub declared_and_actual_liquidity_match: bool,
     pub pool_initialize_sqrt_price_x96: U256,
     pub pool_initialize_tick: i32,
+    pub receipt_end_sqrt_price_x96: U256,
+    pub receipt_end_tick: i32,
+    pub receipt_end_liquidity: U256,
+    pub receipt_end_swap_log_index: u64,
+    pub receipt_end_swap_input: U256,
+    pub receipt_end_swap_output: U256,
+    pub swap_amounts_reconstructed: bool,
+    pub terminal_zero_liquidity_boundary_observed: bool,
     pub expected_profile_validated: bool,
     pub receipt_topology_verified: bool,
     pub pool_state_reconciled: bool,
@@ -809,6 +827,20 @@ pub fn verify_hood_graduation_receipt(
     let mint =
         events::Mint::decode_raw_log_validate(mint_log.topics.iter().copied(), &mint_log.data)
             .map_err(|_| HoodQuoteError::MigrationMismatch)?;
+    let swap_log = exact_migration_log(&receipt.logs, pool, events::Swap::SIGNATURE_HASH)?;
+    let swap =
+        events::Swap::decode_raw_log_validate(swap_log.topics.iter().copied(), &swap_log.data)
+            .map_err(|_| HoodQuoteError::MigrationMismatch)?;
+    let swap_tick = i32::try_from(swap.tick).map_err(|_| HoodQuoteError::MigrationMismatch)?;
+    if receipt
+        .logs
+        .iter()
+        .filter(|log| log.address == pool)
+        .count()
+        != 3
+    {
+        return Err(HoodQuoteError::MigrationMismatch);
+    }
     let increase_log = exact_migration_log(
         &receipt.logs,
         position_manager,
@@ -841,6 +873,42 @@ pub fn verify_hood_graduation_receipt(
         || locked.creator != pre.curve.creator
         || locked.protocol != profile.owner
         || locked.creatorShareBps != profile.migrator_creator_share_bps
+    {
+        return Err(HoodQuoteError::MigrationMismatch);
+    }
+
+    let mut receipt_end_pool = V3PoolState::new(
+        pool,
+        token0,
+        token1,
+        profile.v3_fee,
+        profile.v3_tick_spacing,
+        U256::from(initialize.sqrtPriceX96),
+        initialize_tick,
+        0,
+    )
+    .map_err(|_| HoodQuoteError::MigrationMismatch)?;
+    receipt_end_pool
+        .add_position(
+            profile.full_range_tick_lower,
+            profile.full_range_tick_upper,
+            mint.amount,
+        )
+        .map_err(|_| HoodQuoteError::MigrationMismatch)?;
+    let (swap_input_token, swap_input, swap_output) =
+        exact_v3_swap_amounts(token0, token1, swap.amount0, swap.amount1)?;
+    let reconstructed_swap = receipt_end_pool
+        .quote_exact_input(swap_input_token, swap_input, None)
+        .map_err(|_| HoodQuoteError::MigrationMismatch)?;
+    if swap.sender != trade.trader
+        || swap.recipient != trade.trader
+        || reconstructed_swap.amount_in_consumed != swap_input
+        || reconstructed_swap.amount_out != swap_output
+        || reconstructed_swap.liquidity_after != 0
+        || swap.liquidity != 0
+        || reconstructed_swap.tick_after != profile.full_range_tick_upper
+        || swap_tick <= profile.full_range_tick_upper
+        || U256::from(swap.sqrtPriceX96) <= reconstructed_swap.sqrt_price_x96_after
     {
         return Err(HoodQuoteError::MigrationMismatch);
     }
@@ -925,6 +993,7 @@ pub fn verify_hood_graduation_receipt(
         locked_log.log_index,
         v3_migrated_log.log_index,
         migrated_log.log_index,
+        swap_log.log_index,
     ];
     if order.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(HoodQuoteError::MigrationMismatch);
@@ -960,18 +1029,41 @@ pub fn verify_hood_graduation_receipt(
         declared_and_actual_liquidity_match,
         pool_initialize_sqrt_price_x96: U256::from(initialize.sqrtPriceX96),
         pool_initialize_tick: initialize_tick,
+        receipt_end_sqrt_price_x96: U256::from(swap.sqrtPriceX96),
+        receipt_end_tick: swap_tick,
+        receipt_end_liquidity: U256::from(swap.liquidity),
+        receipt_end_swap_log_index: swap_log.log_index,
+        receipt_end_swap_input: swap_input,
+        receipt_end_swap_output: swap_output,
+        swap_amounts_reconstructed: true,
+        terminal_zero_liquidity_boundary_observed: true,
         expected_profile_validated: true,
         receipt_topology_verified: true,
         pool_state_reconciled: false,
         v3_quote_available: false,
         execution_eligible: false,
         execution_blocker: if declared_and_actual_liquidity_match {
-            "migration_topology_only_missing_independent_v3_state_quote".into()
+            "terminal_zero_liquidity_boundary_unreconciled_quote_blocked".into()
         } else {
-            "declared_actual_liquidity_mismatch_and_missing_independent_v3_state_quote".into()
+            "declared_actual_liquidity_mismatch_and_terminal_boundary_unreconciled".into()
         },
         broadcast: false,
     })
+}
+
+fn exact_v3_swap_amounts(
+    token0: Address,
+    token1: Address,
+    amount0: I256,
+    amount1: I256,
+) -> Result<(Address, U256, U256), HoodQuoteError> {
+    if amount0.is_positive() && amount1.is_negative() {
+        Ok((token0, amount0.into_raw(), amount1.unsigned_abs()))
+    } else if amount1.is_positive() && amount0.is_negative() {
+        Ok((token1, amount1.into_raw(), amount0.unsigned_abs()))
+    } else {
+        Err(HoodQuoteError::MigrationMismatch)
+    }
 }
 
 fn exact_migration_log(
@@ -1890,6 +1982,11 @@ mod tests {
         assert!(evidence.expected_profile_validated);
         assert!(evidence.receipt_topology_verified);
         assert!(!evidence.pool_state_reconciled);
+        assert_eq!(evidence.receipt_end_swap_log_index, 53);
+        assert_ne!(evidence.receipt_end_swap_input, U256::ZERO);
+        assert_ne!(evidence.receipt_end_swap_output, U256::ZERO);
+        assert!(evidence.swap_amounts_reconstructed);
+        assert!(evidence.terminal_zero_liquidity_boundary_observed);
         assert!(!evidence.declared_and_actual_liquidity_match);
         assert!(!evidence.v3_quote_available);
         assert!(!evidence.execution_eligible);
@@ -2020,7 +2117,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_initialization_is_recorded_but_never_claimed_as_reconciled() {
+    fn migration_pool_state_tampering_fails_closed() {
         let value = fixture(include_str!(
             "../tests/fixtures/hood-graduation-migration-live-proof.json"
         ));
@@ -2033,18 +2130,38 @@ mod tests {
         let mut data = initialize.data.to_vec();
         data[31] ^= 1;
         initialize.data = data.into();
-        let evidence = verify_hood_graduation_receipt(
-            &value.transaction,
-            &receipt,
-            &value.block,
-            &value.pre_snapshot(),
-            &value.snapshot(),
-            &HoodExpectedProfile::production(),
-        )
-        .unwrap();
-        assert!(!evidence.pool_state_reconciled);
-        assert!(!evidence.v3_quote_available);
-        assert!(!evidence.execution_eligible);
+        assert!(matches!(
+            verify_hood_graduation_receipt(
+                &value.transaction,
+                &receipt,
+                &value.block,
+                &value.pre_snapshot(),
+                &value.snapshot(),
+                &HoodExpectedProfile::production(),
+            ),
+            Err(HoodQuoteError::MigrationMismatch)
+        ));
+
+        let mut receipt = value.receipt.clone();
+        let swap = receipt
+            .logs
+            .iter_mut()
+            .find(|log| log.topics.first() == Some(&events::Swap::SIGNATURE_HASH))
+            .unwrap();
+        let mut data = swap.data.to_vec();
+        data[2 * 32 - 1] ^= 1;
+        swap.data = data.into();
+        assert!(matches!(
+            verify_hood_graduation_receipt(
+                &value.transaction,
+                &receipt,
+                &value.block,
+                &value.pre_snapshot(),
+                &value.snapshot(),
+                &HoodExpectedProfile::production(),
+            ),
+            Err(HoodQuoteError::MigrationMismatch)
+        ));
     }
 
     #[test]

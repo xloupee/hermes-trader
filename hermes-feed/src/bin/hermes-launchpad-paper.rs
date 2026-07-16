@@ -827,12 +827,12 @@ fn validate_hood_migration_records(
                 && record.protocol_event_match
                 && record.quote_status == QuoteStatus::Blocked
                 && record.protocol_blocker.as_deref()
-                    == Some("hood_migration_topology_verified_v3_quote_unavailable")
+                    == Some("hood_migration_terminal_boundary_unreconciled_v3_quote_unavailable")
         });
         let expected_blocker = if migration.declared_and_actual_liquidity_match {
-            "migration_topology_only_missing_independent_v3_state_quote"
+            "terminal_zero_liquidity_boundary_unreconciled_quote_blocked"
         } else {
-            "declared_actual_liquidity_mismatch_and_missing_independent_v3_state_quote"
+            "declared_actual_liquidity_mismatch_and_terminal_boundary_unreconciled"
         };
         let liquidity_match = migration.actual_eth_liquidity == migration.declared_eth_liquidity
             && migration.actual_token_liquidity == migration.declared_token_liquidity;
@@ -850,6 +850,12 @@ fn validate_hood_migration_records(
             || migration.declared_token_liquidity == U256::ZERO
             || migration.actual_eth_liquidity == U256::ZERO
             || migration.actual_token_liquidity == U256::ZERO
+            || migration.pool_initialize_sqrt_price_x96 == U256::ZERO
+            || migration.receipt_end_sqrt_price_x96 == U256::ZERO
+            || migration.receipt_end_swap_input == U256::ZERO
+            || migration.receipt_end_swap_output == U256::ZERO
+            || !migration.swap_amounts_reconstructed
+            || !migration.terminal_zero_liquidity_boundary_observed
             || migration.declared_and_actual_liquidity_match != liquidity_match
             || !migration.expected_profile_validated
             || !migration.receipt_topology_verified
@@ -865,7 +871,7 @@ fn validate_hood_migration_records(
     for record in evidence.values().filter(|record| {
         record.launchpad == LaunchpadId::HoodFun
             && record.protocol_blocker.as_deref()
-                == Some("hood_migration_topology_verified_v3_quote_unavailable")
+                == Some("hood_migration_terminal_boundary_unreconciled_v3_quote_unavailable")
     }) {
         let key = (record.tx_hash, record.launchpad);
         if migrations
@@ -3091,7 +3097,7 @@ mod tests {
             "transaction_index": 1,
             "reconciliation_started_unix_ns": 1,
             "reconciliation_completed_unix_ns": 9,
-            "protocol_blocker": "hood_migration_topology_verified_v3_quote_unavailable"
+            "protocol_blocker": "hood_migration_terminal_boundary_unreconciled_v3_quote_unavailable"
         });
         let migration = serde_json::json!({
             "record_type": "launchpad_hood_migration_evidence",
@@ -3111,12 +3117,20 @@ mod tests {
             "declared_and_actual_liquidity_match": false,
             "pool_initialize_sqrt_price_x96": "7",
             "pool_initialize_tick": -1,
+            "receipt_end_sqrt_price_x96": "8",
+            "receipt_end_tick": -2,
+            "receipt_end_liquidity": "0",
+            "receipt_end_swap_log_index": 10,
+            "receipt_end_swap_input": "11",
+            "receipt_end_swap_output": "12",
+            "swap_amounts_reconstructed": true,
+            "terminal_zero_liquidity_boundary_observed": true,
             "expected_profile_validated": true,
             "receipt_topology_verified": true,
             "pool_state_reconciled": false,
             "v3_quote_available": false,
             "execution_eligible": false,
-            "execution_blocker": "declared_actual_liquidity_mismatch_and_missing_independent_v3_state_quote",
+            "execution_blocker": "declared_actual_liquidity_mismatch_and_terminal_boundary_unreconciled",
             "broadcast": false
         });
         let path = std::env::temp_dir().join(format!(
@@ -3149,7 +3163,7 @@ mod tests {
         let mut forged = records.hood_migrations.clone();
         forged[0].declared_and_actual_liquidity_match = true;
         forged[0].execution_blocker =
-            "migration_topology_only_missing_independent_v3_state_quote".into();
+            "terminal_zero_liquidity_boundary_unreconciled_quote_blocked".into();
         assert!(validate_hood_migration_records(&records.evidence, &forged).is_err());
     }
 }

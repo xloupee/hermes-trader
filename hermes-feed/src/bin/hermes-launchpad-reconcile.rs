@@ -844,8 +844,7 @@ async fn reconcile_candidate(
                                     truth_pool = Some(evidence.pool);
                                     quote_status = QuoteStatus::Blocked;
                                     protocol_blocker = Some(
-                                        "hood_migration_topology_verified_v3_quote_unavailable"
-                                            .into(),
+                                        "hood_migration_terminal_boundary_unreconciled_v3_quote_unavailable".into(),
                                     );
                                     hood_migration = Some(evidence);
                                 }

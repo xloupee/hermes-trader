@@ -680,6 +680,28 @@ impl NoxaRpcClient {
         parse_block(&value)
     }
 
+    pub async fn storage_at_l2_block(
+        &self,
+        address: Address,
+        slot: B256,
+        l2_block_number: u64,
+    ) -> Result<B256> {
+        let value = self
+            .request(
+                "eth_getStorageAt",
+                json!([address, slot, hex_u64(l2_block_number)]),
+            )
+            .await?;
+        let bytes = parse_bytes_value(&value)?;
+        if bytes.len() != 32 {
+            bail!(
+                "storage word for {address} slot {slot} is {} bytes, expected 32",
+                bytes.len()
+            );
+        }
+        Ok(B256::from_slice(&bytes))
+    }
+
     pub async fn latest_block(&self) -> Result<RobinhoodBlock> {
         let value = self
             .request("eth_getBlockByNumber", json!(["latest", false]))

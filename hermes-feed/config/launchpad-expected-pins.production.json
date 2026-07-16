@@ -1,8 +1,14 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "document_role": "expected_protocol_pins",
   "provenance": "reviewed_protocol_pins",
   "fixture_id": null,
+  "reviewed_at": {
+    "l2_block_number": 10980306,
+    "l2_block_hash": "0x918363e5b20e86dbe7e952f261a60c9882975ec434abb5815a9dbecdc6354173",
+    "l1_block_number": 25542926,
+    "block_timestamp": 1784177178
+  },
   "pons_v3": {
     "identities": [
       {"address": "0x0c37a24f5d23a486fa692d1500881d698b1f77a4", "code_bytes": 24192, "runtime_hash": "0x921a0d1b2d854de5435804e8ee118658f05173a0eeebca5f41b41385b97cd1b5"},

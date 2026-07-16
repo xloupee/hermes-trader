@@ -6,7 +6,10 @@ The reviewed expected configuration is
 `config/launchpad-expected-pins.production.json`. It is independent of the
 fresh startup snapshot: hashes were committed from protocol research, verified
 explorer source where available, and a historical fixed-block code review at
-L2 block `10980306` (block hash prefix `0x918363e5`). A separate latest-block
+L2 block `10980306` (full block hash
+`0x918363e5b20e86dbe7e952f261a60c9882975ec434abb5815a9dbecdc6354173`,
+L1 block `25542926`, timestamp `1784177178`). These fields are serialized in
+the expected document as the checked historical review boundary. A separate latest-block
 snapshot must match before the observer starts.
 
 ## Reviewed configurable pins
@@ -44,7 +47,8 @@ snapshot must match before the observer starts.
 | Clanker | descending-MEV module `0xea1f...299e` | `0x0815a0af5e056adaf07a1941b92082caa886b207676bd42c89ea6bde3956bc13` | Official source semantics plus fixed-block code commitment. |
 | Clanker | extension `0x6f27...34b5` | `0xf742a12de7ec06481d0e98942d1830d8bf33502d854e5d97062ef5fda6f5e004` | Exact launch receipt identity and fixed-block code commitment. |
 
-Schema version 3 serializes the complete Clanker and Hood identity profiles,
+Schema version 4 serializes the canonical historical review boundary, fresh
+observation boundary, and the complete Clanker and Hood identity profiles,
 reviewed fee/configuration semantics, and all seven Pons runtime identities separately from fresh
 observations. The Pons fields are reviewed expected configuration; observed
 startup code remains a different document and cannot populate them. The
@@ -99,7 +103,7 @@ snapshot path.
 
 ## Explicit gaps
 
-- Schema version 3 still has no configurable fields for Flap or Permit2
+- Schema version 4 still has no configurable fields for Flap or Permit2
   identities. They must not be described as centrally reviewed configuration
   until the schema is extended again.
 - Bow's explorer source is unverified; its reviewed hash is a fixed-block code
@@ -115,7 +119,7 @@ Historical review comparison:
 
 ```sh
 cargo run --bin hermes-launchpad-pin-snapshot -- \
-  --l2-block 10980306 \
+  --verify-reviewed-boundary \
   --expected-pins config/launchpad-expected-pins.production.json
 ```
 

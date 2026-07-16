@@ -1,8 +1,9 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "document_role": "expected_protocol_pins",
   "provenance": "synthetic_offline_fixture",
   "fixture_id": "launchpad-paper-offline-v3",
+  "reviewed_at": null,
   "pons_v3": {
     "identities": [
       {"address": "0x0c37a24f5d23a486fa692d1500881d698b1f77a4", "code_bytes": 24192, "runtime_hash": "0x921a0d1b2d854de5435804e8ee118658f05173a0eeebca5f41b41385b97cd1b5"},

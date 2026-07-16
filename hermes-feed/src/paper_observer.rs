@@ -231,6 +231,15 @@ pub enum ObservedPinsProvenance {
     SyntheticOfflineFixture,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PinBlockBoundary {
+    pub l2_block_number: u64,
+    pub l2_block_hash: B256,
+    pub l1_block_number: u64,
+    pub block_timestamp: u64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PaperExpectedPins {
@@ -238,6 +247,8 @@ pub struct PaperExpectedPins {
     pub document_role: ExpectedPinsDocumentRole,
     pub provenance: ExpectedPinsProvenance,
     pub fixture_id: Option<String>,
+    #[serde(default)]
+    pub reviewed_at: Option<PinBlockBoundary>,
     pub pons_v3: ConfiguredPonsV3,
     pub bow_factory_runtime_hash: B256,
     pub launchhood_v3_factory_runtime_hash: B256,
@@ -437,6 +448,8 @@ pub struct PaperObservedStartupSnapshot {
     pub provenance: ObservedPinsProvenance,
     pub fixture_id: Option<String>,
     pub chain_id: u64,
+    #[serde(default)]
+    pub observed_at: Option<PinBlockBoundary>,
     pub pins: Vec<ObservedRuntimePin>,
     #[serde(default)]
     pub hood_protocol: Option<HoodProtocolSnapshot>,
@@ -1757,7 +1770,7 @@ fn validate_document_pair(
     expected: &PaperExpectedPins,
     observed: &PaperObservedStartupSnapshot,
 ) -> Result<(), PaperObserverError> {
-    if expected.schema_version != 3 || observed.schema_version != 3 || observed.chain_id != CHAIN_ID
+    if expected.schema_version != 4 || observed.schema_version != 4 || observed.chain_id != CHAIN_ID
     {
         return Err(PaperObserverError::Startup(
             "unsupported pin schema or chain".into(),
@@ -1767,16 +1780,33 @@ fn validate_document_pair(
         (
             ExpectedPinsProvenance::ReviewedProtocolPins,
             ObservedPinsProvenance::StartupObservation,
-        ) => expected.fixture_id.is_none() && observed.fixture_id.is_none(),
+        ) => {
+            expected.fixture_id.is_none()
+                && observed.fixture_id.is_none()
+                && expected.reviewed_at.is_some_and(valid_pin_boundary)
+                && observed.observed_at.is_some_and(valid_pin_boundary)
+        }
         (
             ExpectedPinsProvenance::SyntheticOfflineFixture,
             ObservedPinsProvenance::SyntheticOfflineFixture,
-        ) => expected.fixture_id.is_some() && expected.fixture_id == observed.fixture_id,
+        ) => {
+            expected.fixture_id.is_some()
+                && expected.fixture_id == observed.fixture_id
+                && expected.reviewed_at.is_none()
+                && observed.observed_at.is_none()
+        }
         _ => false,
     };
     if !valid_provenance {
         return Err(PaperObserverError::Startup(
             "expected and observed pin provenance is incompatible".into(),
+        ));
+    }
+    if let (Some(boundary), Some(hood)) = (observed.observed_at, &observed.hood_protocol)
+        && hood.l2_block_number != boundary.l2_block_number
+    {
+        return Err(PaperObserverError::Startup(
+            "Hood semantic snapshot and runtime pins use different block boundaries".into(),
         ));
     }
     if expected.provenance == ExpectedPinsProvenance::ReviewedProtocolPins
@@ -1790,6 +1820,13 @@ fn validate_document_pair(
         ));
     }
     Ok(())
+}
+
+fn valid_pin_boundary(boundary: PinBlockBoundary) -> bool {
+    boundary.l2_block_number != 0
+        && boundary.l2_block_hash != B256::ZERO
+        && boundary.l1_block_number != 0
+        && boundary.block_timestamp != 0
 }
 
 fn validate_hood_protocol_snapshot(
@@ -1898,6 +1935,9 @@ fn validate_observed_pins(
     for pin in &observed.pins {
         if pin.address == Address::ZERO
             || pin.runtime_hash == B256::ZERO
+            || pin.implementation == Some(Address::ZERO)
+            || (observed.provenance == ObservedPinsProvenance::StartupObservation
+                && pin.code_bytes.is_none_or(|bytes| bytes == 0))
             || !identities.insert(pin.address)
         {
             return Err(PaperObserverError::Startup(
@@ -2068,10 +2108,11 @@ mod tests {
 
     fn startup() -> (PaperExpectedPins, PaperObservedStartupSnapshot) {
         let expected = PaperExpectedPins {
-            schema_version: 3,
+            schema_version: 4,
             document_role: ExpectedPinsDocumentRole::ExpectedProtocolPins,
             provenance: ExpectedPinsProvenance::SyntheticOfflineFixture,
             fixture_id: Some("launchpad-paper-offline-v3".into()),
+            reviewed_at: None,
             pons_v3: ConfiguredPonsV3 {
                 identities: PonsExpectedProfile::production()
                     .identities()
@@ -2104,11 +2145,12 @@ mod tests {
             erc4337: None,
         };
         let mut snapshot = PaperObservedStartupSnapshot {
-            schema_version: 3,
+            schema_version: 4,
             document_role: ObservedPinsDocumentRole::ObservedStartupSnapshot,
             provenance: ObservedPinsProvenance::SyntheticOfflineFixture,
             fixture_id: Some("launchpad-paper-offline-v3".into()),
             chain_id: CHAIN_ID,
+            observed_at: None,
             pins: vec![
                 observed(NOXA_LAUNCH_FACTORY, None, NOXA_FACTORY_RUNTIME_KECCAK256),
                 observed(
@@ -2714,7 +2756,7 @@ mod tests {
     #[test]
     fn expected_document_cannot_self_attest_as_observed_snapshot() {
         let value = serde_json::json!({
-            "schema_version": 3,
+            "schema_version": 4,
             "document_role": "expected_protocol_pins",
             "provenance": "synthetic_offline_fixture",
             "fixture_id": "launchpad-paper-offline-v3",

@@ -19,6 +19,13 @@ The expected-pin document and fresh observed snapshot must be different files.
 Expected values come from reviewed protocol evidence; a fresh observed hash is
 never copied into expected configuration.
 
+Schema version 4 binds the expected document to its full reviewed historical
+L2 hash, L1 number, and timestamp, and binds every fresh snapshot to a
+confirmed block with the same identity fields. The snapshot tool re-reads that
+block after all code, storage, semantic, and proof work. EIP-1967, Safe, and
+EIP-7702 implementation relationships are derived from chain state at that
+block; expected addresses are comparison inputs, never observation labels.
+
 ## Correct local topology
 
 Use the wrapper so raw frames and probe metrics cannot be confused:

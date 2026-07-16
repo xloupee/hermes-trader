@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -9,16 +9,21 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use futures_util::{StreamExt, stream};
 use hermes_feed::flap_abi::{decode_flap_token_bought, decode_flap_token_created};
-use hermes_feed::launchpad_adapter::LaunchpadId;
+use hermes_feed::launchpad_adapter::{ActionKind, LaunchpadId};
 use hermes_feed::launchpad_adapters::{
     CLANKER_FACTORY, CLANKER_TOKEN_CREATED_TOPIC, DOPPLER_CREATE_EMITTER, DOPPLER_CREATE_TOPIC,
     KLIK_FACTORY, KLIK_TOKEN_CREATED_TOPIC,
+};
+use hermes_feed::launchpad_ground_truth::{
+    BOW_LAUNCHED_SIGNATURE, HOOD_TOKEN_CREATED_SIGNATURE, HOOD_TRADE_SIGNATURE,
+    LAUNCHHOOD_TOKEN_LAUNCHED_SIGNATURE, launchpad_for_ground_truth_log,
 };
 use hermes_feed::noxa_abi::{ReceiptLog, decode_token_launched};
 use hermes_feed::paper_observer::{
     PaperExpectedPins, PaperLaunchpadObserver, PaperObservedStartupSnapshot,
 };
 use hermes_feed::pons::{PONS_CURRENT_FACTORY, PONS_LEGACY_FACTORY, PONS_TOKEN_LAUNCHED_TOPIC};
+use hermes_feed::pons_receipt_quote::pons_launch_event_identity;
 use hermes_feed::robinhood::{
     ACTIVE_NOXA_LAUNCH_FACTORY, BOW_LAUNCH_FACTORY, CHAIN_ID, LAUNCHHOOD_V3_FACTORY,
     NOXA_LAUNCH_FACTORY, PUBLIC_RPC_URL,
@@ -32,16 +37,9 @@ use hermes_feed::{
     quote_bankr_doppler_launch_receipt, quote_clanker_launch_receipt, quote_hood_curve_receipt,
     quote_pons_launch_receipt, quote_v3_launch_receipt, verify_hood_graduation_receipt,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use tokio::time::{Instant, sleep};
-
-const BOW_LAUNCHED_SIGNATURE: &str = "Launched(address,address,address,uint256,uint256)";
-const LAUNCHHOOD_TOKEN_LAUNCHED_SIGNATURE: &str = "TokenLaunched(address,address,address,address,uint256,uint256,uint256,uint256,uint256,uint256)";
-const HOOD_TOKEN_CREATED_SIGNATURE: &str =
-    "TokenCreated(address,address,string,string,string,uint256,uint256,uint256)";
-const HOOD_TRADE_SIGNATURE: &str =
-    "Trade(address,address,bool,uint256,uint256,uint256,uint256,uint256)";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -73,26 +71,116 @@ struct Cli {
     paper_max_amount_in_wei: u64,
     #[arg(long, default_value_t = 100)]
     paper_slippage_bps: u16,
+    /// Canonical L2 head sampled after the observer and producer were ready.
+    /// Ground truth scans the half-open session range (start, cutoff].
+    #[arg(
+        long,
+        requires = "ground_truth_cutoff_head",
+        requires = "ground_truth_start_hash"
+    )]
+    ground_truth_start_head: Option<u64>,
+    /// Canonical hash captured in the same response as the start head number.
+    #[arg(long, requires = "ground_truth_start_head")]
+    ground_truth_start_hash: Option<B256>,
+    /// Latest canonical L2 head sampled while the producer was still alive.
+    #[arg(
+        long,
+        requires = "ground_truth_start_head",
+        requires = "ground_truth_cutoff_hash"
+    )]
+    ground_truth_cutoff_head: Option<u64>,
+    /// Canonical hash captured in the same response as the cutoff head number.
+    #[arg(long, requires = "ground_truth_cutoff_head")]
+    ground_truth_cutoff_hash: Option<B256>,
+    #[arg(long, default_value_t = 2)]
+    ground_truth_confirmations: u64,
+    #[arg(long, default_value_t = 60)]
+    ground_truth_confirmation_timeout_seconds: u64,
+    /// Fail closed instead of issuing an unexpectedly broad eth_getLogs query.
+    #[arg(long, default_value_t = 20_000)]
+    max_ground_truth_blocks: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ObservedCandidate {
     tx_hash: B256,
     launchpad: LaunchpadId,
-    observer_received_unix_ns: u64,
+    observer_claim: bool,
+    ground_truth_event: bool,
+    ground_truth_hits: Vec<GroundTruthHit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct GroundTruthHit {
+    l2_block_number: u64,
+    block_hash: B256,
+    transaction_index: u64,
+    log: ReceiptLog,
+}
+
+#[derive(Debug)]
+struct ObserverInput {
+    candidates: HashMap<(B256, LaunchpadId), ObservedCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GroundTruthWindow {
+    record_type: &'static str,
+    start_head: u64,
+    start_head_hash: B256,
+    cutoff_head: u64,
+    cutoff_head_hash: B256,
+    from_l2_block: u64,
+    to_l2_block: u64,
+    confirmations: u64,
+    scanned_blocks: u64,
+    complete: bool,
+    event_logs: usize,
+    unique_protocol_keys: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GroundTruthScanConfig {
+    start_head: u64,
+    start_hash: B256,
+    cutoff_head: u64,
+    cutoff_hash: B256,
+    confirmations: u64,
+    confirmation_timeout: Duration,
+    max_blocks: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct ReconciliationEvidence {
+    record_type: &'static str,
     tx_hash: B256,
     launchpad: LaunchpadId,
     receipt_status: bool,
     protocol_event_match: bool,
-    observed_unix_ns: u64,
+    observer_claim: bool,
+    ground_truth_event: bool,
+    ground_truth_hits: Vec<GroundTruthHit>,
+    action: Option<ActionKind>,
+    token: Option<alloy_primitives::Address>,
+    pool: Option<alloy_primitives::Address>,
+    quote_status: QuoteStatus,
+    l2_block_number: Option<u64>,
+    block_hash: Option<B256>,
+    transaction_index: Option<u64>,
+    reconciliation_started_unix_ns: u64,
+    reconciliation_completed_unix_ns: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pons_generation: Option<hermes_feed::PonsGeneration>,
     #[serde(skip_serializing_if = "Option::is_none")]
     protocol_blocker: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum QuoteStatus {
+    Available,
+    Blocked,
+    NotApplicable,
 }
 
 #[derive(Debug)]
@@ -116,7 +204,6 @@ struct ReconcileProfiles {
 
 struct PonsReconciliationOutcome {
     generation: Option<hermes_feed::PonsGeneration>,
-    protocol_match: bool,
     quote: Option<PonsReceiptPaperQuote>,
     blocker: Option<String>,
 }
@@ -136,7 +223,7 @@ async fn main() -> Result<()> {
     {
         bail!("timeout, poll interval, and concurrency must be non-zero");
     }
-    let candidates = read_candidates(&args.input)?;
+    let observer_input = read_observer_input(&args.input)?;
     let expected: PaperExpectedPins = serde_json::from_reader(BufReader::new(
         File::open(&args.expected_pins)
             .with_context(|| format!("open expected pins {}", args.expected_pins.display()))?,
@@ -189,6 +276,36 @@ async fn main() -> Result<()> {
         max_amount_in: U256::from(args.paper_max_amount_in_wei),
         slippage_bps: args.paper_slippage_bps,
     };
+    let (candidates, ground_truth_window) = match (
+        args.ground_truth_start_head,
+        args.ground_truth_start_hash,
+        args.ground_truth_cutoff_head,
+        args.ground_truth_cutoff_hash,
+    ) {
+        (Some(start), Some(start_hash), Some(cutoff), Some(cutoff_hash)) => {
+            augment_with_ground_truth(
+                &rpc,
+                observer_input,
+                GroundTruthScanConfig {
+                    start_head: start,
+                    start_hash,
+                    cutoff_head: cutoff,
+                    cutoff_hash,
+                    confirmations: args.ground_truth_confirmations,
+                    confirmation_timeout: Duration::from_secs(
+                        args.ground_truth_confirmation_timeout_seconds,
+                    ),
+                    max_blocks: args.max_ground_truth_blocks,
+                },
+            )
+            .await?
+        }
+        (None, None, None, None) => (observer_input.candidates, None),
+        _ => bail!("ground-truth start/cutoff numbers and hashes must be supplied together"),
+    };
+    if let Some(window) = ground_truth_window {
+        println!("{}", serde_json::to_string(&window)?);
+    }
     let mut reconciled = stream::iter(candidates.into_values().map(|candidate| {
         let rpc = rpc.clone();
         let profiles = profiles.clone();
@@ -231,7 +348,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn read_candidates(path: &Path) -> Result<HashMap<(B256, LaunchpadId), ObservedCandidate>> {
+fn read_observer_input(path: &Path) -> Result<ObserverInput> {
     let input = BufReader::new(
         File::open(path).with_context(|| format!("open observer JSONL {}", path.display()))?,
     );
@@ -264,10 +381,9 @@ fn read_candidates(path: &Path) -> Result<HashMap<(B256, LaunchpadId), ObservedC
                         .cloned()
                         .context("observation has no launchpad")?,
                 )?,
-                observer_received_unix_ns: observation
-                    .get("observer_received_unix_ns")
-                    .and_then(Value::as_u64)
-                    .context("observation has no receive timestamp")?,
+                observer_claim: true,
+                ground_truth_event: false,
+                ground_truth_hits: Vec::new(),
             };
             let key = (candidate.tx_hash, candidate.launchpad);
             if candidates.insert(key, candidate).is_some() {
@@ -275,7 +391,137 @@ fn read_candidates(path: &Path) -> Result<HashMap<(B256, LaunchpadId), ObservedC
             }
         }
     }
-    Ok(candidates)
+    Ok(ObserverInput { candidates })
+}
+
+async fn augment_with_ground_truth(
+    rpc: &NoxaRpcClient,
+    mut input: ObserverInput,
+    scan: GroundTruthScanConfig,
+) -> Result<(
+    HashMap<(B256, LaunchpadId), ObservedCandidate>,
+    Option<GroundTruthWindow>,
+)> {
+    let from_l2_block = scan
+        .start_head
+        .checked_add(1)
+        .context("ground-truth start head overflow")?;
+    if scan.cutoff_head < scan.start_head
+        || scan.cutoff_head.saturating_sub(scan.start_head) > scan.max_blocks
+        || scan.confirmation_timeout.is_zero()
+    {
+        bail!("ground-truth anchored L2 range is inverted or exceeds the configured bound");
+    }
+    let required_head = scan
+        .cutoff_head
+        .checked_add(scan.confirmations)
+        .context("ground-truth confirmation height overflow")?;
+    let confirmation_deadline = Instant::now() + scan.confirmation_timeout;
+    loop {
+        if rpc.latest_block_number().await? >= required_head {
+            break;
+        }
+        if Instant::now() >= confirmation_deadline {
+            bail!("ground-truth cutoff did not reach the required confirmations");
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+    let start_anchor = rpc.block_by_number(scan.start_head).await?;
+    let cutoff_anchor = rpc.block_by_number(scan.cutoff_head).await?;
+    if start_anchor.hash != scan.start_hash || cutoff_anchor.hash != scan.cutoff_hash {
+        bail!("ground-truth head hash changed between sampling and collection");
+    }
+
+    let addresses = [
+        BOW_LAUNCH_FACTORY,
+        LAUNCHHOOD_V3_FACTORY,
+        CLANKER_FACTORY,
+        DOPPLER_CREATE_EMITTER,
+        PONS_CURRENT_FACTORY,
+        PONS_LEGACY_FACTORY,
+        HOOD_FACTORY,
+    ];
+    let topics = [
+        keccak256(BOW_LAUNCHED_SIGNATURE.as_bytes()),
+        keccak256(LAUNCHHOOD_TOKEN_LAUNCHED_SIGNATURE.as_bytes()),
+        CLANKER_TOKEN_CREATED_TOPIC,
+        DOPPLER_CREATE_TOPIC,
+        PONS_TOKEN_LAUNCHED_TOPIC,
+        keccak256(HOOD_TOKEN_CREATED_SIGNATURE.as_bytes()),
+        keccak256(HOOD_TRADE_SIGNATURE.as_bytes()),
+    ];
+    let logs = if from_l2_block <= scan.cutoff_head {
+        rpc.protocol_event_logs(&addresses, &topics, from_l2_block, scan.cutoff_head)
+            .await?
+    } else {
+        Vec::new()
+    };
+    let mut exact_event_logs = 0_usize;
+    let mut seen_logs = HashSet::new();
+    for log in logs {
+        let Some(launchpad) = launchpad_for_ground_truth_log(&log.log) else {
+            continue;
+        };
+        let hit = GroundTruthHit {
+            l2_block_number: log.l2_block_number,
+            block_hash: log.block_hash,
+            transaction_index: log.transaction_index,
+            log: log.log,
+        };
+        if !seen_logs.insert((
+            log.block_hash,
+            log.transaction_hash,
+            launchpad,
+            hit.log.log_index,
+            hit.log.address,
+            hit.log.topics.first().copied(),
+        )) {
+            continue;
+        }
+        exact_event_logs += 1;
+        let key = (log.transaction_hash, launchpad);
+        input
+            .candidates
+            .entry(key)
+            .and_modify(|candidate| {
+                candidate.ground_truth_event = true;
+                candidate.ground_truth_hits.push(hit.clone());
+            })
+            .or_insert(ObservedCandidate {
+                tx_hash: log.transaction_hash,
+                launchpad,
+                observer_claim: false,
+                ground_truth_event: true,
+                ground_truth_hits: vec![hit],
+            });
+    }
+    let stable_start = rpc.block_by_number(scan.start_head).await?;
+    let stable_cutoff = rpc.block_by_number(scan.cutoff_head).await?;
+    if stable_start.hash != start_anchor.hash || stable_cutoff.hash != cutoff_anchor.hash {
+        bail!("ground-truth anchor reorged during event collection");
+    }
+    let unique_protocol_keys = input
+        .candidates
+        .values()
+        .filter(|candidate| candidate.ground_truth_event)
+        .count();
+    Ok((
+        input.candidates,
+        Some(GroundTruthWindow {
+            record_type: "launchpad_ground_truth_window",
+            start_head: scan.start_head,
+            start_head_hash: start_anchor.hash,
+            cutoff_head: scan.cutoff_head,
+            cutoff_head_hash: cutoff_anchor.hash,
+            from_l2_block,
+            to_l2_block: scan.cutoff_head,
+            confirmations: scan.confirmations,
+            scanned_blocks: scan.cutoff_head.saturating_sub(scan.start_head),
+            complete: true,
+            event_logs: exact_event_logs,
+            unique_protocol_keys,
+        }),
+    ))
 }
 
 async fn reconcile_candidate(
@@ -286,12 +532,21 @@ async fn reconcile_candidate(
     quote_policy: V3ReceiptQuotePolicy,
     profiles: ReconcileProfiles,
 ) -> Result<ReconciledCandidate> {
+    let reconciliation_started_unix_ns = unix_now_ns();
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(receipt) = rpc.receipt(candidate.tx_hash).await? {
             if receipt.transaction_hash != candidate.tx_hash {
                 bail!(
                     "receipt transaction hash mismatch for {}",
+                    candidate.tx_hash
+                );
+            }
+            validate_ground_truth_receipt_binding(&candidate, &receipt)?;
+            let canonical_receipt_block = rpc.block_by_number(receipt.l2_block_number).await?;
+            if canonical_receipt_block.hash != receipt.block_hash {
+                bail!(
+                    "receipt block is no longer canonical for {}",
                     candidate.tx_hash
                 );
             }
@@ -305,6 +560,10 @@ async fn reconcile_candidate(
             let mut hood_migration = None;
             let mut pons_generation = None;
             let mut protocol_blocker = None;
+            let mut truth_action = None;
+            let mut truth_token = None;
+            let mut truth_pool = None;
+            let mut quote_status = QuoteStatus::NotApplicable;
             if receipt.status
                 && matches!(
                     candidate.launchpad,
@@ -323,9 +582,16 @@ async fn reconcile_candidate(
                 ) {
                     Ok(quote) => {
                         protocol_match = true;
+                        truth_action = Some(ActionKind::Launch);
+                        truth_token = Some(quote.market.token);
+                        truth_pool = Some(quote.market.pool);
+                        quote_status = QuoteStatus::Available;
                         v3_quote = Some(quote);
                     }
-                    Err(_) => protocol_match = false,
+                    Err(error) => {
+                        quote_status = QuoteStatus::Blocked;
+                        protocol_blocker = Some(format!("v3_strict_quote:{error}"));
+                    }
                 }
             }
             if receipt.status && candidate.launchpad == LaunchpadId::Clanker {
@@ -348,12 +614,19 @@ async fn reconcile_candidate(
                     ) {
                         Ok(quote) => {
                             protocol_match = true;
+                            truth_action = Some(ActionKind::Launch);
+                            truth_token = Some(quote.market.token);
+                            quote_status = QuoteStatus::Available;
                             clanker_quote = Some(quote);
                         }
-                        Err(_) => protocol_match = false,
+                        Err(error) => {
+                            quote_status = QuoteStatus::Blocked;
+                            protocol_blocker = Some(format!("clanker_strict_quote:{error}"));
+                        }
                     }
                 } else {
-                    protocol_match = false;
+                    quote_status = QuoteStatus::NotApplicable;
+                    protocol_blocker = Some("clanker_expected_profile_not_configured".into());
                 }
             }
             if receipt.status && candidate.launchpad == LaunchpadId::BankrDoppler {
@@ -376,25 +649,51 @@ async fn reconcile_candidate(
                     ) {
                         Ok(quote) => {
                             protocol_match = true;
+                            truth_action = Some(ActionKind::Launch);
+                            truth_token = Some(quote.market.token);
+                            quote_status = QuoteStatus::Available;
                             bankr_quote = Some(quote);
                         }
-                        Err(_) => protocol_match = false,
+                        Err(error) => {
+                            quote_status = QuoteStatus::Blocked;
+                            protocol_blocker = Some(format!("bankr_strict_quote:{error}"));
+                        }
                     }
                 } else {
-                    protocol_match = false;
+                    quote_status = QuoteStatus::NotApplicable;
+                    protocol_blocker = Some("bankr_expected_profile_not_configured".into());
                 }
             }
             if receipt.status && candidate.launchpad == LaunchpadId::Pons {
+                if let Some((token, pool)) =
+                    receipt.logs.iter().find_map(pons_launch_event_identity)
+                {
+                    truth_action = Some(ActionKind::Launch);
+                    truth_token = Some(token);
+                    truth_pool = Some(pool);
+                }
                 let transaction = rpc
                     .transaction_by_hash(candidate.tx_hash)
                     .await?
                     .with_context(|| format!("missing transaction {}", candidate.tx_hash))?;
                 let outcome =
                     strict_pons_reconciliation(&transaction, &receipt, profiles.pons, quote_policy);
-                protocol_match = outcome.protocol_match;
                 pons_generation = outcome.generation;
                 pons_quote = outcome.quote;
                 protocol_blocker = outcome.blocker;
+                quote_status = match (pons_quote.is_some(), pons_generation) {
+                    (true, _) => QuoteStatus::Available,
+                    (false, Some(hermes_feed::PonsGeneration::Legacy)) => {
+                        QuoteStatus::NotApplicable
+                    }
+                    (false, _) => QuoteStatus::Blocked,
+                };
+                if let Some(quote) = &pons_quote
+                    && (truth_token != Some(quote.market.token)
+                        || truth_pool != Some(quote.market.pool))
+                {
+                    bail!("Pons event identity disagrees with strict quote identity");
+                }
             }
             if receipt.status && candidate.launchpad == LaunchpadId::HoodFun {
                 let transaction = rpc
@@ -424,8 +723,7 @@ async fn reconcile_candidate(
                         };
                         let stable_block = rpc.block_by_number(receipt.l2_block_number).await?;
                         if stable_block.hash != block.hash {
-                            protocol_match = false;
-                            protocol_blocker = Some("hood_block_reorg_during_snapshot".into());
+                            bail!("Hood block reorged during fixed-block snapshot");
                         } else if let Some(pre) = pre {
                             match verify_hood_graduation_receipt(
                                 &transaction,
@@ -437,6 +735,10 @@ async fn reconcile_candidate(
                             ) {
                                 Ok(evidence) => {
                                     protocol_match = true;
+                                    truth_action = Some(ActionKind::Buy);
+                                    truth_token = Some(evidence.token);
+                                    truth_pool = Some(evidence.pool);
+                                    quote_status = QuoteStatus::Blocked;
                                     protocol_blocker = Some(
                                         "hood_migration_topology_verified_v3_quote_unavailable"
                                             .into(),
@@ -444,7 +746,7 @@ async fn reconcile_candidate(
                                     hood_migration = Some(evidence);
                                 }
                                 Err(error) => {
-                                    protocol_match = false;
+                                    quote_status = QuoteStatus::Blocked;
                                     protocol_blocker =
                                         Some(format!("hood_migration_verification:{error}"));
                                 }
@@ -464,28 +766,43 @@ async fn reconcile_candidate(
                             ) {
                                 Ok(quote) => {
                                     protocol_match = true;
+                                    truth_action = Some(quote.observed.action);
+                                    truth_token = Some(quote.token);
+                                    quote_status = QuoteStatus::Available;
                                     hood_quote = Some(quote);
                                 }
                                 Err(error) => {
-                                    protocol_match = false;
+                                    quote_status = QuoteStatus::Blocked;
                                     protocol_blocker = Some(format!("hood_strict_quote:{error}"));
                                 }
                             }
                         }
                     }
                     None => {
-                        protocol_match = false;
+                        quote_status = QuoteStatus::Blocked;
                         protocol_blocker = Some("hood_token_identity_missing".into());
                     }
                 }
             }
             return Ok(ReconciledCandidate {
                 evidence: ReconciliationEvidence {
+                    record_type: "launchpad_reconciliation_evidence",
                     tx_hash: candidate.tx_hash,
                     launchpad: candidate.launchpad,
                     receipt_status: receipt.status,
                     protocol_event_match: protocol_match,
-                    observed_unix_ns: unix_now_ns(),
+                    observer_claim: candidate.observer_claim,
+                    ground_truth_event: candidate.ground_truth_event,
+                    ground_truth_hits: candidate.ground_truth_hits.clone(),
+                    action: truth_action,
+                    token: truth_token,
+                    pool: truth_pool,
+                    quote_status,
+                    l2_block_number: Some(receipt.l2_block_number),
+                    block_hash: Some(receipt.block_hash),
+                    transaction_index: Some(receipt.transaction_index),
+                    reconciliation_started_unix_ns,
+                    reconciliation_completed_unix_ns: unix_now_ns(),
                     pons_generation,
                     protocol_blocker,
                 },
@@ -500,11 +817,23 @@ async fn reconcile_candidate(
         if Instant::now() >= deadline {
             return Ok(ReconciledCandidate {
                 evidence: ReconciliationEvidence {
+                    record_type: "launchpad_reconciliation_evidence",
                     tx_hash: candidate.tx_hash,
                     launchpad: candidate.launchpad,
                     receipt_status: false,
                     protocol_event_match: false,
-                    observed_unix_ns: unix_now_ns(),
+                    observer_claim: candidate.observer_claim,
+                    ground_truth_event: candidate.ground_truth_event,
+                    ground_truth_hits: candidate.ground_truth_hits.clone(),
+                    action: None,
+                    token: None,
+                    pool: None,
+                    quote_status: QuoteStatus::Blocked,
+                    l2_block_number: None,
+                    block_hash: None,
+                    transaction_index: None,
+                    reconciliation_started_unix_ns,
+                    reconciliation_completed_unix_ns: unix_now_ns(),
                     pons_generation: None,
                     protocol_blocker: Some("receipt_timeout".into()),
                 },
@@ -518,6 +847,31 @@ async fn reconcile_candidate(
         }
         sleep(poll_interval).await;
     }
+}
+
+fn validate_ground_truth_receipt_binding(
+    candidate: &ObservedCandidate,
+    receipt: &hermes_feed::NoxaReceipt,
+) -> Result<()> {
+    if candidate.ground_truth_event == candidate.ground_truth_hits.is_empty() {
+        bail!("ground-truth flag and exact log hits disagree");
+    }
+    for hit in &candidate.ground_truth_hits {
+        if hit.l2_block_number != receipt.l2_block_number
+            || hit.block_hash != receipt.block_hash
+            || hit.transaction_index != receipt.transaction_index
+            || !receipt
+                .logs
+                .iter()
+                .any(|receipt_log| receipt_log == &hit.log)
+        {
+            bail!(
+                "ground-truth eth_getLogs hit does not match canonical receipt for {}",
+                candidate.tx_hash
+            );
+        }
+    }
+    Ok(())
 }
 
 fn strict_pons_reconciliation(
@@ -534,13 +888,11 @@ fn strict_pons_reconciliation(
     match quote_current_pons(transaction, receipt, expected_profile, policy) {
         Ok(Some(quote)) => PonsReconciliationOutcome {
             generation,
-            protocol_match: true,
             quote: Some(quote),
             blocker: None,
         },
         Ok(None) => PonsReconciliationOutcome {
             generation,
-            protocol_match: false,
             quote: None,
             blocker: Some(
                 "legacy_pons_generation_is_discovery_only_without_strict_receipt_profile".into(),
@@ -548,7 +900,6 @@ fn strict_pons_reconciliation(
         },
         Err(error) => PonsReconciliationOutcome {
             generation,
-            protocol_match: false,
             quote: None,
             blocker: Some(format!("pons_quote_error:{error}")),
         },
@@ -662,6 +1013,7 @@ fn unix_now_ns() -> u64 {
 mod tests {
     use alloy_primitives::{Address, Bytes};
     use hermes_feed::{NoxaReceipt, RobinhoodTransaction};
+    use serde::Deserialize;
 
     use super::*;
 
@@ -681,17 +1033,83 @@ mod tests {
             LaunchpadId::Clanker,
             std::slice::from_ref(&clanker)
         ));
-        assert!(!protocol_event_match(LaunchpadId::BankrDoppler, &[clanker]));
+        assert!(!protocol_event_match(
+            LaunchpadId::BankrDoppler,
+            std::slice::from_ref(&clanker)
+        ));
 
         let bankr = log(DOPPLER_CREATE_EMITTER, DOPPLER_CREATE_TOPIC);
         assert!(protocol_event_match(
             LaunchpadId::BankrDoppler,
             std::slice::from_ref(&bankr)
         ));
-        assert!(!protocol_event_match(LaunchpadId::Clanker, &[bankr]));
+        assert!(!protocol_event_match(
+            LaunchpadId::Clanker,
+            std::slice::from_ref(&bankr)
+        ));
 
         let lookalike = log(Address::with_last_byte(0xee), CLANKER_TOKEN_CREATED_TOPIC);
-        assert!(!protocol_event_match(LaunchpadId::Clanker, &[lookalike]));
+        assert!(!protocol_event_match(
+            LaunchpadId::Clanker,
+            std::slice::from_ref(&lookalike)
+        ));
+
+        assert_eq!(
+            launchpad_for_ground_truth_log(&clanker),
+            Some(LaunchpadId::Clanker)
+        );
+        assert_eq!(
+            launchpad_for_ground_truth_log(&bankr),
+            Some(LaunchpadId::BankrDoppler)
+        );
+        assert_eq!(launchpad_for_ground_truth_log(&lookalike), None);
+        assert_eq!(
+            launchpad_for_ground_truth_log(&log(PONS_LEGACY_FACTORY, PONS_TOKEN_LAUNCHED_TOPIC)),
+            Some(LaunchpadId::Pons)
+        );
+        assert_eq!(
+            launchpad_for_ground_truth_log(&log(PONS_CURRENT_FACTORY, CLANKER_TOKEN_CREATED_TOPIC)),
+            None
+        );
+    }
+
+    #[test]
+    fn ground_truth_hit_must_match_canonical_receipt_coordinates_and_log() {
+        let event = log(CLANKER_FACTORY, CLANKER_TOKEN_CREATED_TOPIC);
+        let tx_hash = B256::with_last_byte(1);
+        let block_hash = B256::with_last_byte(2);
+        let candidate = ObservedCandidate {
+            tx_hash,
+            launchpad: LaunchpadId::Clanker,
+            observer_claim: true,
+            ground_truth_event: true,
+            ground_truth_hits: vec![GroundTruthHit {
+                l2_block_number: 10,
+                block_hash,
+                transaction_index: 3,
+                log: event.clone(),
+            }],
+        };
+        let receipt = NoxaReceipt {
+            transaction_hash: tx_hash,
+            block_hash,
+            status: true,
+            l2_block_number: 10,
+            l1_block_number: None,
+            transaction_index: 3,
+            gas_used: None,
+            effective_gas_price: None,
+            logs: vec![event],
+        };
+        validate_ground_truth_receipt_binding(&candidate, &receipt).unwrap();
+
+        let mut reorged = receipt.clone();
+        reorged.block_hash = B256::with_last_byte(0xee);
+        assert!(validate_ground_truth_receipt_binding(&candidate, &reorged).is_err());
+
+        let mut missing_log = receipt;
+        missing_log.logs.clear();
+        assert!(validate_ground_truth_receipt_binding(&candidate, &missing_log).is_err());
     }
 
     #[test]
@@ -730,13 +1148,19 @@ mod tests {
             hermes_feed::PonsExpectedProfile::production(),
             policy,
         );
-        assert!(outcome.protocol_match);
+        let event_identity = fixture
+            .receipt
+            .logs
+            .iter()
+            .find_map(pons_launch_event_identity)
+            .expect("Pons launch event identity");
         assert_eq!(
             outcome.generation,
             Some(hermes_feed::PonsGeneration::Current)
         );
         assert!(outcome.blocker.is_none());
         let quote = outcome.quote.unwrap();
+        assert_eq!(event_identity, (quote.market.token, quote.market.pool));
         assert_eq!(quote.launchpad, LaunchpadId::Pons);
         assert!(quote.entry.expected_output > U256::ZERO);
         assert!(!quote.execution_eligible);
@@ -750,7 +1174,6 @@ mod tests {
             hermes_feed::PonsExpectedProfile::production(),
             policy,
         );
-        assert!(!legacy.protocol_match);
         assert_eq!(legacy.generation, Some(hermes_feed::PonsGeneration::Legacy));
         assert!(legacy.quote.is_none());
         assert!(legacy.blocker.unwrap().contains("discovery_only"));

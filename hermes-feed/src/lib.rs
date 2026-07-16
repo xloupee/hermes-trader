@@ -15,6 +15,7 @@ pub mod hot_path;
 mod hot_path_safety;
 pub mod launchpad_adapter;
 pub mod launchpad_adapters;
+pub mod launchpad_ground_truth;
 pub mod launchpad_registry;
 pub mod noxa_abi;
 pub mod noxa_candidate;

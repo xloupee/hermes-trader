@@ -1,13 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result};
 use clap::Parser;
 use hermes_feed::feed::BroadcastMessage;
-use hermes_feed::launchpad_adapter::LaunchpadId;
+use hermes_feed::launchpad_adapter::{ActionKind, LaunchpadId};
+use hermes_feed::launchpad_ground_truth::launchpad_for_ground_truth_log;
 use hermes_feed::paper_observer::{
     PaperExpectedPins, PaperFeedRuntime, PaperLaunchpadObserver, PaperObservedStartupSnapshot,
     PaperPlanPolicy,
@@ -19,6 +21,14 @@ use hermes_feed::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+fn unix_now_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -60,29 +70,85 @@ struct Cli {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReconciliationEvidence {
+    record_type: String,
     tx_hash: B256,
     launchpad: LaunchpadId,
     receipt_status: bool,
     protocol_event_match: bool,
-    observed_unix_ns: u64,
+    #[serde(default)]
+    observer_claim: bool,
+    #[serde(default)]
+    ground_truth_event: bool,
+    ground_truth_hits: Vec<GroundTruthHit>,
+    action: Option<ActionKind>,
+    token: Option<alloy_primitives::Address>,
+    pool: Option<alloy_primitives::Address>,
+    quote_status: QuoteStatus,
+    l2_block_number: Option<u64>,
+    block_hash: Option<B256>,
+    transaction_index: Option<u64>,
+    reconciliation_started_unix_ns: u64,
+    reconciliation_completed_unix_ns: u64,
     #[serde(default)]
     pons_generation: Option<hermes_feed::PonsGeneration>,
     #[serde(default)]
     protocol_blocker: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroundTruthHit {
+    l2_block_number: u64,
+    block_hash: B256,
+    transaction_index: u64,
+    log: hermes_feed::noxa_abi::ReceiptLog,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum QuoteStatus {
+    Available,
+    Blocked,
+    NotApplicable,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
 struct ReconciliationMetrics {
     record_type: &'static str,
-    observed_candidates: usize,
-    evidence_records: usize,
-    confirmed: usize,
+    launchpad: LaunchpadId,
+    coverage_from_l2_block: u64,
+    coverage_to_l2_block: u64,
+    raw_ground_truth_transactions: usize,
+    quote_admitted_ground_truth_transactions: usize,
+    observer_claims: usize,
+    confirmed_observations: usize,
     false_positives: usize,
     missed_transactions: usize,
-    unreconciled: usize,
-    reconciliation_latency_p50_ns: Option<u64>,
-    reconciliation_latency_p95_ns: Option<u64>,
-    reconciliation_latency_p99_ns: Option<u64>,
+    detector_misses: usize,
+    feed_coverage_misses: usize,
+    out_of_scope_observations: usize,
+    unreconciled_observations: usize,
+    quote_available: usize,
+    quote_blocked: usize,
+    quote_not_applicable: usize,
+    action_prediction_eligible: usize,
+    action_prediction_missing: usize,
+    action_prediction_matches: usize,
+    action_prediction_mismatches: usize,
+    token_prediction_eligible: usize,
+    token_prediction_missing: usize,
+    token_prediction_matches: usize,
+    token_prediction_mismatches: usize,
+    pool_prediction_eligible: usize,
+    pool_prediction_missing: usize,
+    pool_prediction_matches: usize,
+    pool_prediction_mismatches: usize,
+    observation_latency_p50_ns: Option<u64>,
+    observation_latency_p95_ns: Option<u64>,
+    observation_latency_p99_ns: Option<u64>,
+    reconciliation_rpc_duration_p50_ns: Option<u64>,
+    reconciliation_rpc_duration_p95_ns: Option<u64>,
+    reconciliation_rpc_duration_p99_ns: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -94,12 +160,146 @@ struct ReconciliationRecords {
     pons_quotes: Vec<PonsReceiptPaperQuote>,
     hood_quotes: Vec<HoodReceiptPaperQuote>,
     hood_migrations: Vec<HoodMigrationEvidence>,
+    ground_truth_window: Option<GroundTruthWindow>,
 }
 
 #[derive(Debug, Default)]
 struct ObservedOutputCandidates {
     received_unix_ns: HashMap<(B256, LaunchpadId), u64>,
+    observer_latency_ns: HashMap<(B256, LaunchpadId), u64>,
     feed_sequences: HashMap<(B256, LaunchpadId), u64>,
+    feed_transactions: HashMap<B256, u64>,
+    claims: HashMap<(B256, LaunchpadId), ObserverClaim>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ObserverClaim {
+    action: Option<ActionKind>,
+    predicted_token: Option<alloy_primitives::Address>,
+    predicted_pool: Option<alloy_primitives::Address>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroundTruthWindow {
+    record_type: String,
+    start_head: u64,
+    start_head_hash: B256,
+    cutoff_head: u64,
+    cutoff_head_hash: B256,
+    from_l2_block: u64,
+    to_l2_block: u64,
+    confirmations: u64,
+    scanned_blocks: u64,
+    complete: bool,
+    event_logs: usize,
+    unique_protocol_keys: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GroundTruthQuoteBinding {
+    l2_block_number: u64,
+    block_hash: B256,
+    transaction_index: u64,
+    action: Option<ActionKind>,
+    token: Option<Address>,
+    pool: Option<Address>,
+    quote_status: QuoteStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuoteIdentityVersion {
+    action: ActionKind,
+    token: Address,
+    pool: Option<Address>,
+    l2_block_number: u64,
+    block_hash: B256,
+    transaction_index: u64,
+}
+
+#[derive(Debug)]
+struct ConfirmedGroundTruth {
+    by_key: HashMap<(B256, LaunchpadId), GroundTruthQuoteBinding>,
+}
+
+impl ConfirmedGroundTruth {
+    fn from_records(records: &ReconciliationRecords) -> Result<Self> {
+        let window = records
+            .ground_truth_window
+            .as_ref()
+            .context("finalization requires a complete ground-truth coverage manifest")?;
+        validate_ground_truth_window(window, &records.evidence)?;
+        let mut by_key = HashMap::new();
+        for record in &records.evidence {
+            if !record.ground_truth_event {
+                continue;
+            }
+            let block = record
+                .l2_block_number
+                .context("ground-truth evidence has no L2 block number")?;
+            let block_hash = record
+                .block_hash
+                .filter(|hash| *hash != B256::ZERO)
+                .context("ground-truth evidence has no canonical block hash")?;
+            let transaction_index = record
+                .transaction_index
+                .context("ground-truth evidence has no transaction index")?;
+            if !record.receipt_status || block < window.from_l2_block || block > window.to_l2_block
+            {
+                anyhow::bail!(
+                    "ground-truth evidence is failed or outside coverage for {:?}",
+                    (record.tx_hash, record.launchpad)
+                );
+            }
+            if !record.protocol_event_match {
+                continue;
+            }
+            let key = (record.tx_hash, record.launchpad);
+            if record.quote_status == QuoteStatus::Available && record.protocol_blocker.is_some() {
+                anyhow::bail!("available quote authority has a protocol blocker for {key:?}");
+            }
+            if record.launchpad == LaunchpadId::Pons
+                && record.quote_status == QuoteStatus::Available
+                && record.pons_generation != Some(hermes_feed::PonsGeneration::Current)
+            {
+                anyhow::bail!("Pons quote authority is not from the current generation");
+            }
+            if by_key
+                .insert(
+                    key,
+                    GroundTruthQuoteBinding {
+                        l2_block_number: block,
+                        block_hash,
+                        transaction_index,
+                        action: record.action,
+                        token: record.token,
+                        pool: record.pool,
+                        quote_status: record.quote_status,
+                    },
+                )
+                .is_some()
+            {
+                anyhow::bail!("duplicate confirmed ground-truth evidence for {key:?}");
+            }
+        }
+        Ok(Self { by_key })
+    }
+
+    fn available_quote_matches(
+        &self,
+        key: (B256, LaunchpadId),
+        quote: QuoteIdentityVersion,
+    ) -> Option<bool> {
+        self.by_key.get(&key).map(|binding| {
+            binding.quote_status == QuoteStatus::Available
+                && binding.action == Some(quote.action)
+                && binding.token == Some(quote.token)
+                && binding.pool == quote.pool
+                && binding.l2_block_number == quote.l2_block_number
+                && binding.block_hash == quote.block_hash
+                && binding.transaction_index == quote.transaction_index
+        })
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -181,16 +381,17 @@ fn main() -> Result<()> {
         let observed_candidates = read_observed_output_candidates(observer_path)?;
         let records = read_reconciliation_records(reconciliation_path)?;
         validate_hood_migration_records(&records.evidence, &records.hood_migrations)?;
-        println!(
-            "{}",
-            serde_json::to_string(&reconciliation_metrics(
-                &observed_candidates.received_unix_ns,
-                &records.evidence
-            ))?
-        );
+        let ground_truth = ConfirmedGroundTruth::from_records(&records)?;
+        for metrics in reconciliation_metrics(
+            &observed_candidates,
+            &records.evidence,
+            records.ground_truth_window.as_ref(),
+        )? {
+            println!("{}", serde_json::to_string(&metrics)?);
+        }
         for plan in finalized_v3_plans(
             &observed_candidates.feed_sequences,
-            &records.evidence,
+            &ground_truth,
             records.v3_quotes,
             plan_policy,
         )? {
@@ -198,7 +399,7 @@ fn main() -> Result<()> {
         }
         for plan in finalized_clanker_plans(
             &observed_candidates.feed_sequences,
-            &records.evidence,
+            &ground_truth,
             records.clanker_quotes,
             plan_policy,
         )? {
@@ -206,7 +407,7 @@ fn main() -> Result<()> {
         }
         for plan in finalized_bankr_plans(
             &observed_candidates.feed_sequences,
-            &records.evidence,
+            &ground_truth,
             records.bankr_quotes,
             plan_policy,
         )? {
@@ -214,7 +415,7 @@ fn main() -> Result<()> {
         }
         for plan in finalized_pons_plans(
             &observed_candidates.feed_sequences,
-            &records.evidence,
+            &ground_truth,
             records.pons_quotes,
             plan_policy,
             pons_profile,
@@ -223,7 +424,7 @@ fn main() -> Result<()> {
         }
         for plan in finalized_hood_plans(
             &observed_candidates.feed_sequences,
-            &records.evidence,
+            &ground_truth,
             records.hood_quotes,
             plan_policy,
             &hood_profile,
@@ -233,8 +434,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let mut runtime = PaperFeedRuntime::with_plan_policy(observer, plan_policy)?;
-    let mut observed_candidates = HashMap::new();
-    let mut observed_sequences = HashMap::new();
+    let mut observed_candidates = ObservedOutputCandidates::default();
     println!(
         "{}",
         serde_json::to_string(&json!({
@@ -260,20 +460,56 @@ fn main() -> Result<()> {
         }
         let value: Value = serde_json::from_str(&line)
             .with_context(|| format!("parse input line {}", index + 1))?;
-        let feed: BroadcastMessage = match value.get("payload").and_then(Value::as_str) {
-            Some(payload) => serde_json::from_str(payload)
-                .with_context(|| format!("decode recorded payload at line {}", index + 1))?,
-            None => serde_json::from_value(value)
-                .with_context(|| format!("decode Nitro frame at line {}", index + 1))?,
-        };
-        let report = runtime.decode(&feed)?;
+        let (feed, received_unix_ns): (BroadcastMessage, u64) =
+            match value.get("payload").and_then(Value::as_str) {
+                Some(payload) => (
+                    serde_json::from_str(payload).with_context(|| {
+                        format!("decode recorded payload at line {}", index + 1)
+                    })?,
+                    value
+                        .get("received_unix_ns")
+                        .and_then(Value::as_u64)
+                        .with_context(|| {
+                            format!(
+                                "recorded payload has no receive timestamp at line {}",
+                                index + 1
+                            )
+                        })?,
+                ),
+                None => (
+                    serde_json::from_value(value)
+                        .with_context(|| format!("decode Nitro frame at line {}", index + 1))?,
+                    unix_now_ns(),
+                ),
+            };
+        let report = runtime.decode_received_at(&feed, received_unix_ns)?;
+        for transaction in &report.transactions {
+            observed_candidates
+                .feed_transactions
+                .entry(transaction.tx_hash)
+                .and_modify(|existing| *existing = (*existing).min(transaction.feed_sequence))
+                .or_insert(transaction.feed_sequence);
+        }
         for observation in &report.observations {
             let key = (observation.tx_hash, observation.launchpad);
-            observed_candidates.insert(
+            observed_candidates.received_unix_ns.insert(
                 key,
                 observation.observer_received_unix_ns.unwrap_or_default(),
             );
-            observed_sequences.insert(key, observation.feed_sequence.unwrap_or_default());
+            observed_candidates
+                .observer_latency_ns
+                .insert(key, observation.observer_latency_ns.unwrap_or_default());
+            observed_candidates
+                .feed_sequences
+                .insert(key, observation.feed_sequence.unwrap_or_default());
+            observed_candidates.claims.insert(
+                key,
+                ObserverClaim {
+                    action: observation.action,
+                    predicted_token: observation.predicted_token,
+                    predicted_pool: observation.predicted_pool,
+                },
+            );
         }
         println!(
             "{}",
@@ -286,40 +522,41 @@ fn main() -> Result<()> {
     if let Some(path) = args.reconciliation_input {
         let records = read_reconciliation_records(&path)?;
         validate_hood_migration_records(&records.evidence, &records.hood_migrations)?;
-        println!(
-            "{}",
-            serde_json::to_string(&reconciliation_metrics(
-                &observed_candidates,
-                &records.evidence
-            ))?
-        );
-        for plan in finalized_v3_plans(
-            &observed_sequences,
+        let ground_truth = ConfirmedGroundTruth::from_records(&records)?;
+        for metrics in reconciliation_metrics(
+            &observed_candidates,
             &records.evidence,
+            records.ground_truth_window.as_ref(),
+        )? {
+            println!("{}", serde_json::to_string(&metrics)?);
+        }
+        for plan in finalized_v3_plans(
+            &observed_candidates.feed_sequences,
+            &ground_truth,
             records.v3_quotes,
             plan_policy,
         )? {
             println!("{}", serde_json::to_string(&plan)?);
         }
         for plan in finalized_clanker_plans(
-            &observed_sequences,
-            &records.evidence,
+            &observed_candidates.feed_sequences,
+            &ground_truth,
             records.clanker_quotes,
             plan_policy,
         )? {
             println!("{}", serde_json::to_string(&plan)?);
         }
         for plan in finalized_bankr_plans(
-            &observed_sequences,
-            &records.evidence,
+            &observed_candidates.feed_sequences,
+            &ground_truth,
             records.bankr_quotes,
             plan_policy,
         )? {
             println!("{}", serde_json::to_string(&plan)?);
         }
         for plan in finalized_pons_plans(
-            &observed_sequences,
-            &records.evidence,
+            &observed_candidates.feed_sequences,
+            &ground_truth,
             records.pons_quotes,
             plan_policy,
             pons_profile,
@@ -327,8 +564,8 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&plan)?);
         }
         for plan in finalized_hood_plans(
-            &observed_sequences,
-            &records.evidence,
+            &observed_candidates.feed_sequences,
+            &ground_truth,
             records.hood_quotes,
             plan_policy,
             &hood_profile,
@@ -344,7 +581,10 @@ fn read_observed_output_candidates(path: &Path) -> Result<ObservedOutputCandidat
         File::open(path).with_context(|| format!("open observer output {}", path.display()))?,
     );
     let mut received: HashMap<(B256, LaunchpadId), u64> = HashMap::new();
+    let mut latencies: HashMap<(B256, LaunchpadId), u64> = HashMap::new();
     let mut sequences: HashMap<(B256, LaunchpadId), u64> = HashMap::new();
+    let mut feed_transactions: HashMap<B256, u64> = HashMap::new();
+    let mut claims = HashMap::new();
     for (index, line) in input.lines().enumerate() {
         let line = line.with_context(|| format!("read observer line {}", index + 1))?;
         if line.trim().is_empty() {
@@ -354,6 +594,26 @@ fn read_observed_output_candidates(path: &Path) -> Result<ObservedOutputCandidat
             .with_context(|| format!("decode observer line {}", index + 1))?;
         if value.get("record_type").and_then(Value::as_str) != Some("launchpad_paper_frame") {
             continue;
+        }
+        let transactions = value
+            .pointer("/report/transactions")
+            .and_then(Value::as_array)
+            .context("launchpad paper frame has no transaction inventory")?;
+        for transaction in transactions {
+            let tx_hash: B256 = serde_json::from_value(
+                transaction
+                    .get("tx_hash")
+                    .cloned()
+                    .context("feed transaction has no tx_hash")?,
+            )?;
+            let feed_sequence = transaction
+                .get("feed_sequence")
+                .and_then(Value::as_u64)
+                .context("feed transaction has no feed sequence")?;
+            feed_transactions
+                .entry(tx_hash)
+                .and_modify(|existing| *existing = (*existing).min(feed_sequence))
+                .or_insert(feed_sequence);
         }
         let observations = value
             .pointer("/report/observations")
@@ -380,7 +640,34 @@ fn read_observed_output_candidates(path: &Path) -> Result<ObservedOutputCandidat
                 .get("feed_sequence")
                 .and_then(Value::as_u64)
                 .context("observation has no feed sequence")?;
+            let observer_latency_ns = observation
+                .get("observer_latency_ns")
+                .and_then(Value::as_u64)
+                .context("observation has no local latency")?;
             let key = (tx_hash, launchpad);
+            let claim = ObserverClaim {
+                action: observation
+                    .get("action")
+                    .filter(|value| !value.is_null())
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()?,
+                predicted_token: observation
+                    .get("predicted_token")
+                    .filter(|value| !value.is_null())
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()?,
+                predicted_pool: observation
+                    .get("predicted_pool")
+                    .filter(|value| !value.is_null())
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()?,
+            };
+            if claims.insert(key, claim).is_some() {
+                anyhow::bail!("duplicate observer claim for {key:?}");
+            }
             received
                 .entry(key)
                 .and_modify(|existing| {
@@ -388,11 +675,18 @@ fn read_observed_output_candidates(path: &Path) -> Result<ObservedOutputCandidat
                 })
                 .or_insert(observer_received_unix_ns);
             sequences.entry(key).or_insert(feed_sequence);
+            latencies
+                .entry(key)
+                .and_modify(|existing| *existing = (*existing).min(observer_latency_ns))
+                .or_insert(observer_latency_ns);
         }
     }
     Ok(ObservedOutputCandidates {
         received_unix_ns: received,
+        observer_latency_ns: latencies,
         feed_sequences: sequences,
+        feed_transactions,
+        claims,
     })
 }
 
@@ -419,6 +713,19 @@ fn read_reconciliation_records(path: &Path) -> Result<ReconciliationRecords> {
                 )
             })?;
             match value.get("record_type").and_then(Value::as_str) {
+                Some("launchpad_ground_truth_window") => {
+                    if records.ground_truth_window.is_some() {
+                        anyhow::bail!("duplicate ground-truth coverage manifest");
+                    }
+                    records.ground_truth_window =
+                        Some(serde_json::from_value(value).with_context(|| {
+                            format!(
+                                "decode ground-truth window line {} from {}",
+                                index + 1,
+                                path.display()
+                            )
+                        })?);
+                }
                 Some("launchpad_v3_paper_quote") => {
                     records
                         .v3_quotes
@@ -481,15 +788,21 @@ fn read_reconciliation_records(path: &Path) -> Result<ReconciliationRecords> {
                             )
                         })?)
                 }
+                Some("launchpad_reconciliation_evidence") => {
+                    records
+                        .evidence
+                        .push(serde_json::from_value(value).with_context(|| {
+                            format!("decode evidence line {} from {}", index + 1, path.display())
+                        })?)
+                }
                 Some(other) => anyhow::bail!(
                     "unknown reconciliation record type {other} at line {}",
                     index + 1
                 ),
-                None => records
-                    .evidence
-                    .push(serde_json::from_value(value).with_context(|| {
-                        format!("decode evidence line {} from {}", index + 1, path.display())
-                    })?),
+                None => anyhow::bail!(
+                    "reconciliation record has no explicit record_type at line {}",
+                    index + 1
+                ),
             }
         }
     }
@@ -510,6 +823,7 @@ fn validate_hood_migration_records(
         let confirmed = evidence.get(&key).is_some_and(|record| {
             record.receipt_status
                 && record.protocol_event_match
+                && record.quote_status == QuoteStatus::Blocked
                 && record.protocol_blocker.as_deref()
                     == Some("hood_migration_topology_verified_v3_quote_unavailable")
         });
@@ -566,14 +880,10 @@ fn validate_hood_migration_records(
 
 fn finalized_v3_plans(
     observed_sequences: &HashMap<(B256, LaunchpadId), u64>,
-    evidence: &[ReconciliationEvidence],
+    ground_truth: &ConfirmedGroundTruth,
     quotes: Vec<V3ReceiptPaperQuote>,
     policy: PaperPlanPolicy,
 ) -> Result<Vec<FinalizedV3PaperPlan>> {
-    let evidence = evidence
-        .iter()
-        .map(|record| ((record.tx_hash, record.launchpad), record))
-        .collect::<HashMap<_, _>>();
     let mut seen = HashMap::new();
     let mut plans = Vec::new();
     for quote in quotes {
@@ -584,9 +894,19 @@ fn finalized_v3_plans(
         let Some(feed_sequence) = observed_sequences.get(&key).copied() else {
             continue;
         };
-        let confirmed = evidence
-            .get(&key)
-            .is_some_and(|record| record.receipt_status && record.protocol_event_match);
+        let Some(confirmed) = ground_truth.available_quote_matches(
+            key,
+            QuoteIdentityVersion {
+                action: ActionKind::Launch,
+                token: quote.market.token,
+                pool: Some(quote.market.pool),
+                l2_block_number: quote.state_version.l2_block_number,
+                block_hash: quote.state_version.block_hash,
+                transaction_index: quote.state_version.transaction_index,
+            },
+        ) else {
+            continue;
+        };
         if !confirmed
             || quote.record_type != "launchpad_v3_paper_quote"
             || quote.entry.amount_in == U256::ZERO
@@ -632,14 +952,10 @@ fn finalized_v3_plans(
 
 fn finalized_clanker_plans(
     observed_sequences: &HashMap<(B256, LaunchpadId), u64>,
-    evidence: &[ReconciliationEvidence],
+    ground_truth: &ConfirmedGroundTruth,
     quotes: Vec<ClankerReceiptPaperQuote>,
     policy: PaperPlanPolicy,
 ) -> Result<Vec<FinalizedV3PaperPlan>> {
-    let evidence = evidence
-        .iter()
-        .map(|record| ((record.tx_hash, record.launchpad), record))
-        .collect::<HashMap<_, _>>();
     let mut seen = HashMap::new();
     let mut plans = Vec::new();
     for quote in quotes {
@@ -650,9 +966,19 @@ fn finalized_clanker_plans(
         let Some(feed_sequence) = observed_sequences.get(&key).copied() else {
             continue;
         };
-        let confirmed = evidence
-            .get(&key)
-            .is_some_and(|record| record.receipt_status && record.protocol_event_match);
+        let Some(confirmed) = ground_truth.available_quote_matches(
+            key,
+            QuoteIdentityVersion {
+                action: ActionKind::Launch,
+                token: quote.market.token,
+                pool: None,
+                l2_block_number: quote.state_version.l2_block_number,
+                block_hash: quote.state_version.block_hash,
+                transaction_index: quote.state_version.transaction_index,
+            },
+        ) else {
+            continue;
+        };
         if !confirmed
             || quote.record_type != "launchpad_clanker_v4_paper_quote"
             || quote.launchpad != LaunchpadId::Clanker
@@ -701,14 +1027,10 @@ fn finalized_clanker_plans(
 
 fn finalized_bankr_plans(
     observed_sequences: &HashMap<(B256, LaunchpadId), u64>,
-    evidence: &[ReconciliationEvidence],
+    ground_truth: &ConfirmedGroundTruth,
     quotes: Vec<BankrDopplerReceiptPaperQuote>,
     policy: PaperPlanPolicy,
 ) -> Result<Vec<FinalizedV3PaperPlan>> {
-    let evidence = evidence
-        .iter()
-        .map(|record| ((record.tx_hash, record.launchpad), record))
-        .collect::<HashMap<_, _>>();
     let mut seen = HashMap::new();
     let mut plans = Vec::new();
     for quote in quotes {
@@ -719,9 +1041,19 @@ fn finalized_bankr_plans(
         let Some(feed_sequence) = observed_sequences.get(&key).copied() else {
             continue;
         };
-        let confirmed = evidence
-            .get(&key)
-            .is_some_and(|record| record.receipt_status && record.protocol_event_match);
+        let Some(confirmed) = ground_truth.available_quote_matches(
+            key,
+            QuoteIdentityVersion {
+                action: ActionKind::Launch,
+                token: quote.market.token,
+                pool: None,
+                l2_block_number: quote.state_version.l2_block_number,
+                block_hash: quote.state_version.block_hash,
+                transaction_index: quote.state_version.transaction_index,
+            },
+        ) else {
+            continue;
+        };
         if !confirmed
             || quote.record_type != "launchpad_bankr_doppler_v4_paper_quote"
             || quote.launchpad != LaunchpadId::BankrDoppler
@@ -771,15 +1103,11 @@ fn finalized_bankr_plans(
 
 fn finalized_pons_plans(
     observed_sequences: &HashMap<(B256, LaunchpadId), u64>,
-    evidence: &[ReconciliationEvidence],
+    ground_truth: &ConfirmedGroundTruth,
     quotes: Vec<PonsReceiptPaperQuote>,
     policy: PaperPlanPolicy,
     expected_profile: hermes_feed::PonsExpectedProfile,
 ) -> Result<Vec<FinalizedV3PaperPlan>> {
-    let evidence = evidence
-        .iter()
-        .map(|record| ((record.tx_hash, record.launchpad), record))
-        .collect::<HashMap<_, _>>();
     let mut seen = HashMap::new();
     let mut plans = Vec::new();
     for quote in quotes {
@@ -790,12 +1118,19 @@ fn finalized_pons_plans(
         let Some(feed_sequence) = observed_sequences.get(&key).copied() else {
             continue;
         };
-        let confirmed = evidence.get(&key).is_some_and(|record| {
-            record.receipt_status
-                && record.protocol_event_match
-                && record.pons_generation == Some(hermes_feed::PonsGeneration::Current)
-                && record.protocol_blocker.is_none()
-        });
+        let Some(confirmed) = ground_truth.available_quote_matches(
+            key,
+            QuoteIdentityVersion {
+                action: ActionKind::Launch,
+                token: quote.market.token,
+                pool: Some(quote.market.pool),
+                l2_block_number: quote.state_version.l2_block_number,
+                block_hash: quote.state_version.block_hash,
+                transaction_index: quote.state_version.transaction_index,
+            },
+        ) else {
+            continue;
+        };
         if !confirmed
             || quote.record_type != "launchpad_pons_v3_paper_quote"
             || quote.launchpad != LaunchpadId::Pons
@@ -843,16 +1178,12 @@ fn finalized_pons_plans(
 
 fn finalized_hood_plans(
     observed_sequences: &HashMap<(B256, LaunchpadId), u64>,
-    evidence: &[ReconciliationEvidence],
+    ground_truth: &ConfirmedGroundTruth,
     quotes: Vec<HoodReceiptPaperQuote>,
     policy: PaperPlanPolicy,
     expected_profile: &HoodExpectedProfile,
 ) -> Result<Vec<FinalizedV3PaperPlan>> {
     expected_profile.validate()?;
-    let evidence = evidence
-        .iter()
-        .map(|record| ((record.tx_hash, record.launchpad), record))
-        .collect::<HashMap<_, _>>();
     let mut seen = HashMap::new();
     let mut plans = Vec::new();
     for quote in quotes {
@@ -863,11 +1194,19 @@ fn finalized_hood_plans(
         let Some(feed_sequence) = observed_sequences.get(&key).copied() else {
             continue;
         };
-        let confirmed = evidence.get(&key).is_some_and(|record| {
-            record.receipt_status
-                && record.protocol_event_match
-                && record.protocol_blocker.is_none()
-        });
+        let Some(confirmed) = ground_truth.available_quote_matches(
+            key,
+            QuoteIdentityVersion {
+                action: quote.observed.action,
+                token: quote.token,
+                pool: None,
+                l2_block_number: quote.state_version.l2_block_number,
+                block_hash: quote.state_version.block_hash,
+                transaction_index: quote.state_version.transaction_index,
+            },
+        ) else {
+            continue;
+        };
         if !confirmed
             || quote.record_type != "launchpad_hood_curve_paper_quote"
             || quote.launchpad != LaunchpadId::HoodFun
@@ -1412,60 +1751,303 @@ fn bankr_quote_arithmetic_is_consistent(
         && quote.simulated_round_trip_return_bps == round_trip_bps
 }
 
-fn reconciliation_metrics(
-    observed: &HashMap<(B256, LaunchpadId), u64>,
+fn validate_ground_truth_window(
+    window: &GroundTruthWindow,
     evidence: &[ReconciliationEvidence],
-) -> ReconciliationMetrics {
+) -> Result<()> {
+    let expected_from = window
+        .start_head
+        .checked_add(1)
+        .context("ground-truth start head overflow")?;
+    let expected_scanned = if window.to_l2_block < window.from_l2_block {
+        if window.cutoff_head != window.start_head {
+            anyhow::bail!("ground-truth coverage range is inverted");
+        }
+        0
+    } else {
+        window.to_l2_block - window.from_l2_block + 1
+    };
+    if window.record_type != "launchpad_ground_truth_window"
+        || !window.complete
+        || window.start_head_hash == B256::ZERO
+        || window.cutoff_head_hash == B256::ZERO
+        || window.from_l2_block != expected_from
+        || window.to_l2_block != window.cutoff_head
+        || window.scanned_blocks != expected_scanned
+        || window.confirmations == 0
+        || window.event_logs < window.unique_protocol_keys
+        || (expected_scanned == 0 && (window.event_logs != 0 || window.unique_protocol_keys != 0))
+    {
+        anyhow::bail!("invalid or incomplete ground-truth coverage manifest");
+    }
+
+    let mut keys = HashSet::new();
+    let mut truth_keys = 0_usize;
+    let mut truth_logs = 0_usize;
+    for record in evidence {
+        let key = (record.tx_hash, record.launchpad);
+        if record.record_type != "launchpad_reconciliation_evidence" {
+            anyhow::bail!("invalid reconciliation evidence type for {key:?}");
+        }
+        if !keys.insert(key) {
+            anyhow::bail!("duplicate reconciliation evidence for {key:?}");
+        }
+        if record.ground_truth_event == record.ground_truth_hits.is_empty() {
+            anyhow::bail!("ground-truth flag and exact log hits disagree for {key:?}");
+        }
+        if !record.ground_truth_event {
+            continue;
+        }
+        truth_keys += 1;
+        truth_logs += record.ground_truth_hits.len();
+        let block = record
+            .l2_block_number
+            .context("ground-truth evidence has no L2 block number")?;
+        if !record.receipt_status
+            || record.block_hash.is_none_or(|hash| hash == B256::ZERO)
+            || record.transaction_index.is_none()
+            || block < window.from_l2_block
+            || block > window.to_l2_block
+        {
+            anyhow::bail!("invalid canonical ground-truth evidence for {key:?}");
+        }
+        for hit in &record.ground_truth_hits {
+            if hit.l2_block_number != block
+                || Some(hit.block_hash) != record.block_hash
+                || Some(hit.transaction_index) != record.transaction_index
+                || hit.log.address == Address::ZERO
+                || hit.log.topics.is_empty()
+                || launchpad_for_ground_truth_log(&hit.log) != Some(record.launchpad)
+            {
+                anyhow::bail!("ground-truth log identity disagrees with receipt for {key:?}");
+            }
+        }
+    }
+    if truth_keys != window.unique_protocol_keys {
+        anyhow::bail!(
+            "ground-truth manifest declares {} keys but evidence contains {truth_keys}",
+            window.unique_protocol_keys
+        );
+    }
+    if truth_logs != window.event_logs {
+        anyhow::bail!(
+            "ground-truth manifest declares {} logs but evidence contains {truth_logs}",
+            window.event_logs
+        );
+    }
+    Ok(())
+}
+
+fn reconciliation_metrics(
+    observed: &ObservedOutputCandidates,
+    evidence: &[ReconciliationEvidence],
+    window: Option<&GroundTruthWindow>,
+) -> Result<Vec<ReconciliationMetrics>> {
+    let window = window.context(
+        "authoritative reconciliation metrics require a complete ground-truth coverage manifest",
+    )?;
+    validate_ground_truth_window(window, evidence)?;
     let indexed = evidence
         .iter()
         .map(|record| ((record.tx_hash, record.launchpad), record))
         .collect::<HashMap<_, _>>();
-    let confirmed_evidence =
-        |record: &&ReconciliationEvidence| record.receipt_status && record.protocol_event_match;
-    let confirmed = observed
-        .keys()
-        .filter(|key| indexed.get(key).is_some_and(confirmed_evidence))
-        .count();
-    let false_positives = observed
-        .keys()
-        .filter(|key| {
-            indexed
-                .get(key)
-                .is_some_and(|record| !confirmed_evidence(record))
-        })
-        .count();
-    let unreconciled = observed
-        .keys()
-        .filter(|key| !indexed.contains_key(key))
-        .count();
-    let missed_transactions = indexed
-        .iter()
-        .filter(|(key, record)| confirmed_evidence(record) && !observed.contains_key(key))
-        .count();
-    let mut latencies = indexed
-        .iter()
-        .filter_map(|(key, record)| {
-            if confirmed_evidence(record) {
-                observed
-                    .get(key)
-                    .and_then(|received| record.observed_unix_ns.checked_sub(*received))
-            } else {
-                None
+    for key in observed.claims.keys() {
+        if !observed.feed_transactions.contains_key(&key.0) {
+            anyhow::bail!("observer claim {key:?} is absent from feed transaction inventory");
+        }
+    }
+    for record in evidence {
+        let claimed = observed
+            .claims
+            .contains_key(&(record.tx_hash, record.launchpad));
+        if record.observer_claim != claimed {
+            anyhow::bail!(
+                "reconciliation observer-membership flag disagrees with observer output for {:?}",
+                (record.tx_hash, record.launchpad)
+            );
+        }
+    }
+
+    const LAUNCHPADS: [LaunchpadId; 6] = [
+        LaunchpadId::Bow,
+        LaunchpadId::LaunchHoodV3,
+        LaunchpadId::Clanker,
+        LaunchpadId::BankrDoppler,
+        LaunchpadId::Pons,
+        LaunchpadId::HoodFun,
+    ];
+    let mut rows = Vec::with_capacity(LAUNCHPADS.len());
+    for launchpad in LAUNCHPADS {
+        let truth = indexed
+            .iter()
+            .filter(|((_, id), record)| *id == launchpad && record.ground_truth_event)
+            .map(|(key, record)| (*key, *record))
+            .collect::<HashMap<_, _>>();
+        let claims = observed
+            .claims
+            .iter()
+            .filter(|((_, id), _)| *id == launchpad)
+            .map(|(key, claim)| (*key, *claim))
+            .collect::<HashMap<_, _>>();
+        let confirmed_keys = truth
+            .keys()
+            .filter(|key| claims.contains_key(key))
+            .copied()
+            .collect::<Vec<_>>();
+        let missed_keys = truth
+            .keys()
+            .filter(|key| !claims.contains_key(key))
+            .copied()
+            .collect::<Vec<_>>();
+
+        let mut false_positives = 0_usize;
+        let mut out_of_scope = 0_usize;
+        let mut unreconciled = 0_usize;
+        for key in claims.keys().filter(|key| !truth.contains_key(key)) {
+            match indexed.get(key) {
+                None => unreconciled += 1,
+                Some(record) => match record.l2_block_number {
+                    None => unreconciled += 1,
+                    Some(block) if block < window.from_l2_block || block > window.to_l2_block => {
+                        out_of_scope += 1;
+                    }
+                    Some(_) => false_positives += 1,
+                },
             }
-        })
-        .collect::<Vec<_>>();
-    latencies.sort_unstable();
-    ReconciliationMetrics {
-        record_type: "launchpad_paper_reconciliation_metrics",
-        observed_candidates: observed.len(),
-        evidence_records: evidence.len(),
-        confirmed,
-        false_positives,
-        missed_transactions,
-        unreconciled,
-        reconciliation_latency_p50_ns: percentile(&latencies, 50),
-        reconciliation_latency_p95_ns: percentile(&latencies, 95),
-        reconciliation_latency_p99_ns: percentile(&latencies, 99),
+        }
+
+        let mut action_eligible = 0_usize;
+        let mut action_missing = 0_usize;
+        let mut action_matches = 0_usize;
+        let mut action_mismatches = 0_usize;
+        let mut token_eligible = 0_usize;
+        let mut token_missing = 0_usize;
+        let mut token_matches = 0_usize;
+        let mut token_mismatches = 0_usize;
+        let mut pool_eligible = 0_usize;
+        let mut pool_missing = 0_usize;
+        let mut pool_matches = 0_usize;
+        let mut pool_mismatches = 0_usize;
+        for key in &confirmed_keys {
+            let claim = claims[key];
+            let record = truth[key];
+            compare_prediction(
+                claim.action,
+                record.action,
+                &mut action_eligible,
+                &mut action_missing,
+                &mut action_matches,
+                &mut action_mismatches,
+            );
+            compare_prediction(
+                claim.predicted_token,
+                record.token,
+                &mut token_eligible,
+                &mut token_missing,
+                &mut token_matches,
+                &mut token_mismatches,
+            );
+            compare_prediction(
+                claim.predicted_pool,
+                record.pool,
+                &mut pool_eligible,
+                &mut pool_missing,
+                &mut pool_matches,
+                &mut pool_mismatches,
+            );
+        }
+
+        let mut observer_latencies = confirmed_keys
+            .iter()
+            .filter_map(|key| observed.observer_latency_ns.get(key).copied())
+            .collect::<Vec<_>>();
+        let mut reconciliation_durations = truth
+            .values()
+            .filter_map(|record| {
+                record
+                    .reconciliation_completed_unix_ns
+                    .checked_sub(record.reconciliation_started_unix_ns)
+            })
+            .collect::<Vec<_>>();
+        observer_latencies.sort_unstable();
+        reconciliation_durations.sort_unstable();
+        rows.push(ReconciliationMetrics {
+            record_type: "launchpad_paper_reconciliation_metrics",
+            launchpad,
+            coverage_from_l2_block: window.from_l2_block,
+            coverage_to_l2_block: window.to_l2_block,
+            raw_ground_truth_transactions: truth.len(),
+            quote_admitted_ground_truth_transactions: truth
+                .values()
+                .filter(|record| {
+                    record.protocol_event_match && record.quote_status == QuoteStatus::Available
+                })
+                .count(),
+            observer_claims: claims.len(),
+            confirmed_observations: confirmed_keys.len(),
+            false_positives,
+            missed_transactions: missed_keys.len(),
+            detector_misses: missed_keys
+                .iter()
+                .filter(|key| observed.feed_transactions.contains_key(&key.0))
+                .count(),
+            feed_coverage_misses: missed_keys
+                .iter()
+                .filter(|key| !observed.feed_transactions.contains_key(&key.0))
+                .count(),
+            out_of_scope_observations: out_of_scope,
+            unreconciled_observations: unreconciled,
+            quote_available: truth
+                .values()
+                .filter(|record| record.quote_status == QuoteStatus::Available)
+                .count(),
+            quote_blocked: truth
+                .values()
+                .filter(|record| record.quote_status == QuoteStatus::Blocked)
+                .count(),
+            quote_not_applicable: truth
+                .values()
+                .filter(|record| record.quote_status == QuoteStatus::NotApplicable)
+                .count(),
+            action_prediction_eligible: action_eligible,
+            action_prediction_missing: action_missing,
+            action_prediction_matches: action_matches,
+            action_prediction_mismatches: action_mismatches,
+            token_prediction_eligible: token_eligible,
+            token_prediction_missing: token_missing,
+            token_prediction_matches: token_matches,
+            token_prediction_mismatches: token_mismatches,
+            pool_prediction_eligible: pool_eligible,
+            pool_prediction_missing: pool_missing,
+            pool_prediction_matches: pool_matches,
+            pool_prediction_mismatches: pool_mismatches,
+            observation_latency_p50_ns: percentile(&observer_latencies, 50),
+            observation_latency_p95_ns: percentile(&observer_latencies, 95),
+            observation_latency_p99_ns: percentile(&observer_latencies, 99),
+            reconciliation_rpc_duration_p50_ns: percentile(&reconciliation_durations, 50),
+            reconciliation_rpc_duration_p95_ns: percentile(&reconciliation_durations, 95),
+            reconciliation_rpc_duration_p99_ns: percentile(&reconciliation_durations, 99),
+        });
+    }
+    Ok(rows)
+}
+
+fn compare_prediction<T: Copy + Eq>(
+    predicted: Option<T>,
+    actual: Option<T>,
+    eligible: &mut usize,
+    missing: &mut usize,
+    matches: &mut usize,
+    mismatches: &mut usize,
+) {
+    let Some(actual) = actual else {
+        return;
+    };
+    *eligible += 1;
+    match predicted {
+        None => *missing += 1,
+        Some(predicted) if predicted == actual => *matches += 1,
+        Some(_) => *mismatches += 1,
     }
 }
 
@@ -1479,7 +2061,16 @@ fn percentile(values: &[u64], percentile: usize) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::Address;
+    use alloy_primitives::{Address, keccak256};
+    use hermes_feed::launchpad_adapters::{
+        CLANKER_FACTORY, CLANKER_TOKEN_CREATED_TOPIC, DOPPLER_CREATE_EMITTER, DOPPLER_CREATE_TOPIC,
+    };
+    use hermes_feed::launchpad_ground_truth::{
+        BOW_LAUNCHED_SIGNATURE, HOOD_TOKEN_CREATED_SIGNATURE, LAUNCHHOOD_TOKEN_LAUNCHED_SIGNATURE,
+    };
+    use hermes_feed::pons::{PONS_CURRENT_FACTORY, PONS_TOKEN_LAUNCHED_TOPIC};
+    use hermes_feed::robinhood::{BOW_LAUNCH_FACTORY, LAUNCHHOOD_V3_FACTORY};
+    use hermes_feed::tier2_curve::HOOD_FACTORY;
     use hermes_feed::{
         BankrDopplerExpectedProfile, BankrDopplerQuotePolicy, ClankerQuotePolicy,
         ClankerV4ExpectedProfile, NoxaReceipt, PonsQuotePolicy, RobinhoodBlock,
@@ -1490,55 +2081,306 @@ mod tests {
 
     use super::*;
 
+    fn quote_authority(
+        key: (B256, LaunchpadId),
+        action: ActionKind,
+        token: Address,
+        pool: Option<Address>,
+        l2_block_number: u64,
+        block_hash: B256,
+        transaction_index: u64,
+    ) -> ConfirmedGroundTruth {
+        ConfirmedGroundTruth {
+            by_key: HashMap::from([(
+                key,
+                GroundTruthQuoteBinding {
+                    l2_block_number,
+                    block_hash,
+                    transaction_index,
+                    action: Some(action),
+                    token: Some(token),
+                    pool,
+                    quote_status: QuoteStatus::Available,
+                },
+            )]),
+        }
+    }
+
+    fn complete_window(unique_protocol_keys: usize) -> GroundTruthWindow {
+        GroundTruthWindow {
+            record_type: "launchpad_ground_truth_window".into(),
+            start_head: 9,
+            start_head_hash: B256::with_last_byte(9),
+            cutoff_head: 20,
+            cutoff_head_hash: B256::with_last_byte(20),
+            from_l2_block: 10,
+            to_l2_block: 20,
+            confirmations: 2,
+            scanned_blocks: 11,
+            complete: true,
+            event_logs: unique_protocol_keys,
+            unique_protocol_keys,
+        }
+    }
+
+    fn evidence_row(
+        key: (B256, LaunchpadId),
+        observer_claim: bool,
+        ground_truth_event: bool,
+        protocol_event_match: bool,
+        quote_status: QuoteStatus,
+    ) -> ReconciliationEvidence {
+        ReconciliationEvidence {
+            record_type: "launchpad_reconciliation_evidence".into(),
+            tx_hash: key.0,
+            launchpad: key.1,
+            receipt_status: true,
+            protocol_event_match,
+            observer_claim,
+            ground_truth_event,
+            ground_truth_hits: if ground_truth_event {
+                vec![GroundTruthHit {
+                    l2_block_number: 10,
+                    block_hash: B256::with_last_byte(10),
+                    transaction_index: 1,
+                    log: hermes_feed::noxa_abi::ReceiptLog {
+                        address: match key.1 {
+                            LaunchpadId::Bow => BOW_LAUNCH_FACTORY,
+                            LaunchpadId::LaunchHoodV3 => LAUNCHHOOD_V3_FACTORY,
+                            LaunchpadId::Clanker => CLANKER_FACTORY,
+                            LaunchpadId::BankrDoppler => DOPPLER_CREATE_EMITTER,
+                            LaunchpadId::Pons => PONS_CURRENT_FACTORY,
+                            LaunchpadId::HoodFun => HOOD_FACTORY,
+                            other => panic!("no ground-truth test log for {other:?}"),
+                        },
+                        log_index: 0,
+                        topics: vec![match key.1 {
+                            LaunchpadId::Bow => keccak256(BOW_LAUNCHED_SIGNATURE.as_bytes()),
+                            LaunchpadId::LaunchHoodV3 => {
+                                keccak256(LAUNCHHOOD_TOKEN_LAUNCHED_SIGNATURE.as_bytes())
+                            }
+                            LaunchpadId::Clanker => CLANKER_TOKEN_CREATED_TOPIC,
+                            LaunchpadId::BankrDoppler => DOPPLER_CREATE_TOPIC,
+                            LaunchpadId::Pons => PONS_TOKEN_LAUNCHED_TOPIC,
+                            LaunchpadId::HoodFun => {
+                                keccak256(HOOD_TOKEN_CREATED_SIGNATURE.as_bytes())
+                            }
+                            other => panic!("no ground-truth test topic for {other:?}"),
+                        }],
+                        data: alloy_primitives::Bytes::new(),
+                    },
+                }]
+            } else {
+                Vec::new()
+            },
+            action: Some(ActionKind::Launch),
+            token: Some(Address::with_last_byte(1)),
+            pool: Some(Address::with_last_byte(2)),
+            quote_status,
+            l2_block_number: Some(10),
+            block_hash: Some(B256::with_last_byte(10)),
+            transaction_index: Some(1),
+            reconciliation_started_unix_ns: 100,
+            reconciliation_completed_unix_ns: 150,
+            pons_generation: (key.1 == LaunchpadId::Pons)
+                .then_some(hermes_feed::PonsGeneration::Current),
+            protocol_blocker: None,
+        }
+    }
+
     #[test]
     fn reconciliation_metrics_separate_confirmed_false_positive_missed_and_unknown() {
         let confirmed_key = (B256::with_last_byte(1), LaunchpadId::Bow);
         let false_positive_key = (B256::with_last_byte(2), LaunchpadId::Clanker);
         let unreconciled_key = (B256::with_last_byte(3), LaunchpadId::Pons);
         let missed_key = (B256::with_last_byte(4), LaunchpadId::HoodFun);
-        let observed = HashMap::from([
-            (confirmed_key, 100),
-            (false_positive_key, 200),
-            (unreconciled_key, 300),
-        ]);
+        let feed_missed_key = (B256::with_last_byte(5), LaunchpadId::BankrDoppler);
+        let observed = ObservedOutputCandidates {
+            observer_latency_ns: HashMap::from([
+                (confirmed_key, 50),
+                (false_positive_key, 60),
+                (unreconciled_key, 70),
+            ]),
+            feed_transactions: HashMap::from([
+                (confirmed_key.0, 1),
+                (false_positive_key.0, 2),
+                (unreconciled_key.0, 3),
+                (missed_key.0, 4),
+            ]),
+            claims: HashMap::from([
+                (
+                    confirmed_key,
+                    ObserverClaim {
+                        action: Some(ActionKind::Launch),
+                        predicted_token: Some(Address::with_last_byte(1)),
+                        predicted_pool: Some(Address::with_last_byte(2)),
+                    },
+                ),
+                (
+                    false_positive_key,
+                    ObserverClaim {
+                        action: Some(ActionKind::Launch),
+                        predicted_token: None,
+                        predicted_pool: None,
+                    },
+                ),
+                (
+                    unreconciled_key,
+                    ObserverClaim {
+                        action: Some(ActionKind::Launch),
+                        predicted_token: None,
+                        predicted_pool: None,
+                    },
+                ),
+            ]),
+            ..ObservedOutputCandidates::default()
+        };
         let evidence = [
-            ReconciliationEvidence {
-                tx_hash: confirmed_key.0,
-                launchpad: confirmed_key.1,
-                receipt_status: true,
-                protocol_event_match: true,
-                observed_unix_ns: 150,
-                pons_generation: None,
-                protocol_blocker: None,
-            },
-            ReconciliationEvidence {
-                tx_hash: false_positive_key.0,
-                launchpad: false_positive_key.1,
-                receipt_status: true,
-                protocol_event_match: false,
-                observed_unix_ns: 250,
-                pons_generation: None,
-                protocol_blocker: None,
-            },
-            ReconciliationEvidence {
-                tx_hash: missed_key.0,
-                launchpad: missed_key.1,
-                receipt_status: true,
-                protocol_event_match: true,
-                observed_unix_ns: 400,
-                pons_generation: None,
-                protocol_blocker: None,
-            },
+            evidence_row(confirmed_key, true, true, true, QuoteStatus::Available),
+            evidence_row(false_positive_key, true, false, false, QuoteStatus::Blocked),
+            evidence_row(missed_key, false, true, true, QuoteStatus::Available),
+            evidence_row(feed_missed_key, false, true, true, QuoteStatus::Available),
         ];
 
-        let metrics = reconciliation_metrics(&observed, &evidence);
-        assert_eq!(metrics.confirmed, 1);
-        assert_eq!(metrics.false_positives, 1);
-        assert_eq!(metrics.missed_transactions, 1);
-        assert_eq!(metrics.unreconciled, 1);
-        assert_eq!(metrics.reconciliation_latency_p50_ns, Some(50));
-        assert_eq!(metrics.reconciliation_latency_p95_ns, Some(50));
-        assert_eq!(metrics.reconciliation_latency_p99_ns, Some(50));
+        let metrics =
+            reconciliation_metrics(&observed, &evidence, Some(&complete_window(3))).unwrap();
+        let bow = metrics
+            .iter()
+            .find(|row| row.launchpad == LaunchpadId::Bow)
+            .unwrap();
+        assert_eq!(bow.confirmed_observations, 1);
+        assert_eq!(bow.observation_latency_p50_ns, Some(50));
+        assert_eq!(bow.action_prediction_matches, 1);
+        assert_eq!(bow.token_prediction_matches, 1);
+        assert_eq!(bow.pool_prediction_matches, 1);
+        let clanker = metrics
+            .iter()
+            .find(|row| row.launchpad == LaunchpadId::Clanker)
+            .unwrap();
+        assert_eq!(clanker.false_positives, 1);
+        let pons = metrics
+            .iter()
+            .find(|row| row.launchpad == LaunchpadId::Pons)
+            .unwrap();
+        assert_eq!(pons.unreconciled_observations, 1);
+        let hood = metrics
+            .iter()
+            .find(|row| row.launchpad == LaunchpadId::HoodFun)
+            .unwrap();
+        assert_eq!(hood.missed_transactions, 1);
+        assert_eq!(hood.detector_misses, 1);
+        assert_eq!(hood.feed_coverage_misses, 0);
+        let bankr = metrics
+            .iter()
+            .find(|row| row.launchpad == LaunchpadId::BankrDoppler)
+            .unwrap();
+        assert_eq!(bankr.missed_transactions, 1);
+        assert_eq!(bankr.detector_misses, 0);
+        assert_eq!(bankr.feed_coverage_misses, 1);
+    }
+
+    #[test]
+    fn quote_authority_requires_complete_unique_canonical_ground_truth() {
+        let key = (B256::with_last_byte(1), LaunchpadId::Bow);
+        let row = evidence_row(key, true, true, true, QuoteStatus::Available);
+        let records = ReconciliationRecords {
+            evidence: vec![row.clone()],
+            ground_truth_window: Some(complete_window(1)),
+            ..ReconciliationRecords::default()
+        };
+        let authority = ConfirmedGroundTruth::from_records(&records).unwrap();
+        assert_eq!(
+            authority.available_quote_matches(
+                key,
+                QuoteIdentityVersion {
+                    action: ActionKind::Launch,
+                    token: Address::with_last_byte(1),
+                    pool: Some(Address::with_last_byte(2)),
+                    l2_block_number: 10,
+                    block_hash: B256::with_last_byte(10),
+                    transaction_index: 1,
+                },
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            authority.available_quote_matches(
+                key,
+                QuoteIdentityVersion {
+                    action: ActionKind::Launch,
+                    token: Address::with_last_byte(1),
+                    pool: Some(Address::with_last_byte(2)),
+                    l2_block_number: 10,
+                    block_hash: B256::with_last_byte(0xee),
+                    transaction_index: 1,
+                },
+            ),
+            Some(false)
+        );
+
+        let missing_window = ReconciliationRecords {
+            evidence: vec![row.clone()],
+            ..ReconciliationRecords::default()
+        };
+        assert!(ConfirmedGroundTruth::from_records(&missing_window).is_err());
+
+        let duplicates = ReconciliationRecords {
+            evidence: vec![row.clone(), row.clone()],
+            ground_truth_window: Some(complete_window(2)),
+            ..ReconciliationRecords::default()
+        };
+        assert!(ConfirmedGroundTruth::from_records(&duplicates).is_err());
+
+        let mut incomplete_window = complete_window(1);
+        incomplete_window.complete = false;
+        let incomplete = ReconciliationRecords {
+            evidence: vec![row.clone()],
+            ground_truth_window: Some(incomplete_window),
+            ..ReconciliationRecords::default()
+        };
+        assert!(ConfirmedGroundTruth::from_records(&incomplete).is_err());
+
+        let mut blocked_available = row.clone();
+        blocked_available.protocol_blocker = Some("contradictory blocker".into());
+        let blocked_available_records = ReconciliationRecords {
+            evidence: vec![blocked_available],
+            ground_truth_window: Some(complete_window(1)),
+            ..ReconciliationRecords::default()
+        };
+        assert!(ConfirmedGroundTruth::from_records(&blocked_available_records).is_err());
+
+        let mut cross_paired = row.clone();
+        cross_paired.ground_truth_hits[0].log.address = CLANKER_FACTORY;
+        cross_paired.ground_truth_hits[0].log.topics = vec![CLANKER_TOKEN_CREATED_TOPIC];
+        let cross_paired_records = ReconciliationRecords {
+            evidence: vec![cross_paired],
+            ground_truth_window: Some(complete_window(1)),
+            ..ReconciliationRecords::default()
+        };
+        assert!(ConfirmedGroundTruth::from_records(&cross_paired_records).is_err());
+
+        let mut blocked = row;
+        blocked.quote_status = QuoteStatus::Blocked;
+        let blocked_records = ReconciliationRecords {
+            evidence: vec![blocked],
+            ground_truth_window: Some(complete_window(1)),
+            ..ReconciliationRecords::default()
+        };
+        let blocked_authority = ConfirmedGroundTruth::from_records(&blocked_records).unwrap();
+        assert_eq!(
+            blocked_authority.available_quote_matches(
+                key,
+                QuoteIdentityVersion {
+                    action: ActionKind::Launch,
+                    token: Address::with_last_byte(1),
+                    pool: Some(Address::with_last_byte(2)),
+                    l2_block_number: 10,
+                    block_hash: B256::with_last_byte(10),
+                    transaction_index: 1,
+                },
+            ),
+            Some(false)
+        );
     }
 
     fn swap_quote(
@@ -1691,17 +2533,18 @@ mod tests {
         quote: BankrDopplerReceiptPaperQuote,
     ) -> Result<Vec<FinalizedV3PaperPlan>> {
         let key = (quote.tx_hash, quote.launchpad);
+        let ground_truth = quote_authority(
+            key,
+            ActionKind::Launch,
+            quote.market.token,
+            None,
+            quote.state_version.l2_block_number,
+            quote.state_version.block_hash,
+            quote.state_version.transaction_index,
+        );
         finalized_bankr_plans(
             &HashMap::from([(key, 88)]),
-            &[ReconciliationEvidence {
-                tx_hash: key.0,
-                launchpad: key.1,
-                receipt_status: true,
-                protocol_event_match: true,
-                observed_unix_ns: 100,
-                pons_generation: None,
-                protocol_blocker: None,
-            }],
+            &ground_truth,
             vec![quote],
             PaperPlanPolicy {
                 max_input_wei: U256::from(1_000_u64),
@@ -1713,17 +2556,18 @@ mod tests {
 
     fn finalize_pons_quote(quote: PonsReceiptPaperQuote) -> Result<Vec<FinalizedV3PaperPlan>> {
         let key = (quote.tx_hash, quote.launchpad);
+        let ground_truth = quote_authority(
+            key,
+            ActionKind::Launch,
+            quote.market.token,
+            Some(quote.market.pool),
+            quote.state_version.l2_block_number,
+            quote.state_version.block_hash,
+            quote.state_version.transaction_index,
+        );
         finalized_pons_plans(
             &HashMap::from([(key, 99)]),
-            &[ReconciliationEvidence {
-                tx_hash: key.0,
-                launchpad: key.1,
-                receipt_status: true,
-                protocol_event_match: true,
-                observed_unix_ns: 100,
-                pons_generation: Some(hermes_feed::PonsGeneration::Current),
-                protocol_blocker: None,
-            }],
+            &ground_truth,
             vec![quote],
             PaperPlanPolicy {
                 max_input_wei: U256::from(1_000_000_000_000_000_u64),
@@ -1738,17 +2582,18 @@ mod tests {
     fn confirmed_quote_becomes_non_broadcast_finalized_plan() {
         let quote = quote_fixture();
         let key = (quote.tx_hash, quote.launchpad);
+        let ground_truth = quote_authority(
+            key,
+            ActionKind::Launch,
+            quote.market.token,
+            Some(quote.market.pool),
+            quote.state_version.l2_block_number,
+            quote.state_version.block_hash,
+            quote.state_version.transaction_index,
+        );
         let plans = finalized_v3_plans(
             &HashMap::from([(key, 42)]),
-            &[ReconciliationEvidence {
-                tx_hash: key.0,
-                launchpad: key.1,
-                receipt_status: true,
-                protocol_event_match: true,
-                observed_unix_ns: 100,
-                pons_generation: None,
-                protocol_blocker: None,
-            }],
+            &ground_truth,
             vec![quote],
             PaperPlanPolicy {
                 max_input_wei: U256::from(1_000),
@@ -1770,19 +2615,20 @@ mod tests {
     fn unconfirmed_or_broadcast_quote_cannot_finalize() {
         let mut quote = quote_fixture();
         let key = (quote.tx_hash, quote.launchpad);
+        let ground_truth = quote_authority(
+            key,
+            ActionKind::Launch,
+            quote.market.token,
+            Some(quote.market.pool),
+            quote.state_version.l2_block_number,
+            quote.state_version.block_hash,
+            quote.state_version.transaction_index,
+        );
         quote.broadcast = true;
         assert!(
             finalized_v3_plans(
                 &HashMap::from([(key, 42)]),
-                &[ReconciliationEvidence {
-                    tx_hash: key.0,
-                    launchpad: key.1,
-                    receipt_status: true,
-                    protocol_event_match: true,
-                    observed_unix_ns: 100,
-                    pons_generation: None,
-                    protocol_blocker: None,
-                }],
+                &ground_truth,
                 vec![quote],
                 PaperPlanPolicy {
                     max_input_wei: U256::from(1_000),
@@ -1798,17 +2644,18 @@ mod tests {
     fn confirmed_clanker_quote_becomes_execution_gated_finalized_plan() {
         let quote = clanker_quote_fixture();
         let key = (quote.tx_hash, quote.launchpad);
+        let ground_truth = quote_authority(
+            key,
+            ActionKind::Launch,
+            quote.market.token,
+            None,
+            quote.state_version.l2_block_number,
+            quote.state_version.block_hash,
+            quote.state_version.transaction_index,
+        );
         let plans = finalized_clanker_plans(
             &HashMap::from([(key, 77)]),
-            &[ReconciliationEvidence {
-                tx_hash: key.0,
-                launchpad: key.1,
-                receipt_status: true,
-                protocol_event_match: true,
-                observed_unix_ns: 100,
-                pons_generation: None,
-                protocol_blocker: None,
-            }],
+            &ground_truth,
             vec![quote],
             PaperPlanPolicy {
                 max_input_wei: U256::from(1_000_u64),
@@ -2004,17 +2851,18 @@ mod tests {
 
     fn finalize_hood_quote(quote: HoodReceiptPaperQuote) -> Result<Vec<FinalizedV3PaperPlan>> {
         let key = (quote.tx_hash, quote.launchpad);
+        let ground_truth = quote_authority(
+            key,
+            quote.observed.action,
+            quote.token,
+            None,
+            quote.state_version.l2_block_number,
+            quote.state_version.block_hash,
+            quote.state_version.transaction_index,
+        );
         finalized_hood_plans(
             &HashMap::from([(key, 71)]),
-            &[ReconciliationEvidence {
-                tx_hash: key.0,
-                launchpad: key.1,
-                receipt_status: true,
-                protocol_event_match: true,
-                observed_unix_ns: 1,
-                pons_generation: None,
-                protocol_blocker: None,
-            }],
+            &ground_truth,
             vec![quote],
             PaperPlanPolicy::default(),
             &HoodExpectedProfile::production(),
@@ -2052,12 +2900,21 @@ mod tests {
 
         let quote = hood_quote_fixture();
         let key = (quote.tx_hash, quote.launchpad);
+        let ground_truth = quote_authority(
+            key,
+            quote.observed.action,
+            quote.token,
+            None,
+            quote.state_version.l2_block_number,
+            quote.state_version.block_hash,
+            quote.state_version.transaction_index,
+        );
         let mut profile = HoodExpectedProfile::production();
         profile.identities[0].runtime_hash = B256::with_last_byte(0xee);
         assert!(
             finalized_hood_plans(
                 &HashMap::from([(key, 1)]),
-                &[],
+                &ground_truth,
                 vec![quote],
                 PaperPlanPolicy::default(),
                 &profile,
@@ -2070,11 +2927,33 @@ mod tests {
     fn hood_migration_evidence_parses_end_to_end_but_never_finalizes_as_a_quote() {
         let tx_hash = B256::with_last_byte(0x44);
         let evidence = serde_json::json!({
+            "record_type": "launchpad_reconciliation_evidence",
             "tx_hash": tx_hash,
             "launchpad": "hood_fun",
             "receipt_status": true,
             "protocol_event_match": true,
-            "observed_unix_ns": 9,
+            "observer_claim": true,
+            "ground_truth_event": true,
+            "ground_truth_hits": [{
+                "l2_block_number": 10,
+                "block_hash": B256::with_last_byte(10),
+                "transaction_index": 1,
+                "log": {
+                    "address": hermes_feed::tier2_curve::HOOD_FACTORY,
+                    "log_index": 0,
+                    "topics": [B256::with_last_byte(1)],
+                    "data": "0x"
+                }
+            }],
+            "action": "buy",
+            "token": Address::with_last_byte(1),
+            "pool": Address::with_last_byte(2),
+            "quote_status": "blocked",
+            "l2_block_number": 10,
+            "block_hash": B256::with_last_byte(10),
+            "transaction_index": 1,
+            "reconciliation_started_unix_ns": 1,
+            "reconciliation_completed_unix_ns": 9,
             "protocol_blocker": "hood_migration_topology_verified_v3_quote_unavailable"
         });
         let migration = serde_json::json!({
@@ -2116,6 +2995,19 @@ mod tests {
         validate_hood_migration_records(&records.evidence, &records.hood_migrations).unwrap();
         assert!(records.hood_quotes.is_empty());
         assert!(validate_hood_migration_records(&records.evidence, &[]).is_err());
+
+        let mut out_of_scope_evidence = records.evidence.clone();
+        out_of_scope_evidence[0].ground_truth_event = false;
+        out_of_scope_evidence[0].ground_truth_hits.clear();
+        validate_hood_migration_records(&out_of_scope_evidence, &records.hood_migrations).unwrap();
+        let out_of_scope_records = ReconciliationRecords {
+            evidence: out_of_scope_evidence,
+            hood_migrations: records.hood_migrations.clone(),
+            ground_truth_window: Some(complete_window(0)),
+            ..ReconciliationRecords::default()
+        };
+        let authority = ConfirmedGroundTruth::from_records(&out_of_scope_records).unwrap();
+        assert!(authority.by_key.is_empty());
 
         let mut forged = records.hood_migrations.clone();
         forged[0].declared_and_actual_liquidity_match = true;

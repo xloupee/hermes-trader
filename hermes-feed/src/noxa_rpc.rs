@@ -138,6 +138,7 @@ pub struct NoxaReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ObservedLaunchLog {
     pub l2_block_number: u64,
+    pub block_hash: B256,
     pub transaction_hash: B256,
     pub transaction_index: u64,
     pub log: ReceiptLog,
@@ -908,6 +909,39 @@ impl NoxaRpcClient {
         logs.iter().map(parse_observed_pool_swap_log).collect()
     }
 
+    /// Fetch a bounded, independently selected protocol-event set. Callers
+    /// remain responsible for exact address/topic pairing; the RPC filter uses
+    /// OR semantics only to avoid one request per reviewed launchpad.
+    pub async fn protocol_event_logs(
+        &self,
+        addresses: &[Address],
+        topics: &[B256],
+        from_l2_block: u64,
+        to_l2_block: u64,
+    ) -> Result<Vec<ObservedLaunchLog>> {
+        if addresses.is_empty() || topics.is_empty() {
+            return Ok(Vec::new());
+        }
+        if from_l2_block > to_l2_block {
+            bail!("protocol-event log range start exceeds end");
+        }
+        let value = self
+            .request(
+                "eth_getLogs",
+                json!([{
+                    "fromBlock": hex_u64(from_l2_block),
+                    "toBlock": hex_u64(to_l2_block),
+                    "address": addresses,
+                    "topics": [topics],
+                }]),
+            )
+            .await?;
+        let logs = value
+            .as_array()
+            .ok_or_else(|| anyhow!("protocol eth_getLogs result is not an array"))?;
+        logs.iter().map(parse_observed_launch_log).collect()
+    }
+
     async fn eth_call(&self, to: Address, data: &str, block_tag: &str) -> Result<Bytes> {
         let value = self
             .request("eth_call", json!([{"to": to, "data": data}, block_tag]))
@@ -1147,6 +1181,9 @@ fn parse_receipt_log(value: &Value) -> Result<ReceiptLog> {
 fn parse_observed_launch_log(value: &Value) -> Result<ObservedLaunchLog> {
     Ok(ObservedLaunchLog {
         l2_block_number: parse_hex_u64(field_str(value, "blockNumber")?)?,
+        block_hash: field_str(value, "blockHash")?
+            .parse()
+            .context("parse log block hash")?,
         transaction_hash: field_str(value, "transactionHash")?
             .parse()
             .context("parse log transaction hash")?,
@@ -1360,6 +1397,7 @@ mod tests {
         let value = json!({
             "address": NOXA_LAUNCH_FACTORY,
             "blockNumber": "0x68fd86",
+            "blockHash": B256::with_last_byte(0x86),
             "transactionHash": "0xc62997c2607d579233b552fad71faae7e392a4c13bc92b9d20c57425b9ffe418",
             "transactionIndex": "0x11",
             "logIndex": "0x20",
@@ -1368,6 +1406,7 @@ mod tests {
         });
         let parsed = parse_observed_launch_log(&value).unwrap();
         assert_eq!(parsed.l2_block_number, 6_880_646);
+        assert_eq!(parsed.block_hash, B256::with_last_byte(0x86));
         assert_eq!(parsed.transaction_index, 17);
         assert_eq!(parsed.log.log_index, 32);
         assert_eq!(

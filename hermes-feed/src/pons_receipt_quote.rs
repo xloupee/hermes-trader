@@ -85,6 +85,24 @@ mod events {
     }
 }
 
+/// Decode only the canonical identity fields carried by a Pons launch event.
+/// This is intentionally independent of quote admission so legacy/discovery
+/// launches remain measurable when no warm quote is available.
+pub fn pons_launch_event_identity(log: &ReceiptLog) -> Option<(Address, Address)> {
+    if !matches!(
+        log.address,
+        PONS_CURRENT_FACTORY | crate::pons::PONS_LEGACY_FACTORY
+    ) || log.topics.first() != Some(&PONS_TOKEN_LAUNCHED_TOPIC)
+    {
+        return None;
+    }
+    let event =
+        events::TokenLaunched::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+            .ok()?;
+    (event.token != Address::ZERO && event.pool != Address::ZERO)
+        .then_some((event.token, event.pool))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PonsQuotePolicy {
     pub amount_in: U256,

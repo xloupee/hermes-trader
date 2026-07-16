@@ -167,6 +167,9 @@ struct ProbeArgs {
     /// Mark frames during this per-connection interval as warmup/catch-up.
     #[arg(long, default_value_t = 10)]
     warmup_seconds: u64,
+    /// Stop cleanly after this wall-clock duration, flushing the recorder.
+    #[arg(long)]
+    duration_seconds: Option<u64>,
     /// Append replayable frames without blocking the socket task.
     #[arg(long)]
     record: Option<PathBuf>,
@@ -357,19 +360,34 @@ struct SourceComparison {
 }
 
 struct OutputSink {
-    tx: Option<SyncSender<String>>,
+    tx: Option<SyncSender<OutputMessage>>,
     writer: Option<thread::JoinHandle<()>>,
+}
+
+enum OutputMessage {
+    Line(String),
+    Flush(SyncSender<()>),
 }
 
 impl OutputSink {
     fn stdout() -> Self {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<String>(8_192);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<OutputMessage>(8_192);
         let writer = thread::spawn(move || {
             let stdout = std::io::stdout();
             let mut output = BufWriter::new(stdout.lock());
-            while let Ok(line) = rx.recv() {
-                if writeln!(output, "{line}").is_err() {
-                    break;
+            while let Ok(message) = rx.recv() {
+                match message {
+                    OutputMessage::Line(line) => {
+                        if writeln!(output, "{line}").is_err() {
+                            break;
+                        }
+                    }
+                    OutputMessage::Flush(done) => {
+                        if output.flush().is_err() {
+                            break;
+                        }
+                        let _ = done.send(());
+                    }
                 }
             }
             let _ = output.flush();
@@ -386,11 +404,27 @@ impl OutputSink {
             .tx
             .as_ref()
             .expect("output sink is live")
-            .try_send(line)
+            .try_send(OutputMessage::Line(line))
         {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
                 anyhow::bail!("stdout queue full; measurements incomplete")
+            }
+            Err(TrySendError::Disconnected(_)) => anyhow::bail!("stdout writer disconnected"),
+        }
+    }
+
+    fn flush(&self) -> Result<()> {
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(0);
+        match self
+            .tx
+            .as_ref()
+            .expect("output sink is live")
+            .try_send(OutputMessage::Flush(done_tx))
+        {
+            Ok(()) => done_rx.recv().context("stdout flush barrier failed"),
+            Err(TrySendError::Full(_)) => {
+                anyhow::bail!("stdout queue full; cannot establish coverage boundary")
             }
             Err(TrySendError::Disconnected(_)) => anyhow::bail!("stdout writer disconnected"),
         }
@@ -915,6 +949,9 @@ fn parse_u256(value: &str) -> Result<U256> {
 }
 
 async fn probe(args: ProbeArgs) -> Result<()> {
+    if args.duration_seconds == Some(0) {
+        anyhow::bail!("--duration-seconds must be non-zero");
+    }
     let mut decoder = FeedDecoder::new(parse_filter(args.filter)?);
     let mut sequences = SequenceTracker::default();
     let output = OutputSink::stdout();
@@ -922,96 +959,133 @@ async fn probe(args: ProbeArgs) -> Result<()> {
         Some(path) => Some(start_recorder(&path).await?),
         None => None,
     };
+    let deadline = args
+        .duration_seconds
+        .map(|seconds| Instant::now() + std::time::Duration::from_secs(seconds));
     let mut reconnects = 0_u64;
     let mut backoff = std::time::Duration::from_millis(250);
-    loop {
-        let stream = match tokio_tungstenite::connect_async(&args.url).await {
-            Ok((stream, _)) => stream,
-            Err(error) => {
-                output.emit(&serde_json::json!({
-                    "record_type": "connection",
-                    "source": args.source,
-                    "state": "connect_error",
-                    "reconnects": reconnects,
-                    "received_unix_ns": unix_ns(),
-                    "error": error.to_string(),
-                }))?;
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(std::time::Duration::from_secs(5));
-                reconnects = reconnects.saturating_add(1);
-                continue;
+    let probe_result: Result<()> = async {
+        'probe: loop {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                emit_coverage_closed(&output, &args.source, reconnects)?;
+                break 'probe Ok(());
             }
-        };
-        backoff = std::time::Duration::from_millis(250);
-        let connected_at = Instant::now();
-        output.emit(&serde_json::json!({
-            "record_type": "connection",
-            "source": args.source,
-            "state": "connected",
-            "reconnects": reconnects,
-            "received_unix_ns": unix_ns(),
-        }))?;
-        let (_, mut read) = stream.split();
-
-        while let Some(frame) = read.next().await {
-            // Timestamp immediately after the socket future becomes ready,
-            // before text conversion, recording, JSON or base64 work.
-            let received_mono_ns = monotonic_raw_ns();
-            let received_unix_ns = unix_ns();
-            let frame = match frame {
-                Ok(frame) => frame,
+            let stream = match tokio_tungstenite::connect_async(&args.url).await {
+                Ok((stream, _)) => stream,
                 Err(error) => {
                     output.emit(&serde_json::json!({
                         "record_type": "connection",
                         "source": args.source,
-                        "state": "read_error",
+                        "state": "connect_error",
                         "reconnects": reconnects,
-                        "received_unix_ns": received_unix_ns,
+                        "received_unix_ns": unix_ns(),
                         "error": error.to_string(),
                     }))?;
-                    break;
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(std::time::Duration::from_secs(5));
+                    reconnects = reconnects.saturating_add(1);
+                    continue;
                 }
             };
-            let payload = match frame {
-                Message::Text(text) => text.to_string(),
-                Message::Binary(bytes) => String::from_utf8(bytes.to_vec())
-                    .context("binary websocket frame was not UTF-8 JSON")?,
-                Message::Close(_) => break,
-                Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
-            };
+            backoff = std::time::Duration::from_millis(250);
+            let connected_at = Instant::now();
+            output.emit(&serde_json::json!({
+                "record_type": "connection",
+                "source": args.source,
+                "state": "connected",
+                "reconnects": reconnects,
+                "received_unix_ns": unix_ns(),
+            }))?;
+            let (_, mut read) = stream.split();
 
-            if let Some(tx) = &recorder {
-                let recorded = RecordedFrame {
-                    received_unix_ns,
-                    payload: payload.clone(),
+            loop {
+                let frame = if let Some(deadline) = deadline {
+                    tokio::select! {
+                        frame = read.next() => frame,
+                        () = tokio::time::sleep_until(deadline.into()) => {
+                            emit_coverage_closed(&output, &args.source, reconnects)?;
+                            break 'probe Ok(());
+                        }
+                    }
+                } else {
+                    read.next().await
                 };
-                if tx.try_send(recorded).is_err() {
-                    anyhow::bail!("recorder queue full or disconnected; recording incomplete");
-                }
-            }
+                let Some(frame) = frame else {
+                    break;
+                };
+                // Timestamp immediately after the socket future becomes ready,
+                // before text conversion, recording, JSON or base64 work.
+                let received_mono_ns = monotonic_raw_ns();
+                let received_unix_ns = unix_ns();
+                let frame = match frame {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        output.emit(&serde_json::json!({
+                            "record_type": "connection",
+                            "source": args.source,
+                            "state": "read_error",
+                            "reconnects": reconnects,
+                            "received_unix_ns": received_unix_ns,
+                            "error": error.to_string(),
+                        }))?;
+                        break;
+                    }
+                };
+                let payload = match frame {
+                    Message::Text(text) => text.to_string(),
+                    Message::Binary(bytes) => String::from_utf8(bytes.to_vec())
+                        .context("binary websocket frame was not UTF-8 JSON")?,
+                    Message::Close(_) => break,
+                    Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
+                };
 
-            process_frame(
-                &args.source,
-                received_mono_ns,
-                received_unix_ns,
-                connected_at.elapsed() < std::time::Duration::from_secs(args.warmup_seconds),
-                reconnects,
-                &payload,
-                &mut decoder,
-                &mut sequences,
-                &output,
-            )?;
+                if let Some(recorder) = &recorder {
+                    let recorded = RecordedFrame {
+                        received_unix_ns,
+                        payload: payload.clone(),
+                    };
+                    if recorder.sender.try_send(recorded).is_err() {
+                        anyhow::bail!("recorder queue full or disconnected; recording incomplete");
+                    }
+                }
+
+                process_frame(
+                    &args.source,
+                    received_mono_ns,
+                    received_unix_ns,
+                    connected_at.elapsed() < std::time::Duration::from_secs(args.warmup_seconds),
+                    reconnects,
+                    &payload,
+                    &mut decoder,
+                    &mut sequences,
+                    &output,
+                )?;
+            }
+            output.emit(&serde_json::json!({
+                "record_type": "connection",
+                "source": args.source,
+                "state": "disconnected",
+                "reconnects": reconnects,
+                "received_unix_ns": unix_ns(),
+            }))?;
+            reconnects = reconnects.saturating_add(1);
+            tokio::time::sleep(backoff).await;
         }
-        output.emit(&serde_json::json!({
-            "record_type": "connection",
-            "source": args.source,
-            "state": "disconnected",
-            "reconnects": reconnects,
-            "received_unix_ns": unix_ns(),
-        }))?;
-        reconnects = reconnects.saturating_add(1);
-        tokio::time::sleep(backoff).await;
     }
+    .await;
+    let recorder_result = finish_recorder(recorder).await;
+    probe_result.and(recorder_result)
+}
+
+fn emit_coverage_closed(output: &OutputSink, source: &str, reconnects: u64) -> Result<()> {
+    output.emit(&serde_json::json!({
+        "record_type": "connection",
+        "source": source,
+        "state": "coverage_closed",
+        "reconnects": reconnects,
+        "received_unix_ns": unix_ns(),
+    }))?;
+    output.flush()
 }
 
 async fn replay(args: ReplayArgs) -> Result<()> {
@@ -1040,6 +1114,7 @@ async fn replay(args: ReplayArgs) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_frame(
     source: &str,
     received_mono_ns: u64,
@@ -1460,8 +1535,8 @@ fn percentile(values: &[u128], percentile: usize) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::{
-        SourceComparison, U256, apply_clock_offset, parse_clock_offsets, parse_selectors,
-        parse_u256, percentile, pick_winner,
+        Recorder, SourceComparison, U256, apply_clock_offset, finish_recorder, mpsc,
+        parse_clock_offsets, parse_selectors, parse_u256, percentile, pick_winner,
     };
 
     #[test]
@@ -1526,9 +1601,24 @@ mod tests {
         assert_eq!(parse_u256("16").unwrap(), U256::from(16));
         assert_eq!(parse_u256("0x10").unwrap(), U256::from(16));
     }
+
+    #[tokio::test]
+    async fn recorder_task_failure_is_propagated() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let recorder = Recorder {
+            sender,
+            task: tokio::spawn(async { anyhow::bail!("synthetic recorder failure") }),
+        };
+        assert!(finish_recorder(Some(recorder)).await.is_err());
+    }
 }
 
-async fn start_recorder(path: &Path) -> Result<mpsc::Sender<RecordedFrame>> {
+struct Recorder {
+    sender: mpsc::Sender<RecordedFrame>,
+    task: tokio::task::JoinHandle<Result<()>>,
+}
+
+async fn start_recorder(path: &Path) -> Result<Recorder> {
     let file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -1536,22 +1626,31 @@ async fn start_recorder(path: &Path) -> Result<mpsc::Sender<RecordedFrame>> {
         .await
         .with_context(|| format!("open record file {}", path.display()))?;
     let (tx, mut rx) = mpsc::channel::<RecordedFrame>(1_024);
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let mut file = file;
         while let Some(frame) = rx.recv().await {
-            match serde_json::to_vec(&frame) {
-                Ok(mut encoded) => {
-                    encoded.push(b'\n');
-                    if let Err(error) = file.write_all(&encoded).await {
-                        eprintln!("record frame: {error}");
-                        break;
-                    }
-                }
-                Err(error) => eprintln!("encode recorded frame: {error}"),
-            }
+            let mut encoded = serde_json::to_vec(&frame).context("encode recorded frame")?;
+            encoded.push(b'\n');
+            file.write_all(&encoded)
+                .await
+                .context("write recorded frame")?;
         }
+        file.flush().await.context("flush recorded frames")?;
+        Ok(())
     });
-    Ok(tx)
+    Ok(Recorder { sender: tx, task })
+}
+
+async fn finish_recorder(recorder: Option<Recorder>) -> Result<()> {
+    if let Some(recorder) = recorder {
+        drop(recorder.sender);
+        recorder
+            .task
+            .await
+            .context("join frame recorder")?
+            .context("record frames")?;
+    }
+    Ok(())
 }
 
 fn parse_filter(args: FilterArgs) -> Result<Filter> {

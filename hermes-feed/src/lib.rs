@@ -21,6 +21,7 @@ pub mod noxa_verifier;
 pub mod paper;
 pub mod paper_runtime;
 pub mod permit2;
+pub mod pons;
 pub mod probe;
 pub mod robinhood;
 pub mod rpc;
@@ -99,6 +100,13 @@ pub use paper::{PaperDecision, PaperPolicy, PaperRejectReason, ReservePaperDecis
 pub use paper_runtime::{
     AutomatedPaperRuntime, PaperBoundaryEvent, PaperOrderKind, PaperOrderSnapshot, PaperOrderState,
     PaperPosition, PaperReconciliation, PaperRuntimeError, PaperRuntimeSnapshot,
+};
+pub use pons::{
+    FollowerTradePlan as PonsFollowerTradePlan, ObservedLeaderAction as PonsObservedLeaderAction,
+    PonsAdapter, PonsAttributionProvenance, PonsExecutionBlocked, PonsGeneration,
+    PonsObservationInput, PonsObservationReject, PonsPaperPlanError, PonsPaperRequest,
+    PonsPredictionKind, PonsReceiptProvenance, RuntimeIdentity as PonsRuntimeIdentity,
+    VerifiedPonsMarket,
 };
 pub use probe::{FrameReport, SequenceObservation, SequenceTracker};
 pub use rpc::{FactoryBootstrap, SyncUpdate, V2SnapshotClient};

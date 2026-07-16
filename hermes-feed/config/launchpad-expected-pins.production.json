@@ -26,6 +26,28 @@
     "mev_delay_guard_seconds": 1,
     "protocol_fee_share_percent": 20
   },
+  "bankr_doppler_v4": {
+    "airlock_runtime_hash": "0x86b37100cbe9841771c452a592985b4e921254b127a380246073b84ec953f7f8",
+    "pool_manager_runtime_hash": "0xbd3881180b547f5fe817545743cfb4343e96b1bc6640dcd70c106b0066e95626",
+    "initializer_runtime_hash": "0xc41a91106002f15bf70ae266824317f3f3ac638ac72ca5253bae395fa47ee631",
+    "rehype_hook_runtime_hash": "0x5d33a1d867ba0d17cc7af077786b1356848c72f8e0bf960ef88aa15f7a6962d1",
+    "token_factory_runtime_hash": "0x27abd63146eb5743b7871e211da17163afbb495863a626c0d002312af6813459",
+    "governance_factory_runtime_hash": "0xefce8ac4a6fe83ae3dd1c3cfebc0e370e1595a66608bed5610ffdd1f291b7f63",
+    "liquidity_migrator_runtime_hash": "0x7bf5115543e8e0769ceabe4da9b8e23547c9e95c1cce15d24d96f164406129e3",
+    "standard_lp_fee_ppm": 7000,
+    "max_lp_fee_ppm": 100000,
+    "hook_fee_denominator_ppm": 800000,
+    "hook_start_fee_ppm": 800000,
+    "hook_end_fee_ppm": 5000,
+    "hook_duration_seconds": 10,
+    "quote_delay_guard_seconds": 1,
+    "tick_spacing": 200,
+    "pool_allocation_bps": 8500,
+    "primary_curve_share_bps": 9900,
+    "secondary_curve_share_bps": 100,
+    "creator_beneficiary_bps": 9500,
+    "protocol_beneficiary_bps": 500
+  },
   "bankr_doppler_calls": [
     {
       "destination": "0xeb7c034704ef8dcd2d32324c1545f62fb4ad0862",

@@ -17,6 +17,12 @@ snapshot must match before the observer starts.
 | LaunchHood V3 | factory `0x62b33a039d289cbda50ebeb72fe4261449e61bcf` | `0x9b785dd157fe757dd427822df3e2bc3a1b6134f1d338b21c36c3de279bb67766` | Verified explorer ABI and fixed-block code commitment. |
 | Hood | factory `0x5fcc1df0dc020cf454e742e9a8ae2554c37a452c` | `0x4aa0ce56b5b67d27f2fab59dcb796fa552d10ceafdecb06e088cdd254c92c0fc` | Verified `HoodCustomLaunchpad` explorer source and fixed-block code commitment. |
 | Bankr/Doppler | Create emitter `0xeb7c034704ef8dcd2d32324c1545f62fb4ad0862` | `0x86b37100cbe9841771c452a592985b4e921254b127a380246073b84ec953f7f8` | Proof receipt and fixed-block code commitment; only selector `0x882db707` is admitted. |
+| Bankr/Doppler | V4 PoolManager `0x8366...0951` | `0xbd3881180b547f5fe817545743cfb4343e96b1bc6640dcd70c106b0066e95626` | Canonical pool event emitter, proof receipt, and fixed-block code commitment. |
+| Bankr/Doppler | `DopplerHookInitializer` `0x4e34...a544` | `0xc41a91106002f15bf70ae266824317f3f3ac638ac72ca5253bae395fa47ee631` | Verified explorer source matching official Whetstone source and fixed-block code commitment. |
+| Bankr/Doppler | `RehypeDopplerHookInitializer` `0x6f02...0f77` | `0x5d33a1d867ba0d17cc7af077786b1356848c72f8e0bf960ef88aa15f7a6962d1` | Verified explorer source matching official Whetstone source and fixed-block code commitment. |
+| Bankr/Doppler | `DopplerERC20V1Factory` `0x1b37...b69a` | `0x27abd63146eb5743b7871e211da17163afbb495863a626c0d002312af6813459` | Exact module in proof calldata; verified explorer source and fixed-block code commitment. |
+| Bankr/Doppler | `LaunchpadGovernanceFactory` `0xdb03...37cf` | `0xefce8ac4a6fe83ae3dd1c3cfebc0e370e1595a66608bed5610ffdd1f291b7f63` | Exact module in proof calldata; verified explorer source and fixed-block code commitment. |
+| Bankr/Doppler | `NoOpMigrator` `0xba2f...5a0e` | `0x7bf5115543e8e0769ceabe4da9b8e23547c9e95c1cce15d24d96f164406129e3` | Exact module in proof calldata; verified explorer source and fixed-block code commitment. |
 | Bankr wrapper | EntryPoint v0.7 | `0x8db5ff695839d655407cc8490bb7a5d82337a86a6b39c3f0258aa6c3b582fc58` | Canonical EntryPoint address plus fixed-block code commitment. |
 | Bankr leader | EIP-7702 designator | `0x4542cbf1da24ba964614e4f5585736e22884e23e97c0f0915de4f602585d2dd4` | Exact `ef0100 || d6cedd...75b28` designator from proof account. |
 | Bankr leader | delegated Kernel runtime | `0x6f6d6691dc11fda98d3102802f20e7e816ccc576c16c9279ee1a884a51d1935d` | Fixed-block delegated implementation code commitment. |
@@ -35,6 +41,16 @@ the expected document pins the official contract bounds instead of copying an
 observed pool's values into expected configuration: static LP fees are capped
 at 100,000 ppm, the MEV override at 800,000 ppm, and decay at 120 seconds, with
 the pinned one-second guard and 20% protocol share.
+
+The Bankr standard profile was independently decoded from proof transaction
+`0xc6597f...f0609` and checked against the verified Robinhood explorer sources
+and official `whetstoneresearch/doppler` source at commit `568fc2f`. The proof
+pins a 7,000 ppm core LP fee and a separate Rehype output-token fee schedule:
+800,000 to 5,000 over ten seconds, divided by 800,000. The reviewed standard
+profile also fixes 200 tick spacing, 85% pool allocation, 99%/1% curves,
+95%/5% beneficiaries, and a one-second paper-quote guard. These are exact
+standard-profile invariants, not broad bounds for arbitrary Doppler launches;
+variants remain rejected until independently reviewed.
 
 Pons and Flap identities remain the exact constants recorded in
 `PONS_FAMILY.md` and `FLAP_SH_EVIDENCE.json`. They are validated by the registry

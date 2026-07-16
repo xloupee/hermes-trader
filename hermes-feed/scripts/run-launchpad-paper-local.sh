@@ -69,8 +69,9 @@ wait "$pipeline_pid"
 pipeline_pid=
 
 # Receipt/event work begins only after the feed pipeline has closed. The
-# collector also appends fully validated Bow/LaunchHood V3 and Clanker V4
-# quote records, using the same reviewed-vs-observed startup pin boundary.
+# collector also appends fully validated Bow/LaunchHood V3, Clanker V4, and
+# Bankr/Doppler V4 quote records, using the same reviewed-vs-observed startup
+# pin boundary.
 "$reconcile_bin" \
   --input "$observer_output" \
   --expected-pins "$expected_pins" \

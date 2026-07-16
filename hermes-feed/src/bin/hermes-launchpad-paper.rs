@@ -12,7 +12,10 @@ use hermes_feed::paper_observer::{
     PaperExpectedPins, PaperFeedRuntime, PaperLaunchpadObserver, PaperObservedStartupSnapshot,
     PaperPlanPolicy,
 };
-use hermes_feed::{ClankerReceiptPaperQuote, V3ReceiptPaperQuote};
+use hermes_feed::{
+    BankrDopplerExpectedProfile, BankrDopplerReceiptPaperQuote, ClankerReceiptPaperQuote,
+    V3ReceiptPaperQuote, bankr_hook_fee_ppm,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -82,6 +85,7 @@ struct ReconciliationRecords {
     evidence: Vec<ReconciliationEvidence>,
     v3_quotes: Vec<V3ReceiptPaperQuote>,
     clanker_quotes: Vec<ClankerReceiptPaperQuote>,
+    bankr_quotes: Vec<BankrDopplerReceiptPaperQuote>,
 }
 
 #[derive(Debug, Default)]
@@ -184,6 +188,14 @@ fn main() -> Result<()> {
         )? {
             println!("{}", serde_json::to_string(&plan)?);
         }
+        for plan in finalized_bankr_plans(
+            &observed_candidates.feed_sequences,
+            &records.evidence,
+            records.bankr_quotes,
+            plan_policy,
+        )? {
+            println!("{}", serde_json::to_string(&plan)?);
+        }
         return Ok(());
     }
     let mut runtime = PaperFeedRuntime::with_plan_policy(observer, plan_policy)?;
@@ -258,6 +270,14 @@ fn main() -> Result<()> {
             &observed_sequences,
             &records.evidence,
             records.clanker_quotes,
+            plan_policy,
+        )? {
+            println!("{}", serde_json::to_string(&plan)?);
+        }
+        for plan in finalized_bankr_plans(
+            &observed_sequences,
+            &records.evidence,
+            records.bankr_quotes,
             plan_policy,
         )? {
             println!("{}", serde_json::to_string(&plan)?);
@@ -359,6 +379,17 @@ fn read_reconciliation_records(path: &Path) -> Result<ReconciliationRecords> {
                         .push(serde_json::from_value(value).with_context(|| {
                             format!(
                                 "decode Clanker V4 quote line {} from {}",
+                                index + 1,
+                                path.display()
+                            )
+                        })?)
+                }
+                Some("launchpad_bankr_doppler_v4_paper_quote") => {
+                    records
+                        .bankr_quotes
+                        .push(serde_json::from_value(value).with_context(|| {
+                            format!(
+                                "decode Bankr/Doppler V4 quote line {} from {}",
                                 index + 1,
                                 path.display()
                             )
@@ -514,6 +545,247 @@ fn finalized_clanker_plans(
     Ok(plans)
 }
 
+fn finalized_bankr_plans(
+    observed_sequences: &HashMap<(B256, LaunchpadId), u64>,
+    evidence: &[ReconciliationEvidence],
+    quotes: Vec<BankrDopplerReceiptPaperQuote>,
+    policy: PaperPlanPolicy,
+) -> Result<Vec<FinalizedV3PaperPlan>> {
+    let evidence = evidence
+        .iter()
+        .map(|record| ((record.tx_hash, record.launchpad), record))
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashMap::new();
+    let mut plans = Vec::new();
+    for quote in quotes {
+        let key = (quote.tx_hash, quote.launchpad);
+        if seen.insert(key, ()).is_some() {
+            anyhow::bail!("duplicate Bankr/Doppler V4 paper quote for {key:?}");
+        }
+        let Some(feed_sequence) = observed_sequences.get(&key).copied() else {
+            continue;
+        };
+        let confirmed = evidence
+            .get(&key)
+            .is_some_and(|record| record.receipt_status && record.protocol_event_match);
+        if !confirmed
+            || quote.record_type != "launchpad_bankr_doppler_v4_paper_quote"
+            || quote.launchpad != LaunchpadId::BankrDoppler
+            || quote.entry.amount_in == U256::ZERO
+            || quote.entry.amount_in > policy.max_input_wei
+            || quote.entry.slippage_bps != policy.slippage_bps
+            || quote.entry.expected_output == U256::ZERO
+            || quote.entry.min_receive == U256::ZERO
+            || quote.entry.min_receive > quote.entry.expected_output
+            || quote.full_position_exit.amount_in != quote.entry.expected_output
+            || quote.full_position_exit.expected_output == U256::ZERO
+            || quote.full_position_exit.min_receive == U256::ZERO
+            || quote.full_position_exit.min_receive > quote.full_position_exit.expected_output
+            || quote.broadcast
+            || quote.execution_eligible
+            || quote.state_version.chain_id != hermes_feed::robinhood::CHAIN_ID
+            || quote.state_version.l2_block_number != quote.l2_block_number
+            || quote.state_version.first_eligible_quote_timestamp
+                <= quote.state_version.receipt_timestamp
+            || !bankr_quote_arithmetic_is_consistent(&quote, policy)
+        {
+            anyhow::bail!("unsafe or inconsistent Bankr/Doppler V4 quote evidence for {key:?}");
+        }
+        plans.push(FinalizedV3PaperPlan {
+            record_type: "launchpad_paper_finalized_plan",
+            tx_hash: quote.tx_hash,
+            launchpad: quote.launchpad,
+            feed_sequence,
+            status: "quoted_execution_gated",
+            amount_in: quote.entry.amount_in,
+            expected_output: quote.entry.expected_output,
+            min_receive: quote.entry.min_receive,
+            quote_source: quote.quote_source,
+            quote_state_version: serde_json::to_value(quote.state_version)?,
+            exit_full_position: true,
+            exit_expected_output: quote.full_position_exit.expected_output,
+            exit_min_receive: quote.full_position_exit.min_receive,
+            simulated_round_trip_return_bps: quote.simulated_round_trip_return_bps,
+            leader_amounts_reused: false,
+            execution_eligible: false,
+            execution_blocker: quote.execution_blocker,
+            broadcast: false,
+        });
+    }
+    Ok(plans)
+}
+
+fn bankr_quote_arithmetic_is_consistent(
+    quote: &BankrDopplerReceiptPaperQuote,
+    policy: PaperPlanPolicy,
+) -> bool {
+    let profile = BankrDopplerExpectedProfile::production();
+    let entry = &quote.entry;
+    let exit = &quote.full_position_exit;
+    let Ok(pool_key) = hermes_feed::uniswap_v4::V4PoolKey::canonical(
+        profile.weth.address,
+        quote.market.token,
+        hermes_feed::uniswap_v4::DYNAMIC_FEE_FLAG,
+        profile.tick_spacing,
+        profile.initializer.address,
+    ) else {
+        return false;
+    };
+    let Ok(expected_hook_fee_ppm) = bankr_hook_fee_ppm(
+        quote.state_version.receipt_timestamp,
+        profile.hook_start_fee_ppm,
+        profile.hook_end_fee_ppm,
+        profile.hook_duration_seconds,
+        quote.state_version.first_eligible_quote_timestamp,
+    ) else {
+        return false;
+    };
+    let Some(expected_first_eligible_timestamp) = quote
+        .state_version
+        .receipt_timestamp
+        .checked_add(profile.quote_delay_guard_seconds)
+    else {
+        return false;
+    };
+    let expected_initialize_tick = if quote.market.token < profile.weth.address {
+        -229_600
+    } else {
+        229_800
+    };
+    if quote.quote_source != "confirmed_receipt_end_bankr_doppler_first_nonzero_state"
+        || quote.sizing_source != "independent_fixed_tiny_weth_policy"
+        || quote.execution_blocker
+            != "paper_only_bankr_rehype_router_permit2_and_account_execution_not_enabled"
+        || quote.market.leader != profile.smart_account.account.address
+        || quote.market.outer_bundler == alloy_primitives::Address::ZERO
+        || quote.market.token == alloy_primitives::Address::ZERO
+        || quote.market.token == profile.weth.address
+        || quote.market.pool_id != pool_key.pool_id()
+        || quote.market.quote_asset != profile.weth.address
+        || quote.market.pool_manager != profile.pool_manager.address
+        || quote.market.initializer != profile.initializer.address
+        || quote.market.rehype_hook != profile.rehype_hook.address
+        || quote.market.buyback_destination == alloy_primitives::Address::ZERO
+        || entry.amount_in == U256::ZERO
+        || quote.market.lp_fee_ppm != profile.standard_lp_fee_ppm
+        || quote.market.hook_start_fee_ppm != profile.hook_start_fee_ppm
+        || quote.market.hook_end_fee_ppm != profile.hook_end_fee_ppm
+        || quote.market.hook_duration_seconds != profile.hook_duration_seconds
+        || quote.market.tick_spacing != profile.tick_spacing
+        || quote.market.initialize_tick != expected_initialize_tick
+        || quote.market.position_count != 2
+        || quote.market.initialize_log_index >= quote.market.last_liquidity_log_index
+        || quote.market.last_liquidity_log_index >= quote.market.launch_log_index
+        || quote.market.launch_log_index >= quote.market.user_operation_log_index
+        || quote.state_version.terminal_log_index != quote.market.user_operation_log_index
+        || quote.state_version.first_eligible_quote_timestamp != expected_first_eligible_timestamp
+        || entry.lp_fee_ppm != quote.market.lp_fee_ppm
+        || exit.lp_fee_ppm != quote.market.lp_fee_ppm
+        || entry.hook_fee_ppm != exit.hook_fee_ppm
+        || entry.hook_fee_ppm != expected_hook_fee_ppm
+        || entry.hook_fee_denominator_ppm != profile.hook_fee_denominator_ppm
+        || exit.hook_fee_denominator_ppm != profile.hook_fee_denominator_ppm
+        || entry.core_state_after.token_in != quote.market.quote_asset
+        || entry.core_state_after.token_out != quote.market.token
+        || exit.core_state_after.token_in != quote.market.token
+        || exit.core_state_after.token_out != quote.market.quote_asset
+        || exit.internal_buyback_state_after.is_some()
+    {
+        return false;
+    }
+
+    let swap_arithmetic = |amount_in: U256,
+                           core_expected_output: U256,
+                           hook_output_fee: U256,
+                           expected_output: U256,
+                           min_receive: U256,
+                           slippage_bps: u16,
+                           hook_fee_ppm: u32,
+                           hook_fee_denominator_ppm: u32,
+                           state: &hermes_feed::V3Quote| {
+        if hook_fee_denominator_ppm == 0 || slippage_bps != policy.slippage_bps {
+            return false;
+        }
+        let Some(calculated_hook_fee) = core_expected_output
+            .checked_mul(U256::from(hook_fee_ppm))
+            .map(|value| value / U256::from(hook_fee_denominator_ppm))
+        else {
+            return false;
+        };
+        let Some(calculated_output) = core_expected_output.checked_sub(calculated_hook_fee) else {
+            return false;
+        };
+        let Some(retained_bps) = 10_000_u16.checked_sub(slippage_bps) else {
+            return false;
+        };
+        let Some(calculated_minimum) = calculated_output
+            .checked_mul(U256::from(retained_bps))
+            .map(|value| value / U256::from(10_000_u16))
+        else {
+            return false;
+        };
+        state.amount_in_requested == amount_in
+            && state.amount_in_consumed == amount_in
+            && state.amount_out == core_expected_output
+            && hook_output_fee == calculated_hook_fee
+            && expected_output == calculated_output
+            && min_receive == calculated_minimum
+            && calculated_output != U256::ZERO
+            && calculated_minimum != U256::ZERO
+    };
+    if !swap_arithmetic(
+        entry.amount_in,
+        entry.core_expected_output,
+        entry.hook_output_fee,
+        entry.expected_output,
+        entry.min_receive,
+        entry.slippage_bps,
+        entry.hook_fee_ppm,
+        entry.hook_fee_denominator_ppm,
+        &entry.core_state_after,
+    ) || !swap_arithmetic(
+        exit.amount_in,
+        exit.core_expected_output,
+        exit.hook_output_fee,
+        exit.expected_output,
+        exit.min_receive,
+        exit.slippage_bps,
+        exit.hook_fee_ppm,
+        exit.hook_fee_denominator_ppm,
+        &exit.core_state_after,
+    ) {
+        return false;
+    }
+
+    let Some(internal) = entry.internal_buyback_state_after.as_ref() else {
+        return false;
+    };
+    let Some(owner_fee) = entry
+        .hook_output_fee
+        .checked_mul(U256::from(profile.protocol_beneficiary_bps))
+        .map(|value| value / U256::from(10_000_u16))
+    else {
+        return false;
+    };
+    let Some(internal_input) = entry.hook_output_fee.checked_sub(owner_fee) else {
+        return false;
+    };
+    let Some(round_trip_bps) = exit
+        .expected_output
+        .checked_mul(U256::from(10_000_u16))
+        .map(|value| value / entry.amount_in)
+    else {
+        return false;
+    };
+    internal.token_in == quote.market.token
+        && internal.token_out == quote.market.quote_asset
+        && internal.amount_in_requested == internal_input
+        && internal.amount_in_consumed == internal_input
+        && internal.amount_out != U256::ZERO
+        && exit.amount_in == entry.expected_output
+        && quote.simulated_round_trip_return_bps == round_trip_bps
+}
+
 fn reconciliation_metrics(
     observed: &HashMap<(B256, LaunchpadId), u64>,
     evidence: &[ReconciliationEvidence],
@@ -583,9 +855,10 @@ fn percentile(values: &[u64], percentile: usize) -> Option<u64> {
 mod tests {
     use alloy_primitives::Address;
     use hermes_feed::{
-        ClankerQuotePolicy, ClankerV4ExpectedProfile, NoxaReceipt, RobinhoodBlock,
-        RobinhoodTransaction, V3PaperSwapQuote, V3Quote, V3QuoteStateVersion,
-        V3ReceiptMarketEvidence, quote_clanker_launch_receipt,
+        BankrDopplerExpectedProfile, BankrDopplerQuotePolicy, ClankerQuotePolicy,
+        ClankerV4ExpectedProfile, NoxaReceipt, RobinhoodBlock, RobinhoodTransaction,
+        V3PaperSwapQuote, V3Quote, V3QuoteStateVersion, V3ReceiptMarketEvidence,
+        quote_bankr_doppler_launch_receipt, quote_clanker_launch_receipt,
     };
 
     use super::*;
@@ -729,6 +1002,47 @@ mod tests {
         .unwrap()
     }
 
+    fn bankr_quote_fixture() -> BankrDopplerReceiptPaperQuote {
+        let fixture: ClankerLiveFixture = serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-live-proof.json"
+        ))
+        .unwrap();
+        quote_bankr_doppler_launch_receipt(
+            &fixture.transaction,
+            &fixture.receipt,
+            &fixture.block,
+            BankrDopplerExpectedProfile::production(),
+            BankrDopplerQuotePolicy {
+                amount_in: U256::from(1_000_u64),
+                max_amount_in: U256::from(1_000_u64),
+                slippage_bps: 100,
+            },
+        )
+        .unwrap()
+    }
+
+    fn finalize_bankr_quote(
+        quote: BankrDopplerReceiptPaperQuote,
+    ) -> Result<Vec<FinalizedV3PaperPlan>> {
+        let key = (quote.tx_hash, quote.launchpad);
+        finalized_bankr_plans(
+            &HashMap::from([(key, 88)]),
+            &[ReconciliationEvidence {
+                tx_hash: key.0,
+                launchpad: key.1,
+                receipt_status: true,
+                protocol_event_match: true,
+                observed_unix_ns: 100,
+            }],
+            vec![quote],
+            PaperPlanPolicy {
+                max_input_wei: U256::from(1_000_u64),
+                slippage_bps: 100,
+                ..PaperPlanPolicy::default()
+            },
+        )
+    }
+
     #[test]
     fn confirmed_quote_becomes_non_broadcast_finalized_plan() {
         let quote = quote_fixture();
@@ -811,5 +1125,52 @@ mod tests {
         assert_eq!(plans[0].feed_sequence, 77);
         assert!(!plans[0].execution_eligible);
         assert!(!plans[0].broadcast);
+    }
+
+    #[test]
+    fn confirmed_bankr_quote_becomes_execution_gated_finalized_plan() {
+        let quote = bankr_quote_fixture();
+        let plans = finalize_bankr_quote(quote).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].launchpad, LaunchpadId::BankrDoppler);
+        assert_eq!(plans[0].status, "quoted_execution_gated");
+        assert_eq!(plans[0].feed_sequence, 88);
+        assert!(plans[0].expected_output > U256::ZERO);
+        assert!(plans[0].min_receive > U256::ZERO);
+        assert!(!plans[0].execution_eligible);
+        assert!(!plans[0].broadcast);
+    }
+
+    #[test]
+    fn tampered_bankr_quote_arithmetic_cannot_finalize() {
+        let mut output = bankr_quote_fixture();
+        output.entry.expected_output += U256::from(1_u8);
+        assert!(finalize_bankr_quote(output).is_err());
+
+        let mut buyback = bankr_quote_fixture();
+        buyback
+            .entry
+            .internal_buyback_state_after
+            .as_mut()
+            .unwrap()
+            .amount_in_consumed += U256::from(1_u8);
+        assert!(finalize_bankr_quote(buyback).is_err());
+
+        let mut round_trip = bankr_quote_fixture();
+        round_trip.simulated_round_trip_return_bps += U256::from(1_u8);
+        assert!(finalize_bankr_quote(round_trip).is_err());
+
+        let mut pinned_market = bankr_quote_fixture();
+        pinned_market.market.pool_manager = Address::with_last_byte(0xee);
+        assert!(finalize_bankr_quote(pinned_market).is_err());
+
+        let mut hook_fee = bankr_quote_fixture();
+        hook_fee.entry.hook_fee_ppm += 1;
+        hook_fee.full_position_exit.hook_fee_ppm += 1;
+        assert!(finalize_bankr_quote(hook_fee).is_err());
+
+        let mut schedule = bankr_quote_fixture();
+        schedule.market.hook_end_fee_ppm += 1;
+        assert!(finalize_bankr_quote(schedule).is_err());
     }
 }

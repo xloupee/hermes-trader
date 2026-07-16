@@ -1,4 +1,5 @@
 pub mod active_noxa;
+pub mod bankr_receipt_quote;
 pub mod boundary_gate;
 pub mod cache;
 pub mod clanker_receipt_quote;
@@ -44,6 +45,11 @@ pub mod v3_pool;
 pub mod v3_receipt_quote;
 
 pub use active_noxa::validate_active_noxa_copy_token;
+pub use bankr_receipt_quote::{
+    BankrDopplerExpectedProfile, BankrDopplerMarketEvidence, BankrDopplerPaperSwapQuote,
+    BankrDopplerQuotePolicy, BankrDopplerReceiptPaperQuote, BankrDopplerStateVersion,
+    BankrQuoteError, bankr_hook_fee_ppm, quote_bankr_doppler_launch_receipt,
+};
 pub use boundary_gate::{BoundaryDecision, BoundaryGate, BoundaryGateError, FeedBoundary};
 pub use cache::{CacheApplyReport, CacheCheckpoint, CacheError, ConfirmedReserveCache};
 pub use clanker_receipt_quote::{

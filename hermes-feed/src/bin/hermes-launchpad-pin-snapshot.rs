@@ -256,6 +256,30 @@ fn pin_requests(expected: Option<&PaperExpectedPins>) -> Result<Vec<PinRequest>>
                 request(CLANKER_EXTENSION, None),
             ]);
         }
+        if let Some(configured) = expected.bankr_doppler_v4 {
+            let profile = configured.expected_profile()?;
+            requests.extend([
+                request(profile.airlock.address, None),
+                request(profile.pool_manager.address, None),
+                request(profile.initializer.address, None),
+                request(profile.rehype_hook.address, None),
+                request(profile.token_factory.address, None),
+                request(profile.governance_factory.address, None),
+                request(profile.liquidity_migrator.address, None),
+                request(profile.weth.address, None),
+                request(profile.entry_point.address, None),
+                request(
+                    profile.smart_account.account.address,
+                    profile
+                        .smart_account
+                        .delegation_implementation
+                        .map(|pin| pin.address),
+                ),
+            ]);
+            if let Some(implementation) = profile.smart_account.delegation_implementation {
+                requests.push(request(implementation.address, None));
+            }
+        }
         if expected.leavehood_factory_proxy_runtime_hash.is_some() {
             requests.extend([
                 request(
@@ -437,5 +461,59 @@ async fn inspect_bankr_proof(
             inner_call_count: None,
             decode_error: Some(error.to_string()),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hermes_feed::BankrDopplerExpectedProfile;
+
+    use super::*;
+
+    #[test]
+    fn production_bankr_snapshot_requests_every_reviewed_dependency() {
+        let expected: PaperExpectedPins = serde_json::from_str(include_str!(
+            "../../config/launchpad-expected-pins.production.json"
+        ))
+        .unwrap();
+        let profile = BankrDopplerExpectedProfile::production();
+        let requests = pin_requests(Some(&expected)).unwrap();
+        for address in [
+            profile.airlock.address,
+            profile.pool_manager.address,
+            profile.initializer.address,
+            profile.rehype_hook.address,
+            profile.token_factory.address,
+            profile.governance_factory.address,
+            profile.liquidity_migrator.address,
+            profile.weth.address,
+            profile.entry_point.address,
+            profile.smart_account.account.address,
+            profile
+                .smart_account
+                .delegation_implementation
+                .unwrap()
+                .address,
+        ] {
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request.address == address)
+                    .count(),
+                1,
+                "missing or duplicate request for {address}"
+            );
+        }
+        assert_eq!(
+            requests
+                .iter()
+                .find(|request| request.address == profile.smart_account.account.address)
+                .unwrap()
+                .implementation,
+            profile
+                .smart_account
+                .delegation_implementation
+                .map(|pin| pin.address)
+        );
     }
 }

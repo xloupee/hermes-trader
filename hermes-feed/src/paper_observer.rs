@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::PonsAdapter;
+use crate::bankr_receipt_quote::{BANKR_CREATE_SELECTOR, BankrDopplerExpectedProfile};
 use crate::clanker_receipt_quote::{
     CLANKER_DESCENDING_MEV_MODULE, CLANKER_EXTENSION, CLANKER_STATIC_HOOK, ClankerV4ExpectedProfile,
 };
@@ -234,6 +235,8 @@ pub struct PaperExpectedPins {
     #[serde(default)]
     pub clanker_v4: Option<ConfiguredClankerV4>,
     #[serde(default)]
+    pub bankr_doppler_v4: Option<ConfiguredBankrDopplerV4>,
+    #[serde(default)]
     pub bankr_doppler_calls: Vec<ConfiguredCallPin>,
     pub erc4337: Option<ConfiguredSmartAccounts>,
 }
@@ -296,6 +299,61 @@ impl ConfiguredClankerV4 {
                     .into(),
             ));
         }
+        Ok(profile)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfiguredBankrDopplerV4 {
+    pub airlock_runtime_hash: B256,
+    pub pool_manager_runtime_hash: B256,
+    pub initializer_runtime_hash: B256,
+    pub rehype_hook_runtime_hash: B256,
+    pub token_factory_runtime_hash: B256,
+    pub governance_factory_runtime_hash: B256,
+    pub liquidity_migrator_runtime_hash: B256,
+    pub standard_lp_fee_ppm: u32,
+    pub max_lp_fee_ppm: u32,
+    pub hook_fee_denominator_ppm: u32,
+    pub hook_start_fee_ppm: u32,
+    pub hook_end_fee_ppm: u32,
+    pub hook_duration_seconds: u64,
+    pub quote_delay_guard_seconds: u64,
+    pub tick_spacing: i32,
+    pub pool_allocation_bps: u16,
+    pub primary_curve_share_bps: u16,
+    pub secondary_curve_share_bps: u16,
+    pub creator_beneficiary_bps: u16,
+    pub protocol_beneficiary_bps: u16,
+}
+
+impl ConfiguredBankrDopplerV4 {
+    pub fn expected_profile(self) -> Result<BankrDopplerExpectedProfile, PaperObserverError> {
+        let mut profile = BankrDopplerExpectedProfile::production();
+        profile.airlock.runtime_code_hash = self.airlock_runtime_hash;
+        profile.pool_manager.runtime_code_hash = self.pool_manager_runtime_hash;
+        profile.initializer.runtime_code_hash = self.initializer_runtime_hash;
+        profile.rehype_hook.runtime_code_hash = self.rehype_hook_runtime_hash;
+        profile.token_factory.runtime_code_hash = self.token_factory_runtime_hash;
+        profile.governance_factory.runtime_code_hash = self.governance_factory_runtime_hash;
+        profile.liquidity_migrator.runtime_code_hash = self.liquidity_migrator_runtime_hash;
+        profile.standard_lp_fee_ppm = self.standard_lp_fee_ppm;
+        profile.max_lp_fee_ppm = self.max_lp_fee_ppm;
+        profile.hook_fee_denominator_ppm = self.hook_fee_denominator_ppm;
+        profile.hook_start_fee_ppm = self.hook_start_fee_ppm;
+        profile.hook_end_fee_ppm = self.hook_end_fee_ppm;
+        profile.hook_duration_seconds = self.hook_duration_seconds;
+        profile.quote_delay_guard_seconds = self.quote_delay_guard_seconds;
+        profile.tick_spacing = self.tick_spacing;
+        profile.pool_allocation_bps = self.pool_allocation_bps;
+        profile.primary_curve_share_bps = self.primary_curve_share_bps;
+        profile.secondary_curve_share_bps = self.secondary_curve_share_bps;
+        profile.creator_beneficiary_bps = self.creator_beneficiary_bps;
+        profile.protocol_beneficiary_bps = self.protocol_beneficiary_bps;
+        profile
+            .validate()
+            .map_err(|error| PaperObserverError::Startup(error.to_string()))?;
         Ok(profile)
     }
 }
@@ -556,6 +614,10 @@ impl PaperLaunchpadObserver {
         validate_observed_pins(&observed)?;
         if let Some(clanker) = expected.clanker_v4 {
             clanker.expected_profile()?;
+        }
+        if let Some(bankr) = expected.bankr_doppler_v4 {
+            let profile = bankr.expected_profile()?;
+            validate_bankr_profile_links(&expected, profile)?;
         }
         let observed_code = |address| ContractCodeSnapshot {
             address,
@@ -1303,6 +1365,55 @@ fn paper_specs(
                 ),
             ]);
         }
+        if entry.launchpad == LaunchpadId::BankrDoppler
+            && let Some(configured) = expected.bankr_doppler_v4
+        {
+            let profile = configured.expected_profile()?;
+            pins.extend([
+                contract_pin(
+                    ContractRole::ProtocolDependency,
+                    profile.weth.address,
+                    None,
+                    profile.weth.runtime_code_hash,
+                ),
+                contract_pin(
+                    ContractRole::ProtocolDependency,
+                    profile.pool_manager.address,
+                    None,
+                    profile.pool_manager.runtime_code_hash,
+                ),
+                contract_pin(
+                    ContractRole::ProtocolDependency,
+                    profile.initializer.address,
+                    None,
+                    profile.initializer.runtime_code_hash,
+                ),
+                contract_pin(
+                    ContractRole::ProtocolDependency,
+                    profile.rehype_hook.address,
+                    None,
+                    profile.rehype_hook.runtime_code_hash,
+                ),
+                contract_pin(
+                    ContractRole::ProtocolDependency,
+                    profile.token_factory.address,
+                    None,
+                    profile.token_factory.runtime_code_hash,
+                ),
+                contract_pin(
+                    ContractRole::ProtocolDependency,
+                    profile.governance_factory.address,
+                    None,
+                    profile.governance_factory.runtime_code_hash,
+                ),
+                contract_pin(
+                    ContractRole::ProtocolDependency,
+                    profile.liquidity_migrator.address,
+                    None,
+                    profile.liquidity_migrator.runtime_code_hash,
+                ),
+            ]);
+        }
         let observation_keys = keys(&[(entry.destination.address, entry.selector)], v4_wrappers);
         if let Some(existing) = specs.iter_mut().find(|spec| spec.id == entry.launchpad) {
             if existing.family != family || existing.allowed_routes != [route] {
@@ -1461,6 +1572,54 @@ fn validate_document_pair(
     if !valid_provenance {
         return Err(PaperObserverError::Startup(
             "expected and observed pin provenance is incompatible".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_bankr_profile_links(
+    expected: &PaperExpectedPins,
+    profile: BankrDopplerExpectedProfile,
+) -> Result<(), PaperObserverError> {
+    if expected.bankr_doppler_calls.len() != 1 {
+        return Err(PaperObserverError::Startup(
+            "reviewed Bankr profile requires exactly one Airlock call".into(),
+        ));
+    }
+    let call = expected.bankr_doppler_calls[0];
+    if call.destination != profile.airlock.address
+        || call.runtime_hash != profile.airlock.runtime_code_hash
+        || call.selector != BANKR_CREATE_SELECTOR
+    {
+        return Err(PaperObserverError::Startup(
+            "Bankr dispatch disagrees with the independently reviewed profile".into(),
+        ));
+    }
+    let smart = expected.erc4337.as_ref().ok_or_else(|| {
+        PaperObserverError::Startup("reviewed Bankr profile requires ERC-4337 pins".into())
+    })?;
+    if smart.entry_point_runtime_hash != profile.entry_point.runtime_code_hash
+        || smart.accounts.len() != 1
+    {
+        return Err(PaperObserverError::Startup(
+            "Bankr EntryPoint or account set disagrees with the reviewed profile".into(),
+        ));
+    }
+    let account = smart.accounts[0];
+    let delegated = profile
+        .smart_account
+        .delegation_implementation
+        .ok_or_else(|| PaperObserverError::Startup("Bankr delegation pin is missing".into()))?;
+    if account.account != profile.smart_account.account.address
+        || account.runtime_hash != profile.smart_account.account.runtime_code_hash
+        || account.execution_profile != profile.smart_account.execution_profile
+        || account.factory.is_some()
+        || account.factory_runtime_hash.is_some()
+        || account.delegation_implementation != Some(delegated.address)
+        || account.delegation_runtime_hash != Some(delegated.runtime_code_hash)
+    {
+        return Err(PaperObserverError::Startup(
+            "Bankr account execution/delegation pair disagrees with the reviewed profile".into(),
         ));
     }
     Ok(())
@@ -1658,6 +1817,7 @@ mod tests {
             trench_proxy_runtime_hash: Some(B256::with_last_byte(7)),
             trench_implementation_runtime_hash: Some(B256::with_last_byte(8)),
             clanker_v4: None,
+            bankr_doppler_v4: None,
             bankr_doppler_calls: vec![ConfiguredCallPin {
                 destination: Address::with_last_byte(0xb0),
                 runtime_hash: B256::with_last_byte(9),
@@ -2007,6 +2167,139 @@ mod tests {
     }
 
     #[test]
+    fn configured_bankr_profile_requires_exact_dependencies_and_delegation_pair() {
+        let (mut expected, mut observed_snapshot) = startup();
+        let profile = BankrDopplerExpectedProfile::production();
+        expected.bankr_doppler_v4 = Some(ConfiguredBankrDopplerV4 {
+            airlock_runtime_hash: profile.airlock.runtime_code_hash,
+            pool_manager_runtime_hash: profile.pool_manager.runtime_code_hash,
+            initializer_runtime_hash: profile.initializer.runtime_code_hash,
+            rehype_hook_runtime_hash: profile.rehype_hook.runtime_code_hash,
+            token_factory_runtime_hash: profile.token_factory.runtime_code_hash,
+            governance_factory_runtime_hash: profile.governance_factory.runtime_code_hash,
+            liquidity_migrator_runtime_hash: profile.liquidity_migrator.runtime_code_hash,
+            standard_lp_fee_ppm: profile.standard_lp_fee_ppm,
+            max_lp_fee_ppm: profile.max_lp_fee_ppm,
+            hook_fee_denominator_ppm: profile.hook_fee_denominator_ppm,
+            hook_start_fee_ppm: profile.hook_start_fee_ppm,
+            hook_end_fee_ppm: profile.hook_end_fee_ppm,
+            hook_duration_seconds: profile.hook_duration_seconds,
+            quote_delay_guard_seconds: profile.quote_delay_guard_seconds,
+            tick_spacing: profile.tick_spacing,
+            pool_allocation_bps: profile.pool_allocation_bps,
+            primary_curve_share_bps: profile.primary_curve_share_bps,
+            secondary_curve_share_bps: profile.secondary_curve_share_bps,
+            creator_beneficiary_bps: profile.creator_beneficiary_bps,
+            protocol_beneficiary_bps: profile.protocol_beneficiary_bps,
+        });
+        expected.bankr_doppler_calls = vec![ConfiguredCallPin {
+            destination: profile.airlock.address,
+            runtime_hash: profile.airlock.runtime_code_hash,
+            selector: BANKR_CREATE_SELECTOR,
+        }];
+        let delegation = profile.smart_account.delegation_implementation.unwrap();
+        expected.erc4337 = Some(ConfiguredSmartAccounts {
+            entry_point_runtime_hash: profile.entry_point.runtime_code_hash,
+            accounts: vec![ConfiguredSmartAccount {
+                account: profile.smart_account.account.address,
+                runtime_hash: profile.smart_account.account.runtime_code_hash,
+                execution_profile: profile.smart_account.execution_profile,
+                factory: None,
+                factory_runtime_hash: None,
+                delegation_implementation: Some(delegation.address),
+                delegation_runtime_hash: Some(delegation.runtime_code_hash),
+            }],
+        });
+        assert!(
+            PaperLaunchpadObserver::from_startup_snapshots(
+                expected.clone(),
+                observed_snapshot.clone()
+            )
+            .is_err()
+        );
+        observed_snapshot.pins.extend([
+            observed(
+                profile.airlock.address,
+                None,
+                profile.airlock.runtime_code_hash,
+            ),
+            observed(
+                profile.pool_manager.address,
+                None,
+                profile.pool_manager.runtime_code_hash,
+            ),
+            observed(
+                profile.initializer.address,
+                None,
+                profile.initializer.runtime_code_hash,
+            ),
+            observed(
+                profile.rehype_hook.address,
+                None,
+                profile.rehype_hook.runtime_code_hash,
+            ),
+            observed(
+                profile.token_factory.address,
+                None,
+                profile.token_factory.runtime_code_hash,
+            ),
+            observed(
+                profile.governance_factory.address,
+                None,
+                profile.governance_factory.runtime_code_hash,
+            ),
+            observed(
+                profile.liquidity_migrator.address,
+                None,
+                profile.liquidity_migrator.runtime_code_hash,
+            ),
+            observed(
+                profile.entry_point.address,
+                None,
+                profile.entry_point.runtime_code_hash,
+            ),
+            observed(
+                profile.smart_account.account.address,
+                Some(delegation.address),
+                profile.smart_account.account.runtime_code_hash,
+            ),
+            observed(delegation.address, None, delegation.runtime_code_hash),
+        ]);
+        PaperLaunchpadObserver::from_startup_snapshots(expected.clone(), observed_snapshot.clone())
+            .unwrap();
+
+        let mut semantic_drift = expected.clone();
+        semantic_drift
+            .bankr_doppler_v4
+            .as_mut()
+            .unwrap()
+            .hook_fee_denominator_ppm -= 1;
+        assert!(
+            PaperLaunchpadObserver::from_startup_snapshots(
+                semantic_drift,
+                observed_snapshot.clone()
+            )
+            .is_err()
+        );
+
+        let mut incomplete_delegation = expected.clone();
+        incomplete_delegation.erc4337.as_mut().unwrap().accounts[0].delegation_runtime_hash = None;
+        assert!(
+            PaperLaunchpadObserver::from_startup_snapshots(
+                incomplete_delegation,
+                observed_snapshot.clone()
+            )
+            .is_err()
+        );
+
+        find_observed_mut(&mut observed_snapshot.pins, profile.rehype_hook.address).runtime_hash =
+            B256::with_last_byte(0xee);
+        assert!(
+            PaperLaunchpadObserver::from_startup_snapshots(expected, observed_snapshot).is_err()
+        );
+    }
+
+    #[test]
     fn expected_document_cannot_self_attest_as_observed_snapshot() {
         let value = serde_json::json!({
             "schema_version": 2,
@@ -2082,10 +2375,19 @@ mod tests {
         missing_factory_hash.factory = Some(Address::with_last_byte(0xf1));
         assert!(configured_smart_account_pin(missing_factory_hash).is_err());
 
+        let mut missing_factory_address = base;
+        missing_factory_address.factory_runtime_hash = Some(B256::with_last_byte(0xf1));
+        assert!(configured_smart_account_pin(missing_factory_address).is_err());
+
         let mut missing_delegation_hash = base;
         missing_delegation_hash.execution_profile = AccountExecutionProfile::Erc7579SingleCall;
         missing_delegation_hash.delegation_implementation = Some(Address::with_last_byte(0xd1));
         assert!(configured_smart_account_pin(missing_delegation_hash).is_err());
+
+        let mut missing_delegation_address = base;
+        missing_delegation_address.execution_profile = AccountExecutionProfile::Erc7579SingleCall;
+        missing_delegation_address.delegation_runtime_hash = Some(B256::with_last_byte(0xd1));
+        assert!(configured_smart_account_pin(missing_delegation_address).is_err());
     }
 
     #[test]

@@ -25,9 +25,10 @@ use hermes_feed::robinhood::{
 };
 use hermes_feed::tier2_curve::HOOD_FACTORY;
 use hermes_feed::{
+    BankrDopplerExpectedProfile, BankrDopplerQuotePolicy, BankrDopplerReceiptPaperQuote,
     ClankerQuotePolicy, ClankerReceiptPaperQuote, ClankerV4ExpectedProfile, NoxaRpcClient,
-    V3ReceiptPaperQuote, V3ReceiptQuotePolicy, quote_clanker_launch_receipt,
-    quote_v3_launch_receipt,
+    V3ReceiptPaperQuote, V3ReceiptQuotePolicy, quote_bankr_doppler_launch_receipt,
+    quote_clanker_launch_receipt, quote_v3_launch_receipt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -93,6 +94,7 @@ struct ReconciledCandidate {
     evidence: ReconciliationEvidence,
     v3_quote: Option<V3ReceiptPaperQuote>,
     clanker_quote: Option<ClankerReceiptPaperQuote>,
+    bankr_quote: Option<BankrDopplerReceiptPaperQuote>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -135,6 +137,10 @@ async fn main() -> Result<()> {
         .clanker_v4
         .map(|configured| configured.expected_profile())
         .transpose()?;
+    let bankr_profile = expected
+        .bankr_doppler_v4
+        .map(|configured| configured.expected_profile())
+        .transpose()?;
     let rpc = NoxaRpcClient::with_url(args.rpc_url)?;
     let chain_id = rpc.chain_id().await?;
     if chain_id != CHAIN_ID {
@@ -157,6 +163,7 @@ async fn main() -> Result<()> {
                 poll_interval,
                 quote_policy,
                 clanker_profile,
+                bankr_profile,
             )
             .await
         }
@@ -170,6 +177,9 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&quote)?);
         }
         if let Some(quote) = result.clanker_quote {
+            println!("{}", serde_json::to_string(&quote)?);
+        }
+        if let Some(quote) = result.bankr_quote {
             println!("{}", serde_json::to_string(&quote)?);
         }
     }
@@ -230,6 +240,7 @@ async fn reconcile_candidate(
     poll_interval: Duration,
     quote_policy: V3ReceiptQuotePolicy,
     clanker_profile: Option<ClankerV4ExpectedProfile>,
+    bankr_profile: Option<BankrDopplerExpectedProfile>,
 ) -> Result<ReconciledCandidate> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -244,6 +255,7 @@ async fn reconcile_candidate(
                 receipt.status && protocol_event_match(candidate.launchpad, &receipt.logs);
             let mut v3_quote = None;
             let mut clanker_quote = None;
+            let mut bankr_quote = None;
             if receipt.status
                 && matches!(
                     candidate.launchpad,
@@ -295,6 +307,34 @@ async fn reconcile_candidate(
                     protocol_match = false;
                 }
             }
+            if receipt.status && candidate.launchpad == LaunchpadId::BankrDoppler {
+                let transaction = rpc
+                    .transaction_by_hash(candidate.tx_hash)
+                    .await?
+                    .with_context(|| format!("missing transaction {}", candidate.tx_hash))?;
+                let block = rpc.block_by_number(receipt.l2_block_number).await?;
+                if let Some(profile) = bankr_profile {
+                    match quote_bankr_doppler_launch_receipt(
+                        &transaction,
+                        &receipt,
+                        &block,
+                        profile,
+                        BankrDopplerQuotePolicy {
+                            amount_in: quote_policy.amount_in,
+                            max_amount_in: quote_policy.max_amount_in,
+                            slippage_bps: quote_policy.slippage_bps,
+                        },
+                    ) {
+                        Ok(quote) => {
+                            protocol_match = true;
+                            bankr_quote = Some(quote);
+                        }
+                        Err(_) => protocol_match = false,
+                    }
+                } else {
+                    protocol_match = false;
+                }
+            }
             return Ok(ReconciledCandidate {
                 evidence: ReconciliationEvidence {
                     tx_hash: candidate.tx_hash,
@@ -305,6 +345,7 @@ async fn reconcile_candidate(
                 },
                 v3_quote,
                 clanker_quote,
+                bankr_quote,
             });
         }
         if Instant::now() >= deadline {
@@ -318,6 +359,7 @@ async fn reconcile_candidate(
                 },
                 v3_quote: None,
                 clanker_quote: None,
+                bankr_quote: None,
             });
         }
         sleep(poll_interval).await;

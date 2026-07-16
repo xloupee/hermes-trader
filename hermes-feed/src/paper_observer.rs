@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::PonsAdapter;
+use crate::clanker_receipt_quote::{
+    CLANKER_DESCENDING_MEV_MODULE, CLANKER_EXTENSION, CLANKER_STATIC_HOOK, ClankerV4ExpectedProfile,
+};
 use crate::decoder::{DecodeError, DecodeReport, FeedDecoder, Filter};
 use crate::feed::BroadcastMessage;
 use crate::flap_identity::{
@@ -24,8 +27,8 @@ use crate::launchpad_adapter::{
     AdapterKind, AttributionSource, LaunchpadId, RouteKind, WrapperKind,
 };
 use crate::launchpad_adapters::{
-    DispatchEntry, ExecutionMode, ResearchStartupPins, RuntimeCodePin, V4AdapterSet,
-    V4CandidateCall,
+    CLANKER_FACTORY, CLANKER_LOCKER, DispatchEntry, ExecutionMode, ResearchStartupPins,
+    RuntimeCodePin, V4_POOL_MANAGER, V4AdapterSet, V4CandidateCall,
 };
 use crate::launchpad_registry::{
     BoundedCall, ContractPin, ContractRole, DispatchKey, LaunchpadSpec, ObservedContractPin,
@@ -54,6 +57,7 @@ use crate::tier2_curve::{
     LEAVEHOOD_SELL_SELECTOR, LEAVEHOOD_SELL_WITH_SLIPPAGE_SELECTOR, RuntimePin as CurveRuntimePin,
     StartupPins as CurveStartupPins, Tier2CurveAdapter,
 };
+use crate::uniswap_v4::CodePin as V4CodePin;
 use crate::v3_launch_at_birth::{
     BOW_LAUNCH_SELECTOR, ContractCodeSnapshot, LAUNCHHOOD_V3_LAUNCH_SELECTOR,
     V3LaunchAtBirthAdapter,
@@ -228,8 +232,72 @@ pub struct PaperExpectedPins {
     pub trench_proxy_runtime_hash: Option<B256>,
     pub trench_implementation_runtime_hash: Option<B256>,
     #[serde(default)]
+    pub clanker_v4: Option<ConfiguredClankerV4>,
+    #[serde(default)]
     pub bankr_doppler_calls: Vec<ConfiguredCallPin>,
     pub erc4337: Option<ConfiguredSmartAccounts>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfiguredClankerV4 {
+    pub factory_runtime_hash: B256,
+    pub pool_manager_runtime_hash: B256,
+    pub hook_runtime_hash: B256,
+    pub locker_runtime_hash: B256,
+    pub mev_module_runtime_hash: B256,
+    pub extension_runtime_hash: B256,
+    pub max_static_fee_ppm: u32,
+    pub max_mev_fee_ppm: u32,
+    pub max_mev_seconds_to_decay: u64,
+    pub mev_delay_guard_seconds: u64,
+    pub protocol_fee_share_percent: u8,
+}
+
+impl ConfiguredClankerV4 {
+    pub fn expected_profile(self) -> Result<ClankerV4ExpectedProfile, PaperObserverError> {
+        let profile = ClankerV4ExpectedProfile {
+            factory: V4CodePin {
+                address: CLANKER_FACTORY,
+                runtime_code_hash: self.factory_runtime_hash,
+            },
+            pool_manager: V4CodePin {
+                address: V4_POOL_MANAGER,
+                runtime_code_hash: self.pool_manager_runtime_hash,
+            },
+            hook: V4CodePin {
+                address: CLANKER_STATIC_HOOK,
+                runtime_code_hash: self.hook_runtime_hash,
+            },
+            locker: V4CodePin {
+                address: CLANKER_LOCKER,
+                runtime_code_hash: self.locker_runtime_hash,
+            },
+            mev_module: V4CodePin {
+                address: CLANKER_DESCENDING_MEV_MODULE,
+                runtime_code_hash: self.mev_module_runtime_hash,
+            },
+            extension: V4CodePin {
+                address: CLANKER_EXTENSION,
+                runtime_code_hash: self.extension_runtime_hash,
+            },
+            max_static_fee_ppm: self.max_static_fee_ppm,
+            max_mev_fee_ppm: self.max_mev_fee_ppm,
+            max_mev_seconds_to_decay: self.max_mev_seconds_to_decay,
+            mev_delay_guard_seconds: self.mev_delay_guard_seconds,
+            protocol_fee_share_percent: self.protocol_fee_share_percent,
+        };
+        profile
+            .validate()
+            .map_err(|error| PaperObserverError::Startup(error.to_string()))?;
+        if profile != ClankerV4ExpectedProfile::production() {
+            return Err(PaperObserverError::Startup(
+                "configured Clanker profile disagrees with independently reviewed identity and semantics"
+                    .into(),
+            ));
+        }
+        Ok(profile)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -486,6 +554,9 @@ impl PaperLaunchpadObserver {
     ) -> Result<Self, PaperObserverError> {
         validate_document_pair(&expected, &observed)?;
         validate_observed_pins(&observed)?;
+        if let Some(clanker) = expected.clanker_v4 {
+            clanker.expected_profile()?;
+        }
         let observed_code = |address| ContractCodeSnapshot {
             address,
             runtime_code_hash: find_observed_pin(&observed.pins, address, None)
@@ -1195,6 +1266,43 @@ fn paper_specs(
                 implementation.runtime_code_hash,
             ));
         }
+        if entry.launchpad == LaunchpadId::Clanker
+            && let Some(configured) = expected.clanker_v4
+        {
+            let profile = configured.expected_profile()?;
+            pins.extend([
+                contract_pin(
+                    ContractRole::ProtocolDependency,
+                    profile.pool_manager.address,
+                    None,
+                    profile.pool_manager.runtime_code_hash,
+                ),
+                contract_pin(
+                    ContractRole::ProtocolDependency,
+                    profile.hook.address,
+                    None,
+                    profile.hook.runtime_code_hash,
+                ),
+                contract_pin(
+                    ContractRole::ProtocolDependency,
+                    profile.locker.address,
+                    None,
+                    profile.locker.runtime_code_hash,
+                ),
+                contract_pin(
+                    ContractRole::ProtocolDependency,
+                    profile.mev_module.address,
+                    None,
+                    profile.mev_module.runtime_code_hash,
+                ),
+                contract_pin(
+                    ContractRole::ProtocolDependency,
+                    profile.extension.address,
+                    None,
+                    profile.extension.runtime_code_hash,
+                ),
+            ]);
+        }
         let observation_keys = keys(&[(entry.destination.address, entry.selector)], v4_wrappers);
         if let Some(existing) = specs.iter_mut().find(|spec| spec.id == entry.launchpad) {
             if existing.family != family || existing.allowed_routes != [route] {
@@ -1333,7 +1441,7 @@ fn validate_document_pair(
     expected: &PaperExpectedPins,
     observed: &PaperObservedStartupSnapshot,
 ) -> Result<(), PaperObserverError> {
-    if expected.schema_version != 1 || observed.schema_version != 1 || observed.chain_id != CHAIN_ID
+    if expected.schema_version != 2 || observed.schema_version != 2 || observed.chain_id != CHAIN_ID
     {
         return Err(PaperObserverError::Startup(
             "unsupported pin schema or chain".into(),
@@ -1535,7 +1643,7 @@ mod tests {
 
     fn startup() -> (PaperExpectedPins, PaperObservedStartupSnapshot) {
         let expected = PaperExpectedPins {
-            schema_version: 1,
+            schema_version: 2,
             document_role: ExpectedPinsDocumentRole::ExpectedProtocolPins,
             provenance: ExpectedPinsProvenance::SyntheticOfflineFixture,
             fixture_id: Some("launchpad-paper-offline-v2".into()),
@@ -1549,6 +1657,7 @@ mod tests {
             klik_factory_runtime_hash: Some(B256::with_last_byte(6)),
             trench_proxy_runtime_hash: Some(B256::with_last_byte(7)),
             trench_implementation_runtime_hash: Some(B256::with_last_byte(8)),
+            clanker_v4: None,
             bankr_doppler_calls: vec![ConfiguredCallPin {
                 destination: Address::with_last_byte(0xb0),
                 runtime_hash: B256::with_last_byte(9),
@@ -1557,7 +1666,7 @@ mod tests {
             erc4337: None,
         };
         let mut snapshot = PaperObservedStartupSnapshot {
-            schema_version: 1,
+            schema_version: 2,
             document_role: ObservedPinsDocumentRole::ObservedStartupSnapshot,
             provenance: ObservedPinsProvenance::SyntheticOfflineFixture,
             fixture_id: Some("launchpad-paper-offline-v2".into()),
@@ -1833,9 +1942,74 @@ mod tests {
     }
 
     #[test]
+    fn configured_clanker_dependencies_require_fresh_matching_startup_pins() {
+        let (mut expected, mut observed_snapshot) = startup();
+        let profile = ClankerV4ExpectedProfile::production();
+        expected.clanker_v4 = Some(ConfiguredClankerV4 {
+            factory_runtime_hash: profile.factory.runtime_code_hash,
+            pool_manager_runtime_hash: profile.pool_manager.runtime_code_hash,
+            hook_runtime_hash: profile.hook.runtime_code_hash,
+            locker_runtime_hash: profile.locker.runtime_code_hash,
+            mev_module_runtime_hash: profile.mev_module.runtime_code_hash,
+            extension_runtime_hash: profile.extension.runtime_code_hash,
+            max_static_fee_ppm: profile.max_static_fee_ppm,
+            max_mev_fee_ppm: profile.max_mev_fee_ppm,
+            max_mev_seconds_to_decay: profile.max_mev_seconds_to_decay,
+            mev_delay_guard_seconds: profile.mev_delay_guard_seconds,
+            protocol_fee_share_percent: profile.protocol_fee_share_percent,
+        });
+        assert!(
+            PaperLaunchpadObserver::from_startup_snapshots(
+                expected.clone(),
+                observed_snapshot.clone()
+            )
+            .is_err()
+        );
+        observed_snapshot.pins.extend([
+            observed(
+                profile.pool_manager.address,
+                None,
+                profile.pool_manager.runtime_code_hash,
+            ),
+            observed(profile.hook.address, None, profile.hook.runtime_code_hash),
+            observed(
+                profile.locker.address,
+                None,
+                profile.locker.runtime_code_hash,
+            ),
+            observed(
+                profile.mev_module.address,
+                None,
+                profile.mev_module.runtime_code_hash,
+            ),
+            observed(
+                profile.extension.address,
+                None,
+                profile.extension.runtime_code_hash,
+            ),
+        ]);
+        PaperLaunchpadObserver::from_startup_snapshots(expected.clone(), observed_snapshot.clone())
+            .unwrap();
+        let mut semantic_drift = expected.clone();
+        semantic_drift.clanker_v4.as_mut().unwrap().max_mev_fee_ppm -= 1;
+        assert!(
+            PaperLaunchpadObserver::from_startup_snapshots(
+                semantic_drift,
+                observed_snapshot.clone()
+            )
+            .is_err()
+        );
+        find_observed_mut(&mut observed_snapshot.pins, profile.hook.address).runtime_hash =
+            B256::with_last_byte(0xee);
+        assert!(
+            PaperLaunchpadObserver::from_startup_snapshots(expected, observed_snapshot).is_err()
+        );
+    }
+
+    #[test]
     fn expected_document_cannot_self_attest_as_observed_snapshot() {
         let value = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "document_role": "expected_protocol_pins",
             "provenance": "synthetic_offline_fixture",
             "fixture_id": "launchpad-paper-offline-v2",

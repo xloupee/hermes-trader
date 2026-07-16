@@ -6,13 +6,13 @@ use std::path::{Path, PathBuf};
 use alloy_primitives::{B256, U256};
 use anyhow::{Context, Result};
 use clap::Parser;
-use hermes_feed::V3ReceiptPaperQuote;
 use hermes_feed::feed::BroadcastMessage;
 use hermes_feed::launchpad_adapter::LaunchpadId;
 use hermes_feed::paper_observer::{
     PaperExpectedPins, PaperFeedRuntime, PaperLaunchpadObserver, PaperObservedStartupSnapshot,
     PaperPlanPolicy,
 };
+use hermes_feed::{ClankerReceiptPaperQuote, V3ReceiptPaperQuote};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -81,6 +81,7 @@ struct ReconciliationMetrics {
 struct ReconciliationRecords {
     evidence: Vec<ReconciliationEvidence>,
     v3_quotes: Vec<V3ReceiptPaperQuote>,
+    clanker_quotes: Vec<ClankerReceiptPaperQuote>,
 }
 
 #[derive(Debug, Default)]
@@ -100,10 +101,11 @@ struct FinalizedV3PaperPlan {
     expected_output: U256,
     min_receive: U256,
     quote_source: String,
-    quote_state_version: hermes_feed::V3QuoteStateVersion,
+    quote_state_version: Value,
     exit_full_position: bool,
     exit_expected_output: U256,
     exit_min_receive: U256,
+    simulated_round_trip_return_bps: U256,
     leader_amounts_reused: bool,
     execution_eligible: bool,
     execution_blocker: String,
@@ -174,6 +176,14 @@ fn main() -> Result<()> {
         )? {
             println!("{}", serde_json::to_string(&plan)?);
         }
+        for plan in finalized_clanker_plans(
+            &observed_candidates.feed_sequences,
+            &records.evidence,
+            records.clanker_quotes,
+            plan_policy,
+        )? {
+            println!("{}", serde_json::to_string(&plan)?);
+        }
         return Ok(());
     }
     let mut runtime = PaperFeedRuntime::with_plan_policy(observer, plan_policy)?;
@@ -240,6 +250,14 @@ fn main() -> Result<()> {
             &observed_sequences,
             &records.evidence,
             records.v3_quotes,
+            plan_policy,
+        )? {
+            println!("{}", serde_json::to_string(&plan)?);
+        }
+        for plan in finalized_clanker_plans(
+            &observed_sequences,
+            &records.evidence,
+            records.clanker_quotes,
             plan_policy,
         )? {
             println!("{}", serde_json::to_string(&plan)?);
@@ -335,6 +353,17 @@ fn read_reconciliation_records(path: &Path) -> Result<ReconciliationRecords> {
                             format!("decode V3 quote line {} from {}", index + 1, path.display())
                         })?)
                 }
+                Some("launchpad_clanker_v4_paper_quote") => {
+                    records
+                        .clanker_quotes
+                        .push(serde_json::from_value(value).with_context(|| {
+                            format!(
+                                "decode Clanker V4 quote line {} from {}",
+                                index + 1,
+                                path.display()
+                            )
+                        })?)
+                }
                 Some(other) => anyhow::bail!(
                     "unknown reconciliation record type {other} at line {}",
                     index + 1
@@ -402,10 +431,80 @@ fn finalized_v3_plans(
             expected_output: quote.entry.expected_output,
             min_receive: quote.entry.min_receive,
             quote_source: quote.quote_source,
-            quote_state_version: quote.state_version,
+            quote_state_version: serde_json::to_value(quote.state_version)?,
             exit_full_position: true,
             exit_expected_output: quote.full_position_exit.expected_output,
             exit_min_receive: quote.full_position_exit.min_receive,
+            simulated_round_trip_return_bps: quote.simulated_round_trip_return_bps,
+            leader_amounts_reused: false,
+            execution_eligible: false,
+            execution_blocker: quote.execution_blocker,
+            broadcast: false,
+        });
+    }
+    Ok(plans)
+}
+
+fn finalized_clanker_plans(
+    observed_sequences: &HashMap<(B256, LaunchpadId), u64>,
+    evidence: &[ReconciliationEvidence],
+    quotes: Vec<ClankerReceiptPaperQuote>,
+    policy: PaperPlanPolicy,
+) -> Result<Vec<FinalizedV3PaperPlan>> {
+    let evidence = evidence
+        .iter()
+        .map(|record| ((record.tx_hash, record.launchpad), record))
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashMap::new();
+    let mut plans = Vec::new();
+    for quote in quotes {
+        let key = (quote.tx_hash, quote.launchpad);
+        if seen.insert(key, ()).is_some() {
+            anyhow::bail!("duplicate Clanker V4 paper quote for {key:?}");
+        }
+        let Some(feed_sequence) = observed_sequences.get(&key).copied() else {
+            continue;
+        };
+        let confirmed = evidence
+            .get(&key)
+            .is_some_and(|record| record.receipt_status && record.protocol_event_match);
+        if !confirmed
+            || quote.record_type != "launchpad_clanker_v4_paper_quote"
+            || quote.launchpad != LaunchpadId::Clanker
+            || quote.entry.amount_in == U256::ZERO
+            || quote.entry.amount_in > policy.max_input_wei
+            || quote.entry.slippage_bps != policy.slippage_bps
+            || quote.entry.expected_output == U256::ZERO
+            || quote.entry.min_receive == U256::ZERO
+            || quote.entry.min_receive > quote.entry.expected_output
+            || quote.full_position_exit.amount_in != quote.entry.expected_output
+            || quote.full_position_exit.expected_output == U256::ZERO
+            || quote.full_position_exit.min_receive == U256::ZERO
+            || quote.full_position_exit.min_receive > quote.full_position_exit.expected_output
+            || quote.broadcast
+            || quote.execution_eligible
+            || quote.state_version.chain_id != hermes_feed::robinhood::CHAIN_ID
+            || quote.state_version.l2_block_number != quote.l2_block_number
+            || quote.state_version.first_eligible_quote_timestamp
+                <= quote.state_version.receipt_timestamp
+        {
+            anyhow::bail!("unsafe or inconsistent Clanker V4 quote evidence for {key:?}");
+        }
+        plans.push(FinalizedV3PaperPlan {
+            record_type: "launchpad_paper_finalized_plan",
+            tx_hash: quote.tx_hash,
+            launchpad: quote.launchpad,
+            feed_sequence,
+            status: "quoted_execution_gated",
+            amount_in: quote.entry.amount_in,
+            expected_output: quote.entry.expected_output,
+            min_receive: quote.entry.min_receive,
+            quote_source: quote.quote_source,
+            quote_state_version: serde_json::to_value(quote.state_version)?,
+            exit_full_position: true,
+            exit_expected_output: quote.full_position_exit.expected_output,
+            exit_min_receive: quote.full_position_exit.min_receive,
+            simulated_round_trip_return_bps: quote.simulated_round_trip_return_bps,
             leader_amounts_reused: false,
             execution_eligible: false,
             execution_blocker: quote.execution_blocker,
@@ -483,7 +582,11 @@ fn percentile(values: &[u64], percentile: usize) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::Address;
-    use hermes_feed::{V3PaperSwapQuote, V3Quote, V3QuoteStateVersion, V3ReceiptMarketEvidence};
+    use hermes_feed::{
+        ClankerQuotePolicy, ClankerV4ExpectedProfile, NoxaReceipt, RobinhoodBlock,
+        RobinhoodTransaction, V3PaperSwapQuote, V3Quote, V3QuoteStateVersion,
+        V3ReceiptMarketEvidence, quote_clanker_launch_receipt,
+    };
 
     use super::*;
 
@@ -600,6 +703,32 @@ mod tests {
         }
     }
 
+    #[derive(Deserialize)]
+    struct ClankerLiveFixture {
+        transaction: RobinhoodTransaction,
+        block: RobinhoodBlock,
+        receipt: NoxaReceipt,
+    }
+
+    fn clanker_quote_fixture() -> ClankerReceiptPaperQuote {
+        let fixture: ClankerLiveFixture = serde_json::from_str(include_str!(
+            "../../tests/fixtures/clanker-v4-live-proof.json"
+        ))
+        .unwrap();
+        quote_clanker_launch_receipt(
+            &fixture.transaction,
+            &fixture.receipt,
+            &fixture.block,
+            ClankerV4ExpectedProfile::production(),
+            ClankerQuotePolicy {
+                amount_in: U256::from(1_000_u64),
+                max_amount_in: U256::from(1_000_u64),
+                slippage_bps: 100,
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
     fn confirmed_quote_becomes_non_broadcast_finalized_plan() {
         let quote = quote_fixture();
@@ -654,5 +783,33 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn confirmed_clanker_quote_becomes_execution_gated_finalized_plan() {
+        let quote = clanker_quote_fixture();
+        let key = (quote.tx_hash, quote.launchpad);
+        let plans = finalized_clanker_plans(
+            &HashMap::from([(key, 77)]),
+            &[ReconciliationEvidence {
+                tx_hash: key.0,
+                launchpad: key.1,
+                receipt_status: true,
+                protocol_event_match: true,
+                observed_unix_ns: 100,
+            }],
+            vec![quote],
+            PaperPlanPolicy {
+                max_input_wei: U256::from(1_000_u64),
+                slippage_bps: 100,
+                ..PaperPlanPolicy::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].status, "quoted_execution_gated");
+        assert_eq!(plans[0].feed_sequence, 77);
+        assert!(!plans[0].execution_eligible);
+        assert!(!plans[0].broadcast);
     }
 }

@@ -69,8 +69,13 @@ wait "$pipeline_pid"
 pipeline_pid=
 
 # Receipt/event work begins only after the feed pipeline has closed. The
-# collector also appends fully validated Bow/LaunchHood V3 quote records.
-"$reconcile_bin" --input "$observer_output" > "$reconciliation_output"
+# collector also appends fully validated Bow/LaunchHood V3 and Clanker V4
+# quote records, using the same reviewed-vs-observed startup pin boundary.
+"$reconcile_bin" \
+  --input "$observer_output" \
+  --expected-pins "$expected_pins" \
+  --observed-startup-snapshot "$observed_snapshot" \
+  > "$reconciliation_output"
 
 # Join against the original observer timestamps and feed sequences. Do not
 # replay the raw feed here: replay-time timestamps would corrupt latency.

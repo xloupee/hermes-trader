@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "document_role": "expected_protocol_pins",
   "provenance": "synthetic_offline_fixture",
   "fixture_id": "launchpad-paper-offline-v2",
@@ -13,6 +13,7 @@
   "klik_factory_runtime_hash": "0x0000000000000000000000000000000000000000000000000000000000000006",
   "trench_proxy_runtime_hash": "0x0000000000000000000000000000000000000000000000000000000000000007",
   "trench_implementation_runtime_hash": "0x0000000000000000000000000000000000000000000000000000000000000008",
+  "clanker_v4": null,
   "bankr_doppler_calls": [
     {
       "destination": "0x00000000000000000000000000000000000000b0",

@@ -20,18 +20,32 @@ snapshot must match before the observer starts.
 | Bankr wrapper | EntryPoint v0.7 | `0x8db5ff695839d655407cc8490bb7a5d82337a86a6b39c3f0258aa6c3b582fc58` | Canonical EntryPoint address plus fixed-block code commitment. |
 | Bankr leader | EIP-7702 designator | `0x4542cbf1da24ba964614e4f5585736e22884e23e97c0f0915de4f602585d2dd4` | Exact `ef0100 || d6cedd...75b28` designator from proof account. |
 | Bankr leader | delegated Kernel runtime | `0x6f6d6691dc11fda98d3102802f20e7e816ccc576c16c9279ee1a884a51d1935d` | Fixed-block delegated implementation code commitment. |
+| Clanker | factory `0xd3f2...9a94` | `0xf895112a2deed34ba2765d0147aff3494104a28293cc2f19af9275934088da33` | Existing protocol research plus fixed-block code commitment. |
+| Clanker | V4 PoolManager `0x8366...0951` | `0xbd3881180b547f5fe817545743cfb4343e96b1bc6640dcd70c106b0066e95626` | Canonical pool event emitter and fixed-block code commitment. |
+| Clanker | `ClankerHookStaticFeeV2` `0x48b8...e8cc` | `0x0883056c4856f8fe464ff49f9c1c028455459dad8ceddcc6d5159259fe51e07f` | Official `clanker-devco/v4-contracts` source at `b004c2e` plus fixed-block code commitment. |
+| Clanker | locker `0x290f...bc99` | `0x2175e20d41bc72ad6596b2fdd2c43c75e9d8ca10a706a1ca6c1a3d1526c336bc` | Launch receipt identity and fixed-block code commitment. |
+| Clanker | descending-MEV module `0xea1f...299e` | `0x0815a0af5e056adaf07a1941b92082caa886b207676bd42c89ea6bde3956bc13` | Official source semantics plus fixed-block code commitment. |
+| Clanker | extension `0x6f27...34b5` | `0xf742a12de7ec06481d0e98942d1830d8bf33502d854e5d97062ef5fda6f5e004` | Exact launch receipt identity and fixed-block code commitment. |
+
+Schema version 2 serializes the complete Clanker identity profile and reviewed
+fee bounds separately from fresh observations. Historical block `10980306` and
+fresh block `11507862` both matched all 26 requested startup identities. The
+Clanker fee values emitted for an individual pool remain receipt-local state;
+the expected document pins the official contract bounds instead of copying an
+observed pool's values into expected configuration: static LP fees are capped
+at 100,000 ppm, the MEV override at 800,000 ppm, and decay at 120 seconds, with
+the pinned one-second guard and 20% protocol share.
 
 Pons and Flap identities remain the exact constants recorded in
-`PONS_FAMILY.md` and `FLAP_SH_EVIDENCE.json`. Clanker remains pinned to the
-factory hash recorded in `ECOSYSTEM_TIER2.md`. These identities are validated
-by the registry and fresh observed snapshot, but schema version 1 does not yet
-serialize them in the expected document.
+`PONS_FAMILY.md` and `FLAP_SH_EVIDENCE.json`. They are validated by the registry
+and fresh observed snapshot, but are not yet serialized in the expected
+document.
 
 ## Explicit gaps
 
-- Schema version 1 has no configurable fields for Clanker, Pons, Flap,
-  PoolManager, locker, hook, or Permit2 identities. They must not be described
-  as centrally reviewed configuration until the schema is extended.
+- Schema version 2 still has no configurable fields for Pons, Flap, or Permit2
+  identities. They must not be described as centrally reviewed configuration
+  until the schema is extended again.
 - Bow's explorer source is unverified; its reviewed hash is a fixed-block code
   commitment, not a source-build reproducibility claim.
 - Pons current factory and Flap VaultPortal implementation retain their

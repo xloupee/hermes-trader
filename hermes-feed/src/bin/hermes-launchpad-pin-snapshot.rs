@@ -7,11 +7,16 @@ use alloy_primitives::{Address, B256, keccak256};
 use alloy_sol_types::{SolCall, sol};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use hermes_feed::clanker_receipt_quote::{
+    CLANKER_DESCENDING_MEV_MODULE, CLANKER_EXTENSION, CLANKER_STATIC_HOOK,
+};
 use hermes_feed::flap_identity::{
     FLAP_PORTAL_IMPLEMENTATION, FLAP_PORTAL_PROXY, FLAP_VAULT_PORTAL_IMPLEMENTATION,
     FLAP_VAULT_PORTAL_PROXY,
 };
-use hermes_feed::launchpad_adapters::{CLANKER_FACTORY, DOPPLER_CREATE_EMITTER, V4_POOL_MANAGER};
+use hermes_feed::launchpad_adapters::{
+    CLANKER_FACTORY, CLANKER_LOCKER, DOPPLER_CREATE_EMITTER, V4_POOL_MANAGER,
+};
 use hermes_feed::paper_observer::{
     ObservedPinsDocumentRole, ObservedPinsProvenance, ObservedRuntimePin, PaperExpectedPins,
     PaperLaunchpadObserver, PaperObservedStartupSnapshot,
@@ -150,7 +155,7 @@ async fn main() -> Result<()> {
         })
         .transpose()?;
 
-    let requests = pin_requests(expected.as_ref());
+    let requests = pin_requests(expected.as_ref())?;
     let mut pins = Vec::with_capacity(requests.len());
     for request in requests {
         let code = rpc
@@ -168,7 +173,7 @@ async fn main() -> Result<()> {
         });
     }
     let snapshot = PaperObservedStartupSnapshot {
-        schema_version: 1,
+        schema_version: 2,
         document_role: ObservedPinsDocumentRole::ObservedStartupSnapshot,
         provenance: ObservedPinsProvenance::StartupObservation,
         fixture_id: None,
@@ -210,7 +215,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn pin_requests(expected: Option<&PaperExpectedPins>) -> Vec<PinRequest> {
+fn pin_requests(expected: Option<&PaperExpectedPins>) -> Result<Vec<PinRequest>> {
     let mut requests = vec![
         request(WETH, None),
         request(UNISWAP_V3_FACTORY, None),
@@ -242,6 +247,15 @@ fn pin_requests(expected: Option<&PaperExpectedPins>) -> Vec<PinRequest> {
     );
 
     if let Some(expected) = expected {
+        if let Some(configured) = expected.clanker_v4 {
+            configured.expected_profile()?;
+            requests.extend([
+                request(CLANKER_STATIC_HOOK, None),
+                request(CLANKER_LOCKER, None),
+                request(CLANKER_DESCENDING_MEV_MODULE, None),
+                request(CLANKER_EXTENSION, None),
+            ]);
+        }
         if expected.leavehood_factory_proxy_runtime_hash.is_some() {
             requests.extend([
                 request(
@@ -279,7 +293,7 @@ fn pin_requests(expected: Option<&PaperExpectedPins>) -> Vec<PinRequest> {
 
     let mut seen = HashSet::new();
     requests.retain(|pin| seen.insert(pin.address));
-    requests
+    Ok(requests)
 }
 
 const fn request(address: Address, implementation: Option<Address>) -> PinRequest {

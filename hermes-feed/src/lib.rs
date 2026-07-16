@@ -1,6 +1,7 @@
 pub mod active_noxa;
 pub mod boundary_gate;
 pub mod cache;
+pub mod clanker_receipt_quote;
 pub mod copy_observation;
 pub mod copy_policy;
 pub mod decoder;
@@ -45,6 +46,11 @@ pub mod v3_receipt_quote;
 pub use active_noxa::validate_active_noxa_copy_token;
 pub use boundary_gate::{BoundaryDecision, BoundaryGate, BoundaryGateError, FeedBoundary};
 pub use cache::{CacheApplyReport, CacheCheckpoint, CacheError, ConfirmedReserveCache};
+pub use clanker_receipt_quote::{
+    ClankerMarketEvidence, ClankerMevFeeConfig, ClankerPaperSwapQuote, ClankerQuoteError,
+    ClankerQuotePolicy, ClankerReceiptPaperQuote, ClankerStateVersion, ClankerStaticFeeConfig,
+    ClankerV4ExpectedProfile, descending_mev_fee_ppm, quote_clanker_launch_receipt,
+};
 pub use copy_observation::{
     AggregatorCopyRejectReason, NormalizedAggregatorSwap, normalize_aggregator_copy_swap,
 };

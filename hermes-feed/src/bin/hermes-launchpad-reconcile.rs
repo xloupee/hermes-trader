@@ -15,6 +15,9 @@ use hermes_feed::launchpad_adapters::{
     KLIK_FACTORY, KLIK_TOKEN_CREATED_TOPIC,
 };
 use hermes_feed::noxa_abi::{ReceiptLog, decode_token_launched};
+use hermes_feed::paper_observer::{
+    PaperExpectedPins, PaperLaunchpadObserver, PaperObservedStartupSnapshot,
+};
 use hermes_feed::pons::{PONS_CURRENT_FACTORY, PONS_LEGACY_FACTORY, PONS_TOKEN_LAUNCHED_TOPIC};
 use hermes_feed::robinhood::{
     ACTIVE_NOXA_LAUNCH_FACTORY, BOW_LAUNCH_FACTORY, CHAIN_ID, LAUNCHHOOD_V3_FACTORY,
@@ -22,7 +25,9 @@ use hermes_feed::robinhood::{
 };
 use hermes_feed::tier2_curve::HOOD_FACTORY;
 use hermes_feed::{
-    NoxaRpcClient, V3ReceiptPaperQuote, V3ReceiptQuotePolicy, quote_v3_launch_receipt,
+    ClankerQuotePolicy, ClankerReceiptPaperQuote, ClankerV4ExpectedProfile, NoxaRpcClient,
+    V3ReceiptPaperQuote, V3ReceiptQuotePolicy, quote_clanker_launch_receipt,
+    quote_v3_launch_receipt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -44,6 +49,12 @@ struct Cli {
     /// JSONL emitted by hermes-launchpad-paper.
     #[arg(long)]
     input: PathBuf,
+    /// Independently reviewed protocol-owned expected pins.
+    #[arg(long)]
+    expected_pins: PathBuf,
+    /// Fresh startup runtime snapshot, kept separate from expected pins.
+    #[arg(long)]
+    observed_startup_snapshot: PathBuf,
     #[arg(long, default_value = PUBLIC_RPC_URL)]
     rpc_url: String,
     #[arg(long, default_value_t = 30)]
@@ -81,11 +92,15 @@ struct ReconciliationEvidence {
 struct ReconciledCandidate {
     evidence: ReconciliationEvidence,
     v3_quote: Option<V3ReceiptPaperQuote>,
+    clanker_quote: Option<ClankerReceiptPaperQuote>,
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args = Cli::parse();
+    if args.expected_pins.canonicalize()? == args.observed_startup_snapshot.canonicalize()? {
+        bail!("expected pins and observed startup snapshot must be separate files");
+    }
     if args.receipt_timeout_seconds == 0
         || args.poll_interval_ms == 0
         || args.concurrency == 0
@@ -96,6 +111,30 @@ async fn main() -> Result<()> {
         bail!("timeout, poll interval, and concurrency must be non-zero");
     }
     let candidates = read_candidates(&args.input)?;
+    let expected: PaperExpectedPins = serde_json::from_reader(BufReader::new(
+        File::open(&args.expected_pins)
+            .with_context(|| format!("open expected pins {}", args.expected_pins.display()))?,
+    ))
+    .with_context(|| format!("decode expected pins {}", args.expected_pins.display()))?;
+    let observed: PaperObservedStartupSnapshot = serde_json::from_reader(BufReader::new(
+        File::open(&args.observed_startup_snapshot).with_context(|| {
+            format!(
+                "open observed startup snapshot {}",
+                args.observed_startup_snapshot.display()
+            )
+        })?,
+    ))
+    .with_context(|| {
+        format!(
+            "decode observed startup snapshot {}",
+            args.observed_startup_snapshot.display()
+        )
+    })?;
+    PaperLaunchpadObserver::from_startup_snapshots(expected.clone(), observed)?;
+    let clanker_profile = expected
+        .clanker_v4
+        .map(|configured| configured.expected_profile())
+        .transpose()?;
     let rpc = NoxaRpcClient::with_url(args.rpc_url)?;
     let chain_id = rpc.chain_id().await?;
     if chain_id != CHAIN_ID {
@@ -108,19 +147,29 @@ async fn main() -> Result<()> {
         max_amount_in: U256::from(args.paper_max_amount_in_wei),
         slippage_bps: args.paper_slippage_bps,
     };
-    let mut reconciled =
-        stream::iter(candidates.into_values().map(|candidate| {
-            let rpc = rpc.clone();
-            async move {
-                reconcile_candidate(&rpc, candidate, timeout, poll_interval, quote_policy).await
-            }
-        }))
-        .buffer_unordered(args.concurrency);
+    let mut reconciled = stream::iter(candidates.into_values().map(|candidate| {
+        let rpc = rpc.clone();
+        async move {
+            reconcile_candidate(
+                &rpc,
+                candidate,
+                timeout,
+                poll_interval,
+                quote_policy,
+                clanker_profile,
+            )
+            .await
+        }
+    }))
+    .buffer_unordered(args.concurrency);
 
     while let Some(result) = reconciled.next().await {
         let result = result?;
         println!("{}", serde_json::to_string(&result.evidence)?);
         if let Some(quote) = result.v3_quote {
+            println!("{}", serde_json::to_string(&quote)?);
+        }
+        if let Some(quote) = result.clanker_quote {
             println!("{}", serde_json::to_string(&quote)?);
         }
     }
@@ -180,6 +229,7 @@ async fn reconcile_candidate(
     timeout: Duration,
     poll_interval: Duration,
     quote_policy: V3ReceiptQuotePolicy,
+    clanker_profile: Option<ClankerV4ExpectedProfile>,
 ) -> Result<ReconciledCandidate> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -193,6 +243,7 @@ async fn reconcile_candidate(
             let mut protocol_match =
                 receipt.status && protocol_event_match(candidate.launchpad, &receipt.logs);
             let mut v3_quote = None;
+            let mut clanker_quote = None;
             if receipt.status
                 && matches!(
                     candidate.launchpad,
@@ -216,6 +267,34 @@ async fn reconcile_candidate(
                     Err(_) => protocol_match = false,
                 }
             }
+            if receipt.status && candidate.launchpad == LaunchpadId::Clanker {
+                let transaction = rpc
+                    .transaction_by_hash(candidate.tx_hash)
+                    .await?
+                    .with_context(|| format!("missing transaction {}", candidate.tx_hash))?;
+                let block = rpc.block_by_number(receipt.l2_block_number).await?;
+                if let Some(profile) = clanker_profile {
+                    match quote_clanker_launch_receipt(
+                        &transaction,
+                        &receipt,
+                        &block,
+                        profile,
+                        ClankerQuotePolicy {
+                            amount_in: quote_policy.amount_in,
+                            max_amount_in: quote_policy.max_amount_in,
+                            slippage_bps: quote_policy.slippage_bps,
+                        },
+                    ) {
+                        Ok(quote) => {
+                            protocol_match = true;
+                            clanker_quote = Some(quote);
+                        }
+                        Err(_) => protocol_match = false,
+                    }
+                } else {
+                    protocol_match = false;
+                }
+            }
             return Ok(ReconciledCandidate {
                 evidence: ReconciliationEvidence {
                     tx_hash: candidate.tx_hash,
@@ -225,6 +304,7 @@ async fn reconcile_candidate(
                     observed_unix_ns: unix_now_ns(),
                 },
                 v3_quote,
+                clanker_quote,
             });
         }
         if Instant::now() >= deadline {
@@ -237,6 +317,7 @@ async fn reconcile_candidate(
                     observed_unix_ns: unix_now_ns(),
                 },
                 v3_quote: None,
+                clanker_quote: None,
             });
         }
         sleep(poll_interval).await;

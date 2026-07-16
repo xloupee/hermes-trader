@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "document_role": "expected_protocol_pins",
   "provenance": "reviewed_protocol_pins",
   "fixture_id": null,
@@ -13,6 +13,19 @@
   "klik_factory_runtime_hash": null,
   "trench_proxy_runtime_hash": null,
   "trench_implementation_runtime_hash": null,
+  "clanker_v4": {
+    "factory_runtime_hash": "0xf895112a2deed34ba2765d0147aff3494104a28293cc2f19af9275934088da33",
+    "pool_manager_runtime_hash": "0xbd3881180b547f5fe817545743cfb4343e96b1bc6640dcd70c106b0066e95626",
+    "hook_runtime_hash": "0x0883056c4856f8fe464ff49f9c1c028455459dad8ceddcc6d5159259fe51e07f",
+    "locker_runtime_hash": "0x2175e20d41bc72ad6596b2fdd2c43c75e9d8ca10a706a1ca6c1a3d1526c336bc",
+    "mev_module_runtime_hash": "0x0815a0af5e056adaf07a1941b92082caa886b207676bd42c89ea6bde3956bc13",
+    "extension_runtime_hash": "0xf742a12de7ec06481d0e98942d1830d8bf33502d854e5d97062ef5fda6f5e004",
+    "max_static_fee_ppm": 100000,
+    "max_mev_fee_ppm": 800000,
+    "max_mev_seconds_to_decay": 120,
+    "mev_delay_guard_seconds": 1,
+    "protocol_fee_share_percent": 20
+  },
   "bankr_doppler_calls": [
     {
       "destination": "0xeb7c034704ef8dcd2d32324c1545f62fb4ad0862",

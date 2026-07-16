@@ -88,6 +88,18 @@ Official sources: <https://www.clanker.world/clankers/chain/robinhood/stats>, <h
 - PoolManager `0x8366a39cc670b4001a1121b8f6a443a643e40951`; WETH as default quote; locker `0x290F735F63824BB5836cDe24a35F5103A5B5Bc99`.
 - Deploy selector `0xdf40224a`; `TokenCreated(...)` topic `0x9299d1d1a88d8e1abdc591ae7a167a6bc63a8f17d695804e9091ee33aa89fb67`.
 - Live proof: tx `0x1237de969043eee811d7bafdcdcbbb149216016b7417477f7a43d2561dc5167e`, token `0x6bBBb3Be7424a911D5D131E272639512C1c12b07`, pool ID `0x99cdbc6f39e5b75958247787f30c59f251301f3fa517c36456e72b350c546d03`. The `charms` interface and direct sender are distinct from the factory.
+- Receipt-end paper proof reconstructs the five positive V4 liquidity positions,
+  the exact PoolKey, static-fee hook, descending-MEV configuration, and first
+  eligible timestamp without quote-time RPC. A fixed 0.001 WETH paper entry at
+  the first eligible second produces `0x2769d1ed26d975c58dfc0` token units and an
+  immediate full-position paper exit of `0x4d3bc686b147` wei after both LP and
+  hook protocol fees. Execution remains gated.
+- Independent swap differential: launch tx `0xaeae7e30161ec8a714d013bcd25b4939557ae59bd5c9f1b29a3cecedcdd8c645`
+  created pool `0x5f6886d1acf2665218684239b95bd9635d6c38bf883e7f40b62879b870d41edb`.
+  Its first later swap, tx `0x85cc9fb0c4a458456a61653d3381b1b28498d81af945a0d855d5672546e7f803`,
+  occurred after the MEV window. The local model exactly reproduces the event's
+  16,000 ppm LP fee, 63,157,894,736,842 wei hook surcharge, token output,
+  terminal sqrt price, tick, and liquidity.
 - Immediate configurable V4 concentrated liquidity, not a curve/graduation flow. Static/dynamic hooks, MEV descending fees, vault, airdrop, dev-buy, fee recipients, paired token, and position ranges are token-specific risk fields. CREATE2 is strongly suggested by salt/vanity tooling but not made an execution invariant here.
 - Official activity: 1.6k launches/24h, 4.7k/7d, site-labeled 1.0k transactions/24h, 0.071 WETH protocol revenue/24h, 2.10 WETH/7d. Exact unique creators, clean swaps, aggregate volume, and liquidity are unknown.
 

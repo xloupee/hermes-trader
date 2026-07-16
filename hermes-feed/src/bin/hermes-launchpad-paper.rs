@@ -15,9 +15,10 @@ use hermes_feed::paper_observer::{
     PaperPlanPolicy,
 };
 use hermes_feed::{
-    BankrDopplerExpectedProfile, BankrDopplerReceiptPaperQuote, ClankerReceiptPaperQuote,
-    HoodExpectedProfile, HoodMigrationEvidence, HoodReceiptPaperQuote, PonsReceiptPaperQuote,
-    V3ReceiptPaperQuote, bankr_hook_fee_ppm, quote_hood_curve_buy, quote_hood_curve_sell,
+    BankrCreateProfileVersion, BankrDopplerExpectedProfile, BankrDopplerReceiptPaperQuote,
+    BankrEnvelopeKind, ClankerReceiptPaperQuote, HoodExpectedProfile, HoodMigrationEvidence,
+    HoodReceiptPaperQuote, PonsReceiptPaperQuote, V3ReceiptPaperQuote, bankr_hook_fee_ppm,
+    quote_hood_curve_buy, quote_hood_curve_sell,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -123,6 +124,7 @@ struct ReconciliationMetrics {
     observer_claims: usize,
     confirmed_observations: usize,
     false_positives: usize,
+    reverted_attempts: usize,
     missed_transactions: usize,
     detector_misses: usize,
     feed_coverage_misses: usize,
@@ -1612,17 +1614,46 @@ fn bankr_quote_arithmetic_is_consistent(
     else {
         return false;
     };
-    let expected_initialize_tick = if quote.market.token < profile.weth.address {
-        -229_600
-    } else {
-        229_800
+    let expected_initialize_tick = match (
+        quote.market.create_profile_version,
+        quote.market.token < profile.weth.address,
+    ) {
+        (BankrCreateProfileVersion::CurveTicksV1, true)
+        | (BankrCreateProfileVersion::CurveTicksV2, true) => -229_600,
+        (BankrCreateProfileVersion::CurveTicksV1, false) => 229_800,
+        (BankrCreateProfileVersion::CurveTicksV2, false) => 229_600,
+    };
+    let Some(expected_delegation) = profile.smart_account.delegation_implementation else {
+        return false;
+    };
+    let valid_envelope = match quote.market.envelope {
+        BankrEnvelopeKind::Erc7579 => {
+            quote
+                .market
+                .outer_bundler
+                .is_some_and(|bundler| bundler != alloy_primitives::Address::ZERO)
+                && quote
+                    .market
+                    .user_operation_log_index
+                    .is_some_and(|index| index > quote.market.launch_log_index)
+                && quote.state_version.terminal_log_index
+                    == quote.market.user_operation_log_index.unwrap_or_default()
+        }
+        BankrEnvelopeKind::DirectAirlock => {
+            quote.market.outer_bundler.is_none()
+                && quote.market.user_operation_log_index.is_none()
+                && quote.state_version.terminal_log_index == quote.market.launch_log_index
+        }
     };
     if quote.quote_source != "confirmed_receipt_end_bankr_doppler_first_nonzero_state"
         || quote.sizing_source != "independent_fixed_tiny_weth_policy"
         || quote.execution_blocker
             != "paper_only_bankr_rehype_router_permit2_and_account_execution_not_enabled"
-        || quote.market.leader != profile.smart_account.account.address
-        || quote.market.outer_bundler == alloy_primitives::Address::ZERO
+        || !valid_envelope
+        || quote.market.leader == alloy_primitives::Address::ZERO
+        || quote.market.account_designator_hash != profile.smart_account.account.runtime_code_hash
+        || quote.market.delegation_implementation != expected_delegation.address
+        || quote.market.delegation_runtime_hash != expected_delegation.runtime_code_hash
         || quote.market.token == alloy_primitives::Address::ZERO
         || quote.market.token == profile.weth.address
         || quote.market.pool_id != pool_key.pool_id()
@@ -1641,8 +1672,6 @@ fn bankr_quote_arithmetic_is_consistent(
         || quote.market.position_count != 2
         || quote.market.initialize_log_index >= quote.market.last_liquidity_log_index
         || quote.market.last_liquidity_log_index >= quote.market.launch_log_index
-        || quote.market.launch_log_index >= quote.market.user_operation_log_index
-        || quote.state_version.terminal_log_index != quote.market.user_operation_log_index
         || quote.state_version.first_eligible_quote_timestamp != expected_first_eligible_timestamp
         || entry.lp_fee_ppm != quote.market.lp_fee_ppm
         || exit.lp_fee_ppm != quote.market.lp_fee_ppm
@@ -1901,6 +1930,7 @@ fn reconciliation_metrics(
             .collect::<Vec<_>>();
 
         let mut false_positives = 0_usize;
+        let mut reverted_attempts = 0_usize;
         let mut out_of_scope = 0_usize;
         let mut unreconciled = 0_usize;
         for key in claims.keys().filter(|key| !truth.contains_key(key)) {
@@ -1911,6 +1941,7 @@ fn reconciliation_metrics(
                     Some(block) if block < window.from_l2_block || block > window.to_l2_block => {
                         out_of_scope += 1;
                     }
+                    Some(_) if !record.receipt_status => reverted_attempts += 1,
                     Some(_) => false_positives += 1,
                 },
             }
@@ -1986,6 +2017,7 @@ fn reconciliation_metrics(
             observer_claims: claims.len(),
             confirmed_observations: confirmed_keys.len(),
             false_positives,
+            reverted_attempts,
             missed_transactions: missed_keys.len(),
             detector_misses: missed_keys
                 .iter()
@@ -2192,6 +2224,7 @@ mod tests {
     fn reconciliation_metrics_separate_confirmed_false_positive_missed_and_unknown() {
         let confirmed_key = (B256::with_last_byte(1), LaunchpadId::Bow);
         let false_positive_key = (B256::with_last_byte(2), LaunchpadId::Clanker);
+        let reverted_key = (B256::with_last_byte(6), LaunchpadId::Clanker);
         let unreconciled_key = (B256::with_last_byte(3), LaunchpadId::Pons);
         let missed_key = (B256::with_last_byte(4), LaunchpadId::HoodFun);
         let feed_missed_key = (B256::with_last_byte(5), LaunchpadId::BankrDoppler);
@@ -2199,11 +2232,13 @@ mod tests {
             observer_latency_ns: HashMap::from([
                 (confirmed_key, 50),
                 (false_positive_key, 60),
+                (reverted_key, 65),
                 (unreconciled_key, 70),
             ]),
             feed_transactions: HashMap::from([
                 (confirmed_key.0, 1),
                 (false_positive_key.0, 2),
+                (reverted_key.0, 2),
                 (unreconciled_key.0, 3),
                 (missed_key.0, 4),
             ]),
@@ -2225,6 +2260,14 @@ mod tests {
                     },
                 ),
                 (
+                    reverted_key,
+                    ObserverClaim {
+                        action: Some(ActionKind::Launch),
+                        predicted_token: None,
+                        predicted_pool: None,
+                    },
+                ),
+                (
                     unreconciled_key,
                     ObserverClaim {
                         action: Some(ActionKind::Launch),
@@ -2235,9 +2278,12 @@ mod tests {
             ]),
             ..ObservedOutputCandidates::default()
         };
+        let mut reverted = evidence_row(reverted_key, true, false, false, QuoteStatus::Blocked);
+        reverted.receipt_status = false;
         let evidence = [
             evidence_row(confirmed_key, true, true, true, QuoteStatus::Available),
             evidence_row(false_positive_key, true, false, false, QuoteStatus::Blocked),
+            reverted,
             evidence_row(missed_key, false, true, true, QuoteStatus::Available),
             evidence_row(feed_missed_key, false, true, true, QuoteStatus::Available),
         ];
@@ -2258,6 +2304,7 @@ mod tests {
             .find(|row| row.launchpad == LaunchpadId::Clanker)
             .unwrap();
         assert_eq!(clanker.false_positives, 1);
+        assert_eq!(clanker.reverted_attempts, 1);
         let pons = metrics
             .iter()
             .find(|row| row.launchpad == LaunchpadId::Pons)

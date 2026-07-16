@@ -178,6 +178,20 @@ pub struct UnwrappedSmartAccountCall {
     pub inner_call_count: usize,
 }
 
+/// Structurally exact ERC-7579 discovery result whose sender identity still
+/// requires canonical receipt-block EIP-7702 verification. This never grants
+/// execution authority and is intentionally separate from pinned decoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredErc7579Call {
+    pub leader: Address,
+    pub outer_bundler: Address,
+    pub entry_point: Address,
+    pub beneficiary: Address,
+    pub target: Address,
+    pub value: U256,
+    pub calldata: Bytes,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SmartAccountDecodeError {
     #[error("chain ID {actual} is not Robinhood Chain {expected}")]
@@ -332,6 +346,106 @@ pub fn decode_entry_point_v07_prevalidated(
         calldata,
         unwrap_depth,
         inner_call_count,
+    })
+}
+
+/// Decode only the exact single-operation ERC-7579 discovery shape for a
+/// separately pinned target. The UserOperation sender is not trusted here;
+/// callers must verify its EIP-7702 designator and delegated implementation at
+/// the canonical receipt block before admitting any quote.
+pub fn discover_entry_point_v07_erc7579(
+    observed: EntryPointCall<'_>,
+    expected_entry_point: ContractPin,
+    expected_target: ContractPin,
+) -> Result<DiscoveredErc7579Call, SmartAccountDecodeError> {
+    validate_contract_pin(expected_entry_point, "entry point")?;
+    validate_contract_pin(expected_target, "allowed target")?;
+    if observed.chain_id != ROBINHOOD_CHAIN_ID {
+        return Err(SmartAccountDecodeError::WrongChain {
+            expected: ROBINHOOD_CHAIN_ID,
+            actual: observed.chain_id,
+        });
+    }
+    if observed.destination.address != expected_entry_point.address {
+        return Err(SmartAccountDecodeError::EntryPointAddressMismatch);
+    }
+    if observed.destination.runtime_code_hash != expected_entry_point.runtime_code_hash {
+        return Err(SmartAccountDecodeError::EntryPointCodeHashMismatch);
+    }
+    if observed.calldata.len() > MAX_ENTRY_POINT_CALLDATA_BYTES {
+        return Err(SmartAccountDecodeError::EntryPointCalldataTooLarge {
+            actual: observed.calldata.len(),
+            maximum: MAX_ENTRY_POINT_CALLDATA_BYTES,
+        });
+    }
+    if observed.calldata.get(..4) != Some(ENTRY_POINT_V07_HANDLE_OPS_SELECTOR.as_slice()) {
+        return Err(SmartAccountDecodeError::WrongEntryPointSelector);
+    }
+    let operation_count = bounded_operation_count(observed.calldata)?;
+    if operation_count == 0 {
+        return Err(SmartAccountDecodeError::NoUserOperations);
+    }
+    if operation_count > MAX_USER_OPERATIONS {
+        return Err(SmartAccountDecodeError::ExcessiveUserOperations {
+            actual: operation_count,
+            maximum: MAX_USER_OPERATIONS,
+        });
+    }
+    let call = handleOpsCall::abi_decode(observed.calldata)
+        .map_err(|_| SmartAccountDecodeError::MalformedEntryPointCall)?;
+    if call.abi_encode().as_slice() != observed.calldata || call.ops.len() != operation_count {
+        return Err(SmartAccountDecodeError::MalformedEntryPointCall);
+    }
+    if call.ops.len() != 1 {
+        return Err(SmartAccountDecodeError::AmbiguousUserOperations {
+            actual: call.ops.len(),
+        });
+    }
+    let mut operations = call.ops;
+    let operation = operations.pop().expect("one operation checked above");
+    if operation.sender == Address::ZERO {
+        return Err(SmartAccountDecodeError::InvalidPin {
+            role: "discovered smart account",
+        });
+    }
+    if !operation.initCode.is_empty() {
+        return Err(SmartAccountDecodeError::InitCodeNotAllowed {
+            sender: operation.sender,
+        });
+    }
+    if !operation.paymasterAndData.is_empty() {
+        return Err(SmartAccountDecodeError::PaymasterNotAllowed {
+            sender: operation.sender,
+        });
+    }
+    if operation.callData.len() > MAX_ACCOUNT_CALLDATA_BYTES {
+        return Err(SmartAccountDecodeError::AccountCalldataTooLarge {
+            actual: operation.callData.len(),
+            maximum: MAX_ACCOUNT_CALLDATA_BYTES,
+        });
+    }
+    let discovery_pin = SmartAccountPin {
+        account: ContractPin {
+            address: operation.sender,
+            runtime_code_hash: B256::ZERO,
+        },
+        factory: None,
+        execution_profile: AccountExecutionProfile::Erc7579SingleCall,
+        delegation_implementation: None,
+    };
+    let (target, value, calldata) =
+        decode_account_execute(&operation.callData, discovery_pin.execution_profile)?;
+    if target != expected_target.address {
+        return Err(SmartAccountDecodeError::UnknownTarget { target });
+    }
+    Ok(DiscoveredErc7579Call {
+        leader: operation.sender,
+        outer_bundler: observed.outer_bundler,
+        entry_point: expected_entry_point.address,
+        beneficiary: call.beneficiary,
+        target,
+        value,
+        calldata,
     })
 }
 
@@ -743,6 +857,57 @@ mod tests {
         assert_eq!(decoded.calldata, protocol_calldata);
         assert_eq!(decoded.unwrap_depth, 1);
         assert_eq!(decoded.inner_call_count, 1);
+    }
+
+    #[test]
+    fn discovers_rotating_bankr_sender_without_granting_pinned_identity() {
+        let protocol_calldata = Bytes::from_static(&[0x88, 0x2d, 0xb7, 0x07]);
+        let account_calldata =
+            encode_erc7579_execute(B256::ZERO, TARGET, U256::ZERO, protocol_calldata.clone());
+        let calldata = encode_handle_ops(vec![user_operation(UNKNOWN, account_calldata)]);
+        let observed = EntryPointCall {
+            chain_id: ROBINHOOD_CHAIN_ID,
+            destination: contract(ENTRY_POINT, ENTRY_POINT_HASH),
+            outer_bundler: BUNDLER,
+            calldata: &calldata,
+        };
+        assert_eq!(
+            decode_with(
+                &calldata,
+                contract(ENTRY_POINT, ENTRY_POINT_HASH),
+                &[erc7579_account(LEADER)],
+                &[contract(TARGET, TARGET_HASH)],
+            ),
+            Err(SmartAccountDecodeError::UnknownSmartAccount { sender: UNKNOWN })
+        );
+
+        let discovered = discover_entry_point_v07_erc7579(
+            observed,
+            contract(ENTRY_POINT, ENTRY_POINT_HASH),
+            contract(TARGET, TARGET_HASH),
+        )
+        .unwrap();
+        assert_eq!(discovered.leader, UNKNOWN);
+        assert_eq!(discovered.outer_bundler, BUNDLER);
+        assert_eq!(discovered.target, TARGET);
+        assert_eq!(discovered.value, U256::ZERO);
+        assert_eq!(discovered.calldata, protocol_calldata);
+
+        let wrong_mode = encode_handle_ops(vec![user_operation(
+            UNKNOWN,
+            encode_erc7579_execute(B256::with_last_byte(1), TARGET, U256::ZERO, Bytes::new()),
+        )]);
+        assert_eq!(
+            discover_entry_point_v07_erc7579(
+                EntryPointCall {
+                    calldata: &wrong_mode,
+                    ..observed
+                },
+                contract(ENTRY_POINT, ENTRY_POINT_HASH),
+                contract(TARGET, TARGET_HASH),
+            ),
+            Err(SmartAccountDecodeError::UnsupportedErc7579Mode)
+        );
     }
 
     #[test]

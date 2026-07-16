@@ -215,6 +215,13 @@ mod initializer_events {
 
 pub const BANKR_CREATE_SELECTOR: [u8; 4] = abi::createCall::SELECTOR;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BankrCreateProfileVersion {
+    CurveTicksV1,
+    CurveTicksV2,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BankrDopplerExpectedProfile {
     pub airlock: CodePin,
@@ -346,8 +353,13 @@ pub struct BankrDopplerStateVersion {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct BankrDopplerMarketEvidence {
+    pub envelope: BankrEnvelopeKind,
+    pub create_profile_version: BankrCreateProfileVersion,
     pub leader: Address,
-    pub outer_bundler: Address,
+    pub outer_bundler: Option<Address>,
+    pub account_designator_hash: B256,
+    pub delegation_implementation: Address,
+    pub delegation_runtime_hash: B256,
     pub token: Address,
     pub pool_id: B256,
     pub quote_asset: Address,
@@ -364,8 +376,21 @@ pub struct BankrDopplerMarketEvidence {
     pub initialize_log_index: u64,
     pub last_liquidity_log_index: u64,
     pub launch_log_index: u64,
-    pub user_operation_log_index: u64,
+    pub user_operation_log_index: Option<u64>,
     pub position_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BankrEnvelopeKind {
+    Erc7579,
+    DirectAirlock,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifiedBankrEnvelope {
+    Erc7579 { smart_account: SmartAccountPin },
+    DirectAirlock { smart_account: SmartAccountPin },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -451,7 +476,7 @@ struct LaunchEvidence {
     initialize_log_index: u64,
     last_liquidity_log_index: u64,
     launch_log_index: u64,
-    user_operation_log_index: u64,
+    user_operation_log_index: Option<u64>,
     schedule_start: u64,
     buyback_destination: Address,
 }
@@ -465,53 +490,97 @@ pub fn quote_bankr_doppler_launch_receipt(
     profile: BankrDopplerExpectedProfile,
     policy: BankrDopplerQuotePolicy,
 ) -> Result<BankrDopplerReceiptPaperQuote, BankrQuoteError> {
-    profile.validate()?;
-    validate_envelope(transaction, receipt, block, policy)?;
-
-    let accounts = [profile.smart_account];
-    let targets = [ContractPin {
-        address: profile.airlock.address,
-        runtime_code_hash: profile.airlock.runtime_code_hash,
-    }];
-    let unwrapped = decode_entry_point_v07(
-        EntryPointCall {
-            chain_id: CHAIN_ID,
-            destination: profile.entry_point,
-            outer_bundler: transaction.from,
-            calldata: &transaction.input,
-        },
-        SmartAccountPins {
-            entry_point: profile.entry_point,
-            accounts: &accounts,
-            allowed_targets: &targets,
+    quote_bankr_doppler_launch_receipt_verified(
+        transaction,
+        receipt,
+        block,
+        profile,
+        policy,
+        VerifiedBankrEnvelope::Erc7579 {
+            smart_account: profile.smart_account,
         },
     )
-    .map_err(|_| BankrQuoteError::SmartAccountIdentity)?;
-    if unwrapped.leader != profile.smart_account.account.address
-        || unwrapped.target != profile.airlock.address
-        || unwrapped.value != U256::ZERO
-        || unwrapped.execution_profile != AccountExecutionProfile::Erc7579SingleCall
-        || unwrapped.delegation_implementation
-            != profile
-                .smart_account
-                .delegation_implementation
-                .map(|pin| pin.address)
-    {
-        return Err(BankrQuoteError::SmartAccountIdentity);
-    }
+}
 
-    let create = abi::createCall::abi_decode(&unwrapped.calldata)
+pub fn quote_bankr_doppler_launch_receipt_verified(
+    transaction: &RobinhoodTransaction,
+    receipt: &NoxaReceipt,
+    block: &RobinhoodBlock,
+    profile: BankrDopplerExpectedProfile,
+    policy: BankrDopplerQuotePolicy,
+    envelope: VerifiedBankrEnvelope,
+) -> Result<BankrDopplerReceiptPaperQuote, BankrQuoteError> {
+    profile.validate()?;
+    let smart_account = match envelope {
+        VerifiedBankrEnvelope::Erc7579 { smart_account }
+        | VerifiedBankrEnvelope::DirectAirlock { smart_account } => smart_account,
+    };
+    validate_verified_smart_account(smart_account, profile)?;
+    validate_envelope(transaction, receipt, block, policy, profile, envelope)?;
+
+    let (envelope_kind, leader, outer_bundler, create_calldata, require_user_operation) =
+        match envelope {
+            VerifiedBankrEnvelope::Erc7579 { .. } => {
+                let accounts = [smart_account];
+                let targets = [ContractPin {
+                    address: profile.airlock.address,
+                    runtime_code_hash: profile.airlock.runtime_code_hash,
+                }];
+                let unwrapped = decode_entry_point_v07(
+                    EntryPointCall {
+                        chain_id: CHAIN_ID,
+                        destination: profile.entry_point,
+                        outer_bundler: transaction.from,
+                        calldata: &transaction.input,
+                    },
+                    SmartAccountPins {
+                        entry_point: profile.entry_point,
+                        accounts: &accounts,
+                        allowed_targets: &targets,
+                    },
+                )
+                .map_err(|_| BankrQuoteError::SmartAccountIdentity)?;
+                if unwrapped.leader != smart_account.account.address
+                    || unwrapped.target != profile.airlock.address
+                    || unwrapped.value != U256::ZERO
+                    || unwrapped.execution_profile != AccountExecutionProfile::Erc7579SingleCall
+                    || unwrapped.delegation_implementation
+                        != smart_account
+                            .delegation_implementation
+                            .map(|pin| pin.address)
+                {
+                    return Err(BankrQuoteError::SmartAccountIdentity);
+                }
+                (
+                    BankrEnvelopeKind::Erc7579,
+                    unwrapped.leader,
+                    Some(unwrapped.outer_bundler),
+                    unwrapped.calldata,
+                    true,
+                )
+            }
+            VerifiedBankrEnvelope::DirectAirlock { .. } => (
+                BankrEnvelopeKind::DirectAirlock,
+                smart_account.account.address,
+                None,
+                transaction.input.clone(),
+                false,
+            ),
+        };
+
+    let create = abi::createCall::abi_decode(&create_calldata)
         .map_err(|_| BankrQuoteError::CreateCalldata)?;
-    if create.abi_encode().as_slice() != unwrapped.calldata.as_ref() {
+    if create.abi_encode().as_slice() != create_calldata.as_ref() {
         return Err(BankrQuoteError::CreateCalldata);
     }
     let decoded = validate_create_calldata(&create, profile)?;
     let (evidence, positions) = validate_receipt(
         &receipt.logs,
-        unwrapped.leader,
+        leader,
         &decoded,
         block.timestamp,
         profile,
+        require_user_operation,
     )?;
 
     let first_eligible_quote_timestamp = evidence
@@ -616,15 +685,28 @@ pub fn quote_bankr_doppler_launch_receipt(
             block_hash: receipt.block_hash,
             l2_block_number: receipt.l2_block_number,
             transaction_index: receipt.transaction_index,
-            terminal_log_index: evidence.user_operation_log_index,
+            terminal_log_index: evidence
+                .user_operation_log_index
+                .unwrap_or(evidence.launch_log_index),
             receipt_timestamp: block.timestamp,
             first_eligible_quote_timestamp,
         },
         quote_source: "confirmed_receipt_end_bankr_doppler_first_nonzero_state".into(),
         sizing_source: "independent_fixed_tiny_weth_policy".into(),
         market: BankrDopplerMarketEvidence {
-            leader: unwrapped.leader,
-            outer_bundler: unwrapped.outer_bundler,
+            envelope: envelope_kind,
+            create_profile_version: decoded.profile_version,
+            leader,
+            outer_bundler,
+            account_designator_hash: smart_account.account.runtime_code_hash,
+            delegation_implementation: smart_account
+                .delegation_implementation
+                .map(|pin| pin.address)
+                .ok_or(BankrQuoteError::SmartAccountIdentity)?,
+            delegation_runtime_hash: smart_account
+                .delegation_implementation
+                .map(|pin| pin.runtime_code_hash)
+                .ok_or(BankrQuoteError::SmartAccountIdentity)?,
             token: evidence.token,
             pool_id: evidence.pool_id,
             quote_asset: WETH,
@@ -681,6 +763,17 @@ pub fn quote_bankr_doppler_launch_receipt(
 struct DecodedCreate {
     init: abi::DopplerInitData,
     rehype: abi::RehypeInitData,
+    profile_version: BankrCreateProfileVersion,
+}
+
+/// Applies the canonical ABI and exact reviewed Bankr create-profile checks
+/// without granting account identity or execution rights.
+pub fn validate_bankr_create_calldata_for_observation(calldata: &[u8]) -> bool {
+    let Ok(call) = abi::createCall::abi_decode(calldata) else {
+        return false;
+    };
+    call.abi_encode().as_slice() == calldata
+        && validate_create_calldata(&call, BankrDopplerExpectedProfile::production()).is_ok()
 }
 
 fn validate_create_calldata(
@@ -735,11 +828,17 @@ fn validate_create_calldata(
             && curve.numPositions == 1
             && curve.shares == shares
     };
-    if !curve(&init.curves[0], -229_800, -119_800, expected_primary_share)
-        || !curve(&init.curves[1], -119_800, 887_200, expected_secondary_share)
+    let profile_version = if curve(&init.curves[0], -229_800, -119_800, expected_primary_share)
+        && curve(&init.curves[1], -119_800, 887_200, expected_secondary_share)
     {
+        BankrCreateProfileVersion::CurveTicksV1
+    } else if curve(&init.curves[0], -229_600, -119_400, expected_primary_share)
+        && curve(&init.curves[1], -119_400, 887_200, expected_secondary_share)
+    {
+        BankrCreateProfileVersion::CurveTicksV2
+    } else {
         return Err(BankrQuoteError::CreateCalldata);
-    }
+    };
     let creator_share = WAD
         .checked_mul(U256::from(profile.creator_beneficiary_bps))
         .ok_or(BankrQuoteError::ArithmeticOverflow)?
@@ -778,7 +877,11 @@ fn validate_create_calldata(
     {
         return Err(BankrQuoteError::CreateCalldata);
     }
-    Ok(DecodedCreate { init, rehype })
+    Ok(DecodedCreate {
+        init,
+        rehype,
+        profile_version,
+    })
 }
 
 fn validate_receipt(
@@ -787,6 +890,7 @@ fn validate_receipt(
     decoded: &DecodedCreate,
     block_timestamp: u64,
     profile: BankrDopplerExpectedProfile,
+    require_user_operation: bool,
 ) -> Result<(LaunchEvidence, Vec<Position>), BankrQuoteError> {
     let mut airlock_create = None;
     let mut initializer_create = None;
@@ -930,7 +1034,12 @@ fn validate_receipt(
         i32::try_from(initialize.tickSpacing).map_err(|_| BankrQuoteError::InitializeIdentity)?;
     let initialize_tick =
         i32::try_from(initialize.tick).map_err(|_| BankrQuoteError::InitializeIdentity)?;
-    let expected_initialize_tick = if token < WETH { -229_600 } else { 229_800 };
+    let expected_initialize_tick = match (decoded.profile_version, token < WETH) {
+        (BankrCreateProfileVersion::CurveTicksV1, true)
+        | (BankrCreateProfileVersion::CurveTicksV2, true) => -229_600,
+        (BankrCreateProfileVersion::CurveTicksV1, false) => 229_800,
+        (BankrCreateProfileVersion::CurveTicksV2, false) => 229_600,
+    };
     let expected_sqrt_price_x96 = get_sqrt_ratio_at_tick(expected_initialize_tick)
         .map_err(|_| BankrQuoteError::InitializeIdentity)?;
     if initialize.id != key.pool_id()
@@ -951,16 +1060,19 @@ fn validate_receipt(
     {
         return Err(BankrQuoteError::LiquiditySequence);
     }
-    let expected_ranges = if token < WETH {
-        [
+    let expected_ranges = match (decoded.profile_version, token < WETH) {
+        (_, true) => [
             (-229_600, -119_400, B256::ZERO),
             (-119_400, 887_200, B256::with_last_byte(1)),
-        ]
-    } else {
-        [
+        ],
+        (BankrCreateProfileVersion::CurveTicksV1, false) => [
             (119_800, 229_800, B256::ZERO),
             (-887_200, 119_800, B256::with_last_byte(1)),
-        ]
+        ],
+        (BankrCreateProfileVersion::CurveTicksV2, false) => [
+            (119_400, 229_600, B256::ZERO),
+            (-887_200, 119_400, B256::with_last_byte(1)),
+        ],
     };
     for (position, expected) in positions.iter().zip(expected_ranges) {
         if position.pool_id != key.pool_id()
@@ -1000,20 +1112,23 @@ fn validate_receipt(
     {
         return Err(BankrQuoteError::FeeSchedule);
     }
-    let (user_operation, user_operation_log_index) =
-        user_operation.ok_or(BankrQuoteError::UserOperationEvidence)?;
-    if user_operation.sender != leader
-        || user_operation.paymaster != Address::ZERO
-        || !user_operation.success
-    {
-        return Err(BankrQuoteError::UserOperationEvidence);
-    }
+    let user_operation_log_index = match (require_user_operation, user_operation) {
+        (true, Some((event, log_index)))
+            if event.sender == leader
+                && event.paymaster == Address::ZERO
+                && event.success
+                && launch_log_index < log_index =>
+        {
+            Some(log_index)
+        }
+        (false, None) => None,
+        _ => return Err(BankrQuoteError::UserOperationEvidence),
+    };
     if !(initialize_log_index < last_liquidity_log_index
         && last_liquidity_log_index < initializer_create_log_index
         && initializer_create_log_index < lock_log_index
         && lock_log_index < schedule_log_index
-        && schedule_log_index < launch_log_index
-        && launch_log_index < user_operation_log_index)
+        && schedule_log_index < launch_log_index)
     {
         return Err(BankrQuoteError::LiquiditySequence);
     }
@@ -1101,12 +1216,25 @@ fn validate_envelope(
     receipt: &NoxaReceipt,
     block: &RobinhoodBlock,
     policy: BankrDopplerQuotePolicy,
+    profile: BankrDopplerExpectedProfile,
+    envelope: VerifiedBankrEnvelope,
 ) -> Result<(), BankrQuoteError> {
+    let smart_account = match envelope {
+        VerifiedBankrEnvelope::Erc7579 { smart_account }
+        | VerifiedBankrEnvelope::DirectAirlock { smart_account } => smart_account,
+    };
+    let destination_matches = match envelope {
+        VerifiedBankrEnvelope::Erc7579 { .. } => transaction.to == Some(ENTRY_POINT_V07),
+        VerifiedBankrEnvelope::DirectAirlock { .. } => {
+            transaction.to == Some(profile.airlock.address)
+                && transaction.from == smart_account.account.address
+        }
+    };
     if !receipt.status
         || receipt.transaction_hash == B256::ZERO
         || receipt.block_hash == B256::ZERO
         || transaction.hash != receipt.transaction_hash
-        || transaction.to != Some(ENTRY_POINT_V07)
+        || !destination_matches
         || transaction.value != U256::ZERO
         || transaction.l2_block_number != Some(receipt.l2_block_number)
         || transaction.transaction_index != Some(receipt.transaction_index)
@@ -1131,6 +1259,22 @@ fn validate_envelope(
         .any(|pair| pair[0].log_index >= pair[1].log_index)
     {
         return Err(BankrQuoteError::InvalidEnvelope);
+    }
+    Ok(())
+}
+
+fn validate_verified_smart_account(
+    smart_account: SmartAccountPin,
+    profile: BankrDopplerExpectedProfile,
+) -> Result<(), BankrQuoteError> {
+    let expected = profile.smart_account;
+    if smart_account.account.address == Address::ZERO
+        || smart_account.account.runtime_code_hash != expected.account.runtime_code_hash
+        || smart_account.factory.is_some()
+        || smart_account.execution_profile != AccountExecutionProfile::Erc7579SingleCall
+        || smart_account.delegation_implementation != expected.delegation_implementation
+    {
+        return Err(BankrQuoteError::SmartAccountIdentity);
     }
     Ok(())
 }
@@ -1161,6 +1305,30 @@ mod tests {
         }
     }
 
+    fn proof_create_calldata(fixture: &LiveFixture) -> alloy_primitives::Bytes {
+        let profile = BankrDopplerExpectedProfile::production();
+        let accounts = [profile.smart_account];
+        let targets = [ContractPin {
+            address: profile.airlock.address,
+            runtime_code_hash: profile.airlock.runtime_code_hash,
+        }];
+        decode_entry_point_v07(
+            EntryPointCall {
+                chain_id: CHAIN_ID,
+                destination: profile.entry_point,
+                outer_bundler: fixture.transaction.from,
+                calldata: &fixture.transaction.input,
+            },
+            SmartAccountPins {
+                entry_point: profile.entry_point,
+                accounts: &accounts,
+                allowed_targets: &targets,
+            },
+        )
+        .unwrap()
+        .calldata
+    }
+
     fn hex_u256(value: &str) -> U256 {
         U256::from_str_radix(value, 16).unwrap()
     }
@@ -1189,6 +1357,132 @@ mod tests {
         BankrDopplerExpectedProfile::production()
             .validate()
             .unwrap();
+    }
+
+    #[test]
+    fn exact_current_curve_profile_is_distinct_from_reviewed_v1_proof() {
+        let fixture = live_fixture();
+        let calldata = proof_create_calldata(&fixture);
+        let mut call = abi::createCall::abi_decode(&calldata).unwrap();
+        let legacy =
+            validate_create_calldata(&call, BankrDopplerExpectedProfile::production()).unwrap();
+        assert_eq!(
+            legacy.profile_version,
+            BankrCreateProfileVersion::CurveTicksV1
+        );
+
+        let mut init =
+            abi::DopplerInitData::abi_decode(&call.createData.poolInitializerData).unwrap();
+        init.curves[0].tickLower = (-229_600_i32).try_into().unwrap();
+        init.curves[0].tickUpper = (-119_400_i32).try_into().unwrap();
+        init.curves[1].tickLower = (-119_400_i32).try_into().unwrap();
+        call.createData.poolInitializerData = init.abi_encode().into();
+        let current =
+            validate_create_calldata(&call, BankrDopplerExpectedProfile::production()).unwrap();
+        assert_eq!(
+            current.profile_version,
+            BankrCreateProfileVersion::CurveTicksV2
+        );
+        assert!(validate_bankr_create_calldata_for_observation(
+            &call.abi_encode()
+        ));
+
+        init.curves[1].tickLower = (-119_200_i32).try_into().unwrap();
+        call.createData.poolInitializerData = init.abi_encode().into();
+        assert!(!validate_bankr_create_calldata_for_observation(
+            &call.abi_encode()
+        ));
+    }
+
+    #[test]
+    fn rotating_designator_and_direct_airlock_envelopes_quote_fail_closed() {
+        let profile = BankrDopplerExpectedProfile::production();
+        let mut rotating = live_fixture();
+        let rotating_account =
+            alloy_primitives::address!("6af697bf5bccadffb998e9785b880abf7861ebd1");
+        let mut input = rotating.transaction.input.to_vec();
+        let offsets = input
+            .windows(Address::len_bytes())
+            .enumerate()
+            .filter_map(|(index, window)| {
+                (window == BANKR_PROOF_ACCOUNT.as_slice()).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(offsets.len(), 1);
+        input[offsets[0]..offsets[0] + Address::len_bytes()]
+            .copy_from_slice(rotating_account.as_slice());
+        rotating.transaction.input = input.into();
+        let user_operation = rotating
+            .receipt
+            .logs
+            .iter_mut()
+            .find(|log| log.topics.first() == Some(&abi::UserOperationEvent::SIGNATURE_HASH))
+            .unwrap();
+        user_operation.topics[2] = B256::left_padding_from(rotating_account.as_slice());
+        let dynamic_pin = SmartAccountPin {
+            account: ContractPin {
+                address: rotating_account,
+                runtime_code_hash: BANKR_ACCOUNT_DESIGNATOR_HASH,
+            },
+            ..profile.smart_account
+        };
+        let quote = quote_bankr_doppler_launch_receipt_verified(
+            &rotating.transaction,
+            &rotating.receipt,
+            &rotating.block,
+            profile,
+            policy(),
+            VerifiedBankrEnvelope::Erc7579 {
+                smart_account: dynamic_pin,
+            },
+        )
+        .unwrap();
+        assert_eq!(quote.market.leader, rotating_account);
+        assert_eq!(quote.market.envelope, BankrEnvelopeKind::Erc7579);
+
+        let mut drifted_pin = dynamic_pin;
+        drifted_pin.account.runtime_code_hash = B256::with_last_byte(1);
+        assert!(matches!(
+            quote_bankr_doppler_launch_receipt_verified(
+                &rotating.transaction,
+                &rotating.receipt,
+                &rotating.block,
+                profile,
+                policy(),
+                VerifiedBankrEnvelope::Erc7579 {
+                    smart_account: drifted_pin,
+                },
+            ),
+            Err(BankrQuoteError::SmartAccountIdentity)
+        ));
+
+        let mut direct = live_fixture();
+        let direct_calldata = proof_create_calldata(&direct);
+        direct.transaction.from = BANKR_PROOF_ACCOUNT;
+        direct.transaction.to = Some(BANKR_AIRLOCK);
+        direct.transaction.input = direct_calldata;
+        direct
+            .receipt
+            .logs
+            .retain(|log| log.topics.first() != Some(&abi::UserOperationEvent::SIGNATURE_HASH));
+        let quote = quote_bankr_doppler_launch_receipt_verified(
+            &direct.transaction,
+            &direct.receipt,
+            &direct.block,
+            profile,
+            policy(),
+            VerifiedBankrEnvelope::DirectAirlock {
+                smart_account: profile.smart_account,
+            },
+        )
+        .unwrap();
+        assert_eq!(quote.market.envelope, BankrEnvelopeKind::DirectAirlock);
+        assert!(quote.market.outer_bundler.is_none());
+        assert!(quote.market.user_operation_log_index.is_none());
+        assert_eq!(
+            quote.state_version.terminal_log_index,
+            quote.market.launch_log_index
+        );
     }
 
     #[test]

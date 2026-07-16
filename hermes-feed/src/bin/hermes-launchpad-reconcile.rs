@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use alloy_primitives::{B256, U256, keccak256};
+use alloy_primitives::{Address, B256, U256, keccak256};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use futures_util::{StreamExt, stream};
@@ -28,14 +28,19 @@ use hermes_feed::robinhood::{
     ACTIVE_NOXA_LAUNCH_FACTORY, BOW_LAUNCH_FACTORY, CHAIN_ID, LAUNCHHOOD_V3_FACTORY,
     NOXA_LAUNCH_FACTORY, PUBLIC_RPC_URL,
 };
+use hermes_feed::smart_account::{
+    AccountExecutionProfile, ContractPin as SmartContractPin, EntryPointCall, SmartAccountPin,
+    discover_entry_point_v07_erc7579,
+};
 use hermes_feed::tier2_curve::HOOD_FACTORY;
 use hermes_feed::{
     BankrDopplerExpectedProfile, BankrDopplerQuotePolicy, BankrDopplerReceiptPaperQuote,
     ClankerQuotePolicy, ClankerReceiptPaperQuote, ClankerV4ExpectedProfile, HoodExpectedProfile,
     HoodMigrationEvidence, HoodQuotePolicy, HoodReceiptPaperQuote, NoxaRpcClient, PonsQuoteError,
     PonsQuotePolicy, PonsReceiptPaperQuote, V3ReceiptPaperQuote, V3ReceiptQuotePolicy,
-    quote_bankr_doppler_launch_receipt, quote_clanker_launch_receipt, quote_hood_curve_receipt,
-    quote_pons_launch_receipt, quote_v3_launch_receipt, verify_hood_graduation_receipt,
+    VerifiedBankrEnvelope, quote_bankr_doppler_launch_receipt_verified,
+    quote_clanker_launch_receipt, quote_hood_curve_receipt, quote_pons_launch_receipt,
+    quote_v3_launch_receipt, verify_hood_graduation_receipt,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -394,6 +399,98 @@ fn read_observer_input(path: &Path) -> Result<ObserverInput> {
     Ok(ObserverInput { candidates })
 }
 
+async fn verify_bankr_envelope_at_receipt_block(
+    rpc: &NoxaRpcClient,
+    transaction: &hermes_feed::RobinhoodTransaction,
+    block: &hermes_feed::noxa_rpc::RobinhoodBlock,
+    profile: BankrDopplerExpectedProfile,
+) -> Result<VerifiedBankrEnvelope> {
+    let (leader, kind) = if transaction.to == Some(profile.entry_point.address) {
+        let discovered = discover_entry_point_v07_erc7579(
+            EntryPointCall {
+                chain_id: CHAIN_ID,
+                destination: profile.entry_point,
+                outer_bundler: transaction.from,
+                calldata: &transaction.input,
+            },
+            profile.entry_point,
+            SmartContractPin {
+                address: profile.airlock.address,
+                runtime_code_hash: profile.airlock.runtime_code_hash,
+            },
+        )
+        .context("Bankr EntryPoint call is not the exact discovery profile")?;
+        if discovered.value != U256::ZERO {
+            bail!("Bankr discovered account call carries native value");
+        }
+        (discovered.leader, true)
+    } else if transaction.to == Some(profile.airlock.address) && transaction.value == U256::ZERO {
+        (transaction.from, false)
+    } else {
+        bail!("Bankr transaction is neither exact EntryPoint nor direct Airlock envelope");
+    };
+    let delegation = profile
+        .smart_account
+        .delegation_implementation
+        .context("Bankr profile has no delegated implementation")?;
+    let account_code = rpc.code_at_l2_block(leader, block.l2_block_number).await?;
+    let delegated_code = rpc
+        .code_at_l2_block(delegation.address, block.l2_block_number)
+        .await?;
+    if delegated_code.is_empty() {
+        bail!("Bankr delegated Kernel runtime is empty");
+    }
+    let smart_account = verified_bankr_smart_account_from_identity(
+        leader,
+        &account_code,
+        keccak256(&delegated_code),
+        profile,
+    )?;
+    if rpc.block_by_number(block.l2_block_number).await? != *block {
+        bail!("Bankr receipt block changed during EIP-7702 identity verification");
+    }
+    Ok(if kind {
+        VerifiedBankrEnvelope::Erc7579 { smart_account }
+    } else {
+        VerifiedBankrEnvelope::DirectAirlock { smart_account }
+    })
+}
+
+fn verified_bankr_smart_account_from_identity(
+    leader: Address,
+    account_designator: &[u8],
+    delegated_runtime_hash: B256,
+    profile: BankrDopplerExpectedProfile,
+) -> Result<SmartAccountPin> {
+    if leader == Address::ZERO {
+        bail!("Bankr envelope has zero leader");
+    }
+    let delegation = profile
+        .smart_account
+        .delegation_implementation
+        .context("Bankr profile has no delegated implementation")?;
+    let mut expected_designator = Vec::with_capacity(23);
+    expected_designator.extend_from_slice(&[0xef, 0x01, 0x00]);
+    expected_designator.extend_from_slice(delegation.address.as_slice());
+    if account_designator != expected_designator
+        || keccak256(account_designator) != profile.smart_account.account.runtime_code_hash
+    {
+        bail!("Bankr leader EIP-7702 designator disagrees with reviewed profile");
+    }
+    if delegated_runtime_hash != delegation.runtime_code_hash {
+        bail!("Bankr delegated Kernel runtime disagrees with reviewed profile");
+    }
+    Ok(SmartAccountPin {
+        account: SmartContractPin {
+            address: leader,
+            runtime_code_hash: profile.smart_account.account.runtime_code_hash,
+        },
+        factory: None,
+        execution_profile: AccountExecutionProfile::Erc7579SingleCall,
+        delegation_implementation: Some(delegation),
+    })
+}
+
 async fn augment_with_ground_truth(
     rpc: &NoxaRpcClient,
     mut input: ObserverInput,
@@ -636,17 +733,24 @@ async fn reconcile_candidate(
                     .with_context(|| format!("missing transaction {}", candidate.tx_hash))?;
                 let block = rpc.block_by_number(receipt.l2_block_number).await?;
                 if let Some(profile) = profiles.bankr {
-                    match quote_bankr_doppler_launch_receipt(
-                        &transaction,
-                        &receipt,
-                        &block,
-                        profile,
-                        BankrDopplerQuotePolicy {
-                            amount_in: quote_policy.amount_in,
-                            max_amount_in: quote_policy.max_amount_in,
-                            slippage_bps: quote_policy.slippage_bps,
-                        },
-                    ) {
+                    let verified_envelope =
+                        verify_bankr_envelope_at_receipt_block(rpc, &transaction, &block, profile)
+                            .await;
+                    match verified_envelope.and_then(|envelope| {
+                        quote_bankr_doppler_launch_receipt_verified(
+                            &transaction,
+                            &receipt,
+                            &block,
+                            profile,
+                            BankrDopplerQuotePolicy {
+                                amount_in: quote_policy.amount_in,
+                                max_amount_in: quote_policy.max_amount_in,
+                                slippage_bps: quote_policy.slippage_bps,
+                            },
+                            envelope,
+                        )
+                        .map_err(anyhow::Error::from)
+                    }) {
                         Ok(quote) => {
                             protocol_match = true;
                             truth_action = Some(ActionKind::Launch);
@@ -1207,5 +1311,53 @@ mod tests {
         let mut lookalike = fixture.receipt.logs;
         lookalike[0].address = Address::with_last_byte(0xee);
         assert_eq!(hood_token_from_receipt(&lookalike), None);
+    }
+
+    #[test]
+    fn bankr_receipt_identity_requires_exact_designator_and_kernel_hash() {
+        let profile = BankrDopplerExpectedProfile::production();
+        let delegation = profile.smart_account.delegation_implementation.unwrap();
+        let leader = Address::with_last_byte(0x44);
+        let mut designator = vec![0xef, 0x01, 0x00];
+        designator.extend_from_slice(delegation.address.as_slice());
+        let pin = verified_bankr_smart_account_from_identity(
+            leader,
+            &designator,
+            delegation.runtime_code_hash,
+            profile,
+        )
+        .unwrap();
+        assert_eq!(pin.account.address, leader);
+        assert_eq!(pin.delegation_implementation, Some(delegation));
+
+        let mut wrong_designator = designator.clone();
+        wrong_designator[3] ^= 1;
+        assert!(
+            verified_bankr_smart_account_from_identity(
+                leader,
+                &wrong_designator,
+                delegation.runtime_code_hash,
+                profile,
+            )
+            .is_err()
+        );
+        assert!(
+            verified_bankr_smart_account_from_identity(
+                leader,
+                &designator,
+                B256::with_last_byte(1),
+                profile,
+            )
+            .is_err()
+        );
+        assert!(
+            verified_bankr_smart_account_from_identity(
+                Address::ZERO,
+                &designator,
+                delegation.runtime_code_hash,
+                profile,
+            )
+            .is_err()
+        );
     }
 }

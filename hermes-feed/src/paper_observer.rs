@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::PonsAdapter;
-use crate::bankr_receipt_quote::{BANKR_CREATE_SELECTOR, BankrDopplerExpectedProfile};
+use crate::bankr_receipt_quote::{
+    BANKR_CREATE_SELECTOR, BankrDopplerExpectedProfile,
+    validate_bankr_create_calldata_for_observation,
+};
 use crate::clanker_receipt_quote::{
     CLANKER_DESCENDING_MEV_MODULE, CLANKER_EXTENSION, CLANKER_STATIC_HOOK, ClankerV4ExpectedProfile,
 };
@@ -52,7 +55,8 @@ use crate::robinhood::{
 use crate::smart_account::{
     AccountExecutionProfile, ContractPin as SmartContractPin, ENTRY_POINT_V07,
     ENTRY_POINT_V07_HANDLE_OPS_SELECTOR, EntryPointCall, OwnedValidatedSmartAccountPins,
-    SmartAccountPin, decode_entry_point_v07_prevalidated,
+    SmartAccountDecodeError, SmartAccountPin, decode_entry_point_v07_prevalidated,
+    discover_entry_point_v07_erc7579,
 };
 use crate::tier2_curve::{
     CurveCandidateCall, HOOD_BUY_SELECTOR, HOOD_CREATE_SELECTOR, HOOD_FACTORY, HOOD_SELL_SELECTOR,
@@ -522,6 +526,7 @@ pub struct PaperLaunchpadObserver {
     pons_profile: PonsExpectedProfile,
     curves: Tier2CurveAdapter,
     smart_accounts: Option<OwnedValidatedSmartAccountPins>,
+    bankr_profile: Option<BankrDopplerExpectedProfile>,
 }
 
 /// End-to-end Nitro paper runtime. It intentionally exposes no executor, signer, or RPC client.
@@ -745,8 +750,11 @@ impl PaperLaunchpadObserver {
         if let Some(clanker) = expected.clanker_v4 {
             clanker.expected_profile()?;
         }
-        if let Some(bankr) = expected.bankr_doppler_v4 {
-            let profile = bankr.expected_profile()?;
+        let bankr_profile = expected
+            .bankr_doppler_v4
+            .map(ConfiguredBankrDopplerV4::expected_profile)
+            .transpose()?;
+        if let Some(profile) = bankr_profile {
             validate_bankr_profile_links(&expected, profile)?;
         }
         let observed_code = |address| ContractCodeSnapshot {
@@ -943,6 +951,7 @@ impl PaperLaunchpadObserver {
             pons_profile,
             curves,
             smart_accounts,
+            bankr_profile,
         })
     }
 
@@ -978,28 +987,84 @@ impl PaperLaunchpadObserver {
         if let Some(pins) = &self.smart_accounts
             && destination == pins.entry_point().address
         {
-            let unwrapped = decode_entry_point_v07_prevalidated(
-                EntryPointCall {
-                    chain_id: CHAIN_ID,
-                    destination: pins.entry_point(),
-                    outer_bundler: outer_signer,
-                    calldata: transaction.input(),
-                },
-                pins.validated(),
-            )
-            .map_err(|error| PaperObserverError::Wrapper(error.to_string()))?;
-            return self
-                .observe_call(
-                    *transaction.tx_hash(),
+            let observed = EntryPointCall {
+                chain_id: CHAIN_ID,
+                destination: pins.entry_point(),
+                outer_bundler: outer_signer,
+                calldata: transaction.input(),
+            };
+            let strict = decode_entry_point_v07_prevalidated(observed, pins.validated());
+            let (leader, target, value, calldata, identity_pending) = match strict {
+                Ok(unwrapped) => (
                     unwrapped.leader,
-                    outer_signer,
-                    LeaderOrigin::Erc4337Sender,
-                    WrapperKind::Erc4337,
                     unwrapped.target,
                     unwrapped.value,
-                    &unwrapped.calldata,
-                )
-                .map(Some);
+                    unwrapped.calldata,
+                    false,
+                ),
+                Err(SmartAccountDecodeError::UnknownSmartAccount { .. }) => {
+                    let profile = self.bankr_profile.ok_or_else(|| {
+                        PaperObserverError::Wrapper(
+                            "unpinned smart account is not eligible for Bankr discovery".into(),
+                        )
+                    })?;
+                    let discovered = discover_entry_point_v07_erc7579(
+                        observed,
+                        pins.entry_point(),
+                        SmartContractPin {
+                            address: profile.airlock.address,
+                            runtime_code_hash: profile.airlock.runtime_code_hash,
+                        },
+                    )
+                    .map_err(|error| PaperObserverError::Wrapper(error.to_string()))?;
+                    (
+                        discovered.leader,
+                        discovered.target,
+                        discovered.value,
+                        discovered.calldata,
+                        true,
+                    )
+                }
+                Err(error) => return Err(PaperObserverError::Wrapper(error.to_string())),
+            };
+            if self
+                .bankr_profile
+                .is_some_and(|profile| target == profile.airlock.address)
+                && !validate_bankr_create_calldata_for_observation(&calldata)
+            {
+                return Err(PaperObserverError::Adapter(
+                    "Bankr create calldata is not an exact reviewed profile".into(),
+                ));
+            }
+            let mut observation = self.observe_call(
+                *transaction.tx_hash(),
+                leader,
+                outer_signer,
+                LeaderOrigin::Erc4337Sender,
+                WrapperKind::Erc4337,
+                target,
+                value,
+                &calldata,
+            )?;
+            if identity_pending {
+                let detail = observation.detail.as_object_mut().ok_or_else(|| {
+                    PaperObserverError::Adapter("Bankr discovery detail is not an object".into())
+                })?;
+                detail.insert(
+                    "smart_account_identity".into(),
+                    serde_json::Value::String("receipt_block_eip7702_verification_required".into()),
+                );
+            }
+            return Ok(Some(observation));
+        }
+        if self
+            .bankr_profile
+            .is_some_and(|profile| destination == profile.airlock.address)
+            && !validate_bankr_create_calldata_for_observation(transaction.input())
+        {
+            return Err(PaperObserverError::Adapter(
+                "Bankr create calldata is not an exact reviewed profile".into(),
+            ));
         }
         self.observe_call(
             *transaction.tx_hash(),

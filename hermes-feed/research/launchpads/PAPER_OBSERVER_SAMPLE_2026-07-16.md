@@ -63,9 +63,21 @@ set until its semantics are complete.
 - Four Bankr misses used the exact reviewed ERC-7579 selector, zero mode/value,
   Airlock target, and inner selector, but rotated EIP-7702 accounts with the
   same reviewed designator and Kernel. The fifth was a direct Airlock call.
-  Account identity must be verified at the canonical receipt block before
-  admitting these envelopes; no global selector or unpinned-account fallback
-  is acceptable.
+  The corrected collector discovers only the exact ERC-7579/Airlock structure,
+  then independently verifies `ef0100 || implementation`, the designator hash,
+  and the delegated Kernel runtime hash at the canonical receipt block before
+  granting identity. Direct Airlock envelopes receive the same receipt-block
+  EIP-7702 checks.
+- Current launches use an exact second reviewed curve profile:
+  `(-229600,-119400)` and `(-119400,887200)`. The older proof uses
+  `(-229800,-119800)` and `(-119800,887200)`. Both are classified explicitly;
+  ranges and partially matching variants remain rejected.
+- Captured-feed replay observed all five Bankr launches, reconciled all five,
+  admitted five independent quotes, and produced five non-broadcast plans with
+  zero misses and zero successful-receipt false positives. Four additional
+  in-range observations were byte-identical duplicate submissions two or three
+  blocks after a successful launch; all four reverted with zero logs. They are
+  reported separately as `reverted_attempts`, not detector false positives.
 
 ## LaunchHood independent paper outcomes
 
@@ -97,10 +109,29 @@ same fixed tiny policy:
 Each entry size is `0.001 WETH`, each minimum applies 1% slippage, and each
 plan remains `execution_eligible: false` and `broadcast: false`.
 
+## Bankr/Doppler independent paper outcomes
+
+All five current curve-profile receipts independently reconstructed the same
+receipt-end state and fixed tiny policy outcome:
+
+- Entry size: `0.001 WETH`
+- Expected entry output: `922744.419124464731197397` tokens
+- Entry minimum at 1% slippage: `913516.974933220083885423` tokens
+- Immediate full-position exit: `0.000009736765175891 WETH`
+- Exit minimum at 1% slippage: `0.000009639397524132 WETH`
+- Simulated round-trip return: `97 bps`
+- Envelope coverage: four ERC-7579/EIP-7702, one direct Airlock/EIP-7702
+- Execution eligible: false
+- Broadcast: false
+
+The low immediate-exit result reflects the independently modeled launch-time
+Rehype fee schedule. It is evidence against promotion, not an executable quote.
+
 ## Promotion decision
 
-No launchpad is ready for a canary from this sample. Bow and LaunchHood need a
-fresh post-fix live window with valid latency and a larger confirmed sample.
-Bankr requires the account/envelope gaps above to be closed. Pons activity was
-legacy discovery-only. Clanker and Hood had no events in this window. Any
-canary remains separately approval-gated and out of scope for local work.
+No launchpad is ready for a canary from this sample. Bow, LaunchHood, and Bankr
+need a fresh post-fix live window with valid latency and a larger confirmed
+sample. Bankr's `97 bps` immediate round trip is also a direct promotion
+blocker. Pons activity was legacy discovery-only. Clanker and Hood had no
+events in this window. Any canary remains separately approval-gated and out of
+scope for local work.

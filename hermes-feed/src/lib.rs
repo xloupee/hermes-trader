@@ -28,6 +28,7 @@ pub mod testnet_orchestrator;
 pub mod trading_runtime;
 pub mod uniswap_v2;
 pub mod v2_simulator;
+pub mod v3_launch_at_birth;
 pub mod v3_pool;
 
 pub use active_noxa::validate_active_noxa_copy_token;
@@ -119,5 +120,9 @@ pub use trading_runtime::{
 pub use uniswap_v2::{V2SwapIntent, V2SwapKind, decode_v2_exact_input};
 pub use v2_simulator::{
     HopQuote, OrderedCopyQuote, PairSnapshot, QuoteError, ReserveBook, ReserveCache, get_amount_out,
+};
+pub use v3_launch_at_birth::{
+    ContractCodeSnapshot, FollowerPlanInput, LaunchCallObservation, LaunchMarket, LaunchpadId,
+    MarketRestrictionState, RegistryError, V3FollowerPaperPlan, V3LaunchAtBirthRegistry,
 };
 pub use v3_pool::{V3PoolError, V3PoolState, V3Quote};

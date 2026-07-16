@@ -39,6 +39,17 @@ pub const UNISWAP_UNIVERSAL_ROUTER: Address =
 pub const ROBINHOOD_SWAP_AGGREGATOR: Address =
     alloy_primitives::address!("65050a9b7e5075a2ba5ced7b1b64ee66262c40dc");
 
+pub const BOW_LAUNCH_FACTORY: Address =
+    alloy_primitives::address!("c70e510e14710ea535cab7b2414860af63feab79");
+pub const BOW_LAUNCH_LOCKER: Address =
+    alloy_primitives::address!("904dccb96d877e6db365282251fa3dd156476660");
+pub const LAUNCHHOOD_V3_FACTORY: Address =
+    alloy_primitives::address!("62b33a039d289cbda50ebeb72fe4261449e61bcf");
+pub const LAUNCHHOOD_V3_LOCKER: Address =
+    alloy_primitives::address!("99b79154ff4fc0e313549b809254b02722631ee0");
+pub const LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION: Address =
+    alloy_primitives::address!("5fdf73abc7a232d91b03638c2f9a52c16ab0e3be");
+
 pub const NOXA_DEX_ID_UNISWAP: u64 = 0;
 pub const NOXA_LAUNCH_CONFIG_ID_WETH: u64 = 0;
 pub const NOXA_POOL_FEE: u32 = 10_000;
@@ -48,6 +59,10 @@ pub const NOXA_FACTORY_RUNTIME_KECCAK256: B256 =
     alloy_primitives::b256!("adcfca67f5d7df9f26974a07be2b5d83894765e6e5e9b9f0a232223f25c795e6");
 pub const UNISWAP_V3_FACTORY_RUNTIME_KECCAK256: B256 =
     alloy_primitives::b256!("ec72b1abd1f2faee020cfea9c646bd8994f9fb389054f6e574f103a895091739");
+pub const WETH_RUNTIME_KECCAK256: B256 =
+    alloy_primitives::b256!("5706be52f64875fee65a2cec0d80e47a23d8793cbe85d214b48445e2d05f5353");
+pub const UNISWAP_V3_POSITION_MANAGER_RUNTIME_KECCAK256: B256 =
+    alloy_primitives::b256!("0a493d1af3d0f25fed8efa205244ebee14114267a08647fc38c515c7cd6ead4f");
 pub const NOXA_TOKEN_CREATION_CODE_KECCAK256: B256 =
     alloy_primitives::b256!("983cd2b9ed743ddb79121ba35310b8eb55440997f88b0de4b0705ea5463ec7e1");
 pub const ACTIVE_NOXA_FACTORY_RUNTIME_KECCAK256: B256 =

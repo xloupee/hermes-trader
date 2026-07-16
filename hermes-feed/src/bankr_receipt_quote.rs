@@ -514,11 +514,81 @@ struct ReceiptBlockRuntimeObservation {
     code_bytes: usize,
 }
 
+trait BankrReceiptBlockRpc {
+    async fn code_at_l2_block(
+        &self,
+        address: Address,
+        l2_block_number: u64,
+    ) -> Result<alloy_primitives::Bytes, String>;
+
+    async fn runtime_observation_at_l2_block(
+        &self,
+        address: Address,
+        l2_block_number: u64,
+    ) -> Result<ReceiptBlockRuntimeObservation, String>;
+
+    async fn block_by_number(&self, l2_block_number: u64) -> Result<RobinhoodBlock, String>;
+}
+
+impl BankrReceiptBlockRpc for NoxaRpcClient {
+    async fn code_at_l2_block(
+        &self,
+        address: Address,
+        l2_block_number: u64,
+    ) -> Result<alloy_primitives::Bytes, String> {
+        NoxaRpcClient::code_at_l2_block(self, address, l2_block_number)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn runtime_observation_at_l2_block(
+        &self,
+        address: Address,
+        l2_block_number: u64,
+    ) -> Result<ReceiptBlockRuntimeObservation, String> {
+        let code = NoxaRpcClient::code_at_l2_block(self, address, l2_block_number)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(ReceiptBlockRuntimeObservation {
+            address,
+            runtime_code_hash: keccak256(&code),
+            code_bytes: code.len(),
+        })
+    }
+
+    async fn block_by_number(&self, l2_block_number: u64) -> Result<RobinhoodBlock, String> {
+        NoxaRpcClient::block_by_number(self, l2_block_number)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
 /// Verify the transaction's EIP-7702 account identity at the canonical receipt
 /// block, then reconstruct a non-broadcast Bankr quote. This is the only public
 /// quote admission path for rotating or direct Bankr accounts.
 pub async fn quote_bankr_doppler_launch_receipt_at_receipt_block(
     rpc: &NoxaRpcClient,
+    transaction: &RobinhoodTransaction,
+    receipt: &NoxaReceipt,
+    block: &RobinhoodBlock,
+    profile: BankrDopplerExpectedProfile,
+    policy: BankrDopplerQuotePolicy,
+) -> Result<BankrDopplerReceiptPaperQuote, BankrQuoteError> {
+    quote_bankr_doppler_launch_receipt_at_receipt_block_with_rpc(
+        rpc,
+        transaction,
+        receipt,
+        block,
+        profile,
+        policy,
+    )
+    .await
+}
+
+async fn quote_bankr_doppler_launch_receipt_at_receipt_block_with_rpc<
+    R: BankrReceiptBlockRpc + Sync,
+>(
+    rpc: &R,
     transaction: &RobinhoodTransaction,
     receipt: &NoxaReceipt,
     block: &RobinhoodBlock,
@@ -570,11 +640,11 @@ pub async fn quote_bankr_doppler_launch_receipt_at_receipt_block(
     let account_code = rpc
         .code_at_l2_block(leader, receipt.l2_block_number)
         .await
-        .map_err(|error| BankrQuoteError::ReceiptBlockIdentity(error.to_string()))?;
+        .map_err(BankrQuoteError::ReceiptBlockIdentity)?;
     let delegated_code = rpc
         .code_at_l2_block(delegation.address, receipt.l2_block_number)
         .await
-        .map_err(|error| BankrQuoteError::ReceiptBlockIdentity(error.to_string()))?;
+        .map_err(BankrQuoteError::ReceiptBlockIdentity)?;
     let smart_account =
         verified_smart_account_from_receipt_code(leader, &account_code, &delegated_code, profile)?;
     verify_bankr_dependencies_at_receipt_block(rpc, receipt.l2_block_number, profile, erc7579)
@@ -582,7 +652,7 @@ pub async fn quote_bankr_doppler_launch_receipt_at_receipt_block(
     let stable_block = rpc
         .block_by_number(receipt.l2_block_number)
         .await
-        .map_err(|error| BankrQuoteError::ReceiptBlockIdentity(error.to_string()))?;
+        .map_err(BankrQuoteError::ReceiptBlockIdentity)?;
     if stable_block != *block || stable_block.hash != receipt.block_hash {
         return Err(BankrQuoteError::ReceiptBlockIdentity(
             "receipt block changed during identity verification".into(),
@@ -648,8 +718,8 @@ fn verified_smart_account_from_receipt_code(
     })
 }
 
-async fn verify_bankr_dependencies_at_receipt_block(
-    rpc: &NoxaRpcClient,
+async fn verify_bankr_dependencies_at_receipt_block<R: BankrReceiptBlockRpc + Sync>(
+    rpc: &R,
     l2_block_number: u64,
     profile: BankrDopplerExpectedProfile,
     require_entry_point: bool,
@@ -657,15 +727,11 @@ async fn verify_bankr_dependencies_at_receipt_block(
     let expected = bankr_receipt_block_dependency_pins(profile, require_entry_point);
     let mut observed = Vec::with_capacity(expected.len());
     for pin in &expected {
-        let code = rpc
-            .code_at_l2_block(pin.address, l2_block_number)
+        let observation = rpc
+            .runtime_observation_at_l2_block(pin.address, l2_block_number)
             .await
-            .map_err(|error| BankrQuoteError::ReceiptBlockIdentity(error.to_string()))?;
-        observed.push(ReceiptBlockRuntimeObservation {
-            address: pin.address,
-            runtime_code_hash: keccak256(&code),
-            code_bytes: code.len(),
-        });
+            .map_err(BankrQuoteError::ReceiptBlockIdentity)?;
+        observed.push(observation);
     }
     validate_bankr_receipt_block_dependencies(&expected, &observed)
 }
@@ -1553,6 +1619,9 @@ fn validate_verified_smart_account(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
     use super::*;
 
     #[derive(Deserialize)]
@@ -1583,6 +1652,103 @@ mod tests {
         receipt_block_identity: ReceiptBlockIdentityFixture,
     }
 
+    enum MockReceiptBlockCall {
+        Code {
+            address: Address,
+            l2_block_number: u64,
+            result: Result<alloy_primitives::Bytes, String>,
+        },
+        RuntimeObservation {
+            address: Address,
+            l2_block_number: u64,
+            result: Result<ReceiptBlockRuntimeObservation, String>,
+        },
+        Block {
+            l2_block_number: u64,
+            result: Result<RobinhoodBlock, String>,
+        },
+    }
+
+    struct MockReceiptBlockRpc {
+        calls: Mutex<VecDeque<MockReceiptBlockCall>>,
+    }
+
+    impl MockReceiptBlockRpc {
+        fn new(calls: Vec<MockReceiptBlockCall>) -> Self {
+            Self {
+                calls: Mutex::new(calls.into()),
+            }
+        }
+
+        fn next(&self) -> MockReceiptBlockCall {
+            self.calls
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected receipt-block RPC call")
+        }
+
+        fn assert_exhausted(&self) {
+            assert!(
+                self.calls.lock().unwrap().is_empty(),
+                "receipt-block admission did not issue every expected RPC call"
+            );
+        }
+    }
+
+    impl BankrReceiptBlockRpc for MockReceiptBlockRpc {
+        async fn code_at_l2_block(
+            &self,
+            address: Address,
+            l2_block_number: u64,
+        ) -> Result<alloy_primitives::Bytes, String> {
+            match self.next() {
+                MockReceiptBlockCall::Code {
+                    address: expected_address,
+                    l2_block_number: expected_block,
+                    result,
+                } => {
+                    assert_eq!(address, expected_address);
+                    assert_eq!(l2_block_number, expected_block);
+                    result
+                }
+                _ => panic!("expected a receipt-block code request"),
+            }
+        }
+
+        async fn runtime_observation_at_l2_block(
+            &self,
+            address: Address,
+            l2_block_number: u64,
+        ) -> Result<ReceiptBlockRuntimeObservation, String> {
+            match self.next() {
+                MockReceiptBlockCall::RuntimeObservation {
+                    address: expected_address,
+                    l2_block_number: expected_block,
+                    result,
+                } => {
+                    assert_eq!(address, expected_address);
+                    assert_eq!(l2_block_number, expected_block);
+                    result
+                }
+                _ => panic!("expected a receipt-block runtime observation request"),
+            }
+        }
+
+        async fn block_by_number(&self, l2_block_number: u64) -> Result<RobinhoodBlock, String> {
+            match self.next() {
+                MockReceiptBlockCall::Block {
+                    l2_block_number: expected_block,
+                    result,
+                } => {
+                    assert_eq!(l2_block_number, expected_block);
+                    result
+                }
+                _ => panic!("expected a stable-block reread"),
+            }
+        }
+    }
+
     fn live_fixture() -> LiveFixture {
         serde_json::from_str(include_str!(
             "../tests/fixtures/bankr-doppler-live-proof.json"
@@ -1597,6 +1763,44 @@ mod tests {
     fn kernel_runtime() -> Vec<u8> {
         let encoded = include_str!("../tests/fixtures/bankr-kernel-runtime.hex").trim();
         hex::decode(encoded.strip_prefix("0x").unwrap()).unwrap()
+    }
+
+    fn successful_admission_calls(
+        fixture: &ProductionLiveFixture,
+        require_entry_point: bool,
+    ) -> Vec<MockReceiptBlockCall> {
+        let profile = BankrDopplerExpectedProfile::production();
+        let l2_block_number = fixture.receipt.l2_block_number;
+        let mut calls = vec![
+            MockReceiptBlockCall::Code {
+                address: fixture.receipt_block_identity.leader,
+                l2_block_number,
+                result: Ok(fixture.receipt_block_identity.account_designator.clone()),
+            },
+            MockReceiptBlockCall::Code {
+                address: BANKR_KERNEL_IMPLEMENTATION,
+                l2_block_number,
+                result: Ok(kernel_runtime().into()),
+            },
+        ];
+        calls.extend(
+            bankr_receipt_block_dependency_pins(profile, require_entry_point)
+                .into_iter()
+                .map(|pin| MockReceiptBlockCall::RuntimeObservation {
+                    address: pin.address,
+                    l2_block_number,
+                    result: Ok(ReceiptBlockRuntimeObservation {
+                        address: pin.address,
+                        runtime_code_hash: pin.runtime_code_hash,
+                        code_bytes: 1,
+                    }),
+                }),
+        );
+        calls.push(MockReceiptBlockCall::Block {
+            l2_block_number,
+            result: Ok(fixture.block.clone()),
+        });
+        calls
     }
 
     fn policy() -> BankrDopplerQuotePolicy {
@@ -1670,6 +1874,202 @@ mod tests {
                 code_bytes: 1,
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn public_receipt_block_admission_accepts_exact_direct_and_erc7579_proofs() {
+        for (contents, require_entry_point, expected_envelope) in [
+            (
+                include_str!("../tests/fixtures/bankr-doppler-v2-direct-live-proof.json"),
+                false,
+                BankrEnvelopeKind::DirectAirlock,
+            ),
+            (
+                include_str!("../tests/fixtures/bankr-doppler-v2-erc7579-live-proof.json"),
+                true,
+                BankrEnvelopeKind::Erc7579,
+            ),
+        ] {
+            let fixture = production_fixture(contents);
+            let rpc =
+                MockReceiptBlockRpc::new(successful_admission_calls(&fixture, require_entry_point));
+            let quote = quote_bankr_doppler_launch_receipt_at_receipt_block_with_rpc(
+                &rpc,
+                &fixture.transaction,
+                &fixture.receipt,
+                &fixture.block,
+                BankrDopplerExpectedProfile::production(),
+                policy(),
+            )
+            .await
+            .unwrap();
+            rpc.assert_exhausted();
+            assert_eq!(quote.market.envelope, expected_envelope);
+            assert_eq!(quote.market.leader, fixture.receipt_block_identity.leader);
+            assert_eq!(quote.state_version.block_hash, fixture.block.hash);
+            assert_eq!(
+                quote.state_version.l2_block_number,
+                fixture.receipt.l2_block_number
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn public_receipt_block_admission_propagates_code_errors_and_rejects_empty_code() {
+        let contents = include_str!("../tests/fixtures/bankr-doppler-v2-direct-live-proof.json");
+
+        for (call_index, message) in [(0_usize, "leader code unavailable"), (1, "kernel timeout")] {
+            let fixture = production_fixture(contents);
+            let mut calls = successful_admission_calls(&fixture, false);
+            let address = if call_index == 0 {
+                fixture.receipt_block_identity.leader
+            } else {
+                BANKR_KERNEL_IMPLEMENTATION
+            };
+            calls[call_index] = MockReceiptBlockCall::Code {
+                address,
+                l2_block_number: fixture.receipt.l2_block_number,
+                result: Err(message.into()),
+            };
+            let error = quote_bankr_doppler_launch_receipt_at_receipt_block_with_rpc(
+                &MockReceiptBlockRpc::new(calls),
+                &fixture.transaction,
+                &fixture.receipt,
+                &fixture.block,
+                BankrDopplerExpectedProfile::production(),
+                policy(),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                BankrQuoteError::ReceiptBlockIdentity(ref detail) if detail == message
+            ));
+        }
+
+        for call_index in [0_usize, 1] {
+            let fixture = production_fixture(contents);
+            let mut calls = successful_admission_calls(&fixture, false);
+            let address = if call_index == 0 {
+                fixture.receipt_block_identity.leader
+            } else {
+                BANKR_KERNEL_IMPLEMENTATION
+            };
+            calls[call_index] = MockReceiptBlockCall::Code {
+                address,
+                l2_block_number: fixture.receipt.l2_block_number,
+                result: Ok(alloy_primitives::Bytes::new()),
+            };
+            assert!(matches!(
+                quote_bankr_doppler_launch_receipt_at_receipt_block_with_rpc(
+                    &MockReceiptBlockRpc::new(calls),
+                    &fixture.transaction,
+                    &fixture.receipt,
+                    &fixture.block,
+                    BankrDopplerExpectedProfile::production(),
+                    policy(),
+                )
+                .await,
+                Err(BankrQuoteError::ReceiptBlockIdentity(_))
+            ));
+        }
+
+        let fixture = production_fixture(contents);
+        let mut calls = successful_admission_calls(&fixture, false);
+        let dependency = BankrDopplerExpectedProfile::production().airlock.address;
+        calls[2] = MockReceiptBlockCall::RuntimeObservation {
+            address: dependency,
+            l2_block_number: fixture.receipt.l2_block_number,
+            result: Err("dependency code unavailable".into()),
+        };
+        assert!(matches!(
+            quote_bankr_doppler_launch_receipt_at_receipt_block_with_rpc(
+                &MockReceiptBlockRpc::new(calls),
+                &fixture.transaction,
+                &fixture.receipt,
+                &fixture.block,
+                BankrDopplerExpectedProfile::production(),
+                policy(),
+            )
+            .await,
+            Err(BankrQuoteError::ReceiptBlockIdentity(ref detail))
+                if detail == "dependency code unavailable"
+        ));
+
+        let fixture = production_fixture(contents);
+        let mut calls = successful_admission_calls(&fixture, false);
+        calls[2] = MockReceiptBlockCall::RuntimeObservation {
+            address: dependency,
+            l2_block_number: fixture.receipt.l2_block_number,
+            result: Ok(ReceiptBlockRuntimeObservation {
+                address: dependency,
+                runtime_code_hash: BankrDopplerExpectedProfile::production()
+                    .airlock
+                    .runtime_code_hash,
+                code_bytes: 0,
+            }),
+        };
+        assert!(matches!(
+            quote_bankr_doppler_launch_receipt_at_receipt_block_with_rpc(
+                &MockReceiptBlockRpc::new(calls),
+                &fixture.transaction,
+                &fixture.receipt,
+                &fixture.block,
+                BankrDopplerExpectedProfile::production(),
+                policy(),
+            )
+            .await,
+            Err(BankrQuoteError::ReceiptBlockIdentity(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn public_receipt_block_admission_requires_stable_exact_block_reread() {
+        let contents = include_str!("../tests/fixtures/bankr-doppler-v2-erc7579-live-proof.json");
+
+        let fixture = production_fixture(contents);
+        let mut calls = successful_admission_calls(&fixture, true);
+        let last = calls.len() - 1;
+        calls[last] = MockReceiptBlockCall::Block {
+            l2_block_number: fixture.receipt.l2_block_number,
+            result: Err("block reread unavailable".into()),
+        };
+        assert!(matches!(
+            quote_bankr_doppler_launch_receipt_at_receipt_block_with_rpc(
+                &MockReceiptBlockRpc::new(calls),
+                &fixture.transaction,
+                &fixture.receipt,
+                &fixture.block,
+                BankrDopplerExpectedProfile::production(),
+                policy(),
+            )
+            .await,
+            Err(BankrQuoteError::ReceiptBlockIdentity(ref detail))
+                if detail == "block reread unavailable"
+        ));
+
+        let fixture = production_fixture(contents);
+        let mut calls = successful_admission_calls(&fixture, true);
+        let last = calls.len() - 1;
+        let mut reorged = fixture.block.clone();
+        reorged.hash = B256::with_last_byte(0xee);
+        calls[last] = MockReceiptBlockCall::Block {
+            l2_block_number: fixture.receipt.l2_block_number,
+            result: Ok(reorged),
+        };
+        assert!(matches!(
+            quote_bankr_doppler_launch_receipt_at_receipt_block_with_rpc(
+                &MockReceiptBlockRpc::new(calls),
+                &fixture.transaction,
+                &fixture.receipt,
+                &fixture.block,
+                BankrDopplerExpectedProfile::production(),
+                policy(),
+            )
+            .await,
+            Err(BankrQuoteError::ReceiptBlockIdentity(ref detail))
+                if detail == "receipt block changed during identity verification"
+        ));
     }
 
     #[test]

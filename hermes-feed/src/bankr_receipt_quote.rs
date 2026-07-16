@@ -505,6 +505,13 @@ struct LaunchEvidence {
     buyback_destination: Address,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReceiptBlockRuntimeObservation {
+    address: Address,
+    runtime_code_hash: B256,
+    code_bytes: usize,
+}
+
 /// Verify the transaction's EIP-7702 account identity at the canonical receipt
 /// block, then reconstruct a non-broadcast Bankr quote. This is the only public
 /// quote admission path for rotating or direct Bankr accounts.
@@ -568,6 +575,8 @@ pub async fn quote_bankr_doppler_launch_receipt_at_receipt_block(
         .map_err(|error| BankrQuoteError::ReceiptBlockIdentity(error.to_string()))?;
     let smart_account =
         verified_smart_account_from_receipt_code(leader, &account_code, &delegated_code, profile)?;
+    verify_bankr_dependencies_at_receipt_block(rpc, receipt.l2_block_number, profile, erc7579)
+        .await?;
     let stable_block = rpc
         .block_by_number(receipt.l2_block_number)
         .await
@@ -635,6 +644,75 @@ fn verified_smart_account_from_receipt_code(
         execution_profile: AccountExecutionProfile::Erc7579SingleCall,
         delegation_implementation: Some(delegation),
     })
+}
+
+async fn verify_bankr_dependencies_at_receipt_block(
+    rpc: &NoxaRpcClient,
+    l2_block_number: u64,
+    profile: BankrDopplerExpectedProfile,
+    require_entry_point: bool,
+) -> Result<(), BankrQuoteError> {
+    let expected = bankr_receipt_block_dependency_pins(profile, require_entry_point);
+    let mut observed = Vec::with_capacity(expected.len());
+    for pin in &expected {
+        let code = rpc
+            .code_at_l2_block(pin.address, l2_block_number)
+            .await
+            .map_err(|error| BankrQuoteError::ReceiptBlockIdentity(error.to_string()))?;
+        observed.push(ReceiptBlockRuntimeObservation {
+            address: pin.address,
+            runtime_code_hash: keccak256(&code),
+            code_bytes: code.len(),
+        });
+    }
+    validate_bankr_receipt_block_dependencies(&expected, &observed)
+}
+
+fn bankr_receipt_block_dependency_pins(
+    profile: BankrDopplerExpectedProfile,
+    require_entry_point: bool,
+) -> Vec<ContractPin> {
+    let contract_pin = |pin: CodePin| ContractPin {
+        address: pin.address,
+        runtime_code_hash: pin.runtime_code_hash,
+    };
+    let mut pins = vec![
+        contract_pin(profile.airlock),
+        contract_pin(profile.pool_manager),
+        contract_pin(profile.initializer),
+        contract_pin(profile.rehype_hook),
+        contract_pin(profile.token_factory),
+        contract_pin(profile.governance_factory),
+        contract_pin(profile.liquidity_migrator),
+        contract_pin(profile.weth),
+    ];
+    if require_entry_point {
+        pins.push(profile.entry_point);
+    }
+    pins
+}
+
+fn validate_bankr_receipt_block_dependencies(
+    expected: &[ContractPin],
+    observed: &[ReceiptBlockRuntimeObservation],
+) -> Result<(), BankrQuoteError> {
+    if expected.len() != observed.len() {
+        return Err(BankrQuoteError::ReceiptBlockIdentity(
+            "receipt-block dependency proof is incomplete".into(),
+        ));
+    }
+    for (pin, observation) in expected.iter().zip(observed) {
+        if observation.address != pin.address
+            || observation.code_bytes == 0
+            || observation.runtime_code_hash != pin.runtime_code_hash
+        {
+            return Err(BankrQuoteError::ReceiptBlockIdentity(format!(
+                "receipt-block dependency {} disagrees with reviewed profile",
+                pin.address
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Private proof-fixture path. Production callers must use the receipt-block
@@ -1561,6 +1639,67 @@ mod tests {
 
     fn hex_u256(value: &str) -> U256 {
         U256::from_str_radix(value, 16).unwrap()
+    }
+
+    fn receipt_block_observations(pins: &[ContractPin]) -> Vec<ReceiptBlockRuntimeObservation> {
+        pins.iter()
+            .map(|pin| ReceiptBlockRuntimeObservation {
+                address: pin.address,
+                runtime_code_hash: pin.runtime_code_hash,
+                code_bytes: 1,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn receipt_block_dependency_proof_covers_every_quote_critical_runtime() {
+        let profile = BankrDopplerExpectedProfile::production();
+        let direct = bankr_receipt_block_dependency_pins(profile, false);
+        assert_eq!(direct.len(), 8);
+        assert_eq!(direct[0].address, profile.airlock.address);
+        assert_eq!(direct[1].address, profile.pool_manager.address);
+        assert_eq!(direct[2].address, profile.initializer.address);
+        assert_eq!(direct[3].address, profile.rehype_hook.address);
+        assert_eq!(direct[4].address, profile.token_factory.address);
+        assert_eq!(direct[5].address, profile.governance_factory.address);
+        assert_eq!(direct[6].address, profile.liquidity_migrator.address);
+        assert_eq!(direct[7].address, profile.weth.address);
+        validate_bankr_receipt_block_dependencies(&direct, &receipt_block_observations(&direct))
+            .unwrap();
+
+        let erc7579 = bankr_receipt_block_dependency_pins(profile, true);
+        assert_eq!(erc7579.len(), 9);
+        assert_eq!(erc7579.last().unwrap().address, profile.entry_point.address);
+        validate_bankr_receipt_block_dependencies(&erc7579, &receipt_block_observations(&erc7579))
+            .unwrap();
+    }
+
+    #[test]
+    fn incomplete_reordered_empty_or_drifted_receipt_block_pins_fail_closed() {
+        let expected =
+            bankr_receipt_block_dependency_pins(BankrDopplerExpectedProfile::production(), true);
+        let exact = receipt_block_observations(&expected);
+
+        let mut missing = exact.clone();
+        missing.pop();
+        assert!(validate_bankr_receipt_block_dependencies(&expected, &missing).is_err());
+
+        let mut reordered = exact.clone();
+        reordered.swap(0, 1);
+        assert!(validate_bankr_receipt_block_dependencies(&expected, &reordered).is_err());
+
+        let mut empty = exact.clone();
+        empty[0].code_bytes = 0;
+        assert!(validate_bankr_receipt_block_dependencies(&expected, &empty).is_err());
+
+        for index in 0..exact.len() {
+            let mut drifted = exact.clone();
+            drifted[index].runtime_code_hash = B256::with_last_byte((index + 1) as u8);
+            assert!(
+                validate_bankr_receipt_block_dependencies(&expected, &drifted).is_err(),
+                "dependency index {index} accepted a drifted runtime"
+            );
+        }
     }
 
     #[test]

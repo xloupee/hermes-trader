@@ -10,6 +10,7 @@
 
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_sol_types::{SolCall, sol};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const ROBINHOOD_CHAIN_ID: u64 = 4_663;
@@ -51,6 +52,13 @@ pub const ENTRY_POINT_V07_HANDLE_OPS_SELECTOR: [u8; 4] = handleOpsCall::SELECTOR
 pub const ACCOUNT_EXECUTE_SELECTOR: [u8; 4] = executeCall::SELECTOR;
 pub const ERC7579_EXECUTE_SELECTOR: [u8; 4] = erc7579::executeCall::SELECTOR;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountExecutionProfile {
+    ExecuteAddressValueBytes,
+    Erc7579SingleCall,
+}
+
 /// A contract identity verified and frozen during startup.
 ///
 /// Supplying this value asserts that `runtime_code_hash` was observed for
@@ -65,10 +73,15 @@ pub struct ContractPin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SmartAccountPin {
     pub account: ContractPin,
+    pub execution_profile: AccountExecutionProfile,
     /// Optional deployed-account provenance. `initCode` remains forbidden even
     /// when a factory is pinned; this decoder accepts already-deployed accounts
     /// only.
     pub factory: Option<ContractPin>,
+    /// Required for EIP-7702 accounts whose account code is the
+    /// `ef0100 || implementation` designator. The designator hash belongs in
+    /// `account`; the delegated implementation runtime hash belongs here.
+    pub delegation_implementation: Option<ContractPin>,
 }
 
 /// Immutable startup state used by the candidate decoder.
@@ -156,6 +169,8 @@ pub struct UnwrappedSmartAccountCall {
     pub entry_point: Address,
     pub beneficiary: Address,
     pub account_factory: Option<Address>,
+    pub execution_profile: AccountExecutionProfile,
+    pub delegation_implementation: Option<Address>,
     pub target: Address,
     pub value: U256,
     pub calldata: Bytes,
@@ -197,6 +212,8 @@ pub enum SmartAccountDecodeError {
     UnknownSmartAccount { sender: Address },
     #[error("smart-account calldata does not use a supported pinned execute ABI")]
     WrongAccountSelector,
+    #[error("smart-account calldata selector does not match its pinned execution profile")]
+    ExecutionProfileMismatch,
     #[error("smart-account execute calldata is malformed or noncanonical")]
     MalformedAccountCall,
     #[error("ERC-7579 execution mode is not the canonical single-call revert mode")]
@@ -298,7 +315,7 @@ pub fn decode_entry_point_v07_prevalidated(
     let account_pin = find_account_pin(operation.sender, pins.accounts)?;
     let account_factory = account_pin.factory.map(|factory| factory.address);
     let (target, value, calldata, unwrap_depth, inner_call_count) =
-        unwrap_execute_chain(operation.callData, pins)?;
+        unwrap_execute_chain(operation.callData, account_pin, pins)?;
 
     Ok(UnwrappedSmartAccountCall {
         leader: operation.sender,
@@ -306,6 +323,10 @@ pub fn decode_entry_point_v07_prevalidated(
         entry_point: pins.entry_point.address,
         beneficiary: call.beneficiary,
         account_factory,
+        execution_profile: account_pin.execution_profile,
+        delegation_implementation: account_pin
+            .delegation_implementation
+            .map(|implementation| implementation.address),
         target,
         value,
         calldata,
@@ -340,11 +361,13 @@ fn bounded_operation_count(calldata: &[u8]) -> Result<usize, SmartAccountDecodeE
 
 fn unwrap_execute_chain(
     initial_calldata: Bytes,
+    initial_account: SmartAccountPin,
     pins: SmartAccountPins<'_>,
 ) -> Result<(Address, U256, Bytes, usize, usize), SmartAccountDecodeError> {
     let mut current_calldata = initial_calldata;
     let mut depth = 0usize;
     let mut calls = 0usize;
+    let mut current_account = initial_account;
 
     loop {
         if depth >= MAX_UNWRAP_DEPTH {
@@ -363,7 +386,8 @@ fn unwrap_execute_chain(
                 maximum: MAX_ACCOUNT_CALLDATA_BYTES,
             });
         }
-        let (target, value, calldata) = decode_account_execute(&current_calldata)?;
+        let (target, value, calldata) =
+            decode_account_execute(&current_calldata, current_account.execution_profile)?;
 
         depth += 1;
         calls += 1;
@@ -371,11 +395,12 @@ fn unwrap_execute_chain(
         if find_target_pin(target, pins.allowed_targets)?.is_some() {
             return Ok((target, value, calldata, depth, calls));
         }
-        if find_account_pin_optional(target, pins.accounts)?.is_some() {
+        if let Some(next_account) = find_account_pin_optional(target, pins.accounts)? {
             if value != U256::ZERO {
                 return Err(SmartAccountDecodeError::IntermediateValueNotAllowed { target });
             }
             current_calldata = calldata;
+            current_account = next_account;
             continue;
         }
         return Err(SmartAccountDecodeError::UnknownTarget { target });
@@ -384,9 +409,12 @@ fn unwrap_execute_chain(
 
 fn decode_account_execute(
     calldata: &[u8],
+    profile: AccountExecutionProfile,
 ) -> Result<(Address, U256, Bytes), SmartAccountDecodeError> {
-    match calldata.get(..4) {
-        Some(selector) if selector == ACCOUNT_EXECUTE_SELECTOR => {
+    match (profile, calldata.get(..4)) {
+        (AccountExecutionProfile::ExecuteAddressValueBytes, Some(selector))
+            if selector == ACCOUNT_EXECUTE_SELECTOR =>
+        {
             let call = executeCall::abi_decode(calldata)
                 .map_err(|_| SmartAccountDecodeError::MalformedAccountCall)?;
             if call.abi_encode().as_slice() != calldata {
@@ -394,7 +422,9 @@ fn decode_account_execute(
             }
             Ok((call.dest, call.value, call.func))
         }
-        Some(selector) if selector == ERC7579_EXECUTE_SELECTOR => {
+        (AccountExecutionProfile::Erc7579SingleCall, Some(selector))
+            if selector == ERC7579_EXECUTE_SELECTOR =>
+        {
             let call = erc7579::executeCall::abi_decode(calldata)
                 .map_err(|_| SmartAccountDecodeError::MalformedAccountCall)?;
             if call.abi_encode().as_slice() != calldata {
@@ -416,6 +446,11 @@ fn decode_account_execute(
             let inner = Bytes::copy_from_slice(&call.executionCalldata[52..]);
             Ok((target, value, inner))
         }
+        (_, Some(selector))
+            if selector == ACCOUNT_EXECUTE_SELECTOR || selector == ERC7579_EXECUTE_SELECTOR =>
+        {
+            Err(SmartAccountDecodeError::ExecutionProfileMismatch)
+        }
         _ => Err(SmartAccountDecodeError::WrongAccountSelector),
     }
 }
@@ -429,6 +464,19 @@ fn validate_pins(pins: SmartAccountPins<'_>) -> Result<(), SmartAccountDecodeErr
         validate_contract_pin(account.account, "smart account")?;
         if let Some(factory) = account.factory {
             validate_contract_pin(factory, "smart-account factory")?;
+        }
+        if let Some(implementation) = account.delegation_implementation {
+            validate_contract_pin(implementation, "delegation implementation")?;
+        }
+        match (account.execution_profile, account.delegation_implementation) {
+            (AccountExecutionProfile::ExecuteAddressValueBytes, None)
+            | (AccountExecutionProfile::Erc7579SingleCall, Some(_)) => {}
+            (AccountExecutionProfile::ExecuteAddressValueBytes, Some(_))
+            | (AccountExecutionProfile::Erc7579SingleCall, None) => {
+                return Err(SmartAccountDecodeError::InvalidPin {
+                    role: "execution profile/delegation pair",
+                });
+            }
         }
         if pins.accounts[index + 1..]
             .iter()
@@ -527,10 +575,16 @@ mod tests {
         alloy_primitives::b256!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     const ACCOUNT_HASH: B256 =
         alloy_primitives::b256!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    const BANKR_DESIGNATOR_HASH: B256 =
+        alloy_primitives::b256!("4542cbf1da24ba964614e4f5585736e22884e23e97c0f0915de4f602585d2dd4");
     const TARGET_HASH: B256 =
         alloy_primitives::b256!("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
     const FACTORY_HASH: B256 =
         alloy_primitives::b256!("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
+    const DELEGATE: Address =
+        alloy_primitives::address!("d6cedde84be40893d153be9d467cd6ad37875b28");
+    const DELEGATE_HASH: B256 =
+        alloy_primitives::b256!("6f6d6691dc11fda98d3102802f20e7e816ccc576c16c9279ee1a884a51d1935d");
 
     fn contract(address: Address, runtime_code_hash: B256) -> ContractPin {
         ContractPin {
@@ -542,7 +596,18 @@ mod tests {
     fn account(address: Address) -> SmartAccountPin {
         SmartAccountPin {
             account: contract(address, ACCOUNT_HASH),
+            execution_profile: AccountExecutionProfile::ExecuteAddressValueBytes,
             factory: Some(contract(FACTORY, FACTORY_HASH)),
+            delegation_implementation: None,
+        }
+    }
+
+    fn erc7579_account(address: Address) -> SmartAccountPin {
+        SmartAccountPin {
+            account: contract(address, BANKR_DESIGNATOR_HASH),
+            execution_profile: AccountExecutionProfile::Erc7579SingleCall,
+            factory: None,
+            delegation_implementation: Some(contract(DELEGATE, DELEGATE_HASH)),
         }
     }
 
@@ -644,20 +709,19 @@ mod tests {
     }
 
     #[test]
-    fn unwraps_canonical_erc7579_single_call() {
-        let protocol_calldata = Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef, 0x02]);
-        let account_calldata = encode_erc7579_execute(
-            B256::ZERO,
-            TARGET,
-            U256::from(456),
-            protocol_calldata.clone(),
-        );
+    fn unwraps_bankr_eip7702_erc7579_proof_profile() {
+        // Exact identity/selector/value facts from proof transaction
+        // c6597fe8...f0609. The full live transaction is also checked by the
+        // read-only pin snapshot binary.
+        let protocol_calldata = Bytes::from_static(&[0x88, 0x2d, 0xb7, 0x07]);
+        let account_calldata =
+            encode_erc7579_execute(B256::ZERO, TARGET, U256::ZERO, protocol_calldata.clone());
         assert_eq!(
             account_calldata.get(..4),
             Some(ERC7579_EXECUTE_SELECTOR.as_slice())
         );
         let calldata = encode_handle_ops(vec![user_operation(LEADER, account_calldata)]);
-        let accounts = [account(LEADER)];
+        let accounts = [erc7579_account(LEADER)];
         let targets = [contract(TARGET, TARGET_HASH)];
 
         let decoded = decode_with(
@@ -669,16 +733,68 @@ mod tests {
         .unwrap();
 
         assert_eq!(decoded.leader, LEADER);
+        assert_eq!(
+            decoded.execution_profile,
+            AccountExecutionProfile::Erc7579SingleCall
+        );
+        assert_eq!(decoded.delegation_implementation, Some(DELEGATE));
         assert_eq!(decoded.target, TARGET);
-        assert_eq!(decoded.value, U256::from(456));
+        assert_eq!(decoded.value, U256::ZERO);
         assert_eq!(decoded.calldata, protocol_calldata);
         assert_eq!(decoded.unwrap_depth, 1);
         assert_eq!(decoded.inner_call_count, 1);
     }
 
     #[test]
+    fn rejects_selector_profile_mismatch_and_missing_delegation_pin() {
+        let direct = encode_execute(TARGET, U256::ZERO, Bytes::new());
+        let erc7579 = encode_erc7579_execute(B256::ZERO, TARGET, U256::ZERO, Bytes::new());
+        let targets = [contract(TARGET, TARGET_HASH)];
+
+        let direct_for_erc = encode_handle_ops(vec![user_operation(LEADER, direct)]);
+        assert_eq!(
+            decode_with(
+                &direct_for_erc,
+                contract(ENTRY_POINT, ENTRY_POINT_HASH),
+                &[erc7579_account(LEADER)],
+                &targets,
+            ),
+            Err(SmartAccountDecodeError::ExecutionProfileMismatch)
+        );
+
+        let erc_for_direct = encode_handle_ops(vec![user_operation(LEADER, erc7579)]);
+        assert_eq!(
+            decode_with(
+                &erc_for_direct,
+                contract(ENTRY_POINT, ENTRY_POINT_HASH),
+                &[account(LEADER)],
+                &targets,
+            ),
+            Err(SmartAccountDecodeError::ExecutionProfileMismatch)
+        );
+
+        let missing_delegation = SmartAccountPin {
+            account: contract(LEADER, BANKR_DESIGNATOR_HASH),
+            execution_profile: AccountExecutionProfile::Erc7579SingleCall,
+            factory: None,
+            delegation_implementation: None,
+        };
+        assert_eq!(
+            decode_with(
+                &erc_for_direct,
+                contract(ENTRY_POINT, ENTRY_POINT_HASH),
+                &[missing_delegation],
+                &targets,
+            ),
+            Err(SmartAccountDecodeError::InvalidPin {
+                role: "execution profile/delegation pair"
+            })
+        );
+    }
+
+    #[test]
     fn rejects_erc7579_batch_try_and_custom_modes() {
-        let accounts = [account(LEADER)];
+        let accounts = [erc7579_account(LEADER)];
         let targets = [contract(TARGET, TARGET_HASH)];
 
         for mode_prefix in [[0x01, 0x00], [0x00, 0x01], [0x00, 0x00]] {
@@ -710,7 +826,7 @@ mod tests {
         }
         .abi_encode();
         let calldata = encode_handle_ops(vec![user_operation(LEADER, account_calldata.into())]);
-        let accounts = [account(LEADER)];
+        let accounts = [erc7579_account(LEADER)];
         let targets = [contract(TARGET, TARGET_HASH)];
 
         assert_eq!(
@@ -1061,7 +1177,9 @@ mod tests {
 
         let accounts = [SmartAccountPin {
             account: contract(LEADER, B256::ZERO),
+            execution_profile: AccountExecutionProfile::ExecuteAddressValueBytes,
             factory: None,
+            delegation_implementation: None,
         }];
         assert_eq!(
             decode_with(

@@ -30,8 +30,8 @@ use hermes_feed::noxa_abi::{
 };
 use hermes_feed::robinhood::{CHAIN_ID, NOXA_POOL_FEE, UNISWAP_V3_SWAP_ROUTER_02, WETH};
 use hermes_feed::smart_account::{
-    ContractPin, ENTRY_POINT_V07, EntryPointCall, SmartAccountPin, SmartAccountPins,
-    ValidatedSmartAccountPins, decode_entry_point_v07_prevalidated,
+    AccountExecutionProfile, ContractPin, ENTRY_POINT_V07, EntryPointCall, SmartAccountPin,
+    SmartAccountPins, ValidatedSmartAccountPins, decode_entry_point_v07_prevalidated,
 };
 use hermes_feed::uniswap_v4::{
     CodePin, DYNAMIC_FEE_FLAG, FollowerV4Policy, HookPin, V4FeePolicy, V4MarketSnapshot, V4PoolKey,
@@ -495,7 +495,9 @@ fn smart_account_pin(address: Address, hash_byte: u8) -> SmartAccountPin {
             address,
             runtime_code_hash: B256::repeat_byte(hash_byte),
         },
+        execution_profile: AccountExecutionProfile::ExecuteAddressValueBytes,
         factory: None,
+        delegation_implementation: None,
     }
 }
 

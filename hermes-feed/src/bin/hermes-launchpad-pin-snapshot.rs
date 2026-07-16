@@ -22,8 +22,8 @@ use hermes_feed::robinhood::{
     UNISWAP_V3_SWAP_ROUTER_02, WETH,
 };
 use hermes_feed::smart_account::{
-    ContractPin, ENTRY_POINT_V07, EntryPointCall, SmartAccountPin, SmartAccountPins,
-    decode_entry_point_v07,
+    AccountExecutionProfile, ContractPin, ENTRY_POINT_V07, EntryPointCall, SmartAccountPin,
+    SmartAccountPins, decode_entry_point_v07,
 };
 use hermes_feed::tier2_curve::{
     HOOD_FACTORY, LEAVEHOOD_CORE_IMPLEMENTATION, LEAVEHOOD_CORE_PROXY,
@@ -36,6 +36,14 @@ const BANKR_PROOF_TX: B256 =
     alloy_primitives::b256!("c6597fe88f8f3f16b4ba6613c25050d75dc6f3c2b2c5315f0b47828f98f0609c");
 const BANKR_PROOF_ACCOUNT: Address =
     alloy_primitives::address!("ff89978cb8171132395741b785d4a1f7e3efa124");
+const BANKR_KERNEL_IMPLEMENTATION: Address =
+    alloy_primitives::address!("d6cedde84be40893d153be9d467cd6ad37875b28");
+const BANKR_ACCOUNT_DESIGNATOR_HASH: B256 =
+    alloy_primitives::b256!("4542cbf1da24ba964614e4f5585736e22884e23e97c0f0915de4f602585d2dd4");
+const BANKR_KERNEL_RUNTIME_HASH: B256 =
+    alloy_primitives::b256!("6f6d6691dc11fda98d3102802f20e7e816ccc576c16c9279ee1a884a51d1935d");
+const BANKR_ACCOUNT_EXECUTE_SELECTOR: [u8; 4] = [0xe9, 0xae, 0x5c, 0x53];
+const BANKR_DOPPLER_CREATE_SELECTOR: [u8; 4] = [0x88, 0x2d, 0xb7, 0x07];
 
 #[derive(Debug, Parser)]
 #[command(
@@ -72,6 +80,9 @@ struct BankrProof {
     leader: Address,
     entry_point: Address,
     account_selector: String,
+    account_designator_hash: B256,
+    delegation_implementation: Address,
+    delegation_runtime_hash: B256,
     target: Option<Address>,
     target_runtime_hash: Option<B256>,
     selector: Option<String>,
@@ -206,7 +217,8 @@ fn pin_requests(expected: Option<&PaperExpectedPins>) -> Vec<PinRequest> {
         request(DOPPLER_CREATE_EMITTER, None),
         request(V4_POOL_MANAGER, None),
         request(ENTRY_POINT_V07, None),
-        request(BANKR_PROOF_ACCOUNT, None),
+        request(BANKR_PROOF_ACCOUNT, Some(BANKR_KERNEL_IMPLEMENTATION)),
+        request(BANKR_KERNEL_IMPLEMENTATION, None),
         request(HOOD_FACTORY, None),
         request(FLAP_PORTAL_PROXY, Some(FLAP_PORTAL_IMPLEMENTATION)),
         request(FLAP_PORTAL_IMPLEMENTATION, None),
@@ -247,9 +259,12 @@ fn pin_requests(expected: Option<&PaperExpectedPins>) -> Vec<PinRequest> {
         if let Some(smart) = &expected.erc4337 {
             requests.push(request(ENTRY_POINT_V07, None));
             for account in &smart.accounts {
-                requests.push(request(account.account, None));
+                requests.push(request(account.account, account.delegation_implementation));
                 if let Some(factory) = account.factory {
                     requests.push(request(factory, None));
+                }
+                if let Some(implementation) = account.delegation_implementation {
+                    requests.push(request(implementation, None));
                 }
             }
         }
@@ -288,17 +303,38 @@ async fn inspect_bankr_proof(
         .callData
         .get(..4)
         .context("Bankr proof account calldata has no selector")?;
+    if account_selector != BANKR_ACCOUNT_EXECUTE_SELECTOR {
+        bail!("Bankr proof account selector drifted from ERC-7579 execute(bytes32,bytes)");
+    }
     let entry_point_code = rpc
         .code_at_l2_block(ENTRY_POINT_V07, pinned_l2_block)
         .await?;
     let account_code = rpc
         .code_at_l2_block(BANKR_PROOF_ACCOUNT, pinned_l2_block)
         .await?;
+    let kernel_code = rpc
+        .code_at_l2_block(BANKR_KERNEL_IMPLEMENTATION, pinned_l2_block)
+        .await?;
     let target_code = rpc
         .code_at_l2_block(DOPPLER_CREATE_EMITTER, pinned_l2_block)
         .await?;
-    if entry_point_code.is_empty() || account_code.is_empty() || target_code.is_empty() {
+    if entry_point_code.is_empty()
+        || account_code.is_empty()
+        || kernel_code.is_empty()
+        || target_code.is_empty()
+    {
         bail!("Bankr proof identity has empty runtime code");
+    }
+    if keccak256(&account_code) != BANKR_ACCOUNT_DESIGNATOR_HASH
+        || account_code.as_ref()
+            != [
+                vec![0xef, 0x01, 0x00],
+                BANKR_KERNEL_IMPLEMENTATION.as_slice().to_vec(),
+            ]
+            .concat()
+        || keccak256(&kernel_code) != BANKR_KERNEL_RUNTIME_HASH
+    {
+        bail!("Bankr proof EIP-7702 designator or delegated Kernel runtime drifted");
     }
     let entry_point = ContractPin {
         address: ENTRY_POINT_V07,
@@ -307,9 +343,14 @@ async fn inspect_bankr_proof(
     let account = SmartAccountPin {
         account: ContractPin {
             address: BANKR_PROOF_ACCOUNT,
-            runtime_code_hash: keccak256(&account_code),
+            runtime_code_hash: BANKR_ACCOUNT_DESIGNATOR_HASH,
         },
+        execution_profile: AccountExecutionProfile::Erc7579SingleCall,
         factory: None,
+        delegation_implementation: Some(ContractPin {
+            address: BANKR_KERNEL_IMPLEMENTATION,
+            runtime_code_hash: BANKR_KERNEL_RUNTIME_HASH,
+        }),
     };
     let target = ContractPin {
         address: DOPPLER_CREATE_EMITTER,
@@ -337,12 +378,20 @@ async fn inspect_bankr_proof(
                 .calldata
                 .get(..4)
                 .context("Bankr proof inner calldata has no selector")?;
+            if decoded.value != alloy_primitives::U256::ZERO
+                || selector != BANKR_DOPPLER_CREATE_SELECTOR
+            {
+                bail!("Bankr proof inner value or Doppler selector drifted");
+            }
             Ok(BankrProof {
                 transaction_hash,
                 outer_bundler: decoded.outer_bundler,
                 leader: decoded.leader,
                 entry_point: decoded.entry_point,
                 account_selector: format!("0x{}", hex::encode(account_selector)),
+                account_designator_hash: BANKR_ACCOUNT_DESIGNATOR_HASH,
+                delegation_implementation: BANKR_KERNEL_IMPLEMENTATION,
+                delegation_runtime_hash: BANKR_KERNEL_RUNTIME_HASH,
                 target: Some(decoded.target),
                 target_runtime_hash: Some(target.runtime_code_hash),
                 selector: Some(format!("0x{}", hex::encode(selector))),
@@ -357,6 +406,9 @@ async fn inspect_bankr_proof(
             leader: BANKR_PROOF_ACCOUNT,
             entry_point: ENTRY_POINT_V07,
             account_selector: format!("0x{}", hex::encode(account_selector)),
+            account_designator_hash: BANKR_ACCOUNT_DESIGNATOR_HASH,
+            delegation_implementation: BANKR_KERNEL_IMPLEMENTATION,
+            delegation_runtime_hash: BANKR_KERNEL_RUNTIME_HASH,
             target: None,
             target_runtime_hash: None,
             selector: None,

@@ -42,9 +42,9 @@ use crate::robinhood::{
     UNISWAP_V3_SWAP_ROUTER_02_RUNTIME_KECCAK256, WETH, WETH_RUNTIME_KECCAK256,
 };
 use crate::smart_account::{
-    ContractPin as SmartContractPin, ENTRY_POINT_V07, ENTRY_POINT_V07_HANDLE_OPS_SELECTOR,
-    EntryPointCall, OwnedValidatedSmartAccountPins, SmartAccountPin,
-    decode_entry_point_v07_prevalidated,
+    AccountExecutionProfile, ContractPin as SmartContractPin, ENTRY_POINT_V07,
+    ENTRY_POINT_V07_HANDLE_OPS_SELECTOR, EntryPointCall, OwnedValidatedSmartAccountPins,
+    SmartAccountPin, decode_entry_point_v07_prevalidated,
 };
 use crate::tier2_curve::{
     CurveCandidateCall, HOOD_BUY_SELECTOR, HOOD_CREATE_SELECTOR, HOOD_FACTORY, HOOD_SELL_SELECTOR,
@@ -210,8 +210,11 @@ pub struct ConfiguredSmartAccounts {
 pub struct ConfiguredSmartAccount {
     pub account: Address,
     pub runtime_hash: B256,
+    pub execution_profile: AccountExecutionProfile,
     pub factory: Option<Address>,
     pub factory_runtime_hash: Option<B256>,
+    pub delegation_implementation: Option<Address>,
+    pub delegation_runtime_hash: Option<B256>,
 }
 
 #[derive(Debug, Error)]
@@ -418,20 +421,8 @@ impl PaperLaunchpadObserver {
             let accounts = smart
                 .accounts
                 .into_iter()
-                .map(|account| SmartAccountPin {
-                    account: SmartContractPin {
-                        address: account.account,
-                        runtime_code_hash: account.runtime_hash,
-                    },
-                    factory: match (account.factory, account.factory_runtime_hash) {
-                        (Some(address), Some(runtime_code_hash)) => Some(SmartContractPin {
-                            address,
-                            runtime_code_hash,
-                        }),
-                        _ => None,
-                    },
-                })
-                .collect::<Vec<_>>();
+                .map(configured_smart_account_pin)
+                .collect::<Result<Vec<_>, _>>()?;
             validate_smart_account_pins(entry_point, &accounts, &observed.pins)?;
             OwnedValidatedSmartAccountPins::new(entry_point, accounts, allowed_targets)
                 .map_err(|error| PaperObserverError::Startup(error.to_string()))
@@ -1196,20 +1187,66 @@ fn find_observed_pin(
         .find(|pin| pin.address == address && pin.implementation == implementation)
 }
 
+fn configured_smart_account_pin(
+    configured: ConfiguredSmartAccount,
+) -> Result<SmartAccountPin, PaperObserverError> {
+    let optional_pin = |address: Option<Address>,
+                        runtime_hash: Option<B256>,
+                        role: &'static str| {
+        match (address, runtime_hash) {
+            (None, None) => Ok(None),
+            (Some(address), Some(runtime_code_hash)) => Ok(Some(SmartContractPin {
+                address,
+                runtime_code_hash,
+            })),
+            _ => Err(PaperObserverError::Startup(format!(
+                "smart-account {role} address/runtime hash pair is incomplete"
+            ))),
+        }
+    };
+    Ok(SmartAccountPin {
+        account: SmartContractPin {
+            address: configured.account,
+            runtime_code_hash: configured.runtime_hash,
+        },
+        execution_profile: configured.execution_profile,
+        factory: optional_pin(
+            configured.factory,
+            configured.factory_runtime_hash,
+            "factory",
+        )?,
+        delegation_implementation: optional_pin(
+            configured.delegation_implementation,
+            configured.delegation_runtime_hash,
+            "delegation implementation",
+        )?,
+    })
+}
+
 fn validate_smart_account_pins(
     entry_point: SmartContractPin,
     accounts: &[SmartAccountPin],
     observed: &[ObservedRuntimePin],
 ) -> Result<(), PaperObserverError> {
-    let required = std::iter::once(entry_point).chain(
-        accounts
-            .iter()
-            .flat_map(|account| std::iter::once(account.account).chain(account.factory)),
-    );
-    if required.into_iter().any(|expected| {
-        find_observed_pin(observed, expected.address, None)
-            .is_none_or(|actual| actual.runtime_hash != expected.runtime_code_hash)
-    }) {
+    let entry_point_matches = find_observed_pin(observed, entry_point.address, None)
+        .is_some_and(|actual| actual.runtime_hash == entry_point.runtime_code_hash);
+    let accounts_match = accounts.iter().all(|account| {
+        let implementation = account
+            .delegation_implementation
+            .map(|implementation| implementation.address);
+        let account_matches = find_observed_pin(observed, account.account.address, implementation)
+            .is_some_and(|actual| actual.runtime_hash == account.account.runtime_code_hash);
+        let factory_matches = account.factory.is_none_or(|expected| {
+            find_observed_pin(observed, expected.address, None)
+                .is_some_and(|actual| actual.runtime_hash == expected.runtime_code_hash)
+        });
+        let delegation_matches = account.delegation_implementation.is_none_or(|expected| {
+            find_observed_pin(observed, expected.address, None)
+                .is_some_and(|actual| actual.runtime_hash == expected.runtime_code_hash)
+        });
+        account_matches && factory_matches && delegation_matches
+    });
+    if !entry_point_matches || !accounts_match {
         return Err(PaperObserverError::Startup(
             "smart-account expected pin is missing or mismatched".into(),
         ));
@@ -1612,8 +1649,11 @@ mod tests {
             accounts: vec![ConfiguredSmartAccount {
                 account,
                 runtime_hash: account_hash,
+                execution_profile: AccountExecutionProfile::ExecuteAddressValueBytes,
                 factory: None,
                 factory_runtime_hash: None,
+                delegation_implementation: None,
+                delegation_runtime_hash: None,
             }],
         });
         snapshot
@@ -1639,6 +1679,28 @@ mod tests {
                 .wrappers,
             vec![WrapperKind::Direct]
         );
+    }
+
+    #[test]
+    fn incomplete_smart_account_factory_or_delegation_pairs_fail_closed() {
+        let base = ConfiguredSmartAccount {
+            account: Address::with_last_byte(0xa1),
+            runtime_hash: B256::with_last_byte(0xa1),
+            execution_profile: AccountExecutionProfile::ExecuteAddressValueBytes,
+            factory: None,
+            factory_runtime_hash: None,
+            delegation_implementation: None,
+            delegation_runtime_hash: None,
+        };
+
+        let mut missing_factory_hash = base;
+        missing_factory_hash.factory = Some(Address::with_last_byte(0xf1));
+        assert!(configured_smart_account_pin(missing_factory_hash).is_err());
+
+        let mut missing_delegation_hash = base;
+        missing_delegation_hash.execution_profile = AccountExecutionProfile::Erc7579SingleCall;
+        missing_delegation_hash.delegation_implementation = Some(Address::with_last_byte(0xd1));
+        assert!(configured_smart_account_pin(missing_delegation_hash).is_err());
     }
 
     #[test]

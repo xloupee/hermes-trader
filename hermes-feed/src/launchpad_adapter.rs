@@ -25,6 +25,7 @@ pub enum LaunchpadId {
     BankrDoppler,
     KlikFinance,
     TrenchToday,
+    Pons,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -56,6 +57,7 @@ pub enum WrapperKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionKind {
+    Launch,
     Buy,
     Sell,
 }
@@ -76,6 +78,7 @@ pub struct ObservedAmounts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservedRoute {
+    PonsFactory,
     DirectV3,
     RobinhoodAggregator,
 }
@@ -193,6 +196,7 @@ impl NoxaV3Adapter {
         let expected_assets = match action.action {
             ActionKind::Buy => (WETH, action.market.token),
             ActionKind::Sell => (action.market.token, WETH),
+            ActionKind::Launch => return Err(AdapterError::UnsupportedMarket),
         };
         if (action.asset_in, action.asset_out) != expected_assets {
             return Err(AdapterError::UnsupportedMarket);
@@ -389,6 +393,7 @@ impl LaunchpadAdapter for NoxaV3Adapter {
         let (token_in, token_out) = match action.action {
             ActionKind::Buy => (WETH, action.market.token),
             ActionKind::Sell => (action.market.token, WETH),
+            ActionKind::Launch => return Err(AdapterError::InvalidPlan),
         };
         let intent = V3ExactInputIntent {
             token_in,

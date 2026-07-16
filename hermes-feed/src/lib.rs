@@ -102,11 +102,10 @@ pub use paper_runtime::{
     PaperPosition, PaperReconciliation, PaperRuntimeError, PaperRuntimeSnapshot,
 };
 pub use pons::{
-    FollowerTradePlan as PonsFollowerTradePlan, ObservedLeaderAction as PonsObservedLeaderAction,
     PonsAdapter, PonsAttributionProvenance, PonsExecutionBlocked, PonsGeneration,
-    PonsObservationInput, PonsObservationReject, PonsPaperPlanError, PonsPaperRequest,
-    PonsPredictionKind, PonsReceiptProvenance, RuntimeIdentity as PonsRuntimeIdentity,
-    VerifiedPonsMarket,
+    PonsLaunchObservation, PonsObservationInput, PonsObservationReject, PonsPaperPlanError,
+    PonsPaperRequest, PonsPredictionKind, PonsReceiptProvenance,
+    RuntimeIdentity as PonsRuntimeIdentity, VerifiedPonsMarket,
 };
 pub use probe::{FrameReport, SequenceObservation, SequenceTracker};
 pub use rpc::{FactoryBootstrap, SyncUpdate, V2SnapshotClient};

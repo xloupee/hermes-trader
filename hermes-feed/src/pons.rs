@@ -6,13 +6,17 @@
 //! operations. Markets are never predicted: a pool must arrive through an
 //! asynchronously verified, factory-proven receipt snapshot.
 
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{SolCall, sol};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::launchpad_adapter::{
+    ActionKind, FollowerTradePlan, LaunchpadId, MarketIdentity, ObservedAmounts,
+    ObservedLeaderAction, ObservedRoute, RouteKind,
+};
 use crate::noxa_abi::{V3ExactInputIntent, encode_v3_exact_input_single};
-use crate::v3_pool::{V3PoolError, V3PoolState, V3Quote};
+use crate::v3_pool::{V3PoolError, V3PoolState};
 
 pub const PONS_CHAIN_ID: u64 = 4_663;
 pub const PONS_LAUNCH_FEE_WEI: u64 = 500_000_000_000_000;
@@ -201,7 +205,7 @@ impl PonsAdapter {
     pub fn observe_launch(
         &self,
         input: PonsObservationInput<'_>,
-    ) -> Result<ObservedLeaderAction, PonsObservationReject> {
+    ) -> Result<PonsLaunchObservation, PonsObservationReject> {
         if input.chain_id != PONS_CHAIN_ID {
             return Err(PonsObservationReject::WrongChain);
         }
@@ -232,10 +236,10 @@ impl PonsAdapter {
         {
             return Err(PonsObservationReject::UnsupportedConfiguration);
         }
-        Ok(ObservedLeaderAction {
+        Ok(PonsLaunchObservation {
+            tx_hash: input.tx_hash,
             generation,
             leader: input.sender,
-            action: PonsAction::Launch,
             market: PonsMarketIdentity::UnresolvedUntilReceipt {
                 factory: generation.factory(),
                 salt: call.salt,
@@ -266,7 +270,7 @@ impl PonsAdapter {
     /// not accepted by this API and therefore cannot be copied.
     pub fn plan_paper_entry(
         &self,
-        observed: &ObservedLeaderAction,
+        observed: &PonsLaunchObservation,
         market: &VerifiedPonsMarket,
         request: PonsPaperRequest,
     ) -> Result<FollowerTradePlan, PonsPaperPlanError> {
@@ -300,19 +304,44 @@ impl PonsAdapter {
         })
         .ok_or(PonsPaperPlanError::CalldataConstruction)?;
         Ok(FollowerTradePlan {
-            generation: observed.generation,
-            mode: PonsPlanMode::PaperOnly,
-            route: PonsPaperRoute::PrewrappedWethV3SingleHop,
+            launchpad: LaunchpadId::Pons,
+            route: RouteKind::V3SingleHop,
             destination: PONS_SWAP_ROUTER_02,
             value: U256::ZERO,
-            calldata: Bytes::from(calldata),
+            calldata: calldata.into(),
             spend_limit: request.spend,
-            minimum_receive,
-            expected_market: VerifiedMarketIdentity {
+            min_receive: minimum_receive,
+            expected_market: MarketIdentity {
                 token: market.token,
+                quote_asset: market.quote_asset,
                 pool: market.pool_state.pool,
             },
-            quote,
+        })
+    }
+
+    pub fn normalize_observed_action(
+        &self,
+        observed: &PonsLaunchObservation,
+        market: &VerifiedPonsMarket,
+    ) -> Result<ObservedLeaderAction, PonsPaperPlanError> {
+        validate_market(observed, market)?;
+        Ok(ObservedLeaderAction {
+            tx_hash: observed.tx_hash,
+            launchpad: LaunchpadId::Pons,
+            leader: observed.leader,
+            action: ActionKind::Launch,
+            market: MarketIdentity {
+                token: market.token,
+                quote_asset: market.quote_asset,
+                pool: market.pool_state.pool,
+            },
+            asset_in: PONS_WETH,
+            asset_out: market.token,
+            observed_amounts: ObservedAmounts {
+                amount_in: observed.launch.observed_value,
+                minimum_out: U256::ZERO,
+            },
+            observed_route: ObservedRoute::PonsFactory,
         })
     }
 
@@ -345,6 +374,7 @@ pub enum PonsAttributionProvenance {
 
 #[derive(Debug, Clone, Copy)]
 pub struct PonsObservationInput<'a> {
+    pub tx_hash: B256,
     pub chain_id: u64,
     pub destination: Address,
     pub destination_runtime_hash: B256,
@@ -398,20 +428,15 @@ pub struct PonsLaunchIntent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PonsAction {
-    Launch,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PonsMarketIdentity {
     UnresolvedUntilReceipt { factory: Address, salt: B256 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ObservedLeaderAction {
+pub struct PonsLaunchObservation {
+    pub tx_hash: B256,
     pub generation: PonsGeneration,
     pub leader: Address,
-    pub action: PonsAction,
     pub market: PonsMarketIdentity,
     pub launch: PonsLaunchIntent,
 }
@@ -448,38 +473,6 @@ pub struct PonsPaperRequest {
     pub max_slippage_bps: u16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PonsPlanMode {
-    PaperOnly,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PonsPaperRoute {
-    PrewrappedWethV3SingleHop,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct VerifiedMarketIdentity {
-    pub token: Address,
-    pub pool: Address,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FollowerTradePlan {
-    pub generation: PonsGeneration,
-    pub mode: PonsPlanMode,
-    pub route: PonsPaperRoute,
-    pub destination: Address,
-    pub value: U256,
-    pub calldata: Bytes,
-    pub spend_limit: U256,
-    pub minimum_receive: U256,
-    pub expected_market: VerifiedMarketIdentity,
-    pub quote: V3Quote,
-}
-
 #[derive(Debug, Error)]
 pub enum PonsPaperPlanError {
     #[error("paper market lacks exact generation factory receipt provenance")]
@@ -501,7 +494,7 @@ pub enum PonsPaperPlanError {
 }
 
 fn validate_market(
-    observed: &ObservedLeaderAction,
+    observed: &PonsLaunchObservation,
     market: &VerifiedPonsMarket,
 ) -> Result<(), PonsPaperPlanError> {
     if observed.generation != market.generation {
@@ -589,6 +582,7 @@ mod tests {
 
     fn observation_input(generation: PonsGeneration, calldata: &[u8]) -> PonsObservationInput<'_> {
         PonsObservationInput {
+            tx_hash: PONS_CURRENT_LAUNCH_FIXTURE_TX,
             chain_id: PONS_CHAIN_ID,
             destination: generation.factory(),
             destination_runtime_hash: generation.factory_runtime(),
@@ -687,7 +681,7 @@ mod tests {
         );
     }
 
-    fn current_observation() -> ObservedLeaderAction {
+    fn current_observation() -> PonsLaunchObservation {
         let calldata = fixture_calldata();
         adapter()
             .observe_launch(observation_input(PonsGeneration::Current, &calldata))
@@ -737,10 +731,20 @@ mod tests {
     #[test]
     fn paper_plan_is_fresh_local_and_separate_from_observation() {
         let observed = current_observation();
+        let market = current_market();
+        let quote = market
+            .pool_state
+            .quote_exact_input(PONS_WETH, U256::from(1_000_000_u64), None)
+            .unwrap();
+        let normalized = adapter()
+            .normalize_observed_action(&observed, &market)
+            .unwrap();
+        assert_eq!(normalized.launchpad, LaunchpadId::Pons);
+        assert_eq!(normalized.action, ActionKind::Launch);
         let plan = adapter()
             .plan_paper_entry(
                 &observed,
-                &current_market(),
+                &market,
                 PonsPaperRequest {
                     recipient: Address::with_last_byte(8),
                     spend: U256::from(1_000_000_u64),
@@ -748,13 +752,14 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(plan.mode, PonsPlanMode::PaperOnly);
+        assert_eq!(plan.launchpad, LaunchpadId::Pons);
+        assert_eq!(plan.route, RouteKind::V3SingleHop);
         assert_eq!(plan.destination, PONS_SWAP_ROUTER_02);
         assert_eq!(plan.value, U256::ZERO);
         assert_eq!(&plan.calldata[..4], &[0x04, 0xe4, 0x5a, 0xaf]);
         assert_eq!(
-            plan.minimum_receive,
-            plan.quote.amount_out * U256::from(9_900) / U256::from(10_000)
+            plan.min_receive,
+            quote.amount_out * U256::from(9_900) / U256::from(10_000)
         );
     }
 
@@ -823,7 +828,7 @@ mod tests {
         let _: fn(
             &PonsAdapter,
             PonsObservationInput<'_>,
-        ) -> Result<ObservedLeaderAction, PonsObservationReject> = PonsAdapter::observe_launch;
+        ) -> Result<PonsLaunchObservation, PonsObservationReject> = PonsAdapter::observe_launch;
         assert_eq!(std::mem::size_of::<PonsAdapter>(), 0);
     }
 }

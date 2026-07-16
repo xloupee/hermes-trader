@@ -220,13 +220,13 @@ impl V3LaunchAtBirthAdapter {
                 return Err(V3LaunchError::MalformedCalldata);
             }
             if call.configId != U256::from(LAUNCHHOOD_CONFIG_ID)
+                || call.dexId != U256::ZERO
                 || call.p.name.is_empty()
                 || call.p.symbol.is_empty()
                 || [&call.p.name, &call.p.symbol, &call.p.metadataURI]
                     .iter()
                     .any(|value| value.len() > MAX_DYNAMIC_STRING_BYTES)
                 || deployer == Address::ZERO
-                || (transaction_value != U256::ZERO && call.minTokensOut == U256::ZERO)
             {
                 return Err(V3LaunchError::UnsupportedLaunchConfig);
             }
@@ -237,8 +237,8 @@ impl V3LaunchAtBirthAdapter {
                 transaction_value,
                 embedded_initial_buy: transaction_value != U256::ZERO,
                 leader_min_tokens_out: call.minTokensOut,
-                // The artifacts prove CREATE2 is used, but do not pin the
-                // normalized init-code formula/hash or canonical dexId.
+                // The artifacts prove CREATE2 and the canonical dexId, but do
+                // not pin the normalized init-code formula/hash.
                 predicted_market: None,
                 execution_ready: false,
             });
@@ -429,6 +429,29 @@ mod tests {
         assert_eq!(hood.leader_min_tokens_out, U256::from(888));
         assert_eq!(
             r.pre_receipt_market(&hood),
+            Err(V3LaunchError::PlanUnavailable)
+        );
+    }
+
+    #[test]
+    fn launchhood_live_zero_leader_minimum_is_observed_but_never_reused() {
+        let r = registry();
+        let observation = r
+            .observe_launch_call(
+                CHAIN_ID,
+                LAUNCHHOOD_V3_FACTORY,
+                Address::with_last_byte(4),
+                U256::from(10_000_000_000_000_u64),
+                &launchhood_calldata(U256::ZERO),
+            )
+            .unwrap();
+        assert_eq!(observation.launchpad, LaunchpadId::LaunchHoodV3);
+        assert!(observation.embedded_initial_buy);
+        assert_eq!(observation.leader_min_tokens_out, U256::ZERO);
+        assert!(observation.predicted_market.is_none());
+        assert!(!observation.execution_ready);
+        assert_eq!(
+            r.pre_receipt_market(&observation),
             Err(V3LaunchError::PlanUnavailable)
         );
     }
@@ -639,6 +662,30 @@ mod tests {
                 leader,
                 U256::ZERO,
                 &unsupported
+            ),
+            Err(V3LaunchError::UnsupportedLaunchConfig)
+        );
+
+        let unsupported_dex = launchTokenCall {
+            p: LaunchHoodTokenParams {
+                name: "fixture".into(),
+                symbol: "FIX".into(),
+                metadataURI: "".into(),
+                rewardRecipient: leader,
+            },
+            configId: U256::ZERO,
+            dexId: U256::from(1),
+            userSalt: B256::ZERO,
+            minTokensOut: U256::ZERO,
+        }
+        .abi_encode();
+        assert_eq!(
+            r.observe_launch_call(
+                CHAIN_ID,
+                LAUNCHHOOD_V3_FACTORY,
+                leader,
+                U256::from(10_000_000_000_000_u64),
+                &unsupported_dex
             ),
             Err(V3LaunchError::UnsupportedLaunchConfig)
         );

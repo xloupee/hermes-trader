@@ -3,6 +3,9 @@
 This workflow is local, read-only, and broadcast-free. It does not load a
 wallet, keystore, signer, or transaction sender.
 
+The first complete multi-protocol local window and its fail-closed findings are
+recorded in [PAPER_OBSERVER_SAMPLE_2026-07-16.md](PAPER_OBSERVER_SAMPLE_2026-07-16.md).
+
 ## Build and startup inputs
 
 Build the four runtime binaries:

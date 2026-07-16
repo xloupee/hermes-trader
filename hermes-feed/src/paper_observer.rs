@@ -159,13 +159,13 @@ pub struct PaperExpectedPins {
     pub erc4337: Option<ConfiguredSmartAccounts>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExpectedPinsDocumentRole {
     ExpectedProtocolPins,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PaperObservedStartupSnapshot {
     pub schema_version: u32,
@@ -176,13 +176,13 @@ pub struct PaperObservedStartupSnapshot {
     pub pins: Vec<ObservedRuntimePin>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservedPinsDocumentRole {
     ObservedStartupSnapshot,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObservedRuntimePin {
     pub address: Address,

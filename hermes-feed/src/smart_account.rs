@@ -2,9 +2,11 @@
 //!
 //! This module intentionally supports one small profile: EntryPoint v0.7
 //! `handleOps(PackedUserOperation[], address)` calls whose single user operation
-//! invokes a startup-pinned account's `execute(address,uint256,bytes)` method.
-//! It does not support account deployment, paymasters, batches, arbitrary
-//! account ABIs, or candidate-time code discovery.
+//! invokes either a startup-pinned account's `execute(address,uint256,bytes)`
+//! method or the canonical ERC-7579 single-call
+//! `execute(bytes32,bytes)` method. It does not support account deployment,
+//! paymasters, batches, custom execution modes, arbitrary account ABIs, or
+//! candidate-time code discovery.
 
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_sol_types::{SolCall, sol};
@@ -37,8 +39,17 @@ sol! {
     function execute(address dest, uint256 value, bytes func) external;
 }
 
+mod erc7579 {
+    use alloy_sol_types::sol;
+
+    sol! {
+        function execute(bytes32 mode, bytes executionCalldata) external;
+    }
+}
+
 pub const ENTRY_POINT_V07_HANDLE_OPS_SELECTOR: [u8; 4] = handleOpsCall::SELECTOR;
 pub const ACCOUNT_EXECUTE_SELECTOR: [u8; 4] = executeCall::SELECTOR;
+pub const ERC7579_EXECUTE_SELECTOR: [u8; 4] = erc7579::executeCall::SELECTOR;
 
 /// A contract identity verified and frozen during startup.
 ///
@@ -184,10 +195,14 @@ pub enum SmartAccountDecodeError {
     PaymasterNotAllowed { sender: Address },
     #[error("user operation sender {sender} is not a pinned smart account")]
     UnknownSmartAccount { sender: Address },
-    #[error("smart-account calldata does not use pinned execute(address,uint256,bytes)")]
+    #[error("smart-account calldata does not use a supported pinned execute ABI")]
     WrongAccountSelector,
     #[error("smart-account execute calldata is malformed or noncanonical")]
     MalformedAccountCall,
+    #[error("ERC-7579 execution mode is not the canonical single-call revert mode")]
+    UnsupportedErc7579Mode,
+    #[error("ERC-7579 single-call execution data is malformed")]
+    MalformedErc7579Execution,
     #[error("inner target {target} is neither an allowed target nor a pinned smart account")]
     UnknownTarget { target: Address },
     #[error("intermediate smart-account hop {target} carries non-zero native value")]
@@ -348,31 +363,60 @@ fn unwrap_execute_chain(
                 maximum: MAX_ACCOUNT_CALLDATA_BYTES,
             });
         }
-        if current_calldata.get(..4) != Some(ACCOUNT_EXECUTE_SELECTOR.as_slice()) {
-            return Err(SmartAccountDecodeError::WrongAccountSelector);
-        }
-        let call = executeCall::abi_decode(current_calldata.as_ref())
-            .map_err(|_| SmartAccountDecodeError::MalformedAccountCall)?;
-        if call.abi_encode().as_slice() != current_calldata.as_ref() {
-            return Err(SmartAccountDecodeError::MalformedAccountCall);
-        }
+        let (target, value, calldata) = decode_account_execute(&current_calldata)?;
 
         depth += 1;
         calls += 1;
 
-        if find_target_pin(call.dest, pins.allowed_targets)?.is_some() {
-            return Ok((call.dest, call.value, call.func, depth, calls));
+        if find_target_pin(target, pins.allowed_targets)?.is_some() {
+            return Ok((target, value, calldata, depth, calls));
         }
-        if find_account_pin_optional(call.dest, pins.accounts)?.is_some() {
-            if call.value != U256::ZERO {
-                return Err(SmartAccountDecodeError::IntermediateValueNotAllowed {
-                    target: call.dest,
-                });
+        if find_account_pin_optional(target, pins.accounts)?.is_some() {
+            if value != U256::ZERO {
+                return Err(SmartAccountDecodeError::IntermediateValueNotAllowed { target });
             }
-            current_calldata = call.func;
+            current_calldata = calldata;
             continue;
         }
-        return Err(SmartAccountDecodeError::UnknownTarget { target: call.dest });
+        return Err(SmartAccountDecodeError::UnknownTarget { target });
+    }
+}
+
+fn decode_account_execute(
+    calldata: &[u8],
+) -> Result<(Address, U256, Bytes), SmartAccountDecodeError> {
+    match calldata.get(..4) {
+        Some(selector) if selector == ACCOUNT_EXECUTE_SELECTOR => {
+            let call = executeCall::abi_decode(calldata)
+                .map_err(|_| SmartAccountDecodeError::MalformedAccountCall)?;
+            if call.abi_encode().as_slice() != calldata {
+                return Err(SmartAccountDecodeError::MalformedAccountCall);
+            }
+            Ok((call.dest, call.value, call.func))
+        }
+        Some(selector) if selector == ERC7579_EXECUTE_SELECTOR => {
+            let call = erc7579::executeCall::abi_decode(calldata)
+                .map_err(|_| SmartAccountDecodeError::MalformedAccountCall)?;
+            if call.abi_encode().as_slice() != calldata {
+                return Err(SmartAccountDecodeError::MalformedAccountCall);
+            }
+            // ERC-7579 mode layout is callType || execType || unused ||
+            // modeSelector || modePayload. All-zero is the canonical single
+            // CALL that reverts on failure, with no vendor extension.
+            if call.mode != B256::ZERO {
+                return Err(SmartAccountDecodeError::UnsupportedErc7579Mode);
+            }
+            // Single-call executionCalldata is abi.encodePacked(target, value,
+            // callData): exactly 20 bytes, then 32 bytes, then the opaque call.
+            if call.executionCalldata.len() < 52 {
+                return Err(SmartAccountDecodeError::MalformedErc7579Execution);
+            }
+            let target = Address::from_slice(&call.executionCalldata[..20]);
+            let value = U256::from_be_slice(&call.executionCalldata[20..52]);
+            let inner = Bytes::copy_from_slice(&call.executionCalldata[52..]);
+            Ok((target, value, inner))
+        }
+        _ => Err(SmartAccountDecodeError::WrongAccountSelector),
     }
 }
 
@@ -512,6 +556,19 @@ mod tests {
         .into()
     }
 
+    fn encode_erc7579_execute(mode: B256, target: Address, value: U256, calldata: Bytes) -> Bytes {
+        let mut packed = Vec::with_capacity(52 + calldata.len());
+        packed.extend_from_slice(target.as_slice());
+        packed.extend_from_slice(&value.to_be_bytes::<32>());
+        packed.extend_from_slice(&calldata);
+        erc7579::executeCall {
+            mode,
+            executionCalldata: packed.into(),
+        }
+        .abi_encode()
+        .into()
+    }
+
     fn user_operation(sender: Address, call_data: Bytes) -> PackedUserOperation {
         PackedUserOperation {
             sender,
@@ -584,6 +641,87 @@ mod tests {
         assert_eq!(decoded.calldata, protocol_calldata);
         assert_eq!(decoded.unwrap_depth, 1);
         assert_eq!(decoded.inner_call_count, 1);
+    }
+
+    #[test]
+    fn unwraps_canonical_erc7579_single_call() {
+        let protocol_calldata = Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef, 0x02]);
+        let account_calldata = encode_erc7579_execute(
+            B256::ZERO,
+            TARGET,
+            U256::from(456),
+            protocol_calldata.clone(),
+        );
+        assert_eq!(
+            account_calldata.get(..4),
+            Some(ERC7579_EXECUTE_SELECTOR.as_slice())
+        );
+        let calldata = encode_handle_ops(vec![user_operation(LEADER, account_calldata)]);
+        let accounts = [account(LEADER)];
+        let targets = [contract(TARGET, TARGET_HASH)];
+
+        let decoded = decode_with(
+            &calldata,
+            contract(ENTRY_POINT, ENTRY_POINT_HASH),
+            &accounts,
+            &targets,
+        )
+        .unwrap();
+
+        assert_eq!(decoded.leader, LEADER);
+        assert_eq!(decoded.target, TARGET);
+        assert_eq!(decoded.value, U256::from(456));
+        assert_eq!(decoded.calldata, protocol_calldata);
+        assert_eq!(decoded.unwrap_depth, 1);
+        assert_eq!(decoded.inner_call_count, 1);
+    }
+
+    #[test]
+    fn rejects_erc7579_batch_try_and_custom_modes() {
+        let accounts = [account(LEADER)];
+        let targets = [contract(TARGET, TARGET_HASH)];
+
+        for mode_prefix in [[0x01, 0x00], [0x00, 0x01], [0x00, 0x00]] {
+            let mut mode = [0u8; 32];
+            mode[..2].copy_from_slice(&mode_prefix);
+            if mode_prefix == [0x00, 0x00] {
+                mode[6] = 1;
+            }
+            let account_calldata =
+                encode_erc7579_execute(B256::from(mode), TARGET, U256::ZERO, Bytes::new());
+            let calldata = encode_handle_ops(vec![user_operation(LEADER, account_calldata)]);
+            assert_eq!(
+                decode_with(
+                    &calldata,
+                    contract(ENTRY_POINT, ENTRY_POINT_HASH),
+                    &accounts,
+                    &targets,
+                ),
+                Err(SmartAccountDecodeError::UnsupportedErc7579Mode)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_short_erc7579_single_call_data() {
+        let account_calldata = erc7579::executeCall {
+            mode: B256::ZERO,
+            executionCalldata: Bytes::from(vec![0u8; 51]),
+        }
+        .abi_encode();
+        let calldata = encode_handle_ops(vec![user_operation(LEADER, account_calldata.into())]);
+        let accounts = [account(LEADER)];
+        let targets = [contract(TARGET, TARGET_HASH)];
+
+        assert_eq!(
+            decode_with(
+                &calldata,
+                contract(ENTRY_POINT, ENTRY_POINT_HASH),
+                &accounts,
+                &targets,
+            ),
+            Err(SmartAccountDecodeError::MalformedErc7579Execution)
+        );
     }
 
     #[test]

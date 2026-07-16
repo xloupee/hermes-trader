@@ -275,6 +275,10 @@ impl NoxaRpcClient {
         parse_u64_value(&self.request("eth_chainId", json!([])).await?)
     }
 
+    pub async fn latest_block_number(&self) -> Result<u64> {
+        parse_u64_value(&self.request("eth_blockNumber", json!([])).await?)
+    }
+
     pub async fn pending_nonce(&self, account: Address) -> Result<u64> {
         parse_u64_value(
             &self

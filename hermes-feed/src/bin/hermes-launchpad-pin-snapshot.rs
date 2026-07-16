@@ -1,0 +1,368 @@
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
+use std::path::PathBuf;
+
+use alloy_primitives::{Address, B256, keccak256};
+use alloy_sol_types::{SolCall, sol};
+use anyhow::{Context, Result, bail};
+use clap::Parser;
+use hermes_feed::flap_identity::{
+    FLAP_PORTAL_IMPLEMENTATION, FLAP_PORTAL_PROXY, FLAP_VAULT_PORTAL_IMPLEMENTATION,
+    FLAP_VAULT_PORTAL_PROXY,
+};
+use hermes_feed::launchpad_adapters::{CLANKER_FACTORY, DOPPLER_CREATE_EMITTER, V4_POOL_MANAGER};
+use hermes_feed::paper_observer::{
+    ObservedPinsDocumentRole, ObservedPinsProvenance, ObservedRuntimePin, PaperExpectedPins,
+    PaperLaunchpadObserver, PaperObservedStartupSnapshot,
+};
+use hermes_feed::robinhood::{
+    ACTIVE_NOXA_LAUNCH_FACTORY, BOW_LAUNCH_FACTORY, CHAIN_ID, LAUNCHHOOD_V3_FACTORY,
+    NOXA_LAUNCH_FACTORY, PUBLIC_RPC_URL, UNISWAP_V3_FACTORY, UNISWAP_V3_POSITION_MANAGER,
+    UNISWAP_V3_SWAP_ROUTER_02, WETH,
+};
+use hermes_feed::smart_account::{
+    ContractPin, ENTRY_POINT_V07, EntryPointCall, SmartAccountPin, SmartAccountPins,
+    decode_entry_point_v07,
+};
+use hermes_feed::tier2_curve::{
+    HOOD_FACTORY, LEAVEHOOD_CORE_IMPLEMENTATION, LEAVEHOOD_CORE_PROXY,
+    LEAVEHOOD_FACTORY_IMPLEMENTATION, LEAVEHOOD_FACTORY_PROXY,
+};
+use hermes_feed::{NoxaRpcClient, PonsAdapter};
+use serde::Serialize;
+
+const BANKR_PROOF_TX: B256 =
+    alloy_primitives::b256!("c6597fe88f8f3f16b4ba6613c25050d75dc6f3c2b2c5315f0b47828f98f0609c");
+const BANKR_PROOF_ACCOUNT: Address =
+    alloy_primitives::address!("ff89978cb8171132395741b785d4a1f7e3efa124");
+
+#[derive(Debug, Parser)]
+#[command(
+    version,
+    about = "Read-only chain-4663 runtime-pin snapshot and Bankr proof inspector"
+)]
+struct Cli {
+    #[arg(long, default_value = PUBLIC_RPC_URL)]
+    rpc_url: String,
+
+    /// Optional reviewed expected pins. When supplied, startup validation must pass.
+    #[arg(long)]
+    expected_pins: Option<PathBuf>,
+
+    /// Write the exact observer-compatible startup snapshot to this file.
+    #[arg(long)]
+    snapshot_output: Option<PathBuf>,
+
+    /// Known Bankr/Doppler ERC-4337 proof transaction to inspect.
+    #[arg(long, default_value_t = BANKR_PROOF_TX)]
+    bankr_proof_tx: B256,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PinRequest {
+    address: Address,
+    implementation: Option<Address>,
+}
+
+#[derive(Debug, Serialize)]
+struct BankrProof {
+    transaction_hash: B256,
+    outer_bundler: Address,
+    leader: Address,
+    entry_point: Address,
+    account_selector: String,
+    target: Option<Address>,
+    target_runtime_hash: Option<B256>,
+    selector: Option<String>,
+    unwrap_depth: Option<usize>,
+    inner_call_count: Option<usize>,
+    decode_error: Option<String>,
+}
+
+sol! {
+    struct DiagnosticPackedUserOperation {
+        address sender;
+        uint256 nonce;
+        bytes initCode;
+        bytes callData;
+        bytes32 accountGasLimits;
+        uint256 preVerificationGas;
+        bytes32 gasFees;
+        bytes paymasterAndData;
+        bytes signature;
+    }
+
+    function handleOps(
+        DiagnosticPackedUserOperation[] ops,
+        address payable beneficiary
+    ) external;
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotReport {
+    record_type: &'static str,
+    chain_id: u64,
+    pinned_l2_block: u64,
+    pin_count: usize,
+    expected_validation_passed: bool,
+    bankr_proof: BankrProof,
+    rpc_metrics: hermes_feed::RpcMetricsSnapshot,
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
+    let args = Cli::parse();
+    let rpc = NoxaRpcClient::with_url(args.rpc_url)?;
+    let chain_id = rpc.chain_id().await?;
+    if chain_id != CHAIN_ID {
+        bail!("RPC chain ID {chain_id} does not match Robinhood {CHAIN_ID}");
+    }
+    let pinned_l2_block = rpc.latest_block_number().await?;
+
+    let expected = args
+        .expected_pins
+        .as_ref()
+        .map(|path| {
+            serde_json::from_reader(BufReader::new(
+                File::open(path)
+                    .with_context(|| format!("open expected pins {}", path.display()))?,
+            ))
+            .with_context(|| format!("decode expected pins {}", path.display()))
+        })
+        .transpose()?;
+
+    let requests = pin_requests(expected.as_ref());
+    let mut pins = Vec::with_capacity(requests.len());
+    for request in requests {
+        let code = rpc
+            .code_at_l2_block(request.address, pinned_l2_block)
+            .await
+            .with_context(|| format!("read runtime code for {}", request.address))?;
+        if code.is_empty() {
+            bail!("runtime code is empty for {}", request.address);
+        }
+        pins.push(ObservedRuntimePin {
+            address: request.address,
+            implementation: request.implementation,
+            runtime_hash: keccak256(&code),
+            code_bytes: Some(code.len()),
+        });
+    }
+    let snapshot = PaperObservedStartupSnapshot {
+        schema_version: 1,
+        document_role: ObservedPinsDocumentRole::ObservedStartupSnapshot,
+        provenance: ObservedPinsProvenance::StartupObservation,
+        fixture_id: None,
+        chain_id,
+        pins,
+    };
+
+    let proof = inspect_bankr_proof(&rpc, pinned_l2_block, args.bankr_proof_tx).await?;
+    let expected_validation_passed = if let Some(expected) = expected {
+        PaperLaunchpadObserver::from_startup_snapshots(expected, snapshot.clone())?;
+        true
+    } else {
+        false
+    };
+
+    if let Some(path) = args.snapshot_output {
+        serde_json::to_writer_pretty(
+            BufWriter::new(
+                File::create(&path)
+                    .with_context(|| format!("create snapshot {}", path.display()))?,
+            ),
+            &snapshot,
+        )
+        .with_context(|| format!("write snapshot {}", path.display()))?;
+    }
+
+    println!(
+        "{}",
+        serde_json::to_string(&SnapshotReport {
+            record_type: "launchpad_pin_snapshot",
+            chain_id,
+            pinned_l2_block,
+            pin_count: snapshot.pins.len(),
+            expected_validation_passed,
+            bankr_proof: proof,
+            rpc_metrics: rpc.metrics(),
+        })?
+    );
+    Ok(())
+}
+
+fn pin_requests(expected: Option<&PaperExpectedPins>) -> Vec<PinRequest> {
+    let mut requests = vec![
+        request(WETH, None),
+        request(UNISWAP_V3_FACTORY, None),
+        request(UNISWAP_V3_POSITION_MANAGER, None),
+        request(UNISWAP_V3_SWAP_ROUTER_02, None),
+        request(NOXA_LAUNCH_FACTORY, None),
+        request(ACTIVE_NOXA_LAUNCH_FACTORY, None),
+        request(BOW_LAUNCH_FACTORY, None),
+        request(LAUNCHHOOD_V3_FACTORY, None),
+        request(CLANKER_FACTORY, None),
+        request(DOPPLER_CREATE_EMITTER, None),
+        request(V4_POOL_MANAGER, None),
+        request(ENTRY_POINT_V07, None),
+        request(BANKR_PROOF_ACCOUNT, None),
+        request(HOOD_FACTORY, None),
+        request(FLAP_PORTAL_PROXY, Some(FLAP_PORTAL_IMPLEMENTATION)),
+        request(FLAP_PORTAL_IMPLEMENTATION, None),
+        request(
+            FLAP_VAULT_PORTAL_PROXY,
+            Some(FLAP_VAULT_PORTAL_IMPLEMENTATION),
+        ),
+        request(FLAP_VAULT_PORTAL_IMPLEMENTATION, None),
+    ];
+    requests.extend(
+        PonsAdapter::required_startup_identities()
+            .iter()
+            .map(|identity| request(identity.address, None)),
+    );
+
+    if let Some(expected) = expected {
+        if expected.leavehood_factory_proxy_runtime_hash.is_some() {
+            requests.extend([
+                request(
+                    LEAVEHOOD_FACTORY_PROXY,
+                    Some(LEAVEHOOD_FACTORY_IMPLEMENTATION),
+                ),
+                request(LEAVEHOOD_FACTORY_IMPLEMENTATION, None),
+            ]);
+        }
+        if expected.leavehood_core_proxy_runtime_hash.is_some() {
+            requests.extend([
+                request(LEAVEHOOD_CORE_PROXY, Some(LEAVEHOOD_CORE_IMPLEMENTATION)),
+                request(LEAVEHOOD_CORE_IMPLEMENTATION, None),
+            ]);
+        }
+        requests.extend(
+            expected
+                .bankr_doppler_calls
+                .iter()
+                .map(|call| request(call.destination, None)),
+        );
+        if let Some(smart) = &expected.erc4337 {
+            requests.push(request(ENTRY_POINT_V07, None));
+            for account in &smart.accounts {
+                requests.push(request(account.account, None));
+                if let Some(factory) = account.factory {
+                    requests.push(request(factory, None));
+                }
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    requests.retain(|pin| seen.insert(pin.address));
+    requests
+}
+
+const fn request(address: Address, implementation: Option<Address>) -> PinRequest {
+    PinRequest {
+        address,
+        implementation,
+    }
+}
+
+async fn inspect_bankr_proof(
+    rpc: &NoxaRpcClient,
+    pinned_l2_block: u64,
+    transaction_hash: B256,
+) -> Result<BankrProof> {
+    let transaction = rpc
+        .transaction_by_hash(transaction_hash)
+        .await?
+        .with_context(|| format!("Bankr proof transaction {transaction_hash} is missing"))?;
+    if transaction.to != Some(ENTRY_POINT_V07) {
+        bail!("Bankr proof transaction no longer targets the canonical EntryPoint");
+    }
+    let diagnostic = handleOpsCall::abi_decode(&transaction.input)
+        .context("decode Bankr proof handleOps envelope")?;
+    if diagnostic.ops.len() != 1 || diagnostic.ops[0].sender != BANKR_PROOF_ACCOUNT {
+        bail!("Bankr proof contains an unexpected operation set");
+    }
+    let account_selector = diagnostic.ops[0]
+        .callData
+        .get(..4)
+        .context("Bankr proof account calldata has no selector")?;
+    let entry_point_code = rpc
+        .code_at_l2_block(ENTRY_POINT_V07, pinned_l2_block)
+        .await?;
+    let account_code = rpc
+        .code_at_l2_block(BANKR_PROOF_ACCOUNT, pinned_l2_block)
+        .await?;
+    let target_code = rpc
+        .code_at_l2_block(DOPPLER_CREATE_EMITTER, pinned_l2_block)
+        .await?;
+    if entry_point_code.is_empty() || account_code.is_empty() || target_code.is_empty() {
+        bail!("Bankr proof identity has empty runtime code");
+    }
+    let entry_point = ContractPin {
+        address: ENTRY_POINT_V07,
+        runtime_code_hash: keccak256(&entry_point_code),
+    };
+    let account = SmartAccountPin {
+        account: ContractPin {
+            address: BANKR_PROOF_ACCOUNT,
+            runtime_code_hash: keccak256(&account_code),
+        },
+        factory: None,
+    };
+    let target = ContractPin {
+        address: DOPPLER_CREATE_EMITTER,
+        runtime_code_hash: keccak256(&target_code),
+    };
+    let decoded = decode_entry_point_v07(
+        EntryPointCall {
+            chain_id: CHAIN_ID,
+            destination: entry_point,
+            outer_bundler: transaction.from,
+            calldata: &transaction.input,
+        },
+        SmartAccountPins {
+            entry_point,
+            accounts: std::slice::from_ref(&account),
+            allowed_targets: std::slice::from_ref(&target),
+        },
+    );
+    match decoded {
+        Ok(decoded) => {
+            if decoded.leader != BANKR_PROOF_ACCOUNT || decoded.target != DOPPLER_CREATE_EMITTER {
+                bail!("Bankr proof decoded an unexpected leader or target");
+            }
+            let selector = decoded
+                .calldata
+                .get(..4)
+                .context("Bankr proof inner calldata has no selector")?;
+            Ok(BankrProof {
+                transaction_hash,
+                outer_bundler: decoded.outer_bundler,
+                leader: decoded.leader,
+                entry_point: decoded.entry_point,
+                account_selector: format!("0x{}", hex::encode(account_selector)),
+                target: Some(decoded.target),
+                target_runtime_hash: Some(target.runtime_code_hash),
+                selector: Some(format!("0x{}", hex::encode(selector))),
+                unwrap_depth: Some(decoded.unwrap_depth),
+                inner_call_count: Some(decoded.inner_call_count),
+                decode_error: None,
+            })
+        }
+        Err(error) => Ok(BankrProof {
+            transaction_hash,
+            outer_bundler: transaction.from,
+            leader: BANKR_PROOF_ACCOUNT,
+            entry_point: ENTRY_POINT_V07,
+            account_selector: format!("0x{}", hex::encode(account_selector)),
+            target: None,
+            target_runtime_hash: None,
+            selector: None,
+            unwrap_depth: None,
+            inner_call_count: None,
+            decode_error: Some(error.to_string()),
+        }),
+    }
+}

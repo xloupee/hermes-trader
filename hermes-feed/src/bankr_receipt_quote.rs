@@ -394,12 +394,25 @@ pub struct BankrDopplerMarketEvidence {
     pub hook_end_fee_ppm: u32,
     pub hook_duration_seconds: u64,
     pub tick_spacing: i32,
+    pub initialize_sqrt_price_x96: U256,
     pub initialize_tick: i32,
     pub initialize_log_index: u64,
     pub last_liquidity_log_index: u64,
     pub launch_log_index: u64,
     pub user_operation_log_index: Option<u64>,
     pub position_count: usize,
+    pub positions: Vec<BankrDopplerPositionEvidence>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BankrDopplerPositionEvidence {
+    pub pool_id: B256,
+    pub sender: Address,
+    pub tick_lower: i32,
+    pub tick_upper: i32,
+    pub liquidity: u128,
+    pub salt: B256,
+    pub log_index: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -478,17 +491,6 @@ pub enum BankrQuoteError {
     ArithmeticOverflow,
     #[error(transparent)]
     Pool(#[from] V3PoolError),
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Position {
-    pool_id: B256,
-    sender: Address,
-    tick_lower: i32,
-    tick_upper: i32,
-    liquidity: u128,
-    salt: B256,
-    log_index: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -954,12 +956,14 @@ fn quote_bankr_doppler_launch_receipt_verified(
             hook_end_fee_ppm: profile.hook_end_fee_ppm,
             hook_duration_seconds: profile.hook_duration_seconds,
             tick_spacing: profile.tick_spacing,
+            initialize_sqrt_price_x96: evidence.sqrt_price_x96,
             initialize_tick: evidence.initialize_tick,
             initialize_log_index: evidence.initialize_log_index,
             last_liquidity_log_index: evidence.last_liquidity_log_index,
             launch_log_index: evidence.launch_log_index,
             user_operation_log_index: evidence.user_operation_log_index,
             position_count: positions.len(),
+            positions,
         },
         entry: BankrDopplerPaperSwapQuote {
             amount_in: policy.amount_in,
@@ -1160,7 +1164,7 @@ fn validate_receipt(
     block_timestamp: u64,
     profile: BankrDopplerExpectedProfile,
     require_user_operation: bool,
-) -> Result<(LaunchEvidence, Vec<Position>), BankrQuoteError> {
+) -> Result<(LaunchEvidence, Vec<BankrDopplerPositionEvidence>), BankrQuoteError> {
     let mut airlock_create = None;
     let mut initializer_create = None;
     let mut initialize = None;
@@ -1243,7 +1247,7 @@ fn validate_receipt(
                 .map_err(|_| BankrQuoteError::LiquiditySequence)?;
                 let delta = i128::try_from(event.liquidityDelta)
                     .map_err(|_| BankrQuoteError::LiquiditySequence)?;
-                positions.push(Position {
+                positions.push(BankrDopplerPositionEvidence {
                     pool_id: event.id,
                     sender: event.sender,
                     tick_lower: i32::try_from(event.tickLower)
@@ -2237,6 +2241,21 @@ mod tests {
         assert_eq!(quote.launchpad, LaunchpadId::BankrDoppler);
         assert_eq!(quote.market.leader, BANKR_PROOF_ACCOUNT);
         assert_eq!(quote.market.lp_fee_ppm, 7_000);
+        assert_eq!(quote.market.position_count, 2);
+        assert_eq!(quote.market.positions.len(), 2);
+        assert_eq!(
+            quote.market.positions[1].log_index,
+            quote.market.last_liquidity_log_index
+        );
+        assert!(
+            quote
+                .market
+                .positions
+                .iter()
+                .all(|position| position.pool_id == quote.market.pool_id
+                    && position.sender == quote.market.initializer
+                    && position.liquidity > 0)
+        );
         assert_eq!(quote.entry.hook_fee_ppm, 720_500);
         assert_eq!(quote.entry.hook_fee_denominator_ppm, 800_000);
         assert_eq!(

@@ -1657,6 +1657,8 @@ fn bankr_quote_arithmetic_is_consistent(
     quote: &BankrDopplerReceiptPaperQuote,
     policy: PaperPlanPolicy,
 ) -> bool {
+    use uniswap_v3_math::tick_math::get_sqrt_ratio_at_tick;
+
     let profile = BankrDopplerExpectedProfile::production();
     let entry = &quote.entry;
     let exit = &quote.full_position_exit;
@@ -1693,6 +1695,27 @@ fn bankr_quote_arithmetic_is_consistent(
         | (BankrCreateProfileVersion::CurveTicksV2, true) => -229_600,
         (BankrCreateProfileVersion::CurveTicksV1, false) => 229_800,
         (BankrCreateProfileVersion::CurveTicksV2, false) => 229_600,
+    };
+    let expected_position_ranges = match (
+        quote.market.create_profile_version,
+        quote.market.token < profile.weth.address,
+    ) {
+        (_, true) => [
+            (-229_600, -119_400, B256::ZERO),
+            (-119_400, 887_200, B256::with_last_byte(1)),
+        ],
+        (BankrCreateProfileVersion::CurveTicksV1, false) => [
+            (119_800, 229_800, B256::ZERO),
+            (-887_200, 119_800, B256::with_last_byte(1)),
+        ],
+        (BankrCreateProfileVersion::CurveTicksV2, false) => [
+            (119_400, 229_600, B256::ZERO),
+            (-887_200, 119_400, B256::with_last_byte(1)),
+        ],
+    };
+    let Ok(expected_initialize_sqrt_price_x96) = get_sqrt_ratio_at_tick(expected_initialize_tick)
+    else {
+        return false;
     };
     let Some(expected_delegation) = profile.smart_account.delegation_implementation else {
         return false;
@@ -1739,8 +1762,10 @@ fn bankr_quote_arithmetic_is_consistent(
         || quote.market.hook_end_fee_ppm != profile.hook_end_fee_ppm
         || quote.market.hook_duration_seconds != profile.hook_duration_seconds
         || quote.market.tick_spacing != profile.tick_spacing
+        || quote.market.initialize_sqrt_price_x96 != expected_initialize_sqrt_price_x96
         || quote.market.initialize_tick != expected_initialize_tick
-        || quote.market.position_count != 2
+        || quote.market.position_count != quote.market.positions.len()
+        || quote.market.positions.len() != expected_position_ranges.len()
         || quote.market.initialize_log_index >= quote.market.last_liquidity_log_index
         || quote.market.last_liquidity_log_index >= quote.market.launch_log_index
         || quote.state_version.first_eligible_quote_timestamp != expected_first_eligible_timestamp
@@ -1755,6 +1780,128 @@ fn bankr_quote_arithmetic_is_consistent(
         || exit.core_state_after.token_in != quote.market.token
         || exit.core_state_after.token_out != quote.market.quote_asset
         || exit.internal_buyback_state_after.is_some()
+    {
+        return false;
+    }
+
+    for (index, (position, expected)) in quote
+        .market
+        .positions
+        .iter()
+        .zip(expected_position_ranges)
+        .enumerate()
+    {
+        if position.pool_id != quote.market.pool_id
+            || position.sender != quote.market.initializer
+            || position.tick_lower != expected.0
+            || position.tick_upper != expected.1
+            || position.salt != expected.2
+            || position.liquidity == 0
+            || position.log_index <= quote.market.initialize_log_index
+            || (index > 0 && position.log_index <= quote.market.positions[index - 1].log_index)
+        {
+            return false;
+        }
+    }
+    if quote
+        .market
+        .positions
+        .last()
+        .map(|position| position.log_index)
+        != Some(quote.market.last_liquidity_log_index)
+    {
+        return false;
+    }
+
+    let Ok(mut replay_state) = hermes_feed::V3PoolState::new(
+        quote.market.pool_manager,
+        pool_key.currency0,
+        pool_key.currency1,
+        quote.market.lp_fee_ppm,
+        quote.market.tick_spacing,
+        quote.market.initialize_sqrt_price_x96,
+        quote.market.initialize_tick,
+        0,
+    ) else {
+        return false;
+    };
+    for position in &quote.market.positions {
+        if replay_state
+            .add_position(position.tick_lower, position.tick_upper, position.liquidity)
+            .is_err()
+        {
+            return false;
+        }
+    }
+    let Ok(replayed_entry) =
+        replay_state.quote_exact_input(quote.market.quote_asset, entry.amount_in, None)
+    else {
+        return false;
+    };
+    let Some(replayed_entry_hook_fee) = replayed_entry
+        .amount_out
+        .checked_mul(U256::from(expected_hook_fee_ppm))
+        .map(|value| value / U256::from(profile.hook_fee_denominator_ppm))
+    else {
+        return false;
+    };
+    let Some(replayed_entry_output) = replayed_entry
+        .amount_out
+        .checked_sub(replayed_entry_hook_fee)
+    else {
+        return false;
+    };
+    let Some(replayed_owner_fee) = replayed_entry_hook_fee
+        .checked_mul(U256::from(profile.protocol_beneficiary_bps))
+        .map(|value| value / U256::from(10_000_u16))
+    else {
+        return false;
+    };
+    let Some(replayed_buyback_input) = replayed_entry_hook_fee.checked_sub(replayed_owner_fee)
+    else {
+        return false;
+    };
+    if replayed_entry != entry.core_state_after
+        || replayed_entry.amount_out != entry.core_expected_output
+        || replayed_entry_hook_fee != entry.hook_output_fee
+        || replayed_entry_output != entry.expected_output
+        || replay_state
+            .set_observation(
+                replayed_entry.sqrt_price_x96_after,
+                replayed_entry.tick_after,
+                replayed_entry.liquidity_after,
+            )
+            .is_err()
+    {
+        return false;
+    }
+    let Ok(replayed_buyback) =
+        replay_state.quote_exact_input(quote.market.token, replayed_buyback_input, None)
+    else {
+        return false;
+    };
+    let Some(internal) = entry.internal_buyback_state_after.as_ref() else {
+        return false;
+    };
+    if replayed_buyback != *internal
+        || replay_state
+            .set_observation(
+                replayed_buyback.sqrt_price_x96_after,
+                replayed_buyback.tick_after,
+                replayed_buyback.liquidity_after,
+            )
+            .is_err()
+    {
+        return false;
+    }
+    let Ok(replayed_exit) =
+        replay_state.quote_exact_input(quote.market.token, replayed_entry_output, None)
+    else {
+        return false;
+    };
+    if replayed_exit != exit.core_state_after
+        || replayed_exit.amount_out != exit.core_expected_output
+        || exit.amount_in != replayed_entry_output
     {
         return false;
     }
@@ -1822,9 +1969,6 @@ fn bankr_quote_arithmetic_is_consistent(
         return false;
     }
 
-    let Some(internal) = entry.internal_buyback_state_after.as_ref() else {
-        return false;
-    };
     let Some(owner_fee) = entry
         .hook_output_fee
         .checked_mul(U256::from(profile.protocol_beneficiary_bps))
@@ -2944,6 +3088,27 @@ mod tests {
         let mut schedule = bankr_quote_fixture();
         schedule.market.hook_end_fee_ppm += 1;
         assert!(finalize_bankr_quote(schedule).is_err());
+
+        let mut position = bankr_quote_fixture();
+        position.market.positions[0].salt = B256::with_last_byte(1);
+        assert!(finalize_bankr_quote(position).is_err());
+
+        let mut coordinated_state_forgery = bankr_quote_fixture();
+        coordinated_state_forgery
+            .entry
+            .core_state_after
+            .sqrt_price_x96_after += U256::from(1_u8);
+        coordinated_state_forgery
+            .entry
+            .internal_buyback_state_after
+            .as_mut()
+            .unwrap()
+            .sqrt_price_x96_after += U256::from(1_u8);
+        coordinated_state_forgery
+            .full_position_exit
+            .core_state_after
+            .sqrt_price_x96_after += U256::from(1_u8);
+        assert!(finalize_bankr_quote(coordinated_state_forgery).is_err());
     }
 
     #[derive(serde::Deserialize)]

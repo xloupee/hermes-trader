@@ -1646,6 +1646,18 @@ mod tests {
         call.createData.poolInitializerData = init.abi_encode().into();
     }
 
+    fn decode_initializer_data(call: &abi::createCall) -> abi::DopplerInitData {
+        abi::DopplerInitData::abi_decode(&call.createData.poolInitializerData).unwrap()
+    }
+
+    fn decode_rehype_data(init: &abi::DopplerInitData) -> abi::RehypeInitData {
+        abi::RehypeInitData::abi_decode(&init.onInitializationDopplerHookCalldata).unwrap()
+    }
+
+    fn replace_rehype_data(init: &mut abi::DopplerInitData, rehype: &abi::RehypeInitData) {
+        init.onInitializationDopplerHookCalldata = rehype.abi_encode().into();
+    }
+
     fn hex_u256(value: &str) -> U256 {
         U256::from_str_radix(value, 16).unwrap()
     }
@@ -1700,6 +1712,14 @@ mod tests {
         let mut empty = exact.clone();
         empty[0].code_bytes = 0;
         assert!(validate_bankr_receipt_block_dependencies(&expected, &empty).is_err());
+
+        let mut wrong_address = exact.clone();
+        wrong_address[0].address = Address::with_last_byte(0xee);
+        assert!(validate_bankr_receipt_block_dependencies(&expected, &wrong_address).is_err());
+
+        let mut extra = exact.clone();
+        extra.push(exact[0]);
+        assert!(validate_bankr_receipt_block_dependencies(&expected, &extra).is_err());
 
         for index in 0..exact.len() {
             let mut drifted = exact.clone();
@@ -1889,6 +1909,154 @@ mod tests {
             bytes.into()
         };
         rejects(&trailing);
+    }
+
+    #[test]
+    fn reviewed_create_profile_rejects_outer_and_initializer_field_drift() {
+        let fixture = production_fixture(include_str!(
+            "../tests/fixtures/bankr-doppler-v2-direct-live-proof.json"
+        ));
+        let call = abi::createCall::abi_decode(&fixture.transaction.input).unwrap();
+        let rejects = |candidate: &abi::createCall| {
+            assert!(!validate_bankr_create_calldata_for_observation(
+                &candidate.abi_encode()
+            ));
+        };
+
+        for mutate in [
+            |candidate: &mut abi::createCall| {
+                candidate.createData.numeraire = Address::with_last_byte(1)
+            },
+            |candidate: &mut abi::createCall| {
+                candidate.createData.tokenFactory = Address::with_last_byte(2)
+            },
+            |candidate: &mut abi::createCall| {
+                candidate.createData.governanceFactory = Address::with_last_byte(3)
+            },
+            |candidate: &mut abi::createCall| {
+                candidate.createData.poolInitializer = Address::with_last_byte(4)
+            },
+            |candidate: &mut abi::createCall| {
+                candidate.createData.liquidityMigrator = Address::with_last_byte(5)
+            },
+        ] {
+            let mut candidate = call.clone();
+            mutate(&mut candidate);
+            rejects(&candidate);
+        }
+        let mut candidate = call.clone();
+        let mut governance_data = candidate.createData.governanceFactoryData.to_vec();
+        governance_data[31] = 1;
+        candidate.createData.governanceFactoryData = governance_data.into();
+        rejects(&candidate);
+        let mut candidate = call.clone();
+        candidate.createData.salt = B256::ZERO;
+        rejects(&candidate);
+        let mut candidate = call.clone();
+        let mut initializer_data = candidate.createData.poolInitializerData.to_vec();
+        initializer_data.push(0);
+        candidate.createData.poolInitializerData = initializer_data.into();
+        rejects(&candidate);
+
+        let rejects_init = |mutate: fn(&mut abi::DopplerInitData)| {
+            let mut candidate = call.clone();
+            let mut init = decode_initializer_data(&candidate);
+            mutate(&mut init);
+            replace_initializer_data(&mut candidate, &init);
+            rejects(&candidate);
+        };
+        rejects_init(|init| init.fee = Default::default());
+        rejects_init(|init| init.tickSpacing = 400_i32.try_into().unwrap());
+        rejects_init(|init| init.farTick = 886_800_i32.try_into().unwrap());
+        rejects_init(|init| init.dopplerHook = Address::with_last_byte(6));
+        rejects_init(|init| init.graduationDopplerHookCalldata = vec![1].into());
+        rejects_init(|init| {
+            init.curves.pop();
+        });
+        rejects_init(|init| {
+            init.beneficiaries.pop();
+        });
+        rejects_init(|init| init.curves[0].tickUpper = (-119_200_i32).try_into().unwrap());
+        rejects_init(|init| init.curves[0].numPositions += 1);
+        rejects_init(|init| init.curves[0].shares += U256::from(1_u8));
+        rejects_init(|init| init.beneficiaries[0].beneficiary = Address::ZERO);
+        rejects_init(|init| init.beneficiaries[0].shares = Default::default());
+        rejects_init(|init| init.beneficiaries[1].beneficiary = Address::with_last_byte(7));
+        rejects_init(|init| init.beneficiaries[1].shares = Default::default());
+    }
+
+    #[test]
+    fn reviewed_token_factory_rejects_uncovered_shape_drift() {
+        let fixture = production_fixture(include_str!(
+            "../tests/fixtures/bankr-doppler-v2-direct-live-proof.json"
+        ));
+        let call = abi::createCall::abi_decode(&fixture.transaction.input).unwrap();
+        let token = decode_token_factory_data(&call);
+        let rejects_token = |mutate: fn(&mut abi::tokenFactoryDataCall)| {
+            let mut candidate = call.clone();
+            let mut token = token.clone();
+            mutate(&mut token);
+            replace_token_factory_data(&mut candidate, &token);
+            assert!(!validate_bankr_create_calldata_for_observation(
+                &candidate.abi_encode()
+            ));
+        };
+        rejects_token(|token| token.name = "x".repeat(33));
+        rejects_token(|token| token.symbol.clear());
+        rejects_token(|token| token.schedules.push(token.schedules[0].clone()));
+        rejects_token(|token| token.beneficiaries.push(token.beneficiaries[0]));
+        rejects_token(|token| token.scheduleIds.push(U256::ZERO));
+        rejects_token(|token| token.amounts.push(U256::ZERO));
+        rejects_token(|token| token.tokenURI.replace_range(..1, "x"));
+        rejects_token(|token| token.tokenURI.replace_range(14..15, "A"));
+    }
+
+    #[test]
+    fn reviewed_rehype_profile_rejects_every_route_and_fee_drift() {
+        let fixture = production_fixture(include_str!(
+            "../tests/fixtures/bankr-doppler-v2-direct-live-proof.json"
+        ));
+        let call = abi::createCall::abi_decode(&fixture.transaction.input).unwrap();
+        let rejects_rehype = |mutate: fn(&mut abi::RehypeInitData)| {
+            let mut candidate = call.clone();
+            let mut init = decode_initializer_data(&candidate);
+            let mut rehype = decode_rehype_data(&init);
+            mutate(&mut rehype);
+            replace_rehype_data(&mut init, &rehype);
+            replace_initializer_data(&mut candidate, &init);
+            assert!(!validate_bankr_create_calldata_for_observation(
+                &candidate.abi_encode()
+            ));
+        };
+        rejects_rehype(|rehype| rehype.numeraire = Address::with_last_byte(1));
+        rejects_rehype(|rehype| rehype.buybackDst = Address::with_last_byte(2));
+        rejects_rehype(|rehype| rehype.startFee = Default::default());
+        rejects_rehype(|rehype| rehype.endFee = Default::default());
+        rejects_rehype(|rehype| rehype.durationSeconds += 1);
+        rejects_rehype(|rehype| rehype.startingTime = 1);
+        rejects_rehype(|rehype| rehype.feeRoutingMode = 1);
+        rejects_rehype(|rehype| {
+            rehype.feeDistributionInfo.assetFeesToAssetBuybackWad = U256::from(1_u8)
+        });
+        rejects_rehype(|rehype| {
+            rehype.feeDistributionInfo.assetFeesToNumeraireBuybackWad -= U256::from(1_u8)
+        });
+        rejects_rehype(|rehype| {
+            rehype.feeDistributionInfo.assetFeesToBeneficiaryWad = U256::from(1_u8)
+        });
+        rejects_rehype(|rehype| rehype.feeDistributionInfo.assetFeesToLpWad = U256::from(1_u8));
+        rejects_rehype(|rehype| {
+            rehype.feeDistributionInfo.numeraireFeesToAssetBuybackWad = U256::from(1_u8)
+        });
+        rejects_rehype(|rehype| {
+            rehype
+                .feeDistributionInfo
+                .numeraireFeesToNumeraireBuybackWad -= U256::from(1_u8)
+        });
+        rejects_rehype(|rehype| {
+            rehype.feeDistributionInfo.numeraireFeesToBeneficiaryWad = U256::from(1_u8)
+        });
+        rejects_rehype(|rehype| rehype.feeDistributionInfo.numeraireFeesToLpWad = U256::from(1_u8));
     }
 
     #[test]

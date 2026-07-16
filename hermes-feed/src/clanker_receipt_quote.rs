@@ -232,13 +232,26 @@ pub struct ClankerMarketEvidence {
     pub dynamic_fee_flag: u32,
     pub tick_spacing: i32,
     pub starting_tick: i32,
+    pub initialize_sqrt_price_x96: U256,
     pub initialize_tick: i32,
     pub initialize_log_index: u64,
     pub last_liquidity_log_index: u64,
     pub launch_log_index: u64,
     pub position_count: usize,
+    pub positions: Vec<ClankerPositionEvidence>,
     pub static_fee_config: ClankerStaticFeeConfig,
     pub mev_fee_config: ClankerMevFeeConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ClankerPositionEvidence {
+    pub pool_id: B256,
+    pub sender: Address,
+    pub tick_lower: i32,
+    pub tick_upper: i32,
+    pub liquidity: u128,
+    pub salt: B256,
+    pub log_index: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -305,6 +318,8 @@ pub enum ClankerQuoteError {
     EmbeddedSwapUnsupported,
     #[error("paper quote did not consume all input or returned zero output")]
     IncompleteQuote,
+    #[error("serialized Clanker quote does not replay from receipt-end position evidence")]
+    QuoteReplayMismatch,
     #[error("paper quote arithmetic overflowed")]
     ArithmeticOverflow,
     #[error(transparent)]
@@ -324,14 +339,6 @@ struct LaunchIdentity {
     mev_module: Address,
     extension: Option<Address>,
     extensions_supply: U256,
-    log_index: u64,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Position {
-    tick_lower: i32,
-    tick_upper: i32,
-    liquidity: u128,
     log_index: u64,
 }
 
@@ -427,12 +434,15 @@ pub fn quote_clanker_launch_receipt(
                 .map_err(|_| ClankerQuoteError::LiquiditySequence)?;
             let liquidity =
                 u128::try_from(delta).map_err(|_| ClankerQuoteError::LiquiditySequence)?;
-            positions.push(Position {
+            positions.push(ClankerPositionEvidence {
+                pool_id: event.id,
+                sender: event.sender,
                 tick_lower: i32::try_from(event.tickLower)
                     .map_err(|_| ClankerQuoteError::LiquiditySequence)?,
                 tick_upper: i32::try_from(event.tickUpper)
                     .map_err(|_| ClankerQuoteError::LiquiditySequence)?,
                 liquidity,
+                salt: event.salt,
                 log_index: log.log_index,
             });
         } else if topic == events::Swap::SIGNATURE_HASH {
@@ -465,9 +475,14 @@ pub fn quote_clanker_launch_receipt(
     };
     if initialize_tick != expected_initialize_tick
         || positions.len() != expected_position_count
-        || positions
-            .iter()
-            .any(|position| position.log_index <= initialize_log_index)
+        || positions.iter().enumerate().any(|(index, position)| {
+            position.sender == Address::ZERO
+                || position.salt == B256::ZERO
+                || position.log_index <= initialize_log_index
+                || positions[..index]
+                    .iter()
+                    .any(|previous| previous.salt == position.salt)
+        })
     {
         return Err(ClankerQuoteError::LiquiditySequence);
     }
@@ -600,11 +615,13 @@ pub fn quote_clanker_launch_receipt(
             dynamic_fee_flag: DYNAMIC_FEE_FLAG,
             tick_spacing: key.tick_spacing,
             starting_tick: launch.starting_tick,
+            initialize_sqrt_price_x96: sqrt_price_x96,
             initialize_tick,
             initialize_log_index,
             last_liquidity_log_index,
             launch_log_index: launch.log_index,
             position_count: positions.len(),
+            positions,
             static_fee_config,
             mev_fee_config,
         },
@@ -635,6 +652,216 @@ pub fn quote_clanker_launch_receipt(
         execution_blocker: "paper_only_clanker_hook_mev_and_router_execution_not_enabled".into(),
         broadcast: false,
     })
+}
+
+/// Independently reconstruct both paper swaps from the serialized receipt-end
+/// pool state. Finalizers use this to reject quotes whose outputs were edited
+/// after receipt reconciliation.
+pub fn validate_clanker_quote_replay(
+    quote: &ClankerReceiptPaperQuote,
+    profile: ClankerV4ExpectedProfile,
+    policy: ClankerQuotePolicy,
+) -> Result<(), ClankerQuoteError> {
+    profile.validate()?;
+    let market = &quote.market;
+    if policy.amount_in == U256::ZERO
+        || policy.max_amount_in == U256::ZERO
+        || policy.amount_in > policy.max_amount_in
+        || policy.slippage_bps >= BPS_DENOMINATOR
+        || quote.entry.amount_in != policy.amount_in
+        || quote.entry.slippage_bps != policy.slippage_bps
+        || quote.full_position_exit.slippage_bps != policy.slippage_bps
+        || market.token == Address::ZERO
+        || market.token == WETH
+        || market.pool_manager != profile.pool_manager.address
+        || market.quote_asset != WETH
+        || market.hook != profile.hook.address
+        || market.locker != profile.locker.address
+        || market.mev_module != profile.mev_module.address
+        || market.dynamic_fee_flag != DYNAMIC_FEE_FLAG
+        || market.tick_spacing != 200
+        || market.initialize_sqrt_price_x96 == U256::ZERO
+    {
+        return Err(ClankerQuoteError::QuoteReplayMismatch);
+    }
+    let shape_matches = match market.liquidity_profile {
+        ClankerLiquidityProfile::ExtensionlessSinglePosition => {
+            market.extension.is_none()
+                && market.extensions_supply == U256::ZERO
+                && market.position_count == 1
+        }
+        ClankerLiquidityProfile::PinnedExtensionFivePosition => {
+            market.extension == Some(profile.extension.address)
+                && market.extensions_supply != U256::ZERO
+                && market.position_count == 5
+        }
+    };
+    let expected_initialize_tick = if WETH < market.token {
+        market
+            .starting_tick
+            .checked_neg()
+            .ok_or(ClankerQuoteError::QuoteReplayMismatch)?
+    } else {
+        market.starting_tick
+    };
+    let expected_first_eligible = quote
+        .state_version
+        .receipt_timestamp
+        .checked_add(profile.mev_delay_guard_seconds)
+        .ok_or(ClankerQuoteError::ArithmeticOverflow)?;
+    if !shape_matches
+        || market.position_count != market.positions.len()
+        || market.initialize_tick != expected_initialize_tick
+        || market.initialize_log_index >= market.last_liquidity_log_index
+        || market.last_liquidity_log_index >= market.launch_log_index
+        || quote.state_version.terminal_log_index != market.launch_log_index
+        || quote.state_version.first_eligible_quote_timestamp != expected_first_eligible
+        || market.static_fee_config.clanker_fee_ppm > profile.max_static_fee_ppm
+        || market.static_fee_config.paired_fee_ppm > profile.max_static_fee_ppm
+        || market.mev_fee_config.starting_fee_ppm == 0
+        || market.mev_fee_config.starting_fee_ppm > profile.max_mev_fee_ppm
+        || market.mev_fee_config.ending_fee_ppm > market.mev_fee_config.starting_fee_ppm
+        || market.mev_fee_config.seconds_to_decay == 0
+        || market.mev_fee_config.seconds_to_decay > profile.max_mev_seconds_to_decay
+        || market
+            .positions
+            .iter()
+            .enumerate()
+            .any(|(index, position)| {
+                position.pool_id != market.pool_id
+                    || position.sender == Address::ZERO
+                    || position.salt == B256::ZERO
+                    || position.liquidity == 0
+                    || position.log_index <= market.initialize_log_index
+                    || (index > 0 && position.log_index <= market.positions[index - 1].log_index)
+                    || market.positions[..index]
+                        .iter()
+                        .any(|previous| previous.salt == position.salt)
+            })
+        || market
+            .positions
+            .last()
+            .is_none_or(|position| position.log_index != market.last_liquidity_log_index)
+    {
+        return Err(ClankerQuoteError::QuoteReplayMismatch);
+    }
+    let key = V4PoolKey::canonical(
+        WETH,
+        market.token,
+        DYNAMIC_FEE_FLAG,
+        market.tick_spacing,
+        profile.hook.address,
+    )
+    .map_err(|_| ClankerQuoteError::QuoteReplayMismatch)?;
+    if key.pool_id() != market.pool_id {
+        return Err(ClankerQuoteError::QuoteReplayMismatch);
+    }
+
+    let mev_fee_ppm = descending_mev_fee_ppm(
+        profile,
+        market.mev_fee_config,
+        quote.state_version.receipt_timestamp,
+        quote.state_version.first_eligible_quote_timestamp,
+    )?;
+    let entry_lp_fee_ppm = mev_fee_ppm.max(market.static_fee_config.paired_fee_ppm);
+    let entry_protocol_fee_ppm = entry_lp_fee_ppm
+        .checked_mul(u32::from(profile.protocol_fee_share_percent))
+        .ok_or(ClankerQuoteError::ArithmeticOverflow)?
+        / 100;
+    let mut state = V3PoolState::new(
+        profile.pool_manager.address,
+        key.currency0,
+        key.currency1,
+        entry_lp_fee_ppm,
+        key.tick_spacing,
+        market.initialize_sqrt_price_x96,
+        market.initialize_tick,
+        0,
+    )?;
+    for position in &market.positions {
+        state.add_position(position.tick_lower, position.tick_upper, position.liquidity)?;
+    }
+    if state.liquidity != 0 {
+        return Err(ClankerQuoteError::QuoteReplayMismatch);
+    }
+    let entry_protocol_fee = exact_input_protocol_fee(policy.amount_in, entry_protocol_fee_ppm)?;
+    let entry_core_amount = policy
+        .amount_in
+        .checked_sub(entry_protocol_fee)
+        .ok_or(ClankerQuoteError::ArithmeticOverflow)?;
+    let entry_core = state.quote_exact_input(WETH, entry_core_amount, None)?;
+    validate_complete_core_quote(&entry_core, entry_core_amount)?;
+    let expected_entry = ClankerPaperSwapQuote {
+        amount_in: policy.amount_in,
+        hook_protocol_fee: entry_protocol_fee,
+        core_amount_in: entry_core_amount,
+        expected_output: entry_core.amount_out,
+        min_receive: apply_slippage(entry_core.amount_out, policy.slippage_bps)?,
+        slippage_bps: policy.slippage_bps,
+        lp_fee_ppm: entry_lp_fee_ppm,
+        protocol_fee_ppm: entry_protocol_fee_ppm,
+        core_state_after: entry_core.clone(),
+    };
+
+    let exit_lp_fee_ppm = mev_fee_ppm.max(market.static_fee_config.clanker_fee_ppm);
+    let exit_protocol_fee_ppm = exit_lp_fee_ppm
+        .checked_mul(u32::from(profile.protocol_fee_share_percent))
+        .ok_or(ClankerQuoteError::ArithmeticOverflow)?
+        / 100;
+    let mut post_entry = V3PoolState::new(
+        profile.pool_manager.address,
+        key.currency0,
+        key.currency1,
+        exit_lp_fee_ppm,
+        key.tick_spacing,
+        entry_core.sqrt_price_x96_after,
+        entry_core.tick_after,
+        0,
+    )?;
+    for position in &market.positions {
+        post_entry.add_position(position.tick_lower, position.tick_upper, position.liquidity)?;
+    }
+    if post_entry.liquidity != entry_core.liquidity_after {
+        return Err(ClankerQuoteError::QuoteReplayMismatch);
+    }
+    post_entry.set_observation(
+        entry_core.sqrt_price_x96_after,
+        entry_core.tick_after,
+        entry_core.liquidity_after,
+    )?;
+    let exit_core = post_entry.quote_exact_input(market.token, entry_core.amount_out, None)?;
+    validate_complete_core_quote(&exit_core, entry_core.amount_out)?;
+    let exit_protocol_fee = exit_core
+        .amount_out
+        .checked_mul(U256::from(exit_protocol_fee_ppm))
+        .ok_or(ClankerQuoteError::ArithmeticOverflow)?
+        / U256::from(FEE_DENOMINATOR);
+    let exit_net = exit_core
+        .amount_out
+        .checked_sub(exit_protocol_fee)
+        .ok_or(ClankerQuoteError::ArithmeticOverflow)?;
+    let expected_exit = ClankerPaperSwapQuote {
+        amount_in: exit_core.amount_in_requested,
+        hook_protocol_fee: exit_protocol_fee,
+        core_amount_in: exit_core.amount_in_requested,
+        expected_output: exit_net,
+        min_receive: apply_slippage(exit_net, policy.slippage_bps)?,
+        slippage_bps: policy.slippage_bps,
+        lp_fee_ppm: exit_lp_fee_ppm,
+        protocol_fee_ppm: exit_protocol_fee_ppm,
+        core_state_after: exit_core,
+    };
+    let expected_round_trip = exit_net
+        .checked_mul(U256::from(BPS_DENOMINATOR))
+        .ok_or(ClankerQuoteError::ArithmeticOverflow)?
+        / policy.amount_in;
+    if quote.entry != expected_entry
+        || quote.full_position_exit != expected_exit
+        || quote.simulated_round_trip_return_bps != expected_round_trip
+    {
+        return Err(ClankerQuoteError::QuoteReplayMismatch);
+    }
+    Ok(())
 }
 
 fn validate_envelope(
@@ -1102,8 +1329,18 @@ mod tests {
             policy(),
         )
         .unwrap();
+        validate_clanker_quote_replay(&quote, ClankerV4ExpectedProfile::production(), policy())
+            .unwrap();
         assert_eq!(quote.tx_hash, fixture.receipt.transaction_hash);
         assert_eq!(quote.market.position_count, 5);
+        assert_eq!(quote.market.positions.len(), 5);
+        assert!(
+            quote
+                .market
+                .positions
+                .iter()
+                .all(|position| position.pool_id == quote.market.pool_id)
+        );
         assert_eq!(quote.entry.lp_fee_ppm, 666_777);
         assert_eq!(quote.entry.protocol_fee_ppm, 133_355);
         assert_eq!(quote.market.static_fee_config.clanker_fee_ppm, 16_000);
@@ -1140,6 +1377,8 @@ mod tests {
             policy(),
         )
         .unwrap();
+        validate_clanker_quote_replay(&quote, ClankerV4ExpectedProfile::production(), policy())
+            .unwrap();
         assert_eq!(quote.tx_hash, fixture.receipt.transaction_hash);
         assert_eq!(quote.market.extension, None);
         assert_eq!(quote.market.extensions_supply, U256::ZERO);
@@ -1148,6 +1387,7 @@ mod tests {
             ClankerLiquidityProfile::ExtensionlessSinglePosition
         );
         assert_eq!(quote.market.position_count, 1);
+        assert_eq!(quote.market.positions.len(), 1);
         assert_eq!(quote.market.static_fee_config.clanker_fee_ppm, 10_000);
         assert_eq!(quote.market.static_fee_config.paired_fee_ppm, 10_000);
         assert_eq!(quote.entry.lp_fee_ppm, 666_777);

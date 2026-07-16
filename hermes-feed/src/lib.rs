@@ -59,9 +59,9 @@ pub use boundary_gate::{BoundaryDecision, BoundaryGate, BoundaryGateError, FeedB
 pub use cache::{CacheApplyReport, CacheCheckpoint, CacheError, ConfirmedReserveCache};
 pub use clanker_receipt_quote::{
     ClankerLiquidityProfile, ClankerMarketEvidence, ClankerMevFeeConfig, ClankerPaperSwapQuote,
-    ClankerQuoteError, ClankerQuotePolicy, ClankerReceiptPaperQuote, ClankerStateVersion,
-    ClankerStaticFeeConfig, ClankerV4ExpectedProfile, descending_mev_fee_ppm,
-    quote_clanker_launch_receipt,
+    ClankerPositionEvidence, ClankerQuoteError, ClankerQuotePolicy, ClankerReceiptPaperQuote,
+    ClankerStateVersion, ClankerStaticFeeConfig, ClankerV4ExpectedProfile, descending_mev_fee_ppm,
+    quote_clanker_launch_receipt, validate_clanker_quote_replay,
 };
 pub use copy_observation::{
     AggregatorCopyRejectReason, NormalizedAggregatorSwap, normalize_aggregator_copy_swap,

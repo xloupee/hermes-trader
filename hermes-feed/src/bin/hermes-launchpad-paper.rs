@@ -16,9 +16,10 @@ use hermes_feed::paper_observer::{
 };
 use hermes_feed::{
     BankrCreateProfileVersion, BankrDopplerExpectedProfile, BankrDopplerReceiptPaperQuote,
-    BankrEnvelopeKind, ClankerLiquidityProfile, ClankerReceiptPaperQuote, ClankerV4ExpectedProfile,
-    HoodExpectedProfile, HoodMigrationEvidence, HoodReceiptPaperQuote, PonsReceiptPaperQuote,
-    V3ReceiptPaperQuote, bankr_hook_fee_ppm, quote_hood_curve_buy, quote_hood_curve_sell,
+    BankrEnvelopeKind, ClankerLiquidityProfile, ClankerQuotePolicy, ClankerReceiptPaperQuote,
+    ClankerV4ExpectedProfile, HoodExpectedProfile, HoodMigrationEvidence, HoodReceiptPaperQuote,
+    PonsReceiptPaperQuote, V3ReceiptPaperQuote, bankr_hook_fee_ppm, quote_hood_curve_buy,
+    quote_hood_curve_sell, validate_clanker_quote_replay,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -987,6 +988,11 @@ fn finalized_clanker_plans(
         ) else {
             continue;
         };
+        let replay_policy = ClankerQuotePolicy {
+            amount_in: quote.entry.amount_in,
+            max_amount_in: policy.max_input_wei,
+            slippage_bps: policy.slippage_bps,
+        };
         if !confirmed
             || quote.record_type != "launchpad_clanker_v4_paper_quote"
             || quote.launchpad != LaunchpadId::Clanker
@@ -1006,6 +1012,12 @@ fn finalized_clanker_plans(
             || quote.state_version.l2_block_number != quote.l2_block_number
             || quote.state_version.first_eligible_quote_timestamp
                 <= quote.state_version.receipt_timestamp
+            || validate_clanker_quote_replay(
+                &quote,
+                ClankerV4ExpectedProfile::production(),
+                replay_policy,
+            )
+            .is_err()
             || !clanker_quote_profile_is_consistent(&quote)
         {
             anyhow::bail!("unsafe or inconsistent Clanker V4 quote evidence for {key:?}");
@@ -2798,6 +2810,37 @@ mod tests {
         let mut tampered = quote;
         tampered.market.extensions_supply = U256::from(1_u8);
         assert!(finalize_clanker_quote(tampered).is_err());
+    }
+
+    #[test]
+    fn coherent_clanker_output_and_position_forgeries_cannot_finalize() {
+        let quote = clanker_quote_fixture();
+
+        let mut forged_outputs = quote.clone();
+        forged_outputs.entry.expected_output += U256::from(1_u8);
+        forged_outputs.entry.min_receive = forged_outputs.entry.expected_output;
+        forged_outputs.full_position_exit.amount_in = forged_outputs.entry.expected_output;
+        forged_outputs.full_position_exit.core_amount_in = forged_outputs.entry.expected_output;
+        forged_outputs
+            .full_position_exit
+            .core_state_after
+            .amount_in_requested = forged_outputs.entry.expected_output;
+        forged_outputs
+            .full_position_exit
+            .core_state_after
+            .amount_in_consumed = forged_outputs.entry.expected_output;
+        forged_outputs.full_position_exit.expected_output += U256::from(1_u8);
+        forged_outputs.full_position_exit.min_receive =
+            forged_outputs.full_position_exit.expected_output;
+        forged_outputs.simulated_round_trip_return_bps += U256::from(1_u8);
+        assert!(clanker_quote_profile_is_consistent(&forged_outputs));
+        assert!(finalize_clanker_quote(forged_outputs).is_err());
+
+        let mut forged_positions = quote;
+        forged_positions.market.positions[0].tick_lower -= 200;
+        forged_positions.market.positions[0].liquidity += 1;
+        assert!(clanker_quote_profile_is_consistent(&forged_positions));
+        assert!(finalize_clanker_quote(forged_positions).is_err());
     }
 
     #[test]

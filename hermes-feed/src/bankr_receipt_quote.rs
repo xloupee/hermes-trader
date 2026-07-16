@@ -410,7 +410,7 @@ pub struct BankrDopplerPositionEvidence {
     pub sender: Address,
     pub tick_lower: i32,
     pub tick_upper: i32,
-    pub liquidity: u128,
+    pub liquidity: U256,
     pub salt: B256,
     pub log_index: u64,
 }
@@ -857,7 +857,11 @@ fn quote_bankr_doppler_launch_receipt_verified(
         0,
     )?;
     for position in &positions {
-        state.add_position(position.tick_lower, position.tick_upper, position.liquidity)?;
+        state.add_position(
+            position.tick_lower,
+            position.tick_upper,
+            u128::try_from(position.liquidity).map_err(|_| BankrQuoteError::LiquiditySequence)?,
+        )?;
     }
     let entry_core = state.quote_exact_input(WETH, policy.amount_in, None)?;
     validate_complete_quote(&entry_core, policy.amount_in)?;
@@ -1254,8 +1258,9 @@ fn validate_receipt(
                         .map_err(|_| BankrQuoteError::LiquiditySequence)?,
                     tick_upper: i32::try_from(event.tickUpper)
                         .map_err(|_| BankrQuoteError::LiquiditySequence)?,
-                    liquidity: u128::try_from(delta)
-                        .map_err(|_| BankrQuoteError::LiquiditySequence)?,
+                    liquidity: U256::from(
+                        u128::try_from(delta).map_err(|_| BankrQuoteError::LiquiditySequence)?,
+                    ),
                     salt: event.salt,
                     log_index: log.log_index,
                 });
@@ -1347,7 +1352,7 @@ fn validate_receipt(
             || position.tick_lower != expected.0
             || position.tick_upper != expected.1
             || position.salt != expected.2
-            || position.liquidity == 0
+            || position.liquidity == U256::ZERO
         {
             return Err(BankrQuoteError::LiquiditySequence);
         }
@@ -2254,7 +2259,7 @@ mod tests {
                 .iter()
                 .all(|position| position.pool_id == quote.market.pool_id
                     && position.sender == quote.market.initializer
-                    && position.liquidity > 0)
+                    && position.liquidity != U256::ZERO)
         );
         assert_eq!(quote.entry.hook_fee_ppm, 720_500);
         assert_eq!(quote.entry.hook_fee_denominator_ppm, 800_000);

@@ -1796,7 +1796,7 @@ fn bankr_quote_arithmetic_is_consistent(
             || position.tick_lower != expected.0
             || position.tick_upper != expected.1
             || position.salt != expected.2
-            || position.liquidity == 0
+            || position.liquidity == U256::ZERO
             || position.log_index <= quote.market.initialize_log_index
             || (index > 0 && position.log_index <= quote.market.positions[index - 1].log_index)
         {
@@ -1827,7 +1827,14 @@ fn bankr_quote_arithmetic_is_consistent(
     };
     for position in &quote.market.positions {
         if replay_state
-            .add_position(position.tick_lower, position.tick_upper, position.liquidity)
+            .add_position(
+                position.tick_lower,
+                position.tick_upper,
+                match u128::try_from(position.liquidity) {
+                    Ok(liquidity) => liquidity,
+                    Err(_) => return false,
+                },
+            )
             .is_err()
         {
             return false;
@@ -2982,7 +2989,7 @@ mod tests {
 
         let mut forged_positions = quote;
         forged_positions.market.positions[0].tick_lower -= 200;
-        forged_positions.market.positions[0].liquidity += 1;
+        forged_positions.market.positions[0].liquidity += U256::from(1_u8);
         assert!(clanker_quote_profile_is_consistent(&forged_positions));
         assert!(finalize_clanker_quote(forged_positions).is_err());
     }

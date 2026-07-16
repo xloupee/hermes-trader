@@ -249,7 +249,7 @@ pub struct ClankerPositionEvidence {
     pub sender: Address,
     pub tick_lower: i32,
     pub tick_upper: i32,
-    pub liquidity: u128,
+    pub liquidity: U256,
     pub salt: B256,
     pub log_index: u64,
 }
@@ -441,7 +441,7 @@ pub fn quote_clanker_launch_receipt(
                     .map_err(|_| ClankerQuoteError::LiquiditySequence)?,
                 tick_upper: i32::try_from(event.tickUpper)
                     .map_err(|_| ClankerQuoteError::LiquiditySequence)?,
-                liquidity,
+                liquidity: U256::from(liquidity),
                 salt: event.salt,
                 log_index: log.log_index,
             });
@@ -526,7 +526,11 @@ pub fn quote_clanker_launch_receipt(
         0,
     )?;
     for position in &positions {
-        state.add_position(position.tick_lower, position.tick_upper, position.liquidity)?;
+        state.add_position(
+            position.tick_lower,
+            position.tick_upper,
+            u128::try_from(position.liquidity).map_err(|_| ClankerQuoteError::LiquiditySequence)?,
+        )?;
     }
     if state.liquidity != 0 {
         return Err(ClankerQuoteError::LiquiditySequence);
@@ -557,7 +561,11 @@ pub fn quote_clanker_launch_receipt(
         0,
     )?;
     for position in &positions {
-        post_entry.add_position(position.tick_lower, position.tick_upper, position.liquidity)?;
+        post_entry.add_position(
+            position.tick_lower,
+            position.tick_upper,
+            u128::try_from(position.liquidity).map_err(|_| ClankerQuoteError::LiquiditySequence)?,
+        )?;
     }
     if post_entry.liquidity != entry_core.liquidity_after {
         return Err(ClankerQuoteError::LiquiditySequence);
@@ -731,7 +739,7 @@ pub fn validate_clanker_quote_replay(
                 position.pool_id != market.pool_id
                     || position.sender == Address::ZERO
                     || position.salt == B256::ZERO
-                    || position.liquidity == 0
+                    || position.liquidity == U256::ZERO
                     || position.log_index <= market.initialize_log_index
                     || (index > 0 && position.log_index <= market.positions[index - 1].log_index)
                     || market.positions[..index]
@@ -779,7 +787,12 @@ pub fn validate_clanker_quote_replay(
         0,
     )?;
     for position in &market.positions {
-        state.add_position(position.tick_lower, position.tick_upper, position.liquidity)?;
+        state.add_position(
+            position.tick_lower,
+            position.tick_upper,
+            u128::try_from(position.liquidity)
+                .map_err(|_| ClankerQuoteError::QuoteReplayMismatch)?,
+        )?;
     }
     if state.liquidity != 0 {
         return Err(ClankerQuoteError::QuoteReplayMismatch);
@@ -819,7 +832,12 @@ pub fn validate_clanker_quote_replay(
         0,
     )?;
     for position in &market.positions {
-        post_entry.add_position(position.tick_lower, position.tick_upper, position.liquidity)?;
+        post_entry.add_position(
+            position.tick_lower,
+            position.tick_upper,
+            u128::try_from(position.liquidity)
+                .map_err(|_| ClankerQuoteError::QuoteReplayMismatch)?,
+        )?;
     }
     if post_entry.liquidity != entry_core.liquidity_after {
         return Err(ClankerQuoteError::QuoteReplayMismatch);

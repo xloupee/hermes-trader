@@ -47,7 +47,7 @@
         "sender": "0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544",
         "tick_lower": 119400,
         "tick_upper": 229600,
-        "liquidity": 873703326502923350498830,
+        "liquidity": "0xb9038d5f47caa7aade0e",
         "salt": "0x0000000000000000000000000000000000000000000000000000000000000000",
         "log_index": 33
       },
@@ -56,7 +56,7 @@
         "sender": "0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544",
         "tick_lower": -887200,
         "tick_upper": 119400,
-        "liquidity": 2171753334568235763678399,
+        "liquidity": "0x1cbe2fbf2b38001d6bcbf",
         "salt": "0x0000000000000000000000000000000000000000000000000000000000000001",
         "log_index": 34
       }

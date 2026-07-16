@@ -11,6 +11,7 @@ use alloy_sol_types::{SolCall, sol};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::launchpad_adapter::{AttributionSource, LaunchpadId};
 use crate::robinhood::CHAIN_ID;
 use crate::uniswap_v4::{
     FollowerV4Policy, V4Error, V4MarketSnapshot, V4PaperPlan, WarmV4Quote, build_follower_v4_plan,
@@ -58,21 +59,6 @@ sol! {
         bytes32 salt,
         uint256 initialBuy
     ) external payable;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LaunchpadId {
-    Clanker,
-    BankrDoppler,
-    KlikFinance,
-    TrenchToday,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttributionSource {
-    Virtuals,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -124,12 +110,12 @@ pub struct ResearchStartupPins {
 }
 
 #[derive(Debug, Clone)]
-pub struct StaticLaunchpadRegistry {
+pub struct V4LaunchpadRegistry {
     entries: Vec<DispatchEntry>,
 }
 
-impl StaticLaunchpadRegistry {
-    pub fn from_research(pins: ResearchStartupPins) -> Result<Self, AdapterError> {
+impl V4LaunchpadRegistry {
+    pub fn from_research(pins: ResearchStartupPins) -> Result<Self, V4AdapterError> {
         let mut entries = vec![DispatchEntry {
             launchpad: LaunchpadId::Clanker,
             destination: RuntimeCodePin {
@@ -145,7 +131,7 @@ impl StaticLaunchpadRegistry {
 
         if let Some(pin) = pins.klik_factory {
             if pin.address != KLIK_FACTORY || !pin.complete() {
-                return Err(AdapterError::InvalidStartupPin);
+                return Err(V4AdapterError::InvalidStartupPin);
             }
             entries.push(DispatchEntry {
                 launchpad: LaunchpadId::KlikFinance,
@@ -172,12 +158,12 @@ impl StaticLaunchpadRegistry {
                     mode: ExecutionMode::DiscoveryOnly,
                 });
             }
-            _ => return Err(AdapterError::InvalidStartupPin),
+            _ => return Err(V4AdapterError::InvalidStartupPin),
         }
 
         for (destination, selector) in pins.bankr_doppler_calls {
             if !destination.complete() {
-                return Err(AdapterError::InvalidStartupPin);
+                return Err(V4AdapterError::InvalidStartupPin);
             }
             entries.push(DispatchEntry {
                 launchpad: LaunchpadId::BankrDoppler,
@@ -188,27 +174,30 @@ impl StaticLaunchpadRegistry {
             });
         }
         if entries.iter().any(|entry| !entry.destination.complete()) {
-            return Err(AdapterError::InvalidStartupPin);
+            return Err(V4AdapterError::InvalidStartupPin);
         }
         Ok(Self { entries })
     }
 
     #[cfg(test)]
-    fn from_entries(entries: Vec<DispatchEntry>) -> Result<Self, AdapterError> {
+    fn from_entries(entries: Vec<DispatchEntry>) -> Result<Self, V4AdapterError> {
         if entries.iter().any(|entry| !entry.destination.complete()) {
-            return Err(AdapterError::InvalidStartupPin);
+            return Err(V4AdapterError::InvalidStartupPin);
         }
         Ok(Self { entries })
     }
 
-    pub fn dispatch(&self, candidate: &CandidateCall<'_>) -> Result<DispatchEntry, AdapterError> {
+    pub fn dispatch(
+        &self,
+        candidate: &V4CandidateCall<'_>,
+    ) -> Result<DispatchEntry, V4AdapterError> {
         if candidate.chain_id != CHAIN_ID {
-            return Err(AdapterError::WrongChain);
+            return Err(V4AdapterError::WrongChain);
         }
         let selector: [u8; 4] = candidate
             .input
             .get(..4)
-            .ok_or(AdapterError::MalformedCalldata)?
+            .ok_or(V4AdapterError::MalformedCalldata)?
             .try_into()
             .expect("four-byte slice");
         let matches = self
@@ -227,16 +216,16 @@ impl StaticLaunchpadRegistry {
             .copied()
             .collect::<Vec<_>>();
         match matches.as_slice() {
-            [] => Err(AdapterError::NoMatch),
+            [] => Err(V4AdapterError::NoMatch),
             [entry] => Ok(*entry),
-            _ => Err(AdapterError::Ambiguous),
+            _ => Err(V4AdapterError::Ambiguous),
         }
     }
 
     pub fn observe(
         &self,
-        candidate: &CandidateCall<'_>,
-    ) -> Result<LaunchObservation, AdapterError> {
+        candidate: &V4CandidateCall<'_>,
+    ) -> Result<LaunchObservation, V4AdapterError> {
         let entry = self.dispatch(candidate)?;
         match entry.launchpad {
             LaunchpadId::Clanker => {
@@ -261,9 +250,9 @@ impl StaticLaunchpadRegistry {
             }
             LaunchpadId::KlikFinance => {
                 let call = deployCoinCall::abi_decode(candidate.input)
-                    .map_err(|_| AdapterError::MalformedCalldata)?;
+                    .map_err(|_| V4AdapterError::MalformedCalldata)?;
                 if call.abi_encode().as_slice() != candidate.input {
-                    return Err(AdapterError::MalformedCalldata);
+                    return Err(V4AdapterError::MalformedCalldata);
                 }
                 Ok(LaunchObservation::KlikLaunch {
                     leader: candidate.leader,
@@ -285,12 +274,13 @@ impl StaticLaunchpadRegistry {
                     mode: ExecutionMode::DiscoveryOnly,
                 })
             }
+            _ => Err(V4AdapterError::NoMatch),
         }
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct CandidateCall<'a> {
+pub struct V4CandidateCall<'a> {
     pub chain_id: u64,
     pub leader: Address,
     pub destination: Address,
@@ -365,9 +355,9 @@ pub struct V4ActionObservationInput<'a> {
 pub fn normalize_v4_action(
     market: &V4MarketSnapshot,
     input: V4ActionObservationInput<'_>,
-) -> Result<ObservedV4Action, AdapterError> {
+) -> Result<ObservedV4Action, V4AdapterError> {
     if input.attribution.is_some() && input.launchpad != LaunchpadId::BankrDoppler {
-        return Err(AdapterError::InvalidAttribution);
+        return Err(V4AdapterError::InvalidAttribution);
     }
     if input.leader == Address::ZERO
         || input.asset_in == input.asset_out
@@ -375,7 +365,7 @@ pub fn normalize_v4_action(
         || !market.key.contains(input.asset_out)
         || input.observed_amount_in == U256::ZERO
     {
-        return Err(AdapterError::InvalidObservation);
+        return Err(V4AdapterError::InvalidObservation);
     }
     Ok(ObservedV4Action {
         launchpad: input.launchpad,
@@ -396,12 +386,13 @@ pub fn build_adapter_paper_plan(
     market: &V4MarketSnapshot,
     quote: WarmV4Quote,
     policy: FollowerV4Policy,
-) -> Result<V4PaperPlan, AdapterError> {
+) -> Result<V4PaperPlan, V4AdapterError> {
     match action.launchpad {
         LaunchpadId::KlikFinance | LaunchpadId::TrenchToday => {
-            return Err(AdapterError::ExecutionGated);
+            return Err(V4AdapterError::ExecutionGated);
         }
         LaunchpadId::Clanker | LaunchpadId::BankrDoppler => {}
+        _ => return Err(V4AdapterError::ExecutionGated),
     }
     if validated.launchpad != action.launchpad
         || validated.pool_id != market.pool_id
@@ -409,26 +400,28 @@ pub fn build_adapter_paper_plan(
         || action.asset_in != quote.asset_in
         || action.asset_out != quote.asset_out
     {
-        return Err(AdapterError::InvalidObservation);
+        return Err(V4AdapterError::InvalidObservation);
     }
     // No leader amount, min-out, route hash, value, hook bytes, deadline, or
     // permit material is passed to the shared follower planner.
-    build_follower_v4_plan(market, V4_POOL_MANAGER, quote, policy).map_err(AdapterError::V4)
+    build_follower_v4_plan(market, V4_POOL_MANAGER, quote, policy).map_err(V4AdapterError::V4)
 }
 
 pub fn validate_clanker_market(
     factory: RuntimeCodePin,
     locker: RuntimeCodePin,
     market: &V4MarketSnapshot,
-) -> Result<ValidatedAdapterMarket, AdapterError> {
+) -> Result<ValidatedAdapterMarket, V4AdapterError> {
     if factory.address != CLANKER_FACTORY
         || factory.runtime_code_hash != CLANKER_FACTORY_RUNTIME_HASH
         || locker.address != CLANKER_LOCKER
         || !locker.complete()
     {
-        return Err(AdapterError::InvalidStartupPin);
+        return Err(V4AdapterError::InvalidStartupPin);
     }
-    market.validate(V4_POOL_MANAGER).map_err(AdapterError::V4)?;
+    market
+        .validate(V4_POOL_MANAGER)
+        .map_err(V4AdapterError::V4)?;
     Ok(ValidatedAdapterMarket {
         launchpad: LaunchpadId::Clanker,
         pool_id: market.pool_id,
@@ -438,30 +431,32 @@ pub fn validate_clanker_market(
 pub fn validate_doppler_market(
     emitter: RuntimeCodePin,
     market: &V4MarketSnapshot,
-) -> Result<ValidatedAdapterMarket, AdapterError> {
+) -> Result<ValidatedAdapterMarket, V4AdapterError> {
     if emitter.address != DOPPLER_CREATE_EMITTER || !emitter.complete() {
-        return Err(AdapterError::InvalidStartupPin);
+        return Err(V4AdapterError::InvalidStartupPin);
     }
-    market.validate(V4_POOL_MANAGER).map_err(AdapterError::V4)?;
+    market
+        .validate(V4_POOL_MANAGER)
+        .map_err(V4AdapterError::V4)?;
     Ok(ValidatedAdapterMarket {
         launchpad: LaunchpadId::BankrDoppler,
         pool_id: market.pool_id,
     })
 }
 
-fn validate_opaque_abi(input: &[u8], selector: [u8; 4]) -> Result<(), AdapterError> {
+fn validate_opaque_abi(input: &[u8], selector: [u8; 4]) -> Result<(), V4AdapterError> {
     if input.len() < 4
         || input.len() > MAX_DISCOVERY_CALLDATA
         || input[..4] != selector
         || !(input.len() - 4).is_multiple_of(32)
     {
-        return Err(AdapterError::MalformedCalldata);
+        return Err(V4AdapterError::MalformedCalldata);
     }
     Ok(())
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum AdapterError {
+pub enum V4AdapterError {
     #[error("startup runtime or implementation pin is invalid")]
     InvalidStartupPin,
     #[error("candidate is not Robinhood Chain mainnet")]
@@ -504,8 +499,8 @@ mod tests {
         }
     }
 
-    fn research_registry() -> StaticLaunchpadRegistry {
-        StaticLaunchpadRegistry::from_research(ResearchStartupPins {
+    fn research_registry() -> V4LaunchpadRegistry {
+        V4LaunchpadRegistry::from_research(ResearchStartupPins {
             klik_factory: Some(pin(KLIK_FACTORY, 0x22)),
             trench_proxy: Some(pin(TRENCH_PROXY, 0x33)),
             trench_implementation: Some(pin(TRENCH_IMPLEMENTATION, 0x44)),
@@ -519,8 +514,8 @@ mod tests {
         runtime_hash: B256,
         implementation: Option<RuntimeCodePin>,
         input: &'a [u8],
-    ) -> CandidateCall<'a> {
-        CandidateCall {
+    ) -> V4CandidateCall<'a> {
+        V4CandidateCall {
             chain_id: CHAIN_ID,
             leader: Address::with_last_byte(9),
             destination,
@@ -577,9 +572,12 @@ mod tests {
             None,
             &input,
         );
-        assert_eq!(registry.observe(&wrong_address), Err(AdapterError::NoMatch));
+        assert_eq!(
+            registry.observe(&wrong_address),
+            Err(V4AdapterError::NoMatch)
+        );
         let wrong_hash = candidate(CLANKER_FACTORY, hash(1), None, &input);
-        assert_eq!(registry.observe(&wrong_hash), Err(AdapterError::NoMatch));
+        assert_eq!(registry.observe(&wrong_hash), Err(V4AdapterError::NoMatch));
     }
 
     #[test]
@@ -601,7 +599,7 @@ mod tests {
         let call = candidate(KLIK_FACTORY, hash(0x22), None, &malformed);
         assert_eq!(
             registry.observe(&call),
-            Err(AdapterError::MalformedCalldata)
+            Err(V4AdapterError::MalformedCalldata)
         );
     }
 
@@ -632,7 +630,7 @@ mod tests {
                 Some(pin(TRENCH_IMPLEMENTATION, 0x44)),
                 &input,
             );
-            assert_eq!(registry.observe(&call), Err(AdapterError::NoMatch));
+            assert_eq!(registry.observe(&call), Err(V4AdapterError::NoMatch));
         }
     }
 
@@ -647,10 +645,10 @@ mod tests {
             &input,
         );
         call.chain_id = 8453;
-        assert_eq!(registry.observe(&call), Err(AdapterError::WrongChain));
+        assert_eq!(registry.observe(&call), Err(V4AdapterError::WrongChain));
         call.chain_id = CHAIN_ID;
         call.implementation = Some(pin(TRENCH_IMPLEMENTATION, 0x45));
-        assert_eq!(registry.observe(&call), Err(AdapterError::NoMatch));
+        assert_eq!(registry.observe(&call), Err(V4AdapterError::NoMatch));
 
         let entry = DispatchEntry {
             launchpad: LaunchpadId::Clanker,
@@ -659,10 +657,10 @@ mod tests {
             implementation: None,
             mode: ExecutionMode::ExecutionGated,
         };
-        let ambiguous = StaticLaunchpadRegistry::from_entries(vec![entry, entry]).unwrap();
+        let ambiguous = V4LaunchpadRegistry::from_entries(vec![entry, entry]).unwrap();
         let input = [entry.selector.as_slice(), &[0_u8; 32]].concat();
         let call = candidate(entry.destination.address, hash(1), None, &input);
-        assert_eq!(ambiguous.dispatch(&call), Err(AdapterError::Ambiguous));
+        assert_eq!(ambiguous.dispatch(&call), Err(V4AdapterError::Ambiguous));
     }
 
     #[test]
@@ -682,7 +680,7 @@ mod tests {
                     observed_route: &[1, 2, 3],
                 },
             ),
-            Err(AdapterError::InvalidAttribution)
+            Err(V4AdapterError::InvalidAttribution)
         );
         let bankr = normalize_v4_action(
             &market,
@@ -769,7 +767,7 @@ mod tests {
         let registry = research_registry();
         let clanker_input = [CLANKER_DEPLOY_SELECTOR.as_slice(), &[0_u8; 32]].concat();
         let at_klik = candidate(KLIK_FACTORY, hash(0x22), None, &clanker_input);
-        assert_eq!(registry.observe(&at_klik), Err(AdapterError::NoMatch));
+        assert_eq!(registry.observe(&at_klik), Err(V4AdapterError::NoMatch));
 
         let klik_input = deployCoinCall {
             name: "x".into(),
@@ -785,6 +783,6 @@ mod tests {
             None,
             &klik_input,
         );
-        assert_eq!(registry.observe(&at_clanker), Err(AdapterError::NoMatch));
+        assert_eq!(registry.observe(&at_clanker), Err(V4AdapterError::NoMatch));
     }
 }

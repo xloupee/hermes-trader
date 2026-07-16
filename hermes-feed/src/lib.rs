@@ -53,9 +53,9 @@ pub use hot_path::{
     HotTransaction, ReconciliationJob, SubmissionResult,
 };
 pub use launchpad_adapter::{
-    ActionKind, AdapterError, AdapterKind, AdapterQuote, CandidateCall, FollowerPlanRequest,
-    FollowerTradePlan, LaunchpadAdapter, LaunchpadId, MarketIdentity, NoxaV3Adapter,
-    ObservedAmounts, ObservedLeaderAction, ObservedRoute, RouteKind, WrapperKind,
+    ActionKind, AdapterError, AdapterKind, AdapterQuote, AttributionSource, CandidateCall,
+    FollowerPlanRequest, FollowerTradePlan, LaunchpadAdapter, LaunchpadId, MarketIdentity,
+    NoxaV3Adapter, ObservedAmounts, ObservedLeaderAction, ObservedRoute, RouteKind, WrapperKind,
     expected_noxa_pool,
 };
 pub use launchpad_registry::{

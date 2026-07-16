@@ -1,5 +1,5 @@
 use alloy_primitives::{Address, B256, Bytes, U256};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::copy_observation::normalize_aggregator_copy_swap;
@@ -15,12 +15,22 @@ use crate::robinhood::{
 };
 use crate::v3_pool::{V3PoolError, V3PoolState};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchpadId {
     Noxa,
     Bow,
     LaunchHoodV3,
+    Clanker,
+    BankrDoppler,
+    KlikFinance,
+    TrenchToday,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttributionSource {
+    Virtuals,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]

@@ -2163,10 +2163,9 @@ mod tests {
     use hermes_feed::robinhood::{BOW_LAUNCH_FACTORY, LAUNCHHOOD_V3_FACTORY};
     use hermes_feed::tier2_curve::HOOD_FACTORY;
     use hermes_feed::{
-        BankrDopplerExpectedProfile, BankrDopplerQuotePolicy, ClankerQuotePolicy,
-        ClankerV4ExpectedProfile, NoxaReceipt, PonsQuotePolicy, RobinhoodBlock,
-        RobinhoodTransaction, V3PaperSwapQuote, V3Quote, V3QuoteStateVersion,
-        V3ReceiptMarketEvidence, quote_bankr_doppler_launch_receipt, quote_clanker_launch_receipt,
+        BankrDopplerExpectedProfile, ClankerQuotePolicy, ClankerV4ExpectedProfile, NoxaReceipt,
+        PonsQuotePolicy, RobinhoodBlock, RobinhoodTransaction, V3PaperSwapQuote, V3Quote,
+        V3QuoteStateVersion, V3ReceiptMarketEvidence, quote_clanker_launch_receipt,
         quote_pons_launch_receipt,
     };
 
@@ -2628,21 +2627,9 @@ mod tests {
     }
 
     fn bankr_quote_fixture() -> BankrDopplerReceiptPaperQuote {
-        let fixture: ClankerLiveFixture = serde_json::from_str(include_str!(
-            "../../tests/fixtures/bankr-doppler-live-proof.json"
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v2-paper-quote.json"
         ))
-        .unwrap();
-        quote_bankr_doppler_launch_receipt(
-            &fixture.transaction,
-            &fixture.receipt,
-            &fixture.block,
-            BankrDopplerExpectedProfile::production(),
-            BankrDopplerQuotePolicy {
-                amount_in: U256::from(1_000_u64),
-                max_amount_in: U256::from(1_000_u64),
-                slippage_bps: 100,
-            },
-        )
         .unwrap()
     }
 

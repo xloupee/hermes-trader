@@ -6,7 +6,7 @@
 //! standard profile; reconstructs its V4 concentrated-liquidity state; and
 //! simulates an independent tiny WETH entry plus immediate full-position exit.
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolCall, SolEvent, SolValue};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -14,11 +14,11 @@ use uniswap_v3_math::tick_math::get_sqrt_ratio_at_tick;
 
 use crate::launchpad_adapter::LaunchpadId;
 use crate::noxa_abi::ReceiptLog;
-use crate::noxa_rpc::{NoxaReceipt, RobinhoodBlock, RobinhoodTransaction};
+use crate::noxa_rpc::{NoxaReceipt, NoxaRpcClient, RobinhoodBlock, RobinhoodTransaction};
 use crate::robinhood::{CHAIN_ID, WETH, WETH_RUNTIME_KECCAK256};
 use crate::smart_account::{
     AccountExecutionProfile, ContractPin, ENTRY_POINT_V07, EntryPointCall, SmartAccountPin,
-    SmartAccountPins, decode_entry_point_v07,
+    SmartAccountPins, decode_entry_point_v07, discover_entry_point_v07_erc7579,
 };
 use crate::uniswap_v4::{CodePin, DYNAMIC_FEE_FLAG, V4PoolKey};
 use crate::v3_pool::{V3PoolError, V3PoolState, V3Quote};
@@ -40,6 +40,8 @@ pub const BANKR_LIQUIDITY_MIGRATOR: Address =
     alloy_primitives::address!("ba2f330edb16cd8056f5988d8ce19bbc63475a0e");
 pub const BANKR_PROTOCOL_BENEFICIARY: Address =
     alloy_primitives::address!("edeaa06e2eb42a5c19ce27c6cffb36fd4fe1eda8");
+pub const BANKR_INTEGRATOR: Address =
+    alloy_primitives::address!("f60633d02690e2a15a54ab919925f3d038df163e");
 pub const BANKR_PROOF_ACCOUNT: Address =
     alloy_primitives::address!("ff89978cb8171132395741b785d4a1f7e3efa124");
 pub const BANKR_KERNEL_IMPLEMENTATION: Address =
@@ -89,6 +91,25 @@ mod abi {
         }
 
         function create(AirlockCreateParams createData) external;
+
+        struct VestingSchedule {
+            uint64 cliff;
+            uint64 duration;
+        }
+
+        function tokenFactoryData(
+            string name,
+            string symbol,
+            VestingSchedule[] schedules,
+            address[] beneficiaries,
+            uint256[] scheduleIds,
+            uint256[] amounts,
+            string tokenURI,
+            uint256 maxBalanceLimit,
+            uint48 balanceLimitEnd,
+            address controller,
+            address[] excludedFromBalanceLimit
+        ) external;
 
         struct Curve {
             int24 tickLower;
@@ -388,7 +409,7 @@ pub enum BankrEnvelopeKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VerifiedBankrEnvelope {
+enum VerifiedBankrEnvelope {
     Erc7579 { smart_account: SmartAccountPin },
     DirectAirlock { smart_account: SmartAccountPin },
 }
@@ -436,6 +457,8 @@ pub enum BankrQuoteError {
     UnsafePolicy,
     #[error("Bankr ERC-4337 account call is not the pinned proof profile")]
     SmartAccountIdentity,
+    #[error("receipt-block Bankr account identity proof failed: {0}")]
+    ReceiptBlockIdentity(String),
     #[error("Airlock create calldata is malformed or not the reviewed standard profile")]
     CreateCalldata,
     #[error("receipt launch identity is missing, duplicated, or inconsistent")]
@@ -481,9 +504,119 @@ struct LaunchEvidence {
     buyback_destination: Address,
 }
 
-/// Reconstruct the reviewed Bankr standard launch and produce a non-broadcast
-/// entry/full-exit quote from its first nonzero deterministic timestamp.
-pub fn quote_bankr_doppler_launch_receipt(
+/// Verify the transaction's EIP-7702 account identity at the canonical receipt
+/// block, then reconstruct a non-broadcast Bankr quote. This is the only public
+/// quote admission path for rotating or direct Bankr accounts.
+pub async fn quote_bankr_doppler_launch_receipt_at_receipt_block(
+    rpc: &NoxaRpcClient,
+    transaction: &RobinhoodTransaction,
+    receipt: &NoxaReceipt,
+    block: &RobinhoodBlock,
+    profile: BankrDopplerExpectedProfile,
+    policy: BankrDopplerQuotePolicy,
+) -> Result<BankrDopplerReceiptPaperQuote, BankrQuoteError> {
+    profile.validate()?;
+    let (leader, erc7579) = if transaction.to == Some(profile.entry_point.address) {
+        let discovered = discover_entry_point_v07_erc7579(
+            EntryPointCall {
+                chain_id: CHAIN_ID,
+                destination: profile.entry_point,
+                outer_bundler: transaction.from,
+                calldata: &transaction.input,
+            },
+            profile.entry_point,
+            ContractPin {
+                address: profile.airlock.address,
+                runtime_code_hash: profile.airlock.runtime_code_hash,
+            },
+        )
+        .map_err(|error| BankrQuoteError::ReceiptBlockIdentity(error.to_string()))?;
+        if discovered.value != U256::ZERO {
+            return Err(BankrQuoteError::ReceiptBlockIdentity(
+                "discovered account call carries native value".into(),
+            ));
+        }
+        (discovered.leader, true)
+    } else if transaction.to == Some(profile.airlock.address) && transaction.value == U256::ZERO {
+        (transaction.from, false)
+    } else {
+        return Err(BankrQuoteError::ReceiptBlockIdentity(
+            "transaction is neither exact EntryPoint nor direct Airlock envelope".into(),
+        ));
+    };
+    if leader == Address::ZERO {
+        return Err(BankrQuoteError::ReceiptBlockIdentity(
+            "envelope has zero leader".into(),
+        ));
+    }
+    let delegation = profile
+        .smart_account
+        .delegation_implementation
+        .ok_or_else(|| {
+            BankrQuoteError::ReceiptBlockIdentity(
+                "expected profile has no delegated implementation".into(),
+            )
+        })?;
+    let account_code = rpc
+        .code_at_l2_block(leader, receipt.l2_block_number)
+        .await
+        .map_err(|error| BankrQuoteError::ReceiptBlockIdentity(error.to_string()))?;
+    let mut expected_designator = Vec::with_capacity(23);
+    expected_designator.extend_from_slice(&[0xef, 0x01, 0x00]);
+    expected_designator.extend_from_slice(delegation.address.as_slice());
+    if account_code.as_ref() != expected_designator
+        || keccak256(&account_code) != profile.smart_account.account.runtime_code_hash
+    {
+        return Err(BankrQuoteError::ReceiptBlockIdentity(
+            "leader designator disagrees with reviewed profile".into(),
+        ));
+    }
+    let delegated_code = rpc
+        .code_at_l2_block(delegation.address, receipt.l2_block_number)
+        .await
+        .map_err(|error| BankrQuoteError::ReceiptBlockIdentity(error.to_string()))?;
+    if delegated_code.is_empty() || keccak256(&delegated_code) != delegation.runtime_code_hash {
+        return Err(BankrQuoteError::ReceiptBlockIdentity(
+            "delegated Kernel runtime disagrees with reviewed profile".into(),
+        ));
+    }
+    let stable_block = rpc
+        .block_by_number(receipt.l2_block_number)
+        .await
+        .map_err(|error| BankrQuoteError::ReceiptBlockIdentity(error.to_string()))?;
+    if stable_block != *block || stable_block.hash != receipt.block_hash {
+        return Err(BankrQuoteError::ReceiptBlockIdentity(
+            "receipt block changed during identity verification".into(),
+        ));
+    }
+    let smart_account = SmartAccountPin {
+        account: ContractPin {
+            address: leader,
+            runtime_code_hash: profile.smart_account.account.runtime_code_hash,
+        },
+        factory: None,
+        execution_profile: AccountExecutionProfile::Erc7579SingleCall,
+        delegation_implementation: Some(delegation),
+    };
+    let envelope = if erc7579 {
+        VerifiedBankrEnvelope::Erc7579 { smart_account }
+    } else {
+        VerifiedBankrEnvelope::DirectAirlock { smart_account }
+    };
+    quote_bankr_doppler_launch_receipt_verified(
+        transaction,
+        receipt,
+        block,
+        profile,
+        policy,
+        envelope,
+    )
+}
+
+/// Private proof-fixture path. Production callers must use the receipt-block
+/// verifier above.
+#[cfg(test)]
+fn quote_bankr_doppler_launch_receipt(
     transaction: &RobinhoodTransaction,
     receipt: &NoxaReceipt,
     block: &RobinhoodBlock,
@@ -502,7 +635,7 @@ pub fn quote_bankr_doppler_launch_receipt(
     )
 }
 
-pub fn quote_bankr_doppler_launch_receipt_verified(
+fn quote_bankr_doppler_launch_receipt_verified(
     transaction: &RobinhoodTransaction,
     receipt: &NoxaReceipt,
     block: &RobinhoodBlock,
@@ -781,22 +914,23 @@ fn validate_create_calldata(
     profile: BankrDopplerExpectedProfile,
 ) -> Result<DecodedCreate, BankrQuoteError> {
     let create = &call.createData;
-    if create.initialSupply == U256::ZERO
-        || create.numTokensToSell == U256::ZERO
-        || create
-            .numTokensToSell
-            .checked_mul(U256::from(BPS_DENOMINATOR))
-            .ok_or(BankrQuoteError::ArithmeticOverflow)?
-            != create
-                .initialSupply
-                .checked_mul(U256::from(profile.pool_allocation_bps))
-                .ok_or(BankrQuoteError::ArithmeticOverflow)?
+    let expected_initial_supply = U256::from(100_000_000_000_000_000_u64)
+        .checked_mul(U256::from(1_000_000_000_000_u64))
+        .ok_or(BankrQuoteError::ArithmeticOverflow)?;
+    let expected_tokens_to_sell = U256::from(85_000_000_000_000_000_u64)
+        .checked_mul(U256::from(1_000_000_000_000_u64))
+        .ok_or(BankrQuoteError::ArithmeticOverflow)?;
+    if create.initialSupply != expected_initial_supply
+        || create.numTokensToSell != expected_tokens_to_sell
         || create.numeraire != profile.weth.address
         || create.tokenFactory != profile.token_factory.address
+        || create.tokenFactoryData.len() != 928
         || create.governanceFactory != profile.governance_factory.address
+        || create.governanceFactoryData.as_ref() != [0_u8; 32]
         || create.poolInitializer != profile.initializer.address
         || create.liquidityMigrator != profile.liquidity_migrator.address
-        || create.integrator == Address::ZERO
+        || !create.liquidityMigratorData.is_empty()
+        || create.integrator != BANKR_INTEGRATOR
         || create.salt == B256::ZERO
     {
         return Err(BankrQuoteError::CreateCalldata);
@@ -848,10 +982,42 @@ fn validate_create_calldata(
         .ok_or(BankrQuoteError::ArithmeticOverflow)?
         / U256::from(BPS_DENOMINATOR);
     if init.beneficiaries[0].beneficiary == Address::ZERO
-        || init.beneficiaries[0].beneficiary >= init.beneficiaries[1].beneficiary
         || U256::from(init.beneficiaries[0].shares) != creator_share
         || init.beneficiaries[1].beneficiary != BANKR_PROTOCOL_BENEFICIARY
         || U256::from(init.beneficiaries[1].shares) != protocol_share
+    {
+        return Err(BankrQuoteError::CreateCalldata);
+    }
+    let mut token_call = Vec::with_capacity(4 + create.tokenFactoryData.len());
+    token_call.extend_from_slice(&abi::tokenFactoryDataCall::SELECTOR);
+    token_call.extend_from_slice(&create.tokenFactoryData);
+    let token = abi::tokenFactoryDataCall::abi_decode(&token_call)
+        .map_err(|_| BankrQuoteError::CreateCalldata)?;
+    let uri = token.tokenURI.as_bytes();
+    let unsold_supply = create
+        .initialSupply
+        .checked_sub(create.numTokensToSell)
+        .ok_or(BankrQuoteError::ArithmeticOverflow)?;
+    if token.abi_encode().get(4..) != Some(create.tokenFactoryData.as_ref())
+        || token.name.is_empty()
+        || token.name.len() > 32
+        || token.symbol.is_empty()
+        || token.symbol.len() > 32
+        || token.schedules.len() != 1
+        || token.schedules[0].cliff != 2_592_000
+        || token.schedules[0].duration != 63_072_000
+        || token.beneficiaries.as_slice() != [init.beneficiaries[0].beneficiary]
+        || token.scheduleIds.as_slice() != [U256::ZERO]
+        || token.amounts.as_slice() != [unsold_supply]
+        || uri.len() != 66
+        || !uri.starts_with(b"ipfs://bafkrei")
+        || !uri[14..]
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || (b'2'..=b'7').contains(byte))
+        || token.maxBalanceLimit != U256::ZERO
+        || token.balanceLimitEnd != 0
+        || token.controller != Address::ZERO
+        || !token.excludedFromBalanceLimit.is_empty()
     {
         return Err(BankrQuoteError::CreateCalldata);
     }
@@ -899,7 +1065,7 @@ fn validate_receipt(
     let mut lock = None;
     let mut schedule = None;
     let mut user_operation = None;
-    let mut pool_swaps = 0usize;
+    let mut pool_swap_ids = Vec::new();
 
     for log in logs {
         let Some(topic) = log.topics.first().copied() else {
@@ -990,18 +1156,9 @@ fn validate_receipt(
                 let event =
                     abi::Swap::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
                         .map_err(|_| BankrQuoteError::EmbeddedSwapUnsupported)?;
-                if initialize
-                    .as_ref()
-                    .is_some_and(|(init, _)| init.id == event.id)
-                {
-                    pool_swaps += 1;
-                }
+                pool_swap_ids.push(event.id);
             }
         }
-    }
-
-    if pool_swaps != 0 {
-        return Err(BankrQuoteError::EmbeddedSwapUnsupported);
     }
     let (airlock, launch_log_index) = airlock_create.ok_or(BankrQuoteError::LaunchIdentity)?;
     let (initializer_create, initializer_create_log_index) =
@@ -1027,6 +1184,9 @@ fn validate_receipt(
         profile.initializer.address,
     )
     .map_err(|_| BankrQuoteError::InitializeIdentity)?;
+    if pool_swap_ids.iter().any(|id| *id == key.pool_id()) {
+        return Err(BankrQuoteError::EmbeddedSwapUnsupported);
+    }
     let (initialize, initialize_log_index) =
         initialize.ok_or(BankrQuoteError::InitializeIdentity)?;
     let fee = u32::try_from(initialize.fee).map_err(|_| BankrQuoteError::InitializeIdentity)?;

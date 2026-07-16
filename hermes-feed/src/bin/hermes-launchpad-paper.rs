@@ -2163,10 +2163,9 @@ mod tests {
     use hermes_feed::robinhood::{BOW_LAUNCH_FACTORY, LAUNCHHOOD_V3_FACTORY};
     use hermes_feed::tier2_curve::HOOD_FACTORY;
     use hermes_feed::{
-        BankrDopplerExpectedProfile, ClankerQuotePolicy, ClankerV4ExpectedProfile, NoxaReceipt,
-        PonsQuotePolicy, RobinhoodBlock, RobinhoodTransaction, V3PaperSwapQuote, V3Quote,
-        V3QuoteStateVersion, V3ReceiptMarketEvidence, quote_clanker_launch_receipt,
-        quote_pons_launch_receipt,
+        ClankerQuotePolicy, ClankerV4ExpectedProfile, NoxaReceipt, PonsQuotePolicy, RobinhoodBlock,
+        RobinhoodTransaction, V3PaperSwapQuote, V3Quote, V3QuoteStateVersion,
+        V3ReceiptMarketEvidence, quote_clanker_launch_receipt, quote_pons_launch_receipt,
     };
 
     use super::*;
@@ -2684,7 +2683,7 @@ mod tests {
             &ground_truth,
             vec![quote],
             PaperPlanPolicy {
-                max_input_wei: U256::from(1_000_u64),
+                max_input_wei: U256::from(1_000_000_000_000_000_u64),
                 slippage_bps: 100,
                 ..PaperPlanPolicy::default()
             },

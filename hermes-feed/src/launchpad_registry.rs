@@ -123,10 +123,10 @@ impl StaticLaunchpadRegistry {
             return Err(RegistryError::PinMismatch);
         }
         let spec = noxa_spec(aggregator);
-        Self::build(startup, vec![spec])
+        Self::from_specs(startup, vec![spec])
     }
 
-    fn build(
+    pub fn from_specs(
         startup: StartupPinSnapshot,
         specs: Vec<LaunchpadSpec>,
     ) -> Result<Self, RegistryError> {
@@ -313,9 +313,118 @@ mod tests {
             pins: spec.contract_pins.clone(),
         };
         assert!(matches!(
-            StaticLaunchpadRegistry::build(startup, vec![spec.clone(), spec]),
+            StaticLaunchpadRegistry::from_specs(startup, vec![spec.clone(), spec]),
             Err(RegistryError::AmbiguousDispatch)
         ));
+    }
+
+    #[test]
+    fn combined_registry_is_complete_collision_free_and_chain_4663_only() {
+        let ids = [
+            LaunchpadId::Noxa,
+            LaunchpadId::Bow,
+            LaunchpadId::LaunchHoodV3,
+            LaunchpadId::Clanker,
+            LaunchpadId::BankrDoppler,
+            LaunchpadId::KlikFinance,
+            LaunchpadId::TrenchToday,
+            LaunchpadId::Pons,
+            LaunchpadId::Flap,
+            LaunchpadId::HoodFun,
+            LaunchpadId::LeaveHood,
+        ];
+        let specs = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let ordinal = u8::try_from(index + 1).unwrap();
+                let address = Address::with_last_byte(ordinal);
+                let route = match id {
+                    LaunchpadId::Clanker | LaunchpadId::KlikFinance => RouteKind::V4HookedPool,
+                    LaunchpadId::BankrDoppler => RouteKind::DopplerPermit2,
+                    LaunchpadId::Flap | LaunchpadId::HoodFun | LaunchpadId::LeaveHood => {
+                        RouteKind::NativeBondingCurve
+                    }
+                    _ => RouteKind::V3SingleHop,
+                };
+                let family = match id {
+                    LaunchpadId::Clanker | LaunchpadId::KlikFinance => AdapterKind::UniswapV4,
+                    LaunchpadId::BankrDoppler => AdapterKind::DopplerV4,
+                    LaunchpadId::Flap => AdapterKind::FlapPortal,
+                    LaunchpadId::HoodFun | LaunchpadId::LeaveHood => AdapterKind::NativeCurve,
+                    _ => AdapterKind::V3LaunchAtBirth,
+                };
+                LaunchpadSpec {
+                    id: *id,
+                    chain_id: CHAIN_ID,
+                    family,
+                    observation_keys: vec![DispatchKey {
+                        destination: address,
+                        selector: [ordinal, 0, 0, 1],
+                        wrapper: WrapperKind::Direct,
+                    }],
+                    contract_pins: vec![ContractPin {
+                        role: ContractRole::LaunchFactory,
+                        address,
+                        implementation: None,
+                        runtime_code_hash: B256::with_last_byte(ordinal),
+                    }],
+                    allowed_routes: vec![route],
+                    quote_assets: vec![WETH],
+                }
+            })
+            .collect::<Vec<_>>();
+        let startup = StartupPinSnapshot {
+            chain_id: CHAIN_ID,
+            pins: specs
+                .iter()
+                .flat_map(|spec| spec.contract_pins.iter().copied())
+                .collect(),
+        };
+        let registry = StaticLaunchpadRegistry::from_specs(startup.clone(), specs.clone()).unwrap();
+        assert_eq!(registry.specs().len(), ids.len());
+        assert!(
+            ids.iter()
+                .all(|id| registry.specs().iter().any(|spec| spec.id == *id))
+        );
+
+        let bow_key = specs[1].observation_keys[0];
+        let wrong_destination = specs[2].observation_keys[0].destination;
+        assert_eq!(
+            registry.dispatch(
+                Some(CHAIN_ID),
+                BoundedCall {
+                    destination: wrong_destination,
+                    calldata: &bow_key.selector,
+                    wrapper: WrapperKind::Direct,
+                    depth: 0,
+                },
+            ),
+            Err(RegistryError::UnknownDispatch)
+        );
+        assert_eq!(
+            registry.dispatch(
+                Some(8_453),
+                BoundedCall {
+                    destination: bow_key.destination,
+                    calldata: &bow_key.selector,
+                    wrapper: WrapperKind::Direct,
+                    depth: 0,
+                },
+            ),
+            Err(RegistryError::WrongChain)
+        );
+
+        let mut duplicate = specs[0].clone();
+        duplicate.id = LaunchpadId::Bow;
+        let mut collision_specs = specs;
+        collision_specs.push(duplicate.clone());
+        let mut collision_startup = startup;
+        collision_startup.pins.extend(duplicate.contract_pins);
+        assert_eq!(
+            StaticLaunchpadRegistry::from_specs(collision_startup, collision_specs).unwrap_err(),
+            RegistryError::AmbiguousDispatch
+        );
     }
 
     #[test]

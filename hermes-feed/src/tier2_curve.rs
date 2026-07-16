@@ -9,6 +9,10 @@ use alloy_primitives::{Address, B256, U256};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::launchpad_adapter::{
+    ActionKind, FollowerTradePlan, LaunchpadId, MarketIdentity, ObservedAmounts,
+    ObservedLeaderAction, ObservedRoute, RouteKind,
+};
 use crate::noxa_abi::{
     V3ExactInputIntent, decode_v3_exact_input_single, encode_v3_exact_input_single,
 };
@@ -45,24 +49,9 @@ pub const HOOD_V3_FEE: u32 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Protocol {
-    HoodFun,
-    LeaveHood,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub enum FactoryGeneration {
     HoodCustomLaunchpad,
     LeaveHoodProxyV1,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActionKind {
-    Launch,
-    Buy,
-    Sell,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -118,7 +107,7 @@ struct EnabledAdapters {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CandidateCall<'a> {
+pub struct CurveCandidateCall<'a> {
     pub chain_id: u64,
     pub destination: Address,
     pub input: &'a [u8],
@@ -126,8 +115,8 @@ pub struct CandidateCall<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ObservedAction {
-    pub protocol: Protocol,
+pub struct CurveObservation {
+    pub protocol: LaunchpadId,
     pub generation: FactoryGeneration,
     pub action: ActionKind,
     pub phase: MarketPhase,
@@ -181,7 +170,7 @@ pub struct CurveState {
 
 #[derive(Debug, Clone)]
 pub struct MarketSnapshot<'a> {
-    pub protocol: Protocol,
+    pub protocol: LaunchpadId,
     pub generation: FactoryGeneration,
     pub token: Address,
     pub phase: MarketPhase,
@@ -192,29 +181,16 @@ pub struct MarketSnapshot<'a> {
     pub observed_v3_pool_runtime_code_hash: Option<B256>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PaperRoute {
-    HoodCurve,
-    CanonicalV3,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PaperPlan {
-    pub protocol: Protocol,
-    pub route: PaperRoute,
-    pub destination: Address,
-    pub value: U256,
-    pub calldata: Vec<u8>,
-    pub spend_limit: U256,
+pub struct CurvePaperPlan {
+    pub plan: FollowerTradePlan,
     pub expected_receive: U256,
-    pub min_receive: U256,
     /// This workstream is paper-only by construction.
     pub execution_enabled: bool,
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum AdapterError {
+pub enum CurveAdapterError {
     #[error("candidate is not on Robinhood Chain 4663")]
     WrongChain,
     #[error("adapter is disabled because a startup identity pin is missing or drifted")]
@@ -242,17 +218,17 @@ pub enum AdapterError {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct AdapterRegistry {
+pub struct Tier2CurveAdapter {
     enabled: EnabledAdapters,
 }
 
-impl AdapterRegistry {
+impl Tier2CurveAdapter {
     /// Builds an immutable candidate-time registry from startup-observed pins.
     /// A non-zero hash proves that startup pinned exact runtime bytes; proxy
     /// generations additionally require the evidence-backed implementation.
-    pub fn new(pins: StartupPins) -> Result<Self, AdapterError> {
+    pub fn new(pins: StartupPins) -> Result<Self, CurveAdapterError> {
         if pins.chain_id != CHAIN_ID {
-            return Err(AdapterError::WrongChain);
+            return Err(CurveAdapterError::WrongChain);
         }
         let hood = valid_pin(pins.hood_factory, HOOD_FACTORY, None);
         let leavehood = valid_pin(
@@ -277,22 +253,22 @@ impl AdapterRegistry {
 
     pub fn observe(
         &self,
-        call: CandidateCall<'_>,
+        call: CurveCandidateCall<'_>,
         markets: &[MarketSnapshot<'_>],
-    ) -> Result<ObservedAction, AdapterError> {
+    ) -> Result<CurveObservation, CurveAdapterError> {
         if call.chain_id != CHAIN_ID {
-            return Err(AdapterError::WrongChain);
+            return Err(CurveAdapterError::WrongChain);
         }
         let selector: [u8; 4] = call
             .input
             .get(..4)
-            .ok_or(AdapterError::Malformed)?
+            .ok_or(CurveAdapterError::Malformed)?
             .try_into()
-            .map_err(|_| AdapterError::Malformed)?;
+            .map_err(|_| CurveAdapterError::Malformed)?;
 
         if call.destination == HOOD_FACTORY {
             if !self.enabled.hood {
-                return Err(AdapterError::PinMismatch);
+                return Err(CurveAdapterError::PinMismatch);
             }
             let observed = observe_hood(selector, call.input, call.value)?;
             validate_observed_market_phase(&observed, markets)?;
@@ -300,12 +276,12 @@ impl AdapterRegistry {
         }
         if call.destination == LEAVEHOOD_FACTORY_PROXY {
             if !self.enabled.leavehood {
-                return Err(AdapterError::PinMismatch);
+                return Err(CurveAdapterError::PinMismatch);
             }
             if LEAVEHOOD_LAUNCH_SELECTORS.contains(&selector) {
                 require_abi_envelope(call.input)?;
-                return Ok(ObservedAction {
-                    protocol: Protocol::LeaveHood,
+                return Ok(CurveObservation {
+                    protocol: LaunchpadId::LeaveHood,
                     generation: FactoryGeneration::LeaveHoodProxyV1,
                     action: ActionKind::Launch,
                     phase: MarketPhase::Curve,
@@ -316,11 +292,11 @@ impl AdapterRegistry {
                     paper_plan_supported: false,
                 });
             }
-            return Err(AdapterError::UnknownDispatch);
+            return Err(CurveAdapterError::UnknownDispatch);
         }
         if call.destination == LEAVEHOOD_CORE_PROXY {
             if !self.enabled.leavehood {
-                return Err(AdapterError::PinMismatch);
+                return Err(CurveAdapterError::PinMismatch);
             }
             if matches!(
                 selector,
@@ -329,8 +305,8 @@ impl AdapterRegistry {
                     | LEAVEHOOD_SELL_SELECTOR
             ) {
                 require_abi_envelope(call.input)?;
-                return Ok(ObservedAction {
-                    protocol: Protocol::LeaveHood,
+                return Ok(CurveObservation {
+                    protocol: LaunchpadId::LeaveHood,
                     generation: FactoryGeneration::LeaveHoodProxyV1,
                     action: if selector == LEAVEHOOD_BUY_SELECTOR {
                         ActionKind::Buy
@@ -345,43 +321,97 @@ impl AdapterRegistry {
                     paper_plan_supported: false,
                 });
             }
-            return Err(AdapterError::UnknownDispatch);
+            return Err(CurveAdapterError::UnknownDispatch);
         }
         if call.destination == UNISWAP_V3_SWAP_ROUTER_02 {
             if !self.enabled.v3 {
-                return Err(AdapterError::PinMismatch);
+                return Err(CurveAdapterError::PinMismatch);
             }
             return observe_v3(call.input, markets);
         }
-        Err(AdapterError::UnknownDispatch)
+        Err(CurveAdapterError::UnknownDispatch)
+    }
+
+    pub fn normalize_observed_action(
+        &self,
+        tx_hash: B256,
+        leader: Address,
+        observation: &CurveObservation,
+        market: &MarketSnapshot<'_>,
+    ) -> Result<ObservedLeaderAction, CurveAdapterError> {
+        if leader == Address::ZERO
+            || observation.protocol != market.protocol
+            || observation.generation != market.generation
+            || observation.phase != market.phase
+            || observation.token != Some(market.token)
+        {
+            return Err(CurveAdapterError::RouteMismatch);
+        }
+        let amount_in = observation
+            .amount_in
+            .filter(|amount| *amount != U256::ZERO)
+            .ok_or(CurveAdapterError::InvalidState)?;
+        let minimum_out = observation
+            .leader_min_receive
+            .ok_or(CurveAdapterError::InvalidState)?;
+        let (asset_in, asset_out) = match observation.action {
+            ActionKind::Buy => (WETH, market.token),
+            ActionKind::Sell => (market.token, WETH),
+            ActionKind::Launch => return Err(CurveAdapterError::LaunchAutomation),
+        };
+        let (pool, route) = match market.phase {
+            MarketPhase::Curve => (HOOD_FACTORY, ObservedRoute::HoodCurve),
+            MarketPhase::MigratedV3 => (
+                market.v3.ok_or(CurveAdapterError::EvidenceIncomplete)?.pool,
+                ObservedRoute::MigratedV3,
+            ),
+        };
+        Ok(ObservedLeaderAction {
+            tx_hash,
+            launchpad: observation.protocol,
+            leader,
+            action: observation.action,
+            market: MarketIdentity {
+                token: market.token,
+                quote_asset: WETH,
+                pool,
+            },
+            asset_in,
+            asset_out,
+            observed_amounts: ObservedAmounts {
+                amount_in,
+                minimum_out,
+            },
+            observed_route: route,
+        })
     }
 
     pub fn plan_follow_on(
         &self,
-        observation: &ObservedAction,
+        observation: &CurveObservation,
         market: &MarketSnapshot<'_>,
         follower_amount_in: U256,
         follower_recipient: Address,
         slippage_bps: u16,
-    ) -> Result<PaperPlan, AdapterError> {
+    ) -> Result<CurvePaperPlan, CurveAdapterError> {
         if observation.action == ActionKind::Launch || observation.launch_automation {
-            return Err(AdapterError::LaunchAutomation);
+            return Err(CurveAdapterError::LaunchAutomation);
         }
         if market.quality.quality() != OpportunityQuality::PaperEligible {
-            return Err(AdapterError::LowQuality);
+            return Err(CurveAdapterError::LowQuality);
         }
         if observation.protocol != market.protocol
             || observation.generation != market.generation
             || observation.phase != market.phase
             || observation.token != Some(market.token)
         {
-            return Err(AdapterError::RouteMismatch);
+            return Err(CurveAdapterError::RouteMismatch);
         }
         if follower_amount_in == U256::ZERO
             || follower_recipient == Address::ZERO
             || slippage_bps >= 10_000
         {
-            return Err(AdapterError::InvalidState);
+            return Err(CurveAdapterError::InvalidState);
         }
         match market.phase {
             MarketPhase::Curve => {
@@ -399,24 +429,24 @@ impl AdapterRegistry {
 
     fn plan_curve(
         &self,
-        observation: &ObservedAction,
+        observation: &CurveObservation,
         market: &MarketSnapshot<'_>,
         amount_in: U256,
         slippage_bps: u16,
-    ) -> Result<PaperPlan, AdapterError> {
-        if market.protocol != Protocol::HoodFun || !self.enabled.hood {
+    ) -> Result<CurvePaperPlan, CurveAdapterError> {
+        if market.protocol != LaunchpadId::HoodFun || !self.enabled.hood {
             // LeaveHood selectors are observable, but its curve formula, fees,
             // restrictions and verified implementation ABI are incomplete.
-            return Err(AdapterError::EvidenceIncomplete);
+            return Err(CurveAdapterError::EvidenceIncomplete);
         }
-        let state = market.curve.ok_or(AdapterError::EvidenceIncomplete)?;
+        let state = market.curve.ok_or(CurveAdapterError::EvidenceIncomplete)?;
         if !(100..=500).contains(&state.fee_bps) {
-            return Err(AdapterError::InvalidState);
+            return Err(CurveAdapterError::InvalidState);
         }
         let expected = match observation.action {
             ActionKind::Buy => quote_curve_buy(state, amount_in)?,
             ActionKind::Sell => quote_curve_sell(state, amount_in)?,
-            ActionKind::Launch => return Err(AdapterError::LaunchAutomation),
+            ActionKind::Launch => return Err(CurveAdapterError::LaunchAutomation),
         };
         let minimum = apply_slippage(expected, slippage_bps)?;
         let calldata = match observation.action {
@@ -429,54 +459,61 @@ impl AdapterRegistry {
             ),
             ActionKind::Launch => unreachable!(),
         };
-        Ok(PaperPlan {
-            protocol: Protocol::HoodFun,
-            route: PaperRoute::HoodCurve,
-            destination: HOOD_FACTORY,
-            value: if observation.action == ActionKind::Buy {
-                amount_in
-            } else {
-                U256::ZERO
+        Ok(CurvePaperPlan {
+            plan: FollowerTradePlan {
+                launchpad: LaunchpadId::HoodFun,
+                route: RouteKind::NativeBondingCurve,
+                destination: HOOD_FACTORY,
+                value: if observation.action == ActionKind::Buy {
+                    amount_in
+                } else {
+                    U256::ZERO
+                },
+                calldata: calldata.into(),
+                spend_limit: amount_in,
+                min_receive: minimum,
+                expected_market: MarketIdentity {
+                    token: market.token,
+                    quote_asset: WETH,
+                    pool: HOOD_FACTORY,
+                },
             },
-            calldata,
-            spend_limit: amount_in,
             expected_receive: expected,
-            min_receive: minimum,
             execution_enabled: false,
         })
     }
 
     fn plan_v3(
         &self,
-        observation: &ObservedAction,
+        observation: &CurveObservation,
         market: &MarketSnapshot<'_>,
         amount_in: U256,
         recipient: Address,
         slippage_bps: u16,
-    ) -> Result<PaperPlan, AdapterError> {
+    ) -> Result<CurvePaperPlan, CurveAdapterError> {
         if !self.enabled.v3 {
-            return Err(AdapterError::PinMismatch);
+            return Err(CurveAdapterError::PinMismatch);
         }
-        if market.protocol != Protocol::HoodFun {
+        if market.protocol != LaunchpadId::HoodFun {
             // LeaveHood's V3 fee tier, migration event and token-to-pool
             // derivation are not established by the checkpoint evidence.
-            return Err(AdapterError::EvidenceIncomplete);
+            return Err(CurveAdapterError::EvidenceIncomplete);
         }
-        let pool = market.v3.ok_or(AdapterError::EvidenceIncomplete)?;
+        let pool = market.v3.ok_or(CurveAdapterError::EvidenceIncomplete)?;
         if pool.fee != HOOD_V3_FEE
             || pool.pool != expected_v3_pool(market.token)
             || !valid_v3_pool_runtime_pin(market)
         {
-            return Err(AdapterError::RouteMismatch);
+            return Err(CurveAdapterError::RouteMismatch);
         }
         let token_in = match observation.action {
             ActionKind::Buy => WETH,
             ActionKind::Sell => market.token,
-            ActionKind::Launch => return Err(AdapterError::LaunchAutomation),
+            ActionKind::Launch => return Err(CurveAdapterError::LaunchAutomation),
         };
         let quote = pool
             .quote_exact_input(token_in, amount_in, None)
-            .map_err(|_| AdapterError::InvalidState)?;
+            .map_err(|_| CurveAdapterError::InvalidState)?;
         let minimum = apply_slippage(quote.amount_out, slippage_bps)?;
         let calldata = encode_v3_exact_input_single(&V3ExactInputIntent {
             token_in,
@@ -487,20 +524,27 @@ impl AdapterRegistry {
             amount_out_minimum: minimum,
             sqrt_price_limit_x96: U256::ZERO,
         })
-        .ok_or(AdapterError::InvalidState)?;
-        Ok(PaperPlan {
-            protocol: market.protocol,
-            route: PaperRoute::CanonicalV3,
-            destination: UNISWAP_V3_SWAP_ROUTER_02,
-            value: if token_in == WETH {
-                amount_in
-            } else {
-                U256::ZERO
+        .ok_or(CurveAdapterError::InvalidState)?;
+        Ok(CurvePaperPlan {
+            plan: FollowerTradePlan {
+                launchpad: market.protocol,
+                route: RouteKind::V3SingleHop,
+                destination: UNISWAP_V3_SWAP_ROUTER_02,
+                value: if token_in == WETH {
+                    amount_in
+                } else {
+                    U256::ZERO
+                },
+                calldata: calldata.into(),
+                spend_limit: amount_in,
+                min_receive: minimum,
+                expected_market: MarketIdentity {
+                    token: market.token,
+                    quote_asset: WETH,
+                    pool: pool.pool,
+                },
             },
-            calldata,
-            spend_limit: amount_in,
             expected_receive: quote.amount_out,
-            min_receive: minimum,
             execution_enabled: false,
         })
     }
@@ -529,11 +573,11 @@ fn observe_hood(
     selector: [u8; 4],
     input: &[u8],
     value: U256,
-) -> Result<ObservedAction, AdapterError> {
+) -> Result<CurveObservation, CurveAdapterError> {
     if selector == HOOD_CREATE_SELECTOR {
         require_abi_envelope(input)?;
-        return Ok(ObservedAction {
-            protocol: Protocol::HoodFun,
+        return Ok(CurveObservation {
+            protocol: LaunchpadId::HoodFun,
             generation: FactoryGeneration::HoodCustomLaunchpad,
             action: ActionKind::Launch,
             phase: MarketPhase::Curve,
@@ -547,14 +591,14 @@ fn observe_hood(
     let (action, words) = match selector {
         HOOD_BUY_SELECTOR => (ActionKind::Buy, decode_static_words(input, 2)?),
         HOOD_SELL_SELECTOR => (ActionKind::Sell, decode_static_words(input, 3)?),
-        _ => return Err(AdapterError::UnknownDispatch),
+        _ => return Err(CurveAdapterError::UnknownDispatch),
     };
-    let token = decode_address(words[0]).ok_or(AdapterError::Malformed)?;
+    let token = decode_address(words[0]).ok_or(CurveAdapterError::Malformed)?;
     if token == Address::ZERO
         || (action == ActionKind::Buy && value == U256::ZERO)
         || (action == ActionKind::Sell && value != U256::ZERO)
     {
-        return Err(AdapterError::Malformed);
+        return Err(CurveAdapterError::Malformed);
     }
     let amount_in = if action == ActionKind::Buy {
         value
@@ -567,10 +611,10 @@ fn observe_hood(
         words[2]
     };
     if amount_in == U256::ZERO || leader_min_receive == U256::ZERO {
-        return Err(AdapterError::Malformed);
+        return Err(CurveAdapterError::Malformed);
     }
-    Ok(ObservedAction {
-        protocol: Protocol::HoodFun,
+    Ok(CurveObservation {
+        protocol: LaunchpadId::HoodFun,
         generation: FactoryGeneration::HoodCustomLaunchpad,
         action,
         phase: MarketPhase::Curve,
@@ -585,17 +629,17 @@ fn observe_hood(
 fn observe_v3(
     input: &[u8],
     markets: &[MarketSnapshot<'_>],
-) -> Result<ObservedAction, AdapterError> {
-    let intent = decode_v3_exact_input_single(input).ok_or(AdapterError::Malformed)?;
+) -> Result<CurveObservation, CurveAdapterError> {
+    let intent = decode_v3_exact_input_single(input).ok_or(CurveAdapterError::Malformed)?;
     if intent.fee != HOOD_V3_FEE || intent.amount_in == U256::ZERO {
-        return Err(AdapterError::RouteMismatch);
+        return Err(CurveAdapterError::RouteMismatch);
     }
     let (token, action) = if intent.token_in == WETH && intent.token_out != Address::ZERO {
         (intent.token_out, ActionKind::Buy)
     } else if intent.token_out == WETH && intent.token_in != Address::ZERO {
         (intent.token_in, ActionKind::Sell)
     } else {
-        return Err(AdapterError::RouteMismatch);
+        return Err(CurveAdapterError::RouteMismatch);
     };
     let mut matches = markets.iter().filter(|market| {
         market.token == token
@@ -605,11 +649,11 @@ fn observe_v3(
                 .is_some_and(|pool| pool.pool == expected_v3_pool(token))
             && valid_v3_pool_runtime_pin(market)
     });
-    let market = matches.next().ok_or(AdapterError::UnknownMarket)?;
+    let market = matches.next().ok_or(CurveAdapterError::UnknownMarket)?;
     if matches.next().is_some() {
-        return Err(AdapterError::AmbiguousRoute);
+        return Err(CurveAdapterError::AmbiguousRoute);
     }
-    Ok(ObservedAction {
+    Ok(CurveObservation {
         protocol: market.protocol,
         generation: market.generation,
         action,
@@ -618,70 +662,70 @@ fn observe_v3(
         amount_in: Some(intent.amount_in),
         leader_min_receive: Some(intent.amount_out_minimum),
         launch_automation: false,
-        paper_plan_supported: market.protocol == Protocol::HoodFun,
+        paper_plan_supported: market.protocol == LaunchpadId::HoodFun,
     })
 }
 
-fn quote_curve_buy(state: CurveState, amount_quote: U256) -> Result<U256, AdapterError> {
+fn quote_curve_buy(state: CurveState, amount_quote: U256) -> Result<U256, CurveAdapterError> {
     validate_curve(state)?;
     let net_quote = deduct_fee(amount_quote, state.fee_bps)?;
     let invariant = state
         .virtual_quote_reserve
         .checked_mul(state.virtual_token_reserve)
-        .ok_or(AdapterError::Arithmetic)?;
+        .ok_or(CurveAdapterError::Arithmetic)?;
     let next_quote = state
         .virtual_quote_reserve
         .checked_add(net_quote)
-        .ok_or(AdapterError::Arithmetic)?;
+        .ok_or(CurveAdapterError::Arithmetic)?;
     let next_token = div_ceil(invariant, next_quote)?;
     let output = state
         .virtual_token_reserve
         .checked_sub(next_token)
-        .ok_or(AdapterError::Arithmetic)?;
+        .ok_or(CurveAdapterError::Arithmetic)?;
     if output == U256::ZERO || output > state.remaining_curve_tokens {
-        return Err(AdapterError::InvalidState);
+        return Err(CurveAdapterError::InvalidState);
     }
     Ok(output)
 }
 
-fn quote_curve_sell(state: CurveState, amount_token: U256) -> Result<U256, AdapterError> {
+fn quote_curve_sell(state: CurveState, amount_token: U256) -> Result<U256, CurveAdapterError> {
     validate_curve(state)?;
     let invariant = state
         .virtual_quote_reserve
         .checked_mul(state.virtual_token_reserve)
-        .ok_or(AdapterError::Arithmetic)?;
+        .ok_or(CurveAdapterError::Arithmetic)?;
     let next_token = state
         .virtual_token_reserve
         .checked_add(amount_token)
-        .ok_or(AdapterError::Arithmetic)?;
+        .ok_or(CurveAdapterError::Arithmetic)?;
     let next_quote = div_ceil(invariant, next_token)?;
     let gross = state
         .virtual_quote_reserve
         .checked_sub(next_quote)
-        .ok_or(AdapterError::Arithmetic)?;
+        .ok_or(CurveAdapterError::Arithmetic)?;
     let output = deduct_fee(gross, state.fee_bps)?;
     if output == U256::ZERO {
-        return Err(AdapterError::InvalidState);
+        return Err(CurveAdapterError::InvalidState);
     }
     Ok(output)
 }
 
-fn validate_curve(state: CurveState) -> Result<(), AdapterError> {
+fn validate_curve(state: CurveState) -> Result<(), CurveAdapterError> {
     if state.formula != CurveFormula::HoodConstantProductFeeOnInputV1
         || state.virtual_quote_reserve == U256::ZERO
         || state.virtual_token_reserve == U256::ZERO
         || state.remaining_curve_tokens == U256::ZERO
         || !(100..=500).contains(&state.fee_bps)
     {
-        return Err(AdapterError::InvalidState);
+        return Err(CurveAdapterError::InvalidState);
     }
     Ok(())
 }
 
 fn validate_observed_market_phase(
-    observation: &ObservedAction,
+    observation: &CurveObservation,
     markets: &[MarketSnapshot<'_>],
-) -> Result<(), AdapterError> {
+) -> Result<(), CurveAdapterError> {
     let Some(token) = observation.token else {
         return Ok(());
     };
@@ -690,44 +734,44 @@ fn validate_observed_market_phase(
         return Ok(());
     };
     if matches.next().is_some() {
-        return Err(AdapterError::AmbiguousRoute);
+        return Err(CurveAdapterError::AmbiguousRoute);
     }
     if market.protocol != observation.protocol
         || market.generation != observation.generation
         || market.phase != observation.phase
     {
-        return Err(AdapterError::RouteMismatch);
+        return Err(CurveAdapterError::RouteMismatch);
     }
     Ok(())
 }
 
-fn deduct_fee(value: U256, fee_bps: u16) -> Result<U256, AdapterError> {
+fn deduct_fee(value: U256, fee_bps: u16) -> Result<U256, CurveAdapterError> {
     value
         .checked_mul(U256::from(10_000_u16 - fee_bps))
         .and_then(|value| value.checked_div(U256::from(10_000_u16)))
-        .ok_or(AdapterError::Arithmetic)
+        .ok_or(CurveAdapterError::Arithmetic)
 }
 
-fn apply_slippage(value: U256, slippage_bps: u16) -> Result<U256, AdapterError> {
+fn apply_slippage(value: U256, slippage_bps: u16) -> Result<U256, CurveAdapterError> {
     let minimum = value
         .checked_mul(U256::from(10_000_u16 - slippage_bps))
         .and_then(|value| value.checked_div(U256::from(10_000_u16)))
-        .ok_or(AdapterError::Arithmetic)?;
+        .ok_or(CurveAdapterError::Arithmetic)?;
     if minimum == U256::ZERO {
-        return Err(AdapterError::InvalidState);
+        return Err(CurveAdapterError::InvalidState);
     }
     Ok(minimum)
 }
 
-fn div_ceil(numerator: U256, denominator: U256) -> Result<U256, AdapterError> {
+fn div_ceil(numerator: U256, denominator: U256) -> Result<U256, CurveAdapterError> {
     if denominator == U256::ZERO {
-        return Err(AdapterError::Arithmetic);
+        return Err(CurveAdapterError::Arithmetic);
     }
     let quotient = numerator / denominator;
     let remainder = numerator % denominator;
     quotient
         .checked_add(U256::from(remainder != U256::ZERO))
-        .ok_or(AdapterError::Arithmetic)
+        .ok_or(CurveAdapterError::Arithmetic)
 }
 
 fn expected_v3_pool(token: Address) -> Address {
@@ -750,16 +794,16 @@ fn valid_v3_pool_runtime_pin(market: &MarketSnapshot<'_>) -> bool {
         && market.observed_v3_pool_runtime_code_hash == market.v3_pool_runtime_code_hash
 }
 
-fn require_abi_envelope(input: &[u8]) -> Result<(), AdapterError> {
+fn require_abi_envelope(input: &[u8]) -> Result<(), CurveAdapterError> {
     if input.len() < 36 || !(input.len() - 4).is_multiple_of(32) {
-        return Err(AdapterError::Malformed);
+        return Err(CurveAdapterError::Malformed);
     }
     Ok(())
 }
 
-fn decode_static_words(input: &[u8], count: usize) -> Result<Vec<U256>, AdapterError> {
+fn decode_static_words(input: &[u8], count: usize) -> Result<Vec<U256>, CurveAdapterError> {
     if input.len() != 4 + count * 32 {
-        return Err(AdapterError::Malformed);
+        return Err(CurveAdapterError::Malformed);
     }
     Ok(input[4..]
         .chunks_exact(32)
@@ -812,8 +856,8 @@ mod tests {
         }
     }
 
-    fn registry() -> AdapterRegistry {
-        AdapterRegistry::new(StartupPins {
+    fn registry() -> Tier2CurveAdapter {
+        Tier2CurveAdapter::new(StartupPins {
             chain_id: CHAIN_ID,
             hood_factory: pin(HOOD_FACTORY, None, 1),
             leavehood_factory: pin(
@@ -850,7 +894,7 @@ mod tests {
 
     fn hood_market() -> MarketSnapshot<'static> {
         MarketSnapshot {
-            protocol: Protocol::HoodFun,
+            protocol: LaunchpadId::HoodFun,
             generation: FactoryGeneration::HoodCustomLaunchpad,
             token: token(),
             phase: MarketPhase::Curve,
@@ -875,7 +919,7 @@ mod tests {
         let adapter = registry();
         let buy = adapter
             .observe(
-                CandidateCall {
+                CurveCandidateCall {
                     chain_id: CHAIN_ID,
                     destination: HOOD_FACTORY,
                     input: &hood_buy(U256::from(999)),
@@ -887,12 +931,22 @@ mod tests {
         assert_eq!(buy.action, ActionKind::Buy);
         assert!(!buy.launch_automation);
         assert_eq!(buy.leader_min_receive, Some(U256::from(999)));
+        let normalized = adapter
+            .normalize_observed_action(
+                B256::with_last_byte(0xa1),
+                Address::with_last_byte(0xa2),
+                &buy,
+                &hood_market(),
+            )
+            .unwrap();
+        assert_eq!(normalized.launchpad, LaunchpadId::HoodFun);
+        assert_eq!(normalized.observed_route, ObservedRoute::HoodCurve);
 
         let mut launch = HOOD_CREATE_SELECTOR.to_vec();
         launch.extend_from_slice(&[0_u8; 32]);
         let launch = adapter
             .observe(
-                CandidateCall {
+                CurveCandidateCall {
                     chain_id: CHAIN_ID,
                     destination: HOOD_FACTORY,
                     input: &launch,
@@ -911,7 +965,7 @@ mod tests {
         );
         let sell = adapter
             .observe(
-                CandidateCall {
+                CurveCandidateCall {
                     chain_id: CHAIN_ID,
                     destination: HOOD_FACTORY,
                     input: &sell_input,
@@ -929,7 +983,7 @@ mod tests {
         let adapter = registry();
         let observation = adapter
             .observe(
-                CandidateCall {
+                CurveCandidateCall {
                     chain_id: CHAIN_ID,
                     destination: HOOD_FACTORY,
                     input: &hood_buy(U256::from(1)),
@@ -947,13 +1001,13 @@ mod tests {
                 500,
             )
             .unwrap();
-        assert_eq!(plan.route, PaperRoute::HoodCurve);
-        assert_eq!(plan.value, U256::from(100_000_000_000_000_000_u128));
-        assert_ne!(plan.min_receive, U256::from(1));
+        assert_eq!(plan.plan.route, RouteKind::NativeBondingCurve);
+        assert_eq!(plan.plan.value, U256::from(100_000_000_000_000_000_u128));
+        assert_ne!(plan.plan.min_receive, U256::from(1));
         assert!(!plan.execution_enabled);
         assert_eq!(
-            U256::from_be_slice(&plan.calldata[36..68]),
-            plan.min_receive
+            U256::from_be_slice(&plan.plan.calldata[36..68]),
+            plan.plan.min_receive
         );
     }
 
@@ -964,7 +1018,7 @@ mod tests {
         input.extend_from_slice(&[0_u8; 64]);
         let observation = adapter
             .observe(
-                CandidateCall {
+                CurveCandidateCall {
                     chain_id: CHAIN_ID,
                     destination: LEAVEHOOD_CORE_PROXY,
                     input: &input,
@@ -976,7 +1030,7 @@ mod tests {
         assert_eq!(observation.action, ActionKind::Buy);
         assert!(!observation.paper_plan_supported);
         let market = MarketSnapshot {
-            protocol: Protocol::LeaveHood,
+            protocol: LaunchpadId::LeaveHood,
             generation: FactoryGeneration::LeaveHoodProxyV1,
             token: token(),
             phase: MarketPhase::Curve,
@@ -996,7 +1050,7 @@ mod tests {
                 Address::with_last_byte(1),
                 100
             ),
-            Err(AdapterError::EvidenceIncomplete)
+            Err(CurveAdapterError::EvidenceIncomplete)
         );
 
         for selector in LEAVEHOOD_LAUNCH_SELECTORS {
@@ -1004,7 +1058,7 @@ mod tests {
             launch.extend_from_slice(&[0_u8; 32]);
             let observed = adapter
                 .observe(
-                    CandidateCall {
+                    CurveCandidateCall {
                         chain_id: CHAIN_ID,
                         destination: LEAVEHOOD_FACTORY_PROXY,
                         input: &launch,
@@ -1025,7 +1079,7 @@ mod tests {
             sell.extend_from_slice(&[0_u8; 64]);
             let observed = adapter
                 .observe(
-                    CandidateCall {
+                    CurveCandidateCall {
                         chain_id: CHAIN_ID,
                         destination: LEAVEHOOD_CORE_PROXY,
                         input: &sell,
@@ -1041,7 +1095,7 @@ mod tests {
         claim.extend_from_slice(&[0_u8; 32]);
         assert_eq!(
             adapter.observe(
-                CandidateCall {
+                CurveCandidateCall {
                     chain_id: CHAIN_ID,
                     destination: LEAVEHOOD_CORE_PROXY,
                     input: &claim,
@@ -1049,7 +1103,7 @@ mod tests {
                 },
                 &[],
             ),
-            Err(AdapterError::UnknownDispatch)
+            Err(CurveAdapterError::UnknownDispatch)
         );
     }
 
@@ -1062,8 +1116,8 @@ mod tests {
         assert_eq!(evidence.quality(), OpportunityQuality::CreationOnly);
         let mut market = hood_market();
         market.quality = evidence;
-        let observation = ObservedAction {
-            protocol: Protocol::HoodFun,
+        let observation = CurveObservation {
+            protocol: LaunchpadId::HoodFun,
             generation: FactoryGeneration::HoodCustomLaunchpad,
             action: ActionKind::Buy,
             phase: MarketPhase::Curve,
@@ -1081,7 +1135,7 @@ mod tests {
                 Address::with_last_byte(1),
                 100
             ),
-            Err(AdapterError::LowQuality)
+            Err(CurveAdapterError::LowQuality)
         );
     }
 
@@ -1094,24 +1148,24 @@ mod tests {
                 8453,
                 HOOD_FACTORY,
                 input.as_slice(),
-                AdapterError::WrongChain,
+                CurveAdapterError::WrongChain,
             ),
             (
                 CHAIN_ID,
                 Address::with_last_byte(0x99),
                 input.as_slice(),
-                AdapterError::UnknownDispatch,
+                CurveAdapterError::UnknownDispatch,
             ),
             (
                 CHAIN_ID,
                 HOOD_FACTORY,
                 &input[..67],
-                AdapterError::Malformed,
+                CurveAdapterError::Malformed,
             ),
         ] {
             assert_eq!(
                 adapter.observe(
-                    CandidateCall {
+                    CurveCandidateCall {
                         chain_id,
                         destination,
                         input: bytes,
@@ -1131,12 +1185,12 @@ mod tests {
             v3_factory: pin(UNISWAP_V3_FACTORY, None, 4),
             v3_router: pin(UNISWAP_V3_SWAP_ROUTER_02, None, 5),
         };
-        let disabled = AdapterRegistry::new(pins).unwrap();
+        let disabled = Tier2CurveAdapter::new(pins).unwrap();
         let mut leave = LEAVEHOOD_LAUNCH_SELECTORS[0].to_vec();
         leave.extend_from_slice(&[0_u8; 32]);
         assert_eq!(
             disabled.observe(
-                CandidateCall {
+                CurveCandidateCall {
                     chain_id: CHAIN_ID,
                     destination: LEAVEHOOD_FACTORY_PROXY,
                     input: &leave,
@@ -1144,7 +1198,7 @@ mod tests {
                 },
                 &[]
             ),
-            Err(AdapterError::PinMismatch)
+            Err(CurveAdapterError::PinMismatch)
         );
 
         let mut drifted_hood = pin(HOOD_FACTORY, None, 1);
@@ -1155,10 +1209,10 @@ mod tests {
             Some(LEAVEHOOD_FACTORY_IMPLEMENTATION),
             2,
         );
-        let disabled = AdapterRegistry::new(pins).unwrap();
+        let disabled = Tier2CurveAdapter::new(pins).unwrap();
         assert_eq!(
             disabled.observe(
-                CandidateCall {
+                CurveCandidateCall {
                     chain_id: CHAIN_ID,
                     destination: HOOD_FACTORY,
                     input: &input,
@@ -1166,12 +1220,12 @@ mod tests {
                 },
                 &[],
             ),
-            Err(AdapterError::PinMismatch)
+            Err(CurveAdapterError::PinMismatch)
         );
         pins.chain_id = 1;
         assert!(matches!(
-            AdapterRegistry::new(pins),
-            Err(AdapterError::WrongChain)
+            Tier2CurveAdapter::new(pins),
+            Err(CurveAdapterError::WrongChain)
         ));
     }
 
@@ -1182,7 +1236,7 @@ mod tests {
             encode_words(HOOD_BUY_SELECTOR, &[address_word(token()), U256::from(1)]);
         assert_eq!(
             adapter.observe(
-                CandidateCall {
+                CurveCandidateCall {
                     chain_id: CHAIN_ID,
                     destination: LEAVEHOOD_CORE_PROXY,
                     input: &wrong_selector,
@@ -1190,7 +1244,7 @@ mod tests {
                 },
                 &[]
             ),
-            Err(AdapterError::UnknownDispatch)
+            Err(CurveAdapterError::UnknownDispatch)
         );
 
         // A valid V3-shaped call is not attributed without exactly one warm,
@@ -1207,7 +1261,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             adapter.observe(
-                CandidateCall {
+                CurveCandidateCall {
                     chain_id: CHAIN_ID,
                     destination: UNISWAP_V3_SWAP_ROUTER_02,
                     input: &v3,
@@ -1215,7 +1269,7 @@ mod tests {
                 },
                 &[]
             ),
-            Err(AdapterError::UnknownMarket)
+            Err(CurveAdapterError::UnknownMarket)
         );
 
         let pool_address = expected_v3_pool(token());
@@ -1236,7 +1290,7 @@ mod tests {
         )
         .unwrap();
         let hood = MarketSnapshot {
-            protocol: Protocol::HoodFun,
+            protocol: LaunchpadId::HoodFun,
             generation: FactoryGeneration::HoodCustomLaunchpad,
             token: token(),
             phase: MarketPhase::MigratedV3,
@@ -1247,13 +1301,13 @@ mod tests {
             observed_v3_pool_runtime_code_hash: Some(UNISWAP_V3_POOL_RUNTIME_KECCAK256),
         };
         let leavehood = MarketSnapshot {
-            protocol: Protocol::LeaveHood,
+            protocol: LaunchpadId::LeaveHood,
             generation: FactoryGeneration::LeaveHoodProxyV1,
             ..hood.clone()
         };
         assert_eq!(
             adapter.observe(
-                CandidateCall {
+                CurveCandidateCall {
                     chain_id: CHAIN_ID,
                     destination: UNISWAP_V3_SWAP_ROUTER_02,
                     input: &v3,
@@ -1261,7 +1315,7 @@ mod tests {
                 },
                 &[hood, leavehood],
             ),
-            Err(AdapterError::AmbiguousRoute)
+            Err(CurveAdapterError::AmbiguousRoute)
         );
 
         for foreign in [
@@ -1270,7 +1324,7 @@ mod tests {
         ] {
             assert_eq!(
                 adapter.observe(
-                    CandidateCall {
+                    CurveCandidateCall {
                         chain_id: CHAIN_ID,
                         destination: foreign,
                         input: &wrong_selector,
@@ -1278,7 +1332,7 @@ mod tests {
                     },
                     &[],
                 ),
-                Err(AdapterError::UnknownDispatch)
+                Err(CurveAdapterError::UnknownDispatch)
             );
         }
     }
@@ -1305,7 +1359,7 @@ mod tests {
         pool.add_position(-200, 200, 1_000_000_000_000_000_000)
             .unwrap();
         let market = MarketSnapshot {
-            protocol: Protocol::HoodFun,
+            protocol: LaunchpadId::HoodFun,
             generation: FactoryGeneration::HoodCustomLaunchpad,
             token: token(),
             phase: MarketPhase::MigratedV3,
@@ -1327,7 +1381,7 @@ mod tests {
         .unwrap();
         let observed = registry()
             .observe(
-                CandidateCall {
+                CurveCandidateCall {
                     chain_id: CHAIN_ID,
                     destination: UNISWAP_V3_SWAP_ROUTER_02,
                     input: &input,
@@ -1337,7 +1391,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(observed.phase, MarketPhase::MigratedV3);
-        assert_eq!(observed.protocol, Protocol::HoodFun);
+        assert_eq!(observed.protocol, LaunchpadId::HoodFun);
         let plan = registry()
             .plan_follow_on(
                 &observed,
@@ -1347,12 +1401,12 @@ mod tests {
                 100,
             )
             .unwrap();
-        assert_eq!(plan.route, PaperRoute::CanonicalV3);
-        assert_ne!(plan.min_receive, U256::from(1));
+        assert_eq!(plan.plan.route, RouteKind::V3SingleHop);
+        assert_ne!(plan.plan.min_receive, U256::from(1));
         assert!(!plan.execution_enabled);
 
         let leavehood_market = MarketSnapshot {
-            protocol: Protocol::LeaveHood,
+            protocol: LaunchpadId::LeaveHood,
             generation: FactoryGeneration::LeaveHoodProxyV1,
             token: token(),
             phase: MarketPhase::MigratedV3,
@@ -1362,8 +1416,8 @@ mod tests {
             v3_pool_runtime_code_hash: Some(UNISWAP_V3_POOL_RUNTIME_KECCAK256),
             observed_v3_pool_runtime_code_hash: Some(UNISWAP_V3_POOL_RUNTIME_KECCAK256),
         };
-        let leavehood_observation = ObservedAction {
-            protocol: Protocol::LeaveHood,
+        let leavehood_observation = CurveObservation {
+            protocol: LaunchpadId::LeaveHood,
             generation: FactoryGeneration::LeaveHoodProxyV1,
             action: ActionKind::Buy,
             phase: MarketPhase::MigratedV3,
@@ -1381,7 +1435,7 @@ mod tests {
                 Address::with_last_byte(9),
                 100,
             ),
-            Err(AdapterError::EvidenceIncomplete)
+            Err(CurveAdapterError::EvidenceIncomplete)
         );
     }
 
@@ -1390,8 +1444,8 @@ mod tests {
         // Compile-time API guard: the hot-path inputs are borrowed bytes and
         // immutable warm snapshots. This assertion also catches accidental
         // growth that would indicate a client/config handle entered the path.
-        assert_eq!(std::mem::size_of::<CandidateCall<'_>>(), 80);
-        assert!(std::mem::size_of::<AdapterRegistry>() <= 3);
+        assert_eq!(std::mem::size_of::<CurveCandidateCall<'_>>(), 80);
+        assert!(std::mem::size_of::<Tier2CurveAdapter>() <= 3);
         let _ = b256!("0101010101010101010101010101010101010101010101010101010101010101");
     }
 }

@@ -131,9 +131,9 @@ pub enum V3LaunchError {
 }
 
 #[derive(Debug, Clone)]
-pub struct V3LaunchAtBirthRegistry;
+pub struct V3LaunchAtBirthAdapter;
 
-impl V3LaunchAtBirthRegistry {
+impl V3LaunchAtBirthAdapter {
     /// Validate every code identity once during startup. The resulting registry
     /// contains no client handle and therefore cannot make candidate-time RPC.
     pub fn new(chain_id: u64, code: &[ContractCodeSnapshot]) -> Result<Self, V3LaunchError> {
@@ -337,8 +337,8 @@ mod tests {
         ]
     }
 
-    fn registry() -> V3LaunchAtBirthRegistry {
-        V3LaunchAtBirthRegistry::new(CHAIN_ID, &pins()).unwrap()
+    fn registry() -> V3LaunchAtBirthAdapter {
+        V3LaunchAtBirthAdapter::new(CHAIN_ID, &pins()).unwrap()
     }
 
     fn launchhood_calldata(min_tokens_out: U256) -> Vec<u8> {
@@ -478,13 +478,13 @@ mod tests {
     #[test]
     fn chain_and_code_identity_mismatch_fail_closed() {
         assert_eq!(
-            V3LaunchAtBirthRegistry::new(8453, &pins()).unwrap_err(),
+            V3LaunchAtBirthAdapter::new(8453, &pins()).unwrap_err(),
             V3LaunchError::WrongChain
         );
         let mut bad = pins();
         bad[0].runtime_code_hash = B256::ZERO;
         assert_eq!(
-            V3LaunchAtBirthRegistry::new(CHAIN_ID, &bad).unwrap_err(),
+            V3LaunchAtBirthAdapter::new(CHAIN_ID, &bad).unwrap_err(),
             V3LaunchError::CodeIdentity
         );
         assert_eq!(

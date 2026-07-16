@@ -129,12 +129,10 @@ pub use testnet_orchestrator::{
     validate_signed_testnet_round_trip_step,
 };
 pub use tier2_curve::{
-    ActionKind as Tier2ActionKind, AdapterError as Tier2AdapterError,
-    AdapterRegistry as Tier2AdapterRegistry, CandidateCall as Tier2CandidateCall, CurveFormula,
+    CurveAdapterError, CurveCandidateCall, CurveFormula, CurveObservation, CurvePaperPlan,
     CurveState, FactoryGeneration, MarketPhase, MarketSnapshot as Tier2MarketSnapshot,
-    ObservedAction as Tier2ObservedAction, OpportunityEvidence, OpportunityQuality,
-    PaperPlan as Tier2PaperPlan, PaperRoute, Protocol as Tier2Protocol,
-    RuntimePin as Tier2RuntimePin, StartupPins as Tier2StartupPins,
+    OpportunityEvidence, OpportunityQuality, RuntimePin as Tier2RuntimePin,
+    StartupPins as Tier2StartupPins, Tier2CurveAdapter,
 };
 pub use trading_runtime::{
     SignedBoundaryRelease, SignedPendingKind, SignedPosition, SignedRuntimeError,
@@ -146,6 +144,6 @@ pub use v2_simulator::{
 };
 pub use v3_launch_at_birth::{
     ContractCodeSnapshot, FollowerPlanInput, LaunchCallObservation, LaunchMarket,
-    MarketRestrictionState, V3LaunchAtBirthRegistry, V3LaunchError,
+    MarketRestrictionState, V3LaunchAtBirthAdapter, V3LaunchError,
 };
 pub use v3_pool::{V3PoolError, V3PoolState, V3Quote};

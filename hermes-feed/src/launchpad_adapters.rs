@@ -110,11 +110,11 @@ pub struct ResearchStartupPins {
 }
 
 #[derive(Debug, Clone)]
-pub struct V4LaunchpadRegistry {
+pub struct V4AdapterSet {
     entries: Vec<DispatchEntry>,
 }
 
-impl V4LaunchpadRegistry {
+impl V4AdapterSet {
     pub fn from_research(pins: ResearchStartupPins) -> Result<Self, V4AdapterError> {
         let mut entries = vec![DispatchEntry {
             launchpad: LaunchpadId::Clanker,
@@ -499,8 +499,8 @@ mod tests {
         }
     }
 
-    fn research_registry() -> V4LaunchpadRegistry {
-        V4LaunchpadRegistry::from_research(ResearchStartupPins {
+    fn research_registry() -> V4AdapterSet {
+        V4AdapterSet::from_research(ResearchStartupPins {
             klik_factory: Some(pin(KLIK_FACTORY, 0x22)),
             trench_proxy: Some(pin(TRENCH_PROXY, 0x33)),
             trench_implementation: Some(pin(TRENCH_IMPLEMENTATION, 0x44)),
@@ -657,7 +657,7 @@ mod tests {
             implementation: None,
             mode: ExecutionMode::ExecutionGated,
         };
-        let ambiguous = V4LaunchpadRegistry::from_entries(vec![entry, entry]).unwrap();
+        let ambiguous = V4AdapterSet::from_entries(vec![entry, entry]).unwrap();
         let input = [entry.selector.as_slice(), &[0_u8; 32]].concat();
         let call = candidate(entry.destination.address, hash(1), None, &input);
         assert_eq!(ambiguous.dispatch(&call), Err(V4AdapterError::Ambiguous));

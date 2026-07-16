@@ -27,6 +27,8 @@ pub enum LaunchpadId {
     TrenchToday,
     Pons,
     Flap,
+    HoodFun,
+    LeaveHood,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -39,12 +41,19 @@ pub enum AttributionSource {
 #[serde(rename_all = "snake_case")]
 pub enum AdapterKind {
     V3LaunchAtBirth,
+    NativeCurve,
+    UniswapV4,
+    DopplerV4,
+    FlapPortal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RouteKind {
     V3SingleHop,
+    NativeBondingCurve,
+    V4HookedPool,
+    DopplerPermit2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -81,6 +90,8 @@ pub struct ObservedAmounts {
 pub enum ObservedRoute {
     PonsFactory,
     FlapPortal,
+    HoodCurve,
+    MigratedV3,
     DirectV3,
     RobinhoodAggregator,
 }

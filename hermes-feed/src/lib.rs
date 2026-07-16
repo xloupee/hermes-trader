@@ -7,6 +7,8 @@ pub mod decoder;
 pub mod feed;
 pub mod hot_path;
 mod hot_path_safety;
+pub mod launchpad_adapter;
+pub mod launchpad_registry;
 pub mod noxa_abi;
 pub mod noxa_candidate;
 pub mod noxa_launch;
@@ -44,6 +46,17 @@ pub use decoder::{
 pub use hot_path::{
     ArmedHotTransaction, HotPathError, HotPathExecutor, HotPathReport, HotPathStrategy,
     HotTransaction, ReconciliationJob, SubmissionResult,
+};
+pub use launchpad_adapter::{
+    ActionKind, AdapterError, AdapterKind, AdapterQuote, CandidateCall, FollowerPlanRequest,
+    FollowerTradePlan, LaunchpadAdapter, LaunchpadId, MarketIdentity, NoxaV3Adapter,
+    ObservedAmounts, ObservedLeaderAction, ObservedRoute, RouteKind, WrapperKind,
+    expected_noxa_pool,
+};
+pub use launchpad_registry::{
+    BoundedCall, BoundedInnerCalls, ContractPin, ContractRole, DispatchKey, DynamicAggregatorPin,
+    LaunchpadSpec, MAX_INNER_CALLS, MAX_WRAPPER_DEPTH, RegistryError, StartupPinSnapshot,
+    StaticLaunchpadRegistry,
 };
 pub use noxa_abi::{
     AggregatorSwapIntent, AggregatorSwapLeg, NoxaLaunchEvent, NoxaLaunchHeader, NoxaLaunchIntent,

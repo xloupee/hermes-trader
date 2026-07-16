@@ -4,8 +4,11 @@ use alloy_primitives::{Address, B256, U256};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::launchpad_adapter::{ActionKind, AdapterError, NoxaV3Adapter, ObservedLeaderAction};
 use crate::noxa_abi::V3ExactInputIntent;
-use crate::robinhood::{CHAIN_ID, NOXA_POOL_FEE, UNISWAP_V3_SWAP_ROUTER_02, WETH};
+use crate::robinhood::WETH;
+#[cfg(test)]
+use crate::robinhood::{CHAIN_ID, NOXA_POOL_FEE, UNISWAP_V3_SWAP_ROUTER_02};
 
 #[derive(Debug, Clone)]
 pub struct WatchedWalletCopyPolicy {
@@ -161,58 +164,67 @@ impl WatchedWalletCopyPolicy {
         if admitted_triggers >= self.max_triggers {
             return Err(CopyRejectReason::TriggerLimit);
         }
-        if observed.chain_id != Some(CHAIN_ID) {
-            return Err(CopyRejectReason::WrongChain);
+        let action = NoxaV3Adapter
+            .observe_direct_intent(
+                observed.tx_hash,
+                observed.chain_id,
+                observed.from,
+                observed.to,
+                observed.value,
+                observed.intent.clone(),
+            )
+            .map_err(map_adapter_rejection)?;
+        self.evaluate_action_inner(
+            &action,
+            follower_position,
+            independently_validated_token,
+            require_watched_wallet,
+        )
+    }
+
+    /// Apply shared wallet, position, and sizing policy to an adapter-normalized
+    /// action. Protocol identity and calldata assumptions are already resolved.
+    pub fn evaluate_action(
+        &self,
+        action: &ObservedLeaderAction,
+        follower_position: Option<CopyPosition>,
+        admitted_triggers: u64,
+    ) -> Result<CopyDecision, CopyRejectReason> {
+        if admitted_triggers >= self.max_triggers {
+            return Err(CopyRejectReason::TriggerLimit);
         }
-        if observed.to != UNISWAP_V3_SWAP_ROUTER_02 {
-            return Err(CopyRejectReason::WrongRouter);
-        }
-        if require_watched_wallet && !self.watched_wallets.contains(&observed.from) {
+        self.evaluate_action_inner(action, follower_position, false, true)
+    }
+
+    fn evaluate_action_inner(
+        &self,
+        action: &ObservedLeaderAction,
+        follower_position: Option<CopyPosition>,
+        independently_validated_token: bool,
+        require_watched_wallet: bool,
+    ) -> Result<CopyDecision, CopyRejectReason> {
+        if require_watched_wallet && !self.watched_wallets.contains(&action.leader) {
             return Err(CopyRejectReason::UnwatchedWallet);
         }
-        if observed.intent.recipient != observed.from {
-            return Err(CopyRejectReason::RedirectedRecipient);
-        }
-        if observed.value != U256::ZERO {
-            return Err(CopyRejectReason::NonZeroValue);
-        }
-        if observed.intent.fee != NOXA_POOL_FEE
-            || !is_weth_pair(observed.intent.token_in, observed.intent.token_out)
-        {
-            return Err(CopyRejectReason::UnsupportedPair);
-        }
-        if observed.intent.sqrt_price_limit_x96 != U256::ZERO {
-            return Err(CopyRejectReason::PriceLimit);
-        }
-        if observed.intent.amount_in == U256::ZERO
-            || observed.intent.amount_out_minimum == U256::ZERO
-        {
-            return Err(CopyRejectReason::ZeroAmount);
-        }
-
-        let token = if observed.intent.token_in == WETH {
-            observed.intent.token_out
-        } else {
-            observed.intent.token_in
-        };
+        let token = action.market.token;
         if !independently_validated_token && !self.allowed_tokens.contains(&token) {
             return Err(CopyRejectReason::TokenNotAllowed);
         }
 
-        if observed.intent.token_in == WETH {
+        if action.action == ActionKind::Buy {
             if follower_position.is_some() {
                 return Err(CopyRejectReason::PositionAlreadyOpen);
             }
-            if observed.intent.amount_in > self.max_leader_entry_amount {
+            if action.observed_amounts.amount_in > self.max_leader_entry_amount {
                 return Err(CopyRejectReason::LeaderEntryCap);
             }
             let follower_minimum_out = scale_limit_price(
-                observed.intent.amount_out_minimum,
+                action.observed_amounts.minimum_out,
                 self.follower_entry_amount,
-                observed.intent.amount_in,
+                action.observed_amounts.amount_in,
             )?;
             Ok(CopyDecision::Entry {
-                leader: observed.from,
+                leader: action.leader,
                 token,
                 follower_amount_in: self.follower_entry_amount,
                 follower_minimum_out,
@@ -222,12 +234,12 @@ impl WatchedWalletCopyPolicy {
                 .filter(|position| position.token == token && position.token_amount > U256::ZERO)
                 .ok_or(CopyRejectReason::PositionMissing)?;
             let follower_minimum_out = scale_limit_price(
-                observed.intent.amount_out_minimum,
+                action.observed_amounts.minimum_out,
                 position.token_amount,
-                observed.intent.amount_in,
+                action.observed_amounts.amount_in,
             )?;
             Ok(CopyDecision::Exit {
-                leader: observed.from,
+                leader: action.leader,
                 token,
                 follower_amount_in: position.token_amount,
                 follower_minimum_out,
@@ -236,11 +248,24 @@ impl WatchedWalletCopyPolicy {
     }
 }
 
-fn is_weth_pair(token_in: Address, token_out: Address) -> bool {
-    token_in != Address::ZERO
-        && token_out != Address::ZERO
-        && token_in != token_out
-        && ((token_in == WETH) ^ (token_out == WETH))
+fn map_adapter_rejection(error: AdapterError) -> CopyRejectReason {
+    match error {
+        AdapterError::WrongChain => CopyRejectReason::WrongChain,
+        AdapterError::WrongDestination | AdapterError::WrongSelector => {
+            CopyRejectReason::WrongRouter
+        }
+        AdapterError::RedirectedRecipient => CopyRejectReason::RedirectedRecipient,
+        AdapterError::WrongValue => CopyRejectReason::NonZeroValue,
+        AdapterError::PriceLimit => CopyRejectReason::PriceLimit,
+        AdapterError::ZeroAmount => CopyRejectReason::ZeroAmount,
+        AdapterError::UnsupportedMarket
+        | AdapterError::WrongMarketIdentity
+        | AdapterError::WrongWrapper
+        | AdapterError::Malformed
+        | AdapterError::InvalidPlan
+        | AdapterError::InvalidSlippage
+        | AdapterError::Quote => CopyRejectReason::UnsupportedPair,
+    }
 }
 
 fn scale_limit_price(
@@ -431,5 +456,49 @@ mod tests {
             Err(CopyRejectReason::TokenNotAllowed)
         );
         assert!(policy.evaluate_validated(&candidate, None, 0).is_ok());
+    }
+
+    #[test]
+    fn legacy_noxa_rejections_are_unchanged_behind_the_adapter() {
+        let mut candidate = observed(WETH, token(), 100, 100);
+        candidate.chain_id = Some(8_453);
+        assert_eq!(
+            policy().evaluate(&candidate, None, 0),
+            Err(CopyRejectReason::WrongChain)
+        );
+
+        candidate = observed(WETH, token(), 100, 100);
+        candidate.to = Address::with_last_byte(0xee);
+        assert_eq!(
+            policy().evaluate(&candidate, None, 0),
+            Err(CopyRejectReason::WrongRouter)
+        );
+
+        candidate = observed(WETH, token(), 100, 100);
+        candidate.value = U256::from(1);
+        assert_eq!(
+            policy().evaluate(&candidate, None, 0),
+            Err(CopyRejectReason::NonZeroValue)
+        );
+
+        candidate = observed(WETH, token(), 100, 100);
+        candidate.intent.fee = 500;
+        assert_eq!(
+            policy().evaluate(&candidate, None, 0),
+            Err(CopyRejectReason::UnsupportedPair)
+        );
+
+        candidate = observed(WETH, token(), 100, 100);
+        candidate.intent.sqrt_price_limit_x96 = U256::from(1);
+        assert_eq!(
+            policy().evaluate(&candidate, None, 0),
+            Err(CopyRejectReason::PriceLimit)
+        );
+
+        candidate = observed(WETH, token(), 0, 100);
+        assert_eq!(
+            policy().evaluate(&candidate, None, 0),
+            Err(CopyRejectReason::ZeroAmount)
+        );
     }
 }

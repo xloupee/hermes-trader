@@ -25,15 +25,15 @@ use hermes_feed::robinhood::{
 };
 use hermes_feed::{
     ApprovalTransactionPlan, AutomatedPaperRuntime, ConditionalOptions, CopyDecision, CopyPosition,
-    FactoryStatus, FeedBoundary, FeedDecoder, Filter, HotPathExecutor, HotPathReport,
-    KeystoreTradeSigner, NoxaPredictor, NoxaRpcClient, NoxaVerificationOutcome, ObservedCopySwap,
-    ObservedNoxaFactoryCall, PaperOrderKind, PaperOrderState, PredictedNoxaTradeInput, ReceiptLog,
-    ReconciliationJob, RiskLimits, RpcMetricsSnapshot, SequenceTracker, SequencerClient,
-    SignedPendingKind, SignedPosition, SignedTradingRuntime, TradeSigner, TradeTransactionPlan,
-    V3ExactInputIntent, WatchedWalletCopyPolicy, decode_launch_call, decode_launch_header,
-    decode_token_launched, decode_v3_exact_input_single, normalize_aggregator_copy_swap,
-    predict_v3_pool_address, prepare_predicted_noxa_trade, validate_active_noxa_copy_token,
-    verify_noxa_factory_call,
+    FactoryStatus, FeedBoundary, FeedDecoder, Filter, FollowerPlanRequest, HotPathExecutor,
+    HotPathReport, KeystoreTradeSigner, LaunchpadAdapter, NoxaPredictor, NoxaRpcClient,
+    NoxaV3Adapter, NoxaVerificationOutcome, ObservedCopySwap, ObservedNoxaFactoryCall,
+    PaperOrderKind, PaperOrderState, PredictedNoxaTradeInput, ReceiptLog, ReconciliationJob,
+    RiskLimits, RpcMetricsSnapshot, SequenceTracker, SequencerClient, SignedPendingKind,
+    SignedPosition, SignedTradingRuntime, TradeSigner, TradeTransactionPlan, V3ExactInputIntent,
+    WatchedWalletCopyPolicy, decode_launch_call, decode_launch_header, decode_token_launched,
+    decode_v3_exact_input_single, normalize_aggregator_copy_swap, predict_v3_pool_address,
+    prepare_predicted_noxa_trade, validate_active_noxa_copy_token, verify_noxa_factory_call,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -1677,6 +1677,18 @@ fn handle_copy_candidate(
             }));
         }
     };
+    let normalized_action = NoxaV3Adapter
+        .observe_direct_intent(
+            observed.tx_hash,
+            observed.chain_id,
+            observed.from,
+            observed.to,
+            observed.value,
+            observed.intent.clone(),
+        )
+        .map_err(|error| {
+            anyhow::anyhow!("Noxa adapter rejected policy-approved action: {error}")
+        })?;
     let conditions = ConditionalOptions::first_eligible_window(
         boundary.l1_block_number,
         args.l1_window,
@@ -1775,21 +1787,21 @@ fn handle_copy_candidate(
             },
         ) => {
             ensure_live_broadcast_armed(args)?;
-            let plan = TradeTransactionPlan::exact_input(
-                runtime.snapshot().next_nonce,
-                args.gas_limit,
-                max_fee_per_gas,
-                max_priority_fee_per_gas,
-                &V3ExactInputIntent {
-                    token_in: WETH,
-                    token_out: token,
-                    fee: hermes_feed::robinhood::NOXA_POOL_FEE,
+            let plan = NoxaV3Adapter
+                .plan(FollowerPlanRequest {
+                    action: normalized_action,
                     recipient,
                     amount_in: follower_amount_in,
-                    amount_out_minimum: follower_minimum_out,
-                    sqrt_price_limit_x96: U256::ZERO,
-                },
-            )?;
+                    min_receive: follower_minimum_out,
+                })
+                .map_err(|error| anyhow::anyhow!("Noxa adapter could not plan entry: {error}"))?
+                .into_noxa_transaction_plan(
+                    runtime.snapshot().next_nonce,
+                    args.gas_limit,
+                    max_fee_per_gas,
+                    max_priority_fee_per_gas,
+                    recipient,
+                )?;
             match runtime.arm_trade(&plan, conditions, args.slippage_bps) {
                 Ok(tx_hash) => {
                     emit(json!({
@@ -1821,21 +1833,21 @@ fn handle_copy_candidate(
             },
         ) => {
             ensure_live_broadcast_armed(args)?;
-            let plan = TradeTransactionPlan::exact_input(
-                runtime.snapshot().next_nonce,
-                args.gas_limit,
-                max_fee_per_gas,
-                max_priority_fee_per_gas,
-                &V3ExactInputIntent {
-                    token_in: token,
-                    token_out: WETH,
-                    fee: hermes_feed::robinhood::NOXA_POOL_FEE,
+            let plan = NoxaV3Adapter
+                .plan(FollowerPlanRequest {
+                    action: normalized_action,
                     recipient,
                     amount_in: follower_amount_in,
-                    amount_out_minimum: follower_minimum_out,
-                    sqrt_price_limit_x96: U256::ZERO,
-                },
-            )?;
+                    min_receive: follower_minimum_out,
+                })
+                .map_err(|error| anyhow::anyhow!("Noxa adapter could not plan exit: {error}"))?
+                .into_noxa_transaction_plan(
+                    runtime.snapshot().next_nonce,
+                    args.gas_limit,
+                    max_fee_per_gas,
+                    max_priority_fee_per_gas,
+                    recipient,
+                )?;
             match runtime.arm_trade(&plan, conditions, args.slippage_bps) {
                 Ok(tx_hash) => {
                     emit(json!({

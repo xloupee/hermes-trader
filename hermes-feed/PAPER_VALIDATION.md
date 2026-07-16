@@ -55,6 +55,22 @@ hermes-feed probe --record <mode-0600 FIFO>   (stdout remains metrics only)
   -> hermes-launchpad-paper --input -
 ```
 
+The checked-in local runner enforces a mode-0600 FIFO, a mode-0700 output
+directory, separate raw-feed/observer/probe-metrics files, and distinct
+expected/observed pin documents:
+
+```sh
+cargo build --release \
+  --bin hermes-feed \
+  --bin hermes-launchpad-paper \
+  --bin hermes-launchpad-reconcile
+
+scripts/run-launchpad-paper-local.sh \
+  config/launchpad-expected-pins.production.json \
+  .runtime/launchpad-observed-startup.json \
+  .runtime/launchpad-paper-session
+```
+
 Receipt/event evidence must be collected independently and may be supplied
 after feed EOF with `--reconciliation-input <evidence.jsonl>`. Each JSONL row
 contains `tx_hash`, `launchpad`, `receipt_status`, `protocol_event_match`, and
@@ -62,3 +78,16 @@ contains `tx_hash`, `launchpad`, `receipt_status`, `protocol_event_match`, and
 false positives, missed transactions, unreconciled observations, and p50/p95
 reconciliation latency. Missing evidence is `unreconciled`, never silently
 counted as a false positive.
+
+The read-only collector produces that evidence directly from observer output:
+
+```sh
+target/release/hermes-launchpad-reconcile \
+  --input .runtime/launchpad-paper-session/launchpad-paper.jsonl \
+  > .runtime/launchpad-paper-session/reconciliation-evidence.jsonl
+```
+
+It accepts only successful chain-4663 receipts with exact protocol emitter and
+event signatures for Bow, LaunchHood V3, Clanker, Bankr/Doppler, Pons, Hood,
+Flap, Noxa, and Klik. Trench and LeaveHood remain unmatched until their event
+semantics are independently verified.

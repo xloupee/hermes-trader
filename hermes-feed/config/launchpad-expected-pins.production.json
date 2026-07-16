@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "document_role": "expected_protocol_pins",
+  "provenance": "reviewed_protocol_pins",
+  "fixture_id": null,
+  "bow_factory_runtime_hash": "0x8d56cbcdf72dbf04ed8170d55878cc894997ccc54c2ab0aec782274eb7fe7a14",
+  "launchhood_v3_factory_runtime_hash": "0x9b785dd157fe757dd427822df3e2bc3a1b6134f1d338b21c36c3de279bb67766",
+  "hood_factory_runtime_hash": "0x4aa0ce56b5b67d27f2fab59dcb796fa552d10ceafdecb06e088cdd254c92c0fc",
+  "leavehood_factory_proxy_runtime_hash": null,
+  "leavehood_factory_implementation_runtime_hash": null,
+  "leavehood_core_proxy_runtime_hash": null,
+  "leavehood_core_implementation_runtime_hash": null,
+  "klik_factory_runtime_hash": null,
+  "trench_proxy_runtime_hash": null,
+  "trench_implementation_runtime_hash": null,
+  "bankr_doppler_calls": [
+    {
+      "destination": "0xeb7c034704ef8dcd2d32324c1545f62fb4ad0862",
+      "runtime_hash": "0x86b37100cbe9841771c452a592985b4e921254b127a380246073b84ec953f7f8",
+      "selector": [136, 45, 183, 7]
+    }
+  ],
+  "erc4337": {
+    "entry_point_runtime_hash": "0x8db5ff695839d655407cc8490bb7a5d82337a86a6b39c3f0258aa6c3b582fc58",
+    "accounts": [
+      {
+        "account": "0xff89978cb8171132395741b785d4a1f7e3efa124",
+        "runtime_hash": "0x4542cbf1da24ba964614e4f5585736e22884e23e97c0f0915de4f602585d2dd4",
+        "execution_profile": "erc7579_single_call",
+        "factory": null,
+        "factory_runtime_hash": null,
+        "delegation_implementation": "0xd6cedde84be40893d153be9d467cd6ad37875b28",
+        "delegation_runtime_hash": "0x6f6d6691dc11fda98d3102802f20e7e816ccc576c16c9279ee1a884a51d1935d"
+      }
+    ]
+  }
+}

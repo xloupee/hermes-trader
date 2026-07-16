@@ -54,6 +54,10 @@ struct Cli {
     #[arg(long, default_value = PUBLIC_RPC_URL)]
     rpc_url: String,
 
+    /// Pin an independently reviewed historical L2 block instead of latest.
+    #[arg(long)]
+    l2_block: Option<u64>,
+
     /// Optional reviewed expected pins. When supplied, startup validation must pass.
     #[arg(long)]
     expected_pins: Option<PathBuf>,
@@ -129,7 +133,10 @@ async fn main() -> Result<()> {
     if chain_id != CHAIN_ID {
         bail!("RPC chain ID {chain_id} does not match Robinhood {CHAIN_ID}");
     }
-    let pinned_l2_block = rpc.latest_block_number().await?;
+    let pinned_l2_block = match args.l2_block {
+        Some(block) => block,
+        None => rpc.latest_block_number().await?,
+    };
 
     let expected = args
         .expected_pins

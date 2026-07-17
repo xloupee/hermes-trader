@@ -800,6 +800,7 @@ impl PaperLaunchpadObserver {
         let v3 = V3LaunchAtBirthAdapter::new(
             CHAIN_ID,
             &[
+                observed_code(BOW_LAUNCH_FACTORY),
                 observed_code(WETH),
                 observed_code(UNISWAP_V3_FACTORY),
                 observed_code(UNISWAP_V3_POSITION_MANAGER),
@@ -2189,7 +2190,7 @@ mod tests {
                     })
                     .collect(),
             },
-            bow_factory_runtime_hash: B256::with_last_byte(10),
+            bow_factory_runtime_hash: crate::robinhood::BOW_LAUNCH_FACTORY_RUNTIME_KECCAK256,
             launchhood_v3_factory_runtime_hash: B256::with_last_byte(11),
             hood_factory_runtime_hash: Some(B256::with_last_byte(1)),
             hood_curve: None,
@@ -2223,7 +2224,11 @@ mod tests {
                     None,
                     ACTIVE_NOXA_FACTORY_RUNTIME_KECCAK256,
                 ),
-                observed(BOW_LAUNCH_FACTORY, None, B256::with_last_byte(10)),
+                observed(
+                    BOW_LAUNCH_FACTORY,
+                    None,
+                    crate::robinhood::BOW_LAUNCH_FACTORY_RUNTIME_KECCAK256,
+                ),
                 observed(LAUNCHHOOD_V3_FACTORY, None, B256::with_last_byte(11)),
                 observed(
                     crate::launchpad_adapters::CLANKER_FACTORY,

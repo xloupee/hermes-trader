@@ -1,6 +1,7 @@
 pub mod active_noxa;
 pub mod bankr_receipt_quote;
 pub mod boundary_gate;
+mod bow_token_creation_code;
 pub mod cache;
 pub mod clanker_receipt_quote;
 pub mod copy_observation;

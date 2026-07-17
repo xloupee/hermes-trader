@@ -2,20 +2,21 @@
 //! the launch transaction. This module observes launch calls and constructs
 //! paper plans only; it does not sign, submit, or perform network I/O.
 
-use alloy_primitives::{Address, B256, U256, hex, keccak256};
-use alloy_sol_types::{SolCall, sol};
+use alloy_primitives::{Address, B256, Keccak256, U256, hex, keccak256};
+use alloy_sol_types::{SolCall, SolValue, sol};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::bow_token_creation_code::{BOW_TOKEN_CREATION_CODE, BOW_TOKEN_CREATION_CODE_KECCAK256};
 use crate::launchpad_adapter::{FollowerTradePlan, LaunchpadId, MarketIdentity, RouteKind};
 use crate::noxa_abi::{V3ExactInputIntent, encode_v3_exact_input_single};
-use crate::noxa_predict::predict_v3_pool_address;
+use crate::noxa_predict::{create2_address, predict_v3_pool_address};
 use crate::robinhood::{
-    BOW_LAUNCH_FACTORY, CHAIN_ID, LAUNCHHOOD_V3_FACTORY, LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION,
-    UNISWAP_V3_FACTORY, UNISWAP_V3_FACTORY_RUNTIME_KECCAK256, UNISWAP_V3_POOL_INIT_CODE_KECCAK256,
-    UNISWAP_V3_POSITION_MANAGER, UNISWAP_V3_POSITION_MANAGER_RUNTIME_KECCAK256,
-    UNISWAP_V3_SWAP_ROUTER_02, UNISWAP_V3_SWAP_ROUTER_02_RUNTIME_KECCAK256, WETH,
-    WETH_RUNTIME_KECCAK256,
+    BOW_LAUNCH_FACTORY, BOW_LAUNCH_FACTORY_RUNTIME_KECCAK256, CHAIN_ID, LAUNCHHOOD_V3_FACTORY,
+    LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION, UNISWAP_V3_FACTORY, UNISWAP_V3_FACTORY_RUNTIME_KECCAK256,
+    UNISWAP_V3_POOL_INIT_CODE_KECCAK256, UNISWAP_V3_POSITION_MANAGER,
+    UNISWAP_V3_POSITION_MANAGER_RUNTIME_KECCAK256, UNISWAP_V3_SWAP_ROUTER_02,
+    UNISWAP_V3_SWAP_ROUTER_02_RUNTIME_KECCAK256, WETH, WETH_RUNTIME_KECCAK256,
 };
 
 const V3_FEE: u32 = 10_000;
@@ -146,6 +147,7 @@ impl V3LaunchAtBirthAdapter {
             return Err(V3LaunchError::WrongChain);
         }
         let expected = [
+            (BOW_LAUNCH_FACTORY, BOW_LAUNCH_FACTORY_RUNTIME_KECCAK256),
             (WETH, WETH_RUNTIME_KECCAK256),
             (UNISWAP_V3_FACTORY, UNISWAP_V3_FACTORY_RUNTIME_KECCAK256),
             (
@@ -157,10 +159,12 @@ impl V3LaunchAtBirthAdapter {
                 UNISWAP_V3_SWAP_ROUTER_02_RUNTIME_KECCAK256,
             ),
         ];
-        if !expected.iter().all(|pin| {
-            code.iter()
-                .any(|got| (got.address, got.runtime_code_hash) == *pin)
-        }) {
+        if keccak256(BOW_TOKEN_CREATION_CODE) != BOW_TOKEN_CREATION_CODE_KECCAK256
+            || !expected.iter().all(|pin| {
+                code.iter()
+                    .any(|got| (got.address, got.runtime_code_hash) == *pin)
+            })
+        {
             return Err(V3LaunchError::CodeIdentity);
         }
         Ok(Self)
@@ -186,6 +190,7 @@ impl V3LaunchAtBirthAdapter {
             if call.abi_encode().as_slice() != input
                 || call.p.totalSupply == U256::ZERO
                 || call.p.targetFdvWeth == U256::ZERO
+                || deployer == Address::ZERO
                 || [
                     &call.p.name,
                     &call.p.symbol,
@@ -201,9 +206,6 @@ impl V3LaunchAtBirthAdapter {
             {
                 return Err(V3LaunchError::MalformedCalldata);
             }
-            // Bow exposes tokenInitCodeHash(params, creator), but the checked-in
-            // evidence does not pin enough local bytecode/constructor semantics
-            // to reproduce it without RPC. Fail closed before receipt.
             return Ok(LaunchCallObservation {
                 launchpad: LaunchpadId::Bow,
                 factory: destination,
@@ -211,7 +213,7 @@ impl V3LaunchAtBirthAdapter {
                 transaction_value,
                 embedded_initial_buy: transaction_value != U256::ZERO,
                 leader_min_tokens_out: call.p.devBuyMinTokens,
-                predicted_market: None,
+                predicted_market: Some(bow_market(&call.p, deployer)),
                 execution_ready: false,
             });
         }
@@ -256,8 +258,8 @@ impl V3LaunchAtBirthAdapter {
             .ok_or(V3LaunchError::PlanUnavailable)
     }
 
-    /// Compare a LaunchHood prediction with token and pool identities decoded
-    /// from the exact factory event. Callers must independently prove that
+    /// Compare a V3 launch prediction with token and pool identities decoded
+    /// from the exact protocol factory event. Callers must independently prove that
     /// event's receipt provenance before invoking this pure comparison.
     pub fn reconcile_factory_event_market(
         &self,
@@ -265,9 +267,12 @@ impl V3LaunchAtBirthAdapter {
         receipt_token: Option<Address>,
         receipt_pool: Option<Address>,
     ) -> Result<LaunchMarket, V3LaunchError> {
-        if observation.launchpad != LaunchpadId::LaunchHoodV3
-            || observation.factory != LAUNCHHOOD_V3_FACTORY
-        {
+        let expected_factory = match observation.launchpad {
+            LaunchpadId::Bow => BOW_LAUNCH_FACTORY,
+            LaunchpadId::LaunchHoodV3 => LAUNCHHOOD_V3_FACTORY,
+            _ => return Err(V3LaunchError::MalformedReceipt),
+        };
+        if observation.factory != expected_factory {
             return Err(V3LaunchError::MalformedReceipt);
         }
         let predicted = observation
@@ -345,6 +350,46 @@ fn canonical_pool(token: Address) -> Address {
     )
 }
 
+fn bow_market(params: &BowLaunchParams, creator: Address) -> LaunchMarket {
+    let token = predict_bow_token(params, creator);
+    LaunchMarket {
+        launchpad: LaunchpadId::Bow,
+        token,
+        pool: canonical_pool(token),
+        quote_asset: WETH,
+        fee: V3_FEE,
+        restriction_state: MarketRestrictionState::Unknown,
+    }
+}
+
+fn bow_token_init_code_hash(params: &BowLaunchParams, creator: Address) -> B256 {
+    // Exact constructor shape independently recovered from the pinned factory
+    // runtime's tokenInitCodeHash path and checked against its pure on-chain
+    // result. Pool-only, metadata, delay, salt, and dev-buy fields are not
+    // token constructor arguments.
+    let constructor = (
+        params.name.as_str(),
+        params.symbol.as_str(),
+        params.totalSupply,
+        creator,
+        params.maxWallet,
+        params.limitWindow,
+    )
+        .abi_encode_params();
+    let mut hasher = Keccak256::new();
+    hasher.update(BOW_TOKEN_CREATION_CODE);
+    hasher.update(constructor);
+    hasher.finalize()
+}
+
+fn predict_bow_token(params: &BowLaunchParams, creator: Address) -> Address {
+    create2_address(
+        BOW_LAUNCH_FACTORY,
+        params.salt,
+        bow_token_init_code_hash(params, creator),
+    )
+}
+
 fn launchhood_market(deployer: Address, user_salt: B256) -> LaunchMarket {
     let token = predict_launchhood_token(deployer, user_salt);
     LaunchMarket {
@@ -386,6 +431,10 @@ mod tests {
 
     fn pins() -> Vec<ContractCodeSnapshot> {
         vec![
+            ContractCodeSnapshot {
+                address: BOW_LAUNCH_FACTORY,
+                runtime_code_hash: BOW_LAUNCH_FACTORY_RUNTIME_KECCAK256,
+            },
             ContractCodeSnapshot {
                 address: WETH,
                 runtime_code_hash: WETH_RUNTIME_KECCAK256,
@@ -452,6 +501,50 @@ mod tests {
         .abi_encode()
     }
 
+    fn bow_proof_params_beyond_meat() -> BowLaunchParams {
+        BowLaunchParams {
+            name: "Beyond Meat".into(),
+            symbol: "BYND".into(),
+            totalSupply: U256::from_str_radix("1000000000000000000000000000", 10).unwrap(),
+            launchDelay: U256::ZERO,
+            maxWallet: U256::from_str_radix("20000000000000000000000000", 10).unwrap(),
+            limitWindow: U256::from(10),
+            targetFdvWeth: U256::from(1_500_000_000_000_000_000_u64),
+            salt: b256!("0000000000000000000000000000000000000000000000000000000000005306"),
+            description: "BYND is a tribute to one of the most overlooked meme stocks from the Robinhood era. While GME and AMC became legends, Beyond Meat was also caught in the 2021 trading restrictions and later experienced its own massive short-squeeze frenzy. Now the story lives on as a meme token for everyone who still believes retail can go beyond Wall Street.".into(),
+            website: "https://finance.yahoo.com/news/beyond-meat-earns-meme-stock-134030887.html".into(),
+            telegram: "https://t.me/BYNDRBC".into(),
+            twitter: "".into(),
+            logoURI: "ipfs://Qmd5ZpyVVg8UEpib4tipGAnXTVxpsH1Gem62yrWQHjD2hw".into(),
+            tokenURI: "ipfs://QmWnrZuscXGHaiLe6T97h5auf5VEH2hsaWg7bojAJVK2qa".into(),
+            devBuyMinTokens: U256::ZERO,
+        }
+    }
+
+    fn bow_proof_params_to_the_moon() -> BowLaunchParams {
+        BowLaunchParams {
+            name: "To The Moon".into(),
+            symbol: "MOON".into(),
+            totalSupply: U256::from_str_radix("1000000000000000000000000000", 10).unwrap(),
+            launchDelay: U256::ZERO,
+            maxWallet: U256::from_str_radix("20000000000000000000000000", 10).unwrap(),
+            limitWindow: U256::from(10),
+            targetFdvWeth: U256::from(1_500_000_000_000_000_000_u64),
+            salt: b256!("0000000000000000000000000000000000000000000000000000000000004bc2"),
+            description: "To The Moon".into(),
+            website: "".into(),
+            telegram: "".into(),
+            twitter: "https://x.com/dobbycee/status/2077886160009933095".into(),
+            logoURI: "ipfs://QmeSCNwrm22V4oWcesNXb1GMfTDu7uKrJ2W1f7BmZrpTBi".into(),
+            tokenURI: "ipfs://QmWyNU36nEPQF2Uwmd9XzqNsKoKWmTEfQWJeZsdbwJTQQX".into(),
+            devBuyMinTokens: U256::ZERO,
+        }
+    }
+
+    fn encoded_bow(params: BowLaunchParams) -> Vec<u8> {
+        launchCall { p: params }.abi_encode()
+    }
+
     #[test]
     fn positive_call_fixtures_separate_observation_from_prediction() {
         let fixture: serde_json::Value =
@@ -477,7 +570,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bow.launchpad, LaunchpadId::Bow);
-        assert!(bow.predicted_market.is_none());
+        assert!(bow.predicted_market.is_some());
+        assert!(!bow.execution_ready);
         assert_eq!(bow.leader_min_tokens_out, U256::from(777));
 
         let hood = r
@@ -517,6 +611,150 @@ mod tests {
         assert!(observation.predicted_market.is_some());
         assert!(!observation.execution_ready);
         assert!(r.pre_receipt_market(&observation).is_ok());
+    }
+
+    #[test]
+    fn bow_predictions_match_both_long2_factory_receipts_and_pure_hashes() {
+        let proofs = [
+            (
+                bow_proof_params_beyond_meat(),
+                address!("88e4810d48a65ff7274df7829ef91e930a5eaf9c"),
+                b256!("23915dfdd1e0d5fae4a0b9834459c48a5c18932c0615826bb13695b354482b25"),
+                address!("eff282419233a829d29dcf06230132bf55c6db03"),
+                address!("5bf37a93a728f8ebd8c8d2288a1642ee2f8a6bcd"),
+            ),
+            (
+                bow_proof_params_to_the_moon(),
+                address!("d27664a94b801e912ef2051646f29ce76a8a3fb9"),
+                b256!("cb724966615630ef34838665e7badc5996013b80ab4f1b13dc940b3952d703ef"),
+                address!("cede14a428b954333ba0e9a6df68d0e6fd786b03"),
+                address!("effe014849fb7056fd5aedd923e6dc0777d850ad"),
+            ),
+        ];
+        let adapter = registry();
+        assert_eq!(
+            keccak256(BOW_TOKEN_CREATION_CODE),
+            BOW_TOKEN_CREATION_CODE_KECCAK256
+        );
+        for (params, creator, expected_init_hash, receipt_token, receipt_pool) in proofs {
+            assert_eq!(
+                bow_token_init_code_hash(&params, creator),
+                expected_init_hash
+            );
+            let observed = adapter
+                .observe_launch_call(
+                    CHAIN_ID,
+                    BOW_LAUNCH_FACTORY,
+                    creator,
+                    U256::from(1),
+                    &encoded_bow(params),
+                )
+                .unwrap();
+            let predicted = adapter.pre_receipt_market(&observed).unwrap();
+            assert_eq!(
+                (predicted.token, predicted.pool),
+                (receipt_token, receipt_pool)
+            );
+            assert!(!observed.execution_ready);
+            assert_eq!(
+                adapter
+                    .reconcile_factory_event_market(
+                        &observed,
+                        Some(receipt_token),
+                        Some(receipt_pool),
+                    )
+                    .unwrap(),
+                predicted
+            );
+        }
+    }
+
+    #[test]
+    fn bow_closest_neighbor_forgeries_and_receipt_mismatches_fail_closed() {
+        let adapter = registry();
+        let creator = address!("d27664a94b801e912ef2051646f29ce76a8a3fb9");
+        let params = bow_proof_params_to_the_moon();
+        let expected = predict_bow_token(&params, creator);
+
+        let mut forged_salt = params.clone();
+        forged_salt.salt = B256::with_last_byte(0xc3);
+        assert_ne!(predict_bow_token(&forged_salt, creator), expected);
+        assert_ne!(
+            predict_bow_token(&params, Address::with_last_byte(1)),
+            expected
+        );
+        for forged in [
+            {
+                let mut value = params.clone();
+                value.name.push('!');
+                value
+            },
+            {
+                let mut value = params.clone();
+                value.totalSupply += U256::from(1);
+                value
+            },
+            {
+                let mut value = params.clone();
+                value.maxWallet += U256::from(1);
+                value
+            },
+            {
+                let mut value = params.clone();
+                value.limitWindow += U256::from(1);
+                value
+            },
+        ] {
+            assert_ne!(predict_bow_token(&forged, creator), expected);
+        }
+
+        let observed = adapter
+            .observe_launch_call(
+                CHAIN_ID,
+                BOW_LAUNCH_FACTORY,
+                creator,
+                U256::ZERO,
+                &encoded_bow(params),
+            )
+            .unwrap();
+        let predicted = adapter.pre_receipt_market(&observed).unwrap();
+        assert_eq!(
+            adapter.reconcile_factory_event_market(&observed, None, Some(predicted.pool)),
+            Err(V3LaunchError::MalformedReceipt)
+        );
+        assert_eq!(
+            adapter.reconcile_factory_event_market(
+                &observed,
+                Some(Address::with_last_byte(99)),
+                Some(predicted.pool),
+            ),
+            Err(V3LaunchError::PredictionMismatch)
+        );
+        assert_eq!(
+            adapter.reconcile_factory_event_market(
+                &observed,
+                Some(predicted.token),
+                Some(Address::with_last_byte(99)),
+            ),
+            Err(V3LaunchError::PredictionMismatch)
+        );
+    }
+
+    #[test]
+    fn bow_prediction_hash_cost_is_bounded_without_io() {
+        let creator = address!("d27664a94b801e912ef2051646f29ce76a8a3fb9");
+        let params = bow_proof_params_to_the_moon();
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            std::hint::black_box(predict_bow_token(std::hint::black_box(&params), creator));
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "Bow prediction: 100 iterations in {} us ({} us/iteration)",
+            elapsed.as_micros(),
+            elapsed.as_micros() / 100
+        );
+        assert!(elapsed < std::time::Duration::from_secs(2));
     }
 
     #[test]

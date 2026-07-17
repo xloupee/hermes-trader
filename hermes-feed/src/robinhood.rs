@@ -43,6 +43,8 @@ pub const BOW_LAUNCH_FACTORY: Address =
     alloy_primitives::address!("c70e510e14710ea535cab7b2414860af63feab79");
 pub const BOW_LAUNCH_LOCKER: Address =
     alloy_primitives::address!("904dccb96d877e6db365282251fa3dd156476660");
+pub const BOW_LAUNCH_FACTORY_RUNTIME_KECCAK256: B256 =
+    alloy_primitives::b256!("8d56cbcdf72dbf04ed8170d55878cc894997ccc54c2ab0aec782274eb7fe7a14");
 pub const LAUNCHHOOD_V3_FACTORY: Address =
     alloy_primitives::address!("62b33a039d289cbda50ebeb72fe4261449e61bcf");
 pub const LAUNCHHOOD_V3_LOCKER: Address =

@@ -1,0 +1,72 @@
+{
+  "record_type": "launchpad_paper_campaign_summary",
+  "schema_version": 1,
+  "source_commit": "4fe85872a97c2571b76c07e351d6603cbc8473fb",
+  "collection_scope": {
+    "planned_windows": 3,
+    "completed_windows": 1,
+    "additional_windows_started": 0,
+    "stop_reason": "testing_scope_reduced_after_current_safe_window",
+    "acquisition": "live",
+    "read_only": true,
+    "paper_only": true
+  },
+  "runtime_root": "hermes-feed/.runtime/post-hood-bankr-4fe8587-20260717T162924Z",
+  "expected_pins_content_keccak256": "0x76b72032db60f30c777cba1c30c1939381b0af947257cfbcb07ef11caee76633",
+  "startup_snapshot": {
+    "l2_block_number": 12264534,
+    "l2_block_hash": "0x7a258c84face664390ff729f19cc9382d27b85fce0a92b3172a188eb01367368",
+    "pin_count": 41,
+    "expected_validation_passed": true,
+    "rpc_metrics": {
+      "logical_requests": 83,
+      "http_attempts": 83,
+      "retries": 0,
+      "rate_limited": 0,
+      "server_errors": 0,
+      "transport_errors": 0
+    }
+  },
+  "coverage": {
+    "from_l2_block": 12264633,
+    "to_l2_block": 12267623,
+    "scanned_blocks": 2991,
+    "connected_records": 1,
+    "coverage_closed_records": 1,
+    "reconnects": 0,
+    "connection_errors": 0,
+    "sequence_gaps": 0,
+    "sequence_missing": 0,
+    "sequence_duplicates_or_reordered": 0
+  },
+  "authoritative_outputs": {
+    "byte_identical_regeneration": true,
+    "readiness_sha256": "c8b6e6cefe49497aca7d7416f52eb4b4834827aa815aeced3269cd8f8e8b04db",
+    "readiness_keccak256": "0xfa5619d9bafeece4d5ebd05cf2be8c79bff478ed9b2609a9983b05b471443bd7",
+    "report_sha256": "ac6ae13953edde485a6b538f9276ff63d93b540a74c726714ab1a1eb7e9ee50a",
+    "report_keccak256": "0xd2715ce02d76fbcd09104f98d4bd924a7a8c674ad02b3327012fcd2ca18c74c5"
+  },
+  "launchpads": [
+    {"launchpad":"bow","confirmed":0,"eligible":0,"latency_ns":{"p50":null,"p95":null,"p99":null},"entry_plans":0,"exit_plans":0,"false_positives":0,"detector_misses":0,"identity_mismatches":0,"direction_mismatches":0,"prediction_mismatches":0,"quote_mismatches":0,"round_trip_return_bps":null},
+    {"launchpad":"launch_hood_v3","confirmed":3,"eligible":3,"latency_ns":{"p50":302000,"p95":318000,"p99":318000},"entry_plans":3,"exit_plans":3,"false_positives":0,"detector_misses":0,"identity_mismatches":0,"direction_mismatches":0,"prediction_mismatches":0,"quote_mismatches":0,"round_trip_return_bps":9801},
+    {"launchpad":"clanker","confirmed":0,"eligible":0,"latency_ns":{"p50":null,"p95":null,"p99":null},"entry_plans":0,"exit_plans":0,"false_positives":0,"detector_misses":0,"identity_mismatches":0,"direction_mismatches":0,"prediction_mismatches":0,"quote_mismatches":0,"round_trip_return_bps":null},
+    {"launchpad":"bankr_doppler","confirmed":5,"eligible":5,"latency_ns":{"p50":373000,"p95":508000,"p99":508000},"entry_plans":5,"exit_plans":5,"false_positives":0,"detector_misses":0,"identity_mismatches":0,"direction_mismatches":0,"prediction_mismatches":0,"quote_mismatches":0,"round_trip_return_bps":97,"observed_profiles":{"curve_ticks_v5":5,"erc7579":5,"reverse_curve_ticks_v5":0}},
+    {"launchpad":"pons","confirmed":39,"eligible":0,"latency_ns":{"p50":379000,"p95":3633000,"p99":9268000},"entry_plans":0,"exit_plans":0,"false_positives":0,"detector_misses":2,"identity_mismatches":0,"direction_mismatches":0,"prediction_mismatches":0,"quote_mismatches":0,"round_trip_return_bps":null,"legacy_confirmed":39,"current_generation_positive":0,"current_generation_miss_tx_hashes":["0xd7b246383c97a8b511893996020a26b1b82de1c03eef191837428df62be1432b","0x76450fe5a04c11ff97916a3fc7af2a6bae289124dc60b6c783d951893ecd5103"]},
+    {"launchpad":"hood_fun","confirmed":0,"eligible":0,"latency_ns":{"p50":null,"p95":null,"p99":null},"entry_plans":0,"exit_plans":0,"false_positives":0,"detector_misses":0,"identity_mismatches":0,"direction_mismatches":0,"prediction_mismatches":0,"quote_mismatches":0,"round_trip_return_bps":null,"action_taxonomy_exercised":false,"migrated_v3_quote_exercised":false}
+  ],
+  "stonks": {"positive_samples":0,"suppression_exercised":false},
+  "flap": {"discovery_only_candidates":35,"scored_quotes":0,"execution_plans":0},
+  "promotion": {
+    "paper_evidence_ready": false,
+    "authorizes_canary": false,
+    "execution_eligible": false
+  },
+  "safety": {
+    "wallet_access": false,
+    "signing": false,
+    "broadcast": false,
+    "canary": false,
+    "deployment": false,
+    "droplet_or_server_access": false
+  }
+}

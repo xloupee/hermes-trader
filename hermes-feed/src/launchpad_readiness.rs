@@ -688,6 +688,11 @@ mod tests {
     }
 
     #[test]
+    fn observe_only_stonks_is_absent_from_promotion_readiness_set() {
+        assert!(!READINESS_LAUNCHPADS.contains(&LaunchpadId::StonksV3));
+    }
+
+    #[test]
     fn sample_window_and_profile_thresholds_are_independent_fail_closed_gates() {
         let mut too_few_samples = [
             window(LaunchpadId::Clanker, 0, 33),

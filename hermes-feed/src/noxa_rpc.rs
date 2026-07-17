@@ -374,6 +374,21 @@ impl NoxaRpcClient {
         self.code_at_block(address, &hex_u64(l2_block_number)).await
     }
 
+    /// Execute a read-only contract call against one historical L2 block.
+    ///
+    /// Protocol-specific receipt reconcilers use this to bind immutable and
+    /// storage-backed dependency getters to the same canonical block as the
+    /// receipt. The method never falls back to `latest`.
+    pub async fn call_at_l2_block(
+        &self,
+        address: Address,
+        calldata: &[u8],
+        l2_block_number: u64,
+    ) -> Result<Bytes> {
+        self.eth_call_data(address, calldata, &hex_u64(l2_block_number))
+            .await
+    }
+
     async fn code_at_block(&self, address: Address, block_tag: &str) -> Result<Bytes> {
         parse_bytes_value(
             &self

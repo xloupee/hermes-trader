@@ -21,7 +21,8 @@ use hermes_feed::launchpad_adapters::{
 };
 use hermes_feed::launchpad_ground_truth::{
     BOW_LAUNCHED_SIGNATURE, HOOD_TOKEN_CREATED_SIGNATURE, HOOD_TRADE_SIGNATURE,
-    LAUNCHHOOD_TOKEN_LAUNCHED_SIGNATURE, launchpad_for_ground_truth_log,
+    LAUNCHHOOD_TOKEN_LAUNCHED_SIGNATURE, STONKS_V3_LAUNCHED_SIGNATURE,
+    launchpad_for_ground_truth_log,
 };
 use hermes_feed::noxa_abi::{ReceiptLog, decode_token_launched};
 use hermes_feed::paper_observer::{
@@ -35,6 +36,10 @@ use hermes_feed::pons_receipt_quote::pons_launch_event_identity;
 use hermes_feed::robinhood::{
     ACTIVE_NOXA_LAUNCH_FACTORY, BOW_LAUNCH_FACTORY, CHAIN_ID, LAUNCHHOOD_V3_FACTORY,
     NOXA_LAUNCH_FACTORY, PUBLIC_RPC_URL,
+};
+use hermes_feed::stonks_v3_observer::{
+    STONKS_V3_LAUNCHER, StonksV3ObservationEvidence,
+    observe_stonks_v3_direct_launch_at_receipt_block,
 };
 use hermes_feed::tier2_curve::HOOD_FACTORY;
 use hermes_feed::{
@@ -276,6 +281,7 @@ struct ReconciledCandidate {
     v3_quote: Option<V3ReceiptPaperQuote>,
     clanker_quote: Option<ClankerReceiptPaperQuote>,
     bankr_quote: Option<BankrDopplerReceiptPaperQuote>,
+    stonks_observation: Option<StonksV3ObservationEvidence>,
     pons_quote: Option<PonsReceiptPaperQuote>,
     hood_quote: Option<HoodReceiptPaperQuote>,
     hood_migration: Option<HoodMigrationEvidence>,
@@ -447,6 +453,9 @@ async fn main() -> Result<()> {
         }
         if let Some(quote) = result.bankr_quote {
             println!("{}", serde_json::to_string(&quote)?);
+        }
+        if let Some(observation) = result.stonks_observation {
+            println!("{}", serde_json::to_string(&observation)?);
         }
         if let Some(quote) = result.pons_quote {
             println!("{}", serde_json::to_string(&quote)?);
@@ -653,6 +662,7 @@ async fn augment_with_ground_truth(
         LAUNCHHOOD_V3_FACTORY,
         CLANKER_FACTORY,
         DOPPLER_CREATE_EMITTER,
+        STONKS_V3_LAUNCHER,
         PONS_CURRENT_FACTORY,
         PONS_LEGACY_FACTORY,
         HOOD_FACTORY,
@@ -662,6 +672,7 @@ async fn augment_with_ground_truth(
         keccak256(LAUNCHHOOD_TOKEN_LAUNCHED_SIGNATURE.as_bytes()),
         CLANKER_TOKEN_CREATED_TOPIC,
         DOPPLER_CREATE_TOPIC,
+        keccak256(STONKS_V3_LAUNCHED_SIGNATURE.as_bytes()),
         PONS_TOKEN_LAUNCHED_TOPIC,
         keccak256(HOOD_TOKEN_CREATED_SIGNATURE.as_bytes()),
         keccak256(HOOD_TRADE_SIGNATURE.as_bytes()),
@@ -672,7 +683,6 @@ async fn augment_with_ground_truth(
     } else {
         Vec::new()
     };
-    let mut exact_event_logs = 0_usize;
     let mut seen_logs = HashSet::new();
     for log in logs {
         let Some(launchpad) = launchpad_for_ground_truth_log(&log.log) else {
@@ -694,7 +704,6 @@ async fn augment_with_ground_truth(
         )) {
             continue;
         }
-        exact_event_logs += 1;
         let key = (log.transaction_hash, launchpad);
         input
             .candidates
@@ -718,6 +727,11 @@ async fn augment_with_ground_truth(
     if stable_start.hash != start_anchor.hash || stable_cutoff.hash != cutoff_anchor.hash {
         bail!("ground-truth anchor reorged during event collection");
     }
+    // Stonks emits both the shared Airlock `Create` and a launcher-owned
+    // `Launched` attestation. The latter is the exact protocol taxonomy, so a
+    // single transaction must not also become a Bankr/Doppler miss.
+    suppress_shared_airlock_for_stonks(&mut input.candidates);
+    let exact_event_logs = retained_ground_truth_event_logs(&input.candidates);
     let unique_protocol_keys = input
         .candidates
         .values()
@@ -740,6 +754,31 @@ async fn augment_with_ground_truth(
             unique_protocol_keys,
         }),
     ))
+}
+
+fn suppress_shared_airlock_for_stonks(
+    candidates: &mut HashMap<(B256, LaunchpadId), ObservedCandidate>,
+) {
+    let stonks_transactions: HashSet<_> = candidates
+        .values()
+        .filter(|candidate| {
+            candidate.ground_truth_event && candidate.launchpad == LaunchpadId::StonksV3
+        })
+        .map(|candidate| candidate.tx_hash)
+        .collect();
+    for tx_hash in stonks_transactions {
+        candidates.remove(&(tx_hash, LaunchpadId::BankrDoppler));
+    }
+}
+
+fn retained_ground_truth_event_logs(
+    candidates: &HashMap<(B256, LaunchpadId), ObservedCandidate>,
+) -> usize {
+    candidates
+        .values()
+        .filter(|candidate| candidate.ground_truth_event)
+        .map(|candidate| candidate.ground_truth_hits.len())
+        .sum()
 }
 
 async fn reconcile_candidate(
@@ -773,6 +812,7 @@ async fn reconcile_candidate(
             let mut v3_quote = None;
             let mut clanker_quote = None;
             let mut bankr_quote = None;
+            let mut stonks_observation = None;
             let mut pons_quote = None;
             let mut hood_quote = None;
             let mut hood_migration = None;
@@ -885,6 +925,35 @@ async fn reconcile_candidate(
                 } else {
                     quote_status = QuoteStatus::NotApplicable;
                     protocol_blocker = Some("bankr_expected_profile_not_configured".into());
+                }
+            }
+            if receipt.status && candidate.launchpad == LaunchpadId::StonksV3 {
+                let transaction = rpc
+                    .transaction_by_hash(candidate.tx_hash)
+                    .await?
+                    .with_context(|| format!("missing transaction {}", candidate.tx_hash))?;
+                let block = rpc.block_by_number(receipt.l2_block_number).await?;
+                match observe_stonks_v3_direct_launch_at_receipt_block(
+                    rpc,
+                    &transaction,
+                    &receipt,
+                    &block,
+                )
+                .await
+                {
+                    Ok(observation) => {
+                        protocol_match = true;
+                        truth_action = Some(ActionKind::Launch);
+                        truth_token = Some(observation.asset);
+                        truth_pool = Some(observation.pool);
+                        quote_status = QuoteStatus::NotApplicable;
+                        protocol_blocker = Some(observation.quote_blocker.clone());
+                        stonks_observation = Some(observation);
+                    }
+                    Err(error) => {
+                        quote_status = QuoteStatus::Blocked;
+                        protocol_blocker = Some(format!("stonks_v3_observation:{error}"));
+                    }
                 }
             }
             if receipt.status && candidate.launchpad == LaunchpadId::Pons {
@@ -1039,6 +1108,7 @@ async fn reconcile_candidate(
                 v3_quote,
                 clanker_quote,
                 bankr_quote,
+                stonks_observation,
                 pons_quote,
                 hood_quote,
                 hood_migration,
@@ -1071,6 +1141,7 @@ async fn reconcile_candidate(
                 v3_quote: None,
                 clanker_quote: None,
                 bankr_quote: None,
+                stonks_observation: None,
                 pons_quote: None,
                 hood_quote: None,
                 hood_migration: None,
@@ -1245,6 +1316,11 @@ fn protocol_event_match(launchpad: LaunchpadId, logs: &[ReceiptLog]) -> bool {
         ),
         LaunchpadId::Clanker => exact_topic(log, CLANKER_FACTORY, CLANKER_TOKEN_CREATED_TOPIC),
         LaunchpadId::BankrDoppler => exact_topic(log, DOPPLER_CREATE_EMITTER, DOPPLER_CREATE_TOPIC),
+        LaunchpadId::StonksV3 => exact_topic(
+            log,
+            STONKS_V3_LAUNCHER,
+            keccak256(STONKS_V3_LAUNCHED_SIGNATURE.as_bytes()),
+        ),
         LaunchpadId::KlikFinance => exact_topic(log, KLIK_FACTORY, KLIK_TOKEN_CREATED_TOPIC),
         LaunchpadId::Pons => {
             matches!(log.address, PONS_CURRENT_FACTORY | PONS_LEGACY_FACTORY)
@@ -1301,6 +1377,103 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+
+    #[test]
+    fn exact_stonks_truth_suppresses_shared_airlock_bankr_duplicate() {
+        let tx_hash = alloy_primitives::b256!(
+            "d53c3d8d8c76fd5f367d3d229a45e1aef65c0cdb712d94421f311f97fe6dd563"
+        );
+        let candidate = |launchpad| ObservedCandidate {
+            tx_hash,
+            launchpad,
+            observer_claim: false,
+            ground_truth_event: true,
+            ground_truth_hits: vec![GroundTruthHit {
+                l2_block_number: 12_033_710,
+                block_hash: B256::ZERO,
+                transaction_index: 2,
+                log: ReceiptLog {
+                    address: Address::ZERO,
+                    log_index: u64::from(launchpad as u8),
+                    topics: vec![B256::ZERO],
+                    data: Bytes::new(),
+                },
+            }],
+            wrapper: WrapperKind::Direct,
+            wrapper_provenance: None,
+        };
+        let mut candidates = HashMap::from([
+            (
+                (tx_hash, LaunchpadId::BankrDoppler),
+                candidate(LaunchpadId::BankrDoppler),
+            ),
+            (
+                (tx_hash, LaunchpadId::StonksV3),
+                candidate(LaunchpadId::StonksV3),
+            ),
+        ]);
+        assert_eq!(retained_ground_truth_event_logs(&candidates), 2);
+        suppress_shared_airlock_for_stonks(&mut candidates);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(retained_ground_truth_event_logs(&candidates), 1);
+        assert!(candidates.contains_key(&(tx_hash, LaunchpadId::StonksV3)));
+        assert!(!candidates.contains_key(&(tx_hash, LaunchpadId::BankrDoppler)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "explicit public read-only production reconciler proof; not part of hermetic CI"]
+    async fn fresh_stonks_proof_crosses_concrete_noxa_rpc_reconciler_as_observe_only() {
+        let tx_hash = alloy_primitives::b256!(
+            "d53c3d8d8c76fd5f367d3d229a45e1aef65c0cdb712d94421f311f97fe6dd563"
+        );
+        let rpc = NoxaRpcClient::with_url(PUBLIC_RPC_URL).unwrap();
+        let receipt = rpc.receipt(tx_hash).await.unwrap().unwrap();
+        let launched = receipt
+            .logs
+            .iter()
+            .find(|log| {
+                exact_topic(
+                    log,
+                    STONKS_V3_LAUNCHER,
+                    keccak256(STONKS_V3_LAUNCHED_SIGNATURE.as_bytes()),
+                )
+            })
+            .unwrap()
+            .clone();
+        let candidate = ObservedCandidate {
+            tx_hash,
+            launchpad: LaunchpadId::StonksV3,
+            observer_claim: false,
+            ground_truth_event: true,
+            ground_truth_hits: vec![GroundTruthHit {
+                l2_block_number: receipt.l2_block_number,
+                block_hash: receipt.block_hash,
+                transaction_index: receipt.transaction_index,
+                log: launched,
+            }],
+            wrapper: WrapperKind::Direct,
+            wrapper_provenance: None,
+        };
+        let reconciled = reconcile_candidate(
+            &rpc,
+            candidate,
+            Duration::from_secs(2),
+            Duration::from_millis(1),
+            bankr_quote_policy(),
+            bankr_reconcile_profiles(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reconciled.evidence.launchpad, LaunchpadId::StonksV3);
+        assert_eq!(reconciled.evidence.quote_status, QuoteStatus::NotApplicable);
+        assert!(reconciled.bankr_quote.is_none());
+        let observation = reconciled.stonks_observation.unwrap();
+        assert_eq!(observation.profile, "stonks_v3_direct_launch");
+        assert!(!observation.paper_evidence_ready);
+        assert!(!observation.authorizes_canary);
+        assert!(!observation.execution_eligible);
+        assert!(!observation.broadcast);
+    }
 
     #[derive(Deserialize)]
     struct BankrV4RawFrames {

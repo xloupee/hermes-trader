@@ -42,6 +42,7 @@ pub mod rpc;
 pub mod sequencer;
 pub mod signer;
 pub mod smart_account;
+pub mod stonks_v3_observer;
 pub mod testnet_orchestrator;
 pub mod tier2_curve;
 pub mod trading_runtime;

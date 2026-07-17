@@ -7,6 +7,7 @@ use crate::launchpad_adapters::{
 use crate::noxa_abi::ReceiptLog;
 use crate::pons::{PONS_CURRENT_FACTORY, PONS_LEGACY_FACTORY, PONS_TOKEN_LAUNCHED_TOPIC};
 use crate::robinhood::{BOW_LAUNCH_FACTORY, LAUNCHHOOD_V3_FACTORY};
+use crate::stonks_v3_observer::STONKS_V3_LAUNCHER;
 use crate::tier2_curve::HOOD_FACTORY;
 
 pub const BOW_LAUNCHED_SIGNATURE: &str = "Launched(address,address,address,uint256,uint256)";
@@ -15,6 +16,8 @@ pub const HOOD_TOKEN_CREATED_SIGNATURE: &str =
     "TokenCreated(address,address,string,string,string,uint256,uint256,uint256)";
 pub const HOOD_TRADE_SIGNATURE: &str =
     "Trade(address,address,bool,uint256,uint256,uint256,uint256,uint256)";
+pub const STONKS_V3_LAUNCHED_SIGNATURE: &str =
+    "Launched(address,address,address,string,uint8,address)";
 
 /// Classify only the reviewed exact emitter/topic pairs used as launchpad
 /// ground truth. Callers must not classify the RPC address/topic Cartesian
@@ -32,6 +35,11 @@ pub fn launchpad_for_ground_truth_log(log: &ReceiptLog) -> Option<LaunchpadId> {
         }
         (CLANKER_FACTORY, CLANKER_TOKEN_CREATED_TOPIC) => Some(LaunchpadId::Clanker),
         (DOPPLER_CREATE_EMITTER, DOPPLER_CREATE_TOPIC) => Some(LaunchpadId::BankrDoppler),
+        (STONKS_V3_LAUNCHER, topic)
+            if topic == keccak256(STONKS_V3_LAUNCHED_SIGNATURE.as_bytes()) =>
+        {
+            Some(LaunchpadId::StonksV3)
+        }
         (PONS_CURRENT_FACTORY, PONS_TOKEN_LAUNCHED_TOPIC)
         | (PONS_LEGACY_FACTORY, PONS_TOKEN_LAUNCHED_TOPIC) => Some(LaunchpadId::Pons),
         (HOOD_FACTORY, topic)

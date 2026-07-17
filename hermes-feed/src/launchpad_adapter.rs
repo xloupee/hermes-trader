@@ -23,6 +23,7 @@ pub enum LaunchpadId {
     LaunchHoodV3,
     Clanker,
     BankrDoppler,
+    StonksV3,
     KlikFinance,
     TrenchToday,
     Pons,

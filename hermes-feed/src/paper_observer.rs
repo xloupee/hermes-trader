@@ -2455,6 +2455,12 @@ mod tests {
     }
 
     #[derive(Deserialize)]
+    struct StonksV3RawRecord {
+        received_unix_ns: u64,
+        payload: String,
+    }
+
+    #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct StrictPaperReconciliationRequest {
         tx_hash: B256,
@@ -3133,6 +3139,36 @@ mod tests {
                 .filter(|row| row.tx_hash == frame.tx_hash)
                 .count(),
             1
+        );
+        assert!(report.trade_plans.iter().all(|plan| !plan.broadcast));
+    }
+
+    #[test]
+    fn exact_raw_nitro_stonks_v3_is_decoded_but_not_globally_dispatched() {
+        let record: StonksV3RawRecord = serde_json::from_str(include_str!(
+            "../tests/fixtures/stonks-v3-direct-launch-fresh-raw-frame.json"
+        ))
+        .unwrap();
+        assert_eq!(record.received_unix_ns, 1_784_282_709_119_456_000);
+        let tx_hash = alloy_primitives::b256!(
+            "d53c3d8d8c76fd5f367d3d229a45e1aef65c0cdb712d94421f311f97fe6dd563"
+        );
+        let observer = bankr_v4_observer();
+        assert!(observer.capabilities().iter().all(|capability| {
+            capability.launchpad != LaunchpadId::StonksV3 && !capability.live_execution_enabled
+        }));
+        let mut runtime = PaperFeedRuntime::new(observer);
+        let broadcast: BroadcastMessage = serde_json::from_str(&record.payload).unwrap();
+        let report = runtime
+            .decode_received_at(&broadcast, record.received_unix_ns)
+            .unwrap();
+        assert!(report.transactions.iter().any(|row| row.tx_hash == tx_hash));
+        assert!(report.observations.iter().all(|row| row.tx_hash != tx_hash));
+        assert!(
+            report
+                .reconciliation_requests
+                .iter()
+                .all(|row| row.tx_hash != tx_hash)
         );
         assert!(report.trade_plans.iter().all(|plan| !plan.broadcast));
     }

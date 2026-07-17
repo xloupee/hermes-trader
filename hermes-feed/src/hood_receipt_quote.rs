@@ -486,12 +486,16 @@ pub struct HoodMigrationEvidence {
     pub declared_and_actual_liquidity_match: bool,
     pub pool_initialize_sqrt_price_x96: U256,
     pub pool_initialize_tick: i32,
+    pub reconstructed_boundary_sqrt_price_x96: U256,
+    pub reconstructed_boundary_tick: i32,
+    pub reconstructed_boundary_liquidity: U256,
     pub receipt_end_sqrt_price_x96: U256,
     pub receipt_end_tick: i32,
     pub receipt_end_liquidity: U256,
     pub receipt_end_swap_log_index: u64,
     pub receipt_end_swap_input: U256,
     pub receipt_end_swap_output: U256,
+    pub log_order: HoodMigrationLogOrderEvidence,
     pub swap_amounts_reconstructed: bool,
     pub terminal_zero_liquidity_boundary_observed: bool,
     pub expected_profile_validated: bool,
@@ -501,6 +505,78 @@ pub struct HoodMigrationEvidence {
     pub execution_eligible: bool,
     pub execution_blocker: String,
     pub broadcast: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct HoodMigrationLogOrderEvidence {
+    pub pool_created: u64,
+    pub initialize: u64,
+    pub trade: u64,
+    pub graduated: u64,
+    pub curve_transfer: u64,
+    pub lp_transfer: u64,
+    pub weth_mint: u64,
+    pub funding0: u64,
+    pub funding1: u64,
+    pub mint: u64,
+    pub nft_mint: u64,
+    pub increase_liquidity: u64,
+    pub nft_lock: u64,
+    pub locked: u64,
+    pub v3_migrated: u64,
+    pub migrated: u64,
+    pub swap: u64,
+}
+
+impl HoodMigrationLogOrderEvidence {
+    pub fn ordered_indices(self) -> [u64; 17] {
+        [
+            self.pool_created,
+            self.initialize,
+            self.trade,
+            self.graduated,
+            self.curve_transfer,
+            self.lp_transfer,
+            self.weth_mint,
+            self.funding0,
+            self.funding1,
+            self.mint,
+            self.nft_mint,
+            self.increase_liquidity,
+            self.nft_lock,
+            self.locked,
+            self.v3_migrated,
+            self.migrated,
+            self.swap,
+        ]
+    }
+}
+
+pub fn validate_hood_migration_boundary_evidence(
+    evidence: &HoodMigrationEvidence,
+    profile: &HoodExpectedProfile,
+) -> bool {
+    use uniswap_v3_math::tick_math::get_sqrt_ratio_at_tick;
+
+    let Ok(expected_boundary_sqrt_price_x96) =
+        get_sqrt_ratio_at_tick(profile.full_range_tick_upper)
+    else {
+        return false;
+    };
+    let order = evidence.log_order.ordered_indices();
+    evidence.reconstructed_boundary_sqrt_price_x96 == expected_boundary_sqrt_price_x96
+        && evidence.reconstructed_boundary_tick == profile.full_range_tick_upper
+        && evidence.reconstructed_boundary_liquidity == U256::ZERO
+        && evidence.receipt_end_liquidity == U256::ZERO
+        && evidence.receipt_end_tick > evidence.reconstructed_boundary_tick
+        && evidence.receipt_end_sqrt_price_x96 > evidence.reconstructed_boundary_sqrt_price_x96
+        && evidence.receipt_end_swap_log_index == evidence.log_order.swap
+        && order.windows(2).all(|pair| pair[0] < pair[1])
+        && evidence.terminal_zero_liquidity_boundary_observed
+        && !evidence.pool_state_reconciled
+        && !evidence.v3_quote_available
+        && !evidence.execution_eligible
+        && !evidence.broadcast
 }
 
 #[derive(Debug, Error)]
@@ -1029,12 +1105,34 @@ pub fn verify_hood_graduation_receipt(
         declared_and_actual_liquidity_match,
         pool_initialize_sqrt_price_x96: U256::from(initialize.sqrtPriceX96),
         pool_initialize_tick: initialize_tick,
+        reconstructed_boundary_sqrt_price_x96: reconstructed_swap.sqrt_price_x96_after,
+        reconstructed_boundary_tick: reconstructed_swap.tick_after,
+        reconstructed_boundary_liquidity: U256::from(reconstructed_swap.liquidity_after),
         receipt_end_sqrt_price_x96: U256::from(swap.sqrtPriceX96),
         receipt_end_tick: swap_tick,
         receipt_end_liquidity: U256::from(swap.liquidity),
         receipt_end_swap_log_index: swap_log.log_index,
         receipt_end_swap_input: swap_input,
         receipt_end_swap_output: swap_output,
+        log_order: HoodMigrationLogOrderEvidence {
+            pool_created: pool_created_log.log_index,
+            initialize: initialize_log.log_index,
+            trade: trade_log.log_index,
+            graduated: graduated_log.log_index,
+            curve_transfer: curve_transfer_log.log_index,
+            lp_transfer: lp_transfer_log.log_index,
+            weth_mint: weth_mint_log.log_index,
+            funding0: funding0_log.log_index,
+            funding1: funding1_log.log_index,
+            mint: mint_log.log_index,
+            nft_mint: nft_mint_log.log_index,
+            increase_liquidity: increase_log.log_index,
+            nft_lock: nft_lock_log.log_index,
+            locked: locked_log.log_index,
+            v3_migrated: v3_migrated_log.log_index,
+            migrated: migrated_log.log_index,
+            swap: swap_log.log_index,
+        },
         swap_amounts_reconstructed: true,
         terminal_zero_liquidity_boundary_observed: true,
         expected_profile_validated: true,
@@ -1985,12 +2083,72 @@ mod tests {
         assert_eq!(evidence.receipt_end_swap_log_index, 53);
         assert_ne!(evidence.receipt_end_swap_input, U256::ZERO);
         assert_ne!(evidence.receipt_end_swap_output, U256::ZERO);
+        assert_eq!(evidence.reconstructed_boundary_tick, 887_200);
+        assert_eq!(evidence.reconstructed_boundary_liquidity, U256::ZERO);
+        assert_eq!(evidence.receipt_end_liquidity, U256::ZERO);
+        assert!(validate_hood_migration_boundary_evidence(
+            &evidence,
+            &HoodExpectedProfile::production()
+        ));
         assert!(evidence.swap_amounts_reconstructed);
         assert!(evidence.terminal_zero_liquidity_boundary_observed);
         assert!(!evidence.declared_and_actual_liquidity_match);
         assert!(!evidence.v3_quote_available);
         assert!(!evidence.execution_eligible);
         assert!(!evidence.broadcast);
+    }
+
+    #[test]
+    fn downstream_migration_boundary_forgeries_fail_closed() {
+        use uniswap_v3_math::tick_math::get_sqrt_ratio_at_tick;
+
+        let value = fixture(include_str!(
+            "../tests/fixtures/hood-graduation-migration-live-proof.json"
+        ));
+        let profile = HoodExpectedProfile::production();
+        let evidence = verify_hood_graduation_receipt(
+            &value.transaction,
+            &value.receipt,
+            &value.block,
+            &value.pre_snapshot(),
+            &value.snapshot(),
+            &profile,
+        )
+        .unwrap();
+
+        let mut nonzero_terminal_liquidity = evidence.clone();
+        nonzero_terminal_liquidity.receipt_end_liquidity = U256::from(1_u8);
+        assert!(!validate_hood_migration_boundary_evidence(
+            &nonzero_terminal_liquidity,
+            &profile
+        ));
+
+        let mut coordinated_boundary = evidence.clone();
+        coordinated_boundary.reconstructed_boundary_tick -= profile.v3_tick_spacing;
+        coordinated_boundary.reconstructed_boundary_sqrt_price_x96 =
+            get_sqrt_ratio_at_tick(coordinated_boundary.reconstructed_boundary_tick).unwrap();
+        assert!(!validate_hood_migration_boundary_evidence(
+            &coordinated_boundary,
+            &profile
+        ));
+
+        let mut reordered = evidence.clone();
+        std::mem::swap(
+            &mut reordered.log_order.migrated,
+            &mut reordered.log_order.v3_migrated,
+        );
+        assert!(!validate_hood_migration_boundary_evidence(
+            &reordered, &profile
+        ));
+
+        let mut boundary_not_crossed = evidence;
+        boundary_not_crossed.receipt_end_tick = boundary_not_crossed.reconstructed_boundary_tick;
+        boundary_not_crossed.receipt_end_sqrt_price_x96 =
+            boundary_not_crossed.reconstructed_boundary_sqrt_price_x96;
+        assert!(!validate_hood_migration_boundary_evidence(
+            &boundary_not_crossed,
+            &profile
+        ));
     }
 
     #[test]

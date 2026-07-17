@@ -20,6 +20,7 @@ use hermes_feed::{
     ClankerV4ExpectedProfile, HoodExpectedProfile, HoodMigrationEvidence, HoodReceiptPaperQuote,
     PonsReceiptPaperQuote, V3ReceiptPaperQuote, bankr_hook_fee_ppm, quote_hood_curve_buy,
     quote_hood_curve_sell, validate_clanker_quote_replay,
+    validate_hood_migration_boundary_evidence,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -816,6 +817,10 @@ fn validate_hood_migration_records(
     evidence: &[ReconciliationEvidence],
     migrations: &[HoodMigrationEvidence],
 ) -> Result<()> {
+    let hood_profile = HoodExpectedProfile::production();
+    hood_profile
+        .validate()
+        .context("invalid production Hood profile for migration evidence")?;
     let evidence = evidence
         .iter()
         .map(|record| ((record.tx_hash, record.launchpad), record))
@@ -855,6 +860,7 @@ fn validate_hood_migration_records(
             || migration.receipt_end_sqrt_price_x96 == U256::ZERO
             || migration.receipt_end_swap_input == U256::ZERO
             || migration.receipt_end_swap_output == U256::ZERO
+            || !validate_hood_migration_boundary_evidence(migration, &hood_profile)
             || !migration.swap_amounts_reconstructed
             || !migration.terminal_zero_liquidity_boundary_observed
             || migration.declared_and_actual_liquidity_match != liquidity_match
@@ -3269,6 +3275,26 @@ mod tests {
 
     #[test]
     fn hood_migration_evidence_parses_end_to_end_but_never_finalizes_as_a_quote() {
+        let boundary_price = uniswap_v3_math::tick_math::get_sqrt_ratio_at_tick(887_200).unwrap();
+        let log_order = serde_json::json!({
+            "pool_created": 1,
+            "initialize": 2,
+            "trade": 3,
+            "graduated": 4,
+            "curve_transfer": 5,
+            "lp_transfer": 6,
+            "weth_mint": 7,
+            "funding0": 8,
+            "funding1": 9,
+            "mint": 10,
+            "nft_mint": 11,
+            "increase_liquidity": 12,
+            "nft_lock": 13,
+            "locked": 14,
+            "v3_migrated": 15,
+            "migrated": 16,
+            "swap": 17
+        });
         let tx_hash = B256::with_last_byte(0x44);
         let evidence = serde_json::json!({
             "record_type": "launchpad_reconciliation_evidence",
@@ -3318,12 +3344,16 @@ mod tests {
             "declared_and_actual_liquidity_match": false,
             "pool_initialize_sqrt_price_x96": "7",
             "pool_initialize_tick": -1,
-            "receipt_end_sqrt_price_x96": "8",
-            "receipt_end_tick": -2,
+            "reconstructed_boundary_sqrt_price_x96": boundary_price,
+            "reconstructed_boundary_tick": 887200,
+            "reconstructed_boundary_liquidity": "0",
+            "receipt_end_sqrt_price_x96": boundary_price + U256::from(1_u8),
+            "receipt_end_tick": 887201,
             "receipt_end_liquidity": "0",
-            "receipt_end_swap_log_index": 10,
+            "receipt_end_swap_log_index": 17,
             "receipt_end_swap_input": "11",
             "receipt_end_swap_output": "12",
+            "log_order": log_order,
             "swap_amounts_reconstructed": true,
             "terminal_zero_liquidity_boundary_observed": true,
             "expected_profile_validated": true,
@@ -3365,6 +3395,25 @@ mod tests {
         forged[0].declared_and_actual_liquidity_match = true;
         forged[0].execution_blocker =
             "terminal_zero_liquidity_boundary_unreconciled_quote_blocked".into();
+        assert!(validate_hood_migration_records(&records.evidence, &forged).is_err());
+
+        let mut forged = records.hood_migrations.clone();
+        forged[0].receipt_end_liquidity = U256::from(1_u8);
+        assert!(validate_hood_migration_records(&records.evidence, &forged).is_err());
+
+        let mut forged = records.hood_migrations.clone();
+        forged[0].reconstructed_boundary_tick -= 200;
+        forged[0].reconstructed_boundary_sqrt_price_x96 =
+            uniswap_v3_math::tick_math::get_sqrt_ratio_at_tick(
+                forged[0].reconstructed_boundary_tick,
+            )
+            .unwrap();
+        assert!(validate_hood_migration_records(&records.evidence, &forged).is_err());
+
+        let mut forged = records.hood_migrations.clone();
+        let v3_migrated = forged[0].log_order.v3_migrated;
+        forged[0].log_order.v3_migrated = forged[0].log_order.migrated;
+        forged[0].log_order.migrated = v3_migrated;
         assert!(validate_hood_migration_records(&records.evidence, &forged).is_err());
     }
 }

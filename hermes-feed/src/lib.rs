@@ -75,9 +75,10 @@ pub use decoder::{
 };
 pub use hood_receipt_quote::{
     HOOD_GRADUATED_TOPIC, HOOD_MIGRATED_TOPIC, HOOD_TOKEN_CREATED_TOPIC, HOOD_TRADE_TOPIC,
-    HoodExpectedProfile, HoodIdentityRole, HoodMigrationEvidence, HoodPaperEntryQuote,
-    HoodPaperExitQuote, HoodQuoteError, HoodQuotePolicy, HoodReceiptPaperQuote,
-    HoodRuntimeIdentity, HoodSemanticProfile, HoodStateVersion, quote_hood_curve_receipt,
+    HoodExpectedProfile, HoodIdentityRole, HoodMigrationEvidence, HoodMigrationLogOrderEvidence,
+    HoodPaperEntryQuote, HoodPaperExitQuote, HoodQuoteError, HoodQuotePolicy,
+    HoodReceiptPaperQuote, HoodRuntimeIdentity, HoodSemanticProfile, HoodStateVersion,
+    quote_hood_curve_receipt, validate_hood_migration_boundary_evidence,
     verify_hood_graduation_receipt,
 };
 pub use hot_path::{

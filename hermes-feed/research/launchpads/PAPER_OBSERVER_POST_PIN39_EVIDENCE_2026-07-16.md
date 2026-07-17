@@ -185,25 +185,108 @@ predated `583611d`, and one Clanker truth row remains quote-blocked pending a
 separate envelope diagnosis. Its live timing is nevertheless the first
 release-build, build-idle latency sample.
 
+## Clean2 release-build live evidence and active-boundary replay
+
+The second build-idle release window,
+`.runtime/paper-session-20260716-post43d1caf-clean2`, ran for 600 seconds with
+the private-FIFO topology and only `connected` and `coverage_closed` probe
+states. Its fresh startup authority was
+`.runtime/launchpad-observed-startup-pins39-post43d1caf.json`:
+
+- 39 expected production pins validated at confirmed L2 block `11755893`, hash
+  `0x8c0172eee16a369df7649519cb524eea53ad70506583e33e9782d38783d75286`,
+  L1 block `25549373`, timestamp `1784254818`;
+- expected-pin validation passed, including the independently required Bankr
+  EIP-7702 designator and delegated Kernel runtime; observed hashes were not
+  promoted into expected authority; and
+- snapshot mode 0600 and SHA-256
+  `d10a0c9d2aae451c63badb2a111dc5c46c9de2c6dfdec3c5f4ac0b4f80407dc1`.
+
+The live window persisted start block `11756131`, hash
+`0xd597bf886999d6e394a5d6e164c6e05cd2468b2345ef6ef614dbbec302a8ebc3`,
+and cutoff block `11762102`, hash
+`0x0116823651713b2fc65328a64b7533225c1956de52ad56dece639ce269b66bd6`.
+The complete scored interval was `11756132..=11762102`, or 5,971 blocks. It
+contains 6,458 raw rows, 6,459 observer rows, 150 reconciliation rows, and 30
+finalized rows. The directory is mode 0700 and every file is mode 0600. The
+live digests are:
+
+- raw feed: `dcb4b021636e38b11047e561d2a114aaf4b3716720116ddda32867a8b51461ed`;
+- observer output: `b30a3c241329e12e930d95877552f0bf9984e78285cc02e74240bfa418c9644a`;
+- reconciliation: `0ba5f898edc17f5e232079acd35fc4f2864c7798fd7365bce215b8747ba009dd`;
+  and
+- finalized output: `f8f50a323b012c79b3e95cb7f4255ec14bd6a32c45ff9736e7f90c7003946efb`.
+
+The latency column below is exclusively the original live release-build
+timing. It is not replaced by replay timing.
+
+| Launchpad | Truth | Live confirmed | Post-fix confirmed | False positives | Post-fix missed | Live latency p50 / p95 / p99 | Post-fix quote result |
+|---|---:|---:|---:|---:|---:|---|---|
+| Bow | 0 | 0 | 0 | 0 | 0 | - | no activity |
+| LaunchHood V3 | 2 | 2 | 2 | 0 | 0 | 0.292 / 0.561 / 0.561 ms | 2/2 matched |
+| Clanker | 12 | 12 | 12 | 0 | 0 | 0.471 / 2.426 / 2.426 ms | 12/12 matched after the bounded active-boundary fix |
+| Bankr/Doppler | 5 | 5 | 5 | 0 | 0 | 0.359 / 0.490 / 0.490 ms | 5/5 matched |
+| Pons | 59 | 59 | 59 | 0 | 0 | 0.307 / 2.699 / 3.845 ms | 59 legacy/not applicable |
+| Hood | 0 | 0 | 0 | 0 | 0 | - | no activity |
+
+Bankr emitted eight observer claims: five confirmations, two reverted
+attempts, and one out-of-scope observation. Pons emitted 61 claims: 59
+confirmations and two out-of-scope observations. None of those reverted or
+out-of-range records is a false positive. Every eligible identity, action,
+entry-direction, exit-direction, and independent-quote check matched.
+
+The live `43d1caf` binary quoted 11 of 12 Clanker confirmations. The remaining
+transaction,
+`0xdecb471e034489fb24c4dfa4f4aa71d0af49b0e90835018b093011bfaa91d712`,
+is a supported `pinned_extension_five_position` launch, not the unsupported
+Tator envelope. Its token is pool `token0`, its initialize tick equals the
+first position's lower bound (`-230400`), and that position therefore provides
+active receipt-end liquidity even without a Swap event. The old global
+nonzero-liquidity assertion incorrectly blocked the otherwise canonical
+receipt.
+
+Commit `bbef8b4` replaces that assertion with ordered receipt-derived active
+liquidity, independently recomputes it during replay, and binds the exact live
+transaction plus tamper negatives. The exact raw feed was rescored at
+`.runtime/paper-session-20260716-post43d1caf-clean2-post-active-replay`: 6,459
+observer rows, 151 reconciliation rows, and 31 finalized rows. Clanker is now
+12/12 quote-available with zero detector, coverage, identity, action,
+direction, prediction, or quote mismatch. The replay emits 19 independent
+paper plans: two LaunchHood, 12 Clanker, and five Bankr. Their simulated
+immediate round-trip returns remain 9,801, 849, and 97 bps respectively; all
+plans contain the full-position exit policy and retain
+`execution_eligible: false` and `broadcast: false`.
+
+**All post-fix replay latency is excluded.** It measures persisted-frame
+backlog, not live receive-to-observation time. Clean2 therefore proves exact
+replay correctness for `bbef8b4`, but it is not a live zero-error window on
+that commit: collection ran on `43d1caf`. A new release-build, build-idle live
+window on exact `bbef8b4` or later remains required. The separate clean1
+payable Tator-extension/two-position envelope remains unsupported and strictly
+quote-blocked.
+
 ## Aggregate readiness decision
 
-The conservative evaluator accepts the three non-overlapping anchored windows
+The conservative evaluator accepts the four non-overlapping anchored windows
 as complete scoring inputs, but every launchpad remains not ready and every
 row retains `authorizes_canary: false` and `execution_eligible: false`:
 
 | Launchpad | Quote-eligible / 100 | Supported-envelope progress | Remaining hard errors |
 |---|---:|---|---|
 | Bow | 0 | payable 0/10; zero-buy 0/10 | none; no samples |
-| LaunchHood V3 | 5 | embedded buy 5/10 | none |
-| Clanker | 4 | extensionless 1/10; pinned extension 3/10 | none; Tator row excluded as unsupported |
-| Bankr/Doppler | 13 | V3 13/10; ERC-7579 13/10; V1 0/10; V2 0/10; direct 0/10 | none |
+| LaunchHood V3 | 7 | embedded buy 7/10 | none |
+| Clanker | 16 | extensionless 1/10; pinned extension 15/10 | none; Tator row excluded as unsupported |
+| Bankr/Doppler | 18 | V3 18/10; ERC-7579 18/10; V1 0/10; V2 0/10; direct 0/10 | none |
 | Pons | 1 | current generation 1/10 | two identity mismatches on the current row |
 | Hood | 2 | current curve 2/10 | none |
 
-The three-window count does not replace the operational live requirement:
+The four-window count does not replace the operational live requirement:
 fresh1 may be build-contaminated, quiet1 is a replay, and clean1's live binary
-predated the long-name fix. A new post-`583611d` release-build live window is
-still required before any window can be called current-code promotion-grade.
+predated the long-name fix. Clean2 is build-idle and supplies useful live
+latency, but its binary predates the active-boundary fix. A new live window on
+exact `bbef8b4` or later is still required before any window can be called
+current-code promotion-grade. Passing one Clanker profile threshold does not
+override the 100-confirmation threshold or the sparse extensionless profile.
 
 ## Artifact integrity
 
@@ -227,7 +310,15 @@ The key local files are bound by these SHA-256 digests:
 | clean1 post-fix observer replay | `c16e13253ccfbe8560fcdf28d257588fd8b5c6e7af1ac510618ec17b67888d6a` |
 | clean1 post-fix reconciliation | `b689dcdb5e8bc09e0864bd32b392267ebf2b6dfd69c3b73c873ef29a98bb3d1c` |
 | clean1 post-fix finalized output | `dbff28be3744e2121c5b8d8f24b89b6522dd5718e265d419316e7e3765bfa559` |
-| aggregate readiness decision | `0175ae2aa961d0750a2d64e18819ee17f65af086cf53d14bbdb75bba42104de2` |
+| clean2 39-pin startup snapshot | `d10a0c9d2aae451c63badb2a111dc5c46c9de2c6dfdec3c5f4ac0b4f80407dc1` |
+| clean2 raw feed | `dcb4b021636e38b11047e561d2a114aaf4b3716720116ddda32867a8b51461ed` |
+| clean2 live observer output | `b30a3c241329e12e930d95877552f0bf9984e78285cc02e74240bfa418c9644a` |
+| clean2 live reconciliation | `0ba5f898edc17f5e232079acd35fc4f2864c7798fd7365bce215b8747ba009dd` |
+| clean2 live finalized output | `f8f50a323b012c79b3e95cb7f4255ec14bd6a32c45ff9736e7f90c7003946efb` |
+| clean2 post-fix observer replay | `e0e4adeb3d8b898e980c4291f9e79a76b7fc6bd34fd4f97491dc4214f5a7ad68` |
+| clean2 post-fix reconciliation | `3f452cecc35d2a661e917f09f7e62fdd6e2be6450a994596def857cc5c597f40` |
+| clean2 post-fix finalized output | `8301ac9c478da600a596ef0fb8dc24cb8f3d01bf08518cd7d9e5ae4dc40acd83` |
+| four-window aggregate readiness decision | `60c80b796393aa38ed2d6af3cc05c7b515fd1069568d7fe013d6740600a97abd` |
 
 ## Remaining evidence gaps
 
@@ -237,12 +328,13 @@ complete non-overlapping windows, with zero false positives, detector misses,
 identity failures, direction failures, prediction failures, or quote failures.
 Current gaps include:
 
-1. Collect a new clean, build-idle warm-state window on `583611d` or later;
+1. Collect a new clean, build-idle warm-state window on exact `bbef8b4` or later;
    then accumulate three promotion-grade live windows, not replay-only scores.
 2. Observe both Clanker
    `extensionless_single_position` and `pinned_extension_five_position` at
-   least ten times each. Keep the payable Tator-extension/two-position envelope
-   quote-blocked pending separate pin and semantic review.
+   least ten times each. The pinned-extension profile has 15 observations, but
+   extensionless remains at one. Keep the payable Tator-extension/two-position
+   envelope quote-blocked pending separate pin and semantic review.
 3. Expand Bankr beyond the observed V3/ERC-7579 confirmations. V1, V2, direct
    Airlock, and the remaining per-stratum thresholds are still sparse or
    absent.
@@ -251,8 +343,8 @@ Current gaps include:
    token/pool identity and quote validation instead.
 5. Expand Hood beyond two final-code confirmations; two quotes cannot cover
    the current-curve profile or the 100-confirmation threshold.
-6. Gather Bow activity for both payable and zero-initial-buy profiles and
-   obtain any fresh Clanker activity. Zero events are not evidence of recall.
+6. Gather Bow activity for both payable and zero-initial-buy profiles. Zero
+   events are not evidence of recall.
 7. Keep Flap discovery-only until its direction, identity, sizing, slippage,
    exit, and migration semantics are complete.
 

@@ -231,7 +231,7 @@ signer, broadcast path, deployment, or canary. The evaluator always emits
 authorized review after production-pin validation and paper evidence.
 
 After anchored reconciliation, `hermes-launchpad-paper` automatically emits one
-`launchpad_paper_readiness_window` JSON object for each of the six launchpads.
+`launchpad_paper_readiness_window` JSON object for each of the seven launchpads.
 The rows are derived from the validated ground-truth manifest, reconciliation
 metrics, promotion validation, and typed quote records; there is no CLI input
 for hand-authored counts. Collect those emitted rows across independent runs
@@ -360,10 +360,20 @@ Supported strata are fixed in code so an input cannot omit a difficult stratum:
   `pinned_extension_five_position`;
 - Bankr/Doppler: `curve_ticks_v1`, `curve_ticks_v2`, `curve_ticks_v3`,
   `curve_ticks_v4`, `curve_ticks_v5`, `direct_airlock`, `erc7579`;
-- Pons: `current_generation`; and
-- Hood: `current_curve`.
+- Pons: `current_generation`;
+- Hood: `current_curve`, `migrated_v3_boundary`;
+- Flap: `discovery_only`.
+
+Flap ground truth is anchored only by the exact Portal emitter
+`0x26605f322f7ff986f381bb9a6e3f5dab0beaeb09` and exact
+`TokenCreated(uint256,address,uint256,address,string,string,string)` topic
+`0x504e7f360b2e5fe33cbaaae4c593bc55305328341bf79009e43e0e3b7f699603`.
+Flap has no quote profiles or paper execution route. Its `discovery_only`
+stratum makes observations and misses measurable, but the evaluator always
+adds `discovery_only_launchpad`, so Flap can never become paper-evidence ready,
+authorize a canary, or become execution eligible.
 
 Unknown strata are rejected. Missing strata count as zero. The output always
 contains one machine-readable `launchpad_paper_readiness` row for each of the
-six launchpads. Missing, sparse, or no-activity launchpads therefore remain
+seven launchpads. Missing, sparse, or no-activity launchpads therefore remain
 explicitly not ready rather than disappearing from the report.

@@ -94,6 +94,13 @@ profile; none were copied into it.
 
 ## Artifact identity
 
+The production expected-pin Keccak recorded below is preserved as historical
+provenance but was computed over the ASCII hex representation, not the file
+bytes. The immutable supplemental correction is
+`PONS_CURRENT_PREDICTION_EXPECTED_PIN_DIGEST_CORRECTION_2026-07-17.json`.
+It records the authoritative file-byte Keccak without changing any expected
+pin content or adopting any observed value as expected authority.
+
 | Artifact | SHA-256 | Keccak-256 |
 | --- | --- | --- |
 | Expanded production expected pins | `f1fa4f3080fc3d3c193a5de4424410bc747da784d465f118b6a67d2e74a93095` | `0xe877d69efb9f62650c1acce4b4d2392b35285146e8231f113a1feb80677613fb` |

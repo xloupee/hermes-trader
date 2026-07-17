@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "record_type": "pons_current_prediction_expected_pin_digest_correction",
+  "correction_scope": "digest_metadata_only",
+  "expected_artifact": {
+    "path": "config/launchpad-expected-pins.production.json",
+    "sha256": "f1fa4f3080fc3d3c193a5de4424410bc747da784d465f118b6a67d2e74a93095",
+    "historical_erroneous_keccak256": "0xe877d69efb9f62650c1acce4b4d2392b35285146e8231f113a1feb80677613fb",
+    "authoritative_file_byte_keccak256": "0x76b72032db60f30c777cba1c30c1939381b0af947257cfbcb07ef11caee76633"
+  },
+  "historical_artifacts_retained_unchanged": [
+    "research/launchpads/PONS_CURRENT_PREDICTION_PIN_ATTESTATION_2026-07-17_38FC684.json"
+  ],
+  "historical_evidence_with_supersession_pointer": "research/launchpads/PONS_CURRENT_PREDICTION_EVIDENCE_2026-07-17.md",
+  "supersedes_fields": [
+    "PONS_CURRENT_PREDICTION_PIN_ATTESTATION_2026-07-17_38FC684.json#/expected_artifact/keccak256",
+    "PONS_CURRENT_PREDICTION_EVIDENCE_2026-07-17.md#expanded-production-expected-pins-keccak-256"
+  ],
+  "recomputation": {
+    "working_directory": "hermes-feed",
+    "sha256_command": "shasum -a 256 config/launchpad-expected-pins.production.json",
+    "sha256_output": "f1fa4f3080fc3d3c193a5de4424410bc747da784d465f118b6a67d2e74a93095  config/launchpad-expected-pins.production.json",
+    "keccak256_command": "cast keccak \"0x$(xxd -p -c 1000000 config/launchpad-expected-pins.production.json)\"",
+    "keccak256_output": "0x76b72032db60f30c777cba1c30c1939381b0af947257cfbcb07ef11caee76633",
+    "historical_error_reproduction_command": "cast keccak \"$(xxd -p -c 1000000 config/launchpad-expected-pins.production.json)\"",
+    "historical_error_reproduction_output": "0xe877d69efb9f62650c1acce4b4d2392b35285146e8231f113a1feb80677613fb",
+    "explanation": "The historical command hashed ASCII hexadecimal characters. Prefixing the xxd output with 0x makes cast decode the hexadecimal and hash the original file bytes."
+  },
+  "safety": {
+    "expected_pin_content_changed": false,
+    "observed_values_promoted_to_expected": false,
+    "wallet_access": false,
+    "signing": false,
+    "broadcast": false,
+    "canary_authorized": false,
+    "deployment": false
+  }
+}

@@ -26,9 +26,11 @@ use hermes_feed::{
     BankrCreateProfileVersion, BankrDopplerExpectedProfile, BankrDopplerReceiptPaperQuote,
     BankrEnvelopeKind, ClankerLiquidityProfile, ClankerQuotePolicy, ClankerReceiptPaperQuote,
     ClankerV4ExpectedProfile, HoodExpectedProfile, HoodMigrationEvidence, HoodReceiptPaperQuote,
-    PonsReceiptPaperQuote, V3ReceiptPaperQuote, bankr_hook_fee_ppm, quote_hood_curve_buy,
-    quote_hood_curve_sell, validate_clanker_quote_replay,
-    validate_hood_migration_boundary_evidence, validate_v3_quote_replay,
+    PonsReceiptPaperQuote, StonksV3ObservationEvidence, StonksV3ReceiptPaperQuote,
+    V3ReceiptPaperQuote, bankr_hook_fee_ppm, quote_hood_curve_buy, quote_hood_curve_sell,
+    stonks_v3_observation_proof_keccak256, validate_clanker_quote_replay,
+    validate_hood_migration_boundary_evidence, validate_stonks_v3_quote_replay,
+    validate_v3_quote_replay,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -458,6 +460,8 @@ struct ReconciliationRecords {
     v3_quotes: Vec<V3ReceiptPaperQuote>,
     clanker_quotes: Vec<ClankerReceiptPaperQuote>,
     bankr_quotes: Vec<BankrDopplerReceiptPaperQuote>,
+    stonks_observations: Vec<StonksV3ObservationEvidence>,
+    stonks_quotes: Vec<StonksV3ReceiptPaperQuote>,
     pons_quotes: Vec<PonsReceiptPaperQuote>,
     hood_quotes: Vec<HoodReceiptPaperQuote>,
     hood_migrations: Vec<HoodMigrationEvidence>,
@@ -812,6 +816,34 @@ fn promotion_validations(
             },
         );
     }
+    for quote in &records.stonks_quotes {
+        let key = (quote.tx_hash, quote.launchpad);
+        let quote_matches = finalized_stonks_plans(
+            &HashMap::new(),
+            &HashMap::from([(quote.tx_hash, 1_u64)]),
+            ground_truth,
+            &records.stonks_observations,
+            vec![quote.clone()],
+            policy,
+        )
+        .is_ok_and(|plans| plans.len() == 1);
+        let token = expected_token(key);
+        validations.record(
+            key,
+            PromotionValidation {
+                quote_matches,
+                entry_direction_matches: token.is_some_and(|token| {
+                    quote.entry.state_after.token_in == hermes_feed::robinhood::WETH
+                        && quote.entry.state_after.token_out == token
+                }),
+                exit_direction_matches: token.is_some_and(|token| {
+                    quote.full_position_exit.state_after.token_in == token
+                        && quote.full_position_exit.state_after.token_out
+                            == hermes_feed::robinhood::WETH
+                }),
+            },
+        );
+    }
     for quote in &records.pons_quotes {
         let key = (quote.tx_hash, quote.launchpad);
         let quote_matches = finalized_pons_plans(
@@ -988,6 +1020,16 @@ fn main() -> Result<()> {
         )? {
             println!("{}", serde_json::to_string(&plan)?);
         }
+        for plan in finalized_stonks_plans(
+            &observed_candidates.feed_sequences,
+            &observed_candidates.feed_transactions,
+            &ground_truth,
+            &records.stonks_observations,
+            records.stonks_quotes,
+            plan_policy,
+        )? {
+            println!("{}", serde_json::to_string(&plan)?);
+        }
         for plan in finalized_pons_plans(
             &observed_candidates.feed_sequences,
             &ground_truth,
@@ -1148,6 +1190,16 @@ fn main() -> Result<()> {
             &observed_candidates.feed_sequences,
             &ground_truth,
             records.bankr_quotes,
+            plan_policy,
+        )? {
+            println!("{}", serde_json::to_string(&plan)?);
+        }
+        for plan in finalized_stonks_plans(
+            &observed_candidates.feed_sequences,
+            &observed_candidates.feed_transactions,
+            &ground_truth,
+            &records.stonks_observations,
+            records.stonks_quotes,
             plan_policy,
         )? {
             println!("{}", serde_json::to_string(&plan)?);
@@ -1398,6 +1450,28 @@ fn read_reconciliation_records(path: &Path) -> Result<ReconciliationRecords> {
                             )
                         })?)
                 }
+                Some("launchpad_stonks_v3_paper_quote") => {
+                    records
+                        .stonks_quotes
+                        .push(serde_json::from_value(value).with_context(|| {
+                            format!(
+                                "decode Stonks V3 quote line {} from {}",
+                                index + 1,
+                                path.display()
+                            )
+                        })?)
+                }
+                Some("launchpad_stonks_v3_observation") => {
+                    records
+                        .stonks_observations
+                        .push(serde_json::from_value(value).with_context(|| {
+                            format!(
+                                "decode Stonks V3 observation line {} from {}",
+                                index + 1,
+                                path.display()
+                            )
+                        })?)
+                }
                 Some("launchpad_pons_v3_paper_quote") => {
                     records
                         .pons_quotes
@@ -1601,6 +1675,116 @@ fn finalized_v3_plans(
             launchpad: quote.launchpad,
             feed_sequence,
             status: "quoted_restriction_gated",
+            amount_in: quote.entry.amount_in,
+            expected_output: quote.entry.expected_output,
+            min_receive: quote.entry.min_receive,
+            quote_source: quote.quote_source,
+            quote_state_version: serde_json::to_value(quote.state_version)?,
+            exit_full_position: true,
+            exit_expected_output: quote.full_position_exit.expected_output,
+            exit_min_receive: quote.full_position_exit.min_receive,
+            exit_plan,
+            simulated_round_trip_return_bps: quote.simulated_round_trip_return_bps,
+            leader_amounts_reused: false,
+            execution_eligible: false,
+            execution_blocker: quote.execution_blocker,
+            broadcast: false,
+        });
+    }
+    Ok(plans)
+}
+
+/// Stonks remains absent from candidate-time dispatch. Its sequence may come
+/// only from the raw frame transaction inventory after the independently
+/// confirmed launcher event has established the Stonks ground-truth key.
+fn finalized_stonks_plans(
+    observed_sequences: &HashMap<(B256, LaunchpadId), u64>,
+    feed_transactions: &HashMap<B256, u64>,
+    ground_truth: &ConfirmedGroundTruth,
+    observations: &[StonksV3ObservationEvidence],
+    quotes: Vec<StonksV3ReceiptPaperQuote>,
+    policy: PaperPlanPolicy,
+) -> Result<Vec<FinalizedV3PaperPlan>> {
+    let mut seen = HashSet::new();
+    let mut plans = Vec::new();
+    for quote in quotes {
+        let key = (quote.tx_hash, quote.launchpad);
+        if quote.launchpad != LaunchpadId::StonksV3 || !seen.insert(key) {
+            anyhow::bail!("duplicate or non-Stonks paper quote for {key:?}");
+        }
+        if observed_sequences.contains_key(&key) {
+            anyhow::bail!("Stonks candidate-time observation is unsupported for {key:?}");
+        }
+        let mut matching_observations = observations
+            .iter()
+            .filter(|observation| observation.tx_hash == quote.tx_hash);
+        let Some(observation) = matching_observations.next() else {
+            anyhow::bail!("missing Stonks receipt observation for {key:?}");
+        };
+        if matching_observations.next().is_some()
+            || stonks_v3_observation_proof_keccak256(observation).ok()
+                != Some(quote.observation_proof_keccak256)
+            || observation.leader != quote.market.leader
+            || observation.creator != quote.market.creator
+            || observation.launcher != quote.market.launcher
+            || observation.asset != quote.market.token
+            || observation.mirror != quote.market.mirror
+            || observation.pool != quote.market.pool
+            || observation.block_hash != quote.state_version.block_hash
+            || observation.l2_block_number != quote.state_version.l2_block_number
+            || observation.transaction_index != quote.state_version.transaction_index
+            || observation.positions != quote.market.positions
+        {
+            anyhow::bail!("Stonks quote is not bound to its receipt observation for {key:?}");
+        }
+        let feed_sequence = feed_transactions.get(&quote.tx_hash).copied();
+        let Some(feed_sequence) = feed_sequence else {
+            continue;
+        };
+        let Some(confirmed) = ground_truth.available_quote_matches(
+            key,
+            QuoteIdentityVersion {
+                action: ActionKind::Launch,
+                token: quote.market.token,
+                pool: Some(quote.market.pool),
+                l2_block_number: quote.state_version.l2_block_number,
+                block_hash: quote.state_version.block_hash,
+                transaction_index: quote.state_version.transaction_index,
+            },
+        ) else {
+            continue;
+        };
+        if !confirmed
+            || quote.entry.amount_in == U256::ZERO
+            || quote.entry.amount_in > policy.max_input_wei
+            || quote.entry.expected_output == U256::ZERO
+            || quote.entry.min_receive == U256::ZERO
+            || quote.entry.min_receive > quote.entry.expected_output
+            || quote.full_position_exit.amount_in != quote.entry.expected_output
+            || quote.full_position_exit.expected_output == U256::ZERO
+            || quote.full_position_exit.min_receive == U256::ZERO
+            || quote.full_position_exit.min_receive > quote.full_position_exit.expected_output
+            || quote.candidate_time_prediction_available
+            || quote.paper_evidence_ready
+            || quote.authorizes_canary
+            || quote.execution_eligible
+            || quote.broadcast
+            || validate_stonks_v3_quote_replay(&quote).is_err()
+        {
+            anyhow::bail!("unsafe or inconsistent Stonks V3 quote evidence for {key:?}");
+        }
+        let exit_plan = finalized_exit_plan(
+            quote.entry.amount_in,
+            quote.full_position_exit.expected_output,
+            quote.full_position_exit.min_receive,
+            policy,
+        )?;
+        plans.push(FinalizedV3PaperPlan {
+            record_type: "launchpad_paper_finalized_plan",
+            tx_hash: quote.tx_hash,
+            launchpad: LaunchpadId::StonksV3,
+            feed_sequence,
+            status: "quoted_receipt_confirmed_prediction_unavailable",
             amount_in: quote.entry.amount_in,
             expected_output: quote.entry.expected_output,
             min_receive: quote.entry.min_receive,
@@ -4379,6 +4563,85 @@ mod tests {
         .unwrap()
     }
 
+    fn stonks_quote_fixture() -> StonksV3ReceiptPaperQuote {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/stonks-v3-direct-launch-paper-quote.json"
+        ))
+        .unwrap()
+    }
+
+    fn stonks_observation_for_quote(
+        quote: &StonksV3ReceiptPaperQuote,
+    ) -> StonksV3ObservationEvidence {
+        StonksV3ObservationEvidence {
+            record_type: "launchpad_stonks_v3_observation".into(),
+            profile: "stonks_v3_direct_launch".into(),
+            tx_hash: quote.tx_hash,
+            chain_id: quote.state_version.chain_id,
+            l2_block_number: quote.state_version.l2_block_number,
+            block_hash: quote.state_version.block_hash,
+            transaction_index: quote.state_version.transaction_index,
+            leader: quote.market.leader,
+            launcher: quote.market.launcher,
+            asset: quote.market.token,
+            mirror: quote.market.mirror,
+            pool: quote.market.pool,
+            creator: quote.market.creator,
+            currency: 1,
+            numeraire: quote.market.quote_asset,
+            initializer: hermes_feed::stonks_v3_observer::STONKS_V3_INITIALIZER,
+            initialize_tick: quote.market.initialize_tick,
+            initialize_sqrt_price_x96: quote.market.initialize_sqrt_price_x96,
+            position_count: quote.market.position_count,
+            positions: quote.market.positions.clone(),
+            quote_status: "unsupported".into(),
+            quote_blocker: "observe_only_stonks_v3_no_independent_quote_engine".into(),
+            paper_evidence_ready: false,
+            authorizes_canary: false,
+            execution_eligible: false,
+            broadcast: false,
+        }
+    }
+
+    fn fixture_u256(value: &str) -> U256 {
+        U256::from_str_radix(value.trim_start_matches("0x"), 16).unwrap()
+    }
+
+    /// Exact output captured from the independent V3 engine at 0.005 WETH.
+    /// Production replay must reject it because Stonks sizing is module-fixed.
+    fn coherent_stonks_005_weth_quote() -> StonksV3ReceiptPaperQuote {
+        let mut quote = stonks_quote_fixture();
+        quote.entry.amount_in = fixture_u256("0x11c37937e08000");
+        quote.entry.expected_output = fixture_u256("0x17e57b0e8f46c89cc9088");
+        quote.entry.min_receive = fixture_u256("0x17a84e4e6a00f4afb28af");
+        quote.entry.state_after.amount_in_requested = quote.entry.amount_in;
+        quote.entry.state_after.amount_in_consumed = quote.entry.amount_in;
+        quote.entry.state_after.amount_out = quote.entry.expected_output;
+        quote.entry.state_after.sqrt_price_x96_after = fixture_u256("0x3792ba0f1a84d40313693");
+        quote.entry.state_after.tick_after = -196_915;
+        quote.full_position_exit.amount_in = quote.entry.expected_output;
+        quote.full_position_exit.expected_output = fixture_u256("0x116a0c246b06b6");
+        quote.full_position_exit.min_receive = fixture_u256("0x113d778a743229");
+        quote.full_position_exit.state_after.amount_in_requested = quote.entry.expected_output;
+        quote.full_position_exit.state_after.amount_in_consumed = quote.entry.expected_output;
+        quote.full_position_exit.state_after.amount_out = quote.full_position_exit.expected_output;
+        quote.full_position_exit.state_after.sqrt_price_x96_after =
+            fixture_u256("0x3641067c3ba2f1f8e77d4");
+        quote.full_position_exit.state_after.tick_after = -197_396;
+        quote.simulated_round_trip_return_bps = fixture_u256("0x264b");
+        quote
+    }
+
+    /// Exact 500 bps minima from the same fixed-size two-leg quote.
+    fn coherent_stonks_500_bps_quote() -> StonksV3ReceiptPaperQuote {
+        let mut quote = stonks_quote_fixture();
+        quote.entry.slippage_bps = 500;
+        quote.entry.min_receive = fixture_u256("0x4a10bff8984a49cbacbc");
+        quote.full_position_exit.slippage_bps = 500;
+        quote.full_position_exit.min_receive = fixture_u256("0x34ede0b8fbddb");
+        quote
+    }
+
     fn bankr_v4_quote_fixture() -> BankrDopplerReceiptPaperQuote {
         serde_json::from_str(include_str!(
             "../../tests/fixtures/bankr-doppler-v4-finaltuple-paper-quote.json"
@@ -4682,6 +4945,161 @@ mod tests {
         assert_eq!(plans[0].exit_plan.max_hold_seconds, 300);
         assert!(!plans[0].execution_eligible);
         assert!(!plans[0].broadcast);
+    }
+
+    #[test]
+    fn receipt_confirmed_stonks_quote_finalizes_from_raw_inventory_without_candidate_claim() {
+        let quote = stonks_quote_fixture();
+        let observation = stonks_observation_for_quote(&quote);
+        let key = (quote.tx_hash, quote.launchpad);
+        let ground_truth = quote_authority(
+            key,
+            ActionKind::Launch,
+            quote.market.token,
+            Some(quote.market.pool),
+            quote.state_version.l2_block_number,
+            quote.state_version.block_hash,
+            quote.state_version.transaction_index,
+        );
+        let plans = finalized_stonks_plans(
+            &HashMap::new(),
+            &HashMap::from([(quote.tx_hash, 2097)]),
+            &ground_truth,
+            std::slice::from_ref(&observation),
+            vec![quote.clone()],
+            PaperPlanPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].feed_sequence, 2097);
+        assert_eq!(
+            plans[0].status,
+            "quoted_receipt_confirmed_prediction_unavailable"
+        );
+        assert_eq!(plans[0].amount_in, quote.entry.amount_in);
+        assert_eq!(plans[0].expected_output, quote.entry.expected_output);
+        assert_eq!(plans[0].min_receive, quote.entry.min_receive);
+        assert!(plans[0].exit_full_position);
+        assert_eq!(plans[0].exit_plan.take_profit_bps, 2_000);
+        assert_eq!(plans[0].exit_plan.stop_loss_bps, 1_000);
+        assert_eq!(plans[0].exit_plan.max_hold_seconds, 300);
+        assert!(!plans[0].leader_amounts_reused);
+        assert!(!plans[0].execution_eligible);
+        assert!(!plans[0].broadcast);
+
+        for alternate in [
+            coherent_stonks_005_weth_quote(),
+            coherent_stonks_500_bps_quote(),
+        ] {
+            assert!(
+                finalized_stonks_plans(
+                    &HashMap::new(),
+                    &HashMap::from([(alternate.tx_hash, 2097)]),
+                    &ground_truth,
+                    std::slice::from_ref(&observation),
+                    vec![alternate],
+                    PaperPlanPolicy::default(),
+                )
+                .is_err()
+            );
+        }
+
+        let mut cap_drift = quote.clone();
+        cap_drift.max_amount_in += U256::from(1_u8);
+        assert!(
+            finalized_stonks_plans(
+                &HashMap::new(),
+                &HashMap::from([(cap_drift.tx_hash, 2097)]),
+                &ground_truth,
+                std::slice::from_ref(&observation),
+                vec![cap_drift],
+                PaperPlanPolicy::default(),
+            )
+            .is_err()
+        );
+
+        assert!(
+            finalized_stonks_plans(
+                &HashMap::new(),
+                &HashMap::new(),
+                &ground_truth,
+                std::slice::from_ref(&observation),
+                vec![quote.clone()],
+                PaperPlanPolicy::default(),
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            finalized_stonks_plans(
+                &HashMap::from([(key, 2097)]),
+                &HashMap::from([(quote.tx_hash, 2097)]),
+                &ground_truth,
+                std::slice::from_ref(&observation),
+                vec![quote.clone()],
+                PaperPlanPolicy::default(),
+            )
+            .is_err()
+        );
+
+        let mut tampered = quote.clone();
+        tampered.market.positions[0].liquidity += U256::from(1_u8);
+        assert!(
+            finalized_stonks_plans(
+                &HashMap::new(),
+                &HashMap::from([(tampered.tx_hash, 2097)]),
+                &ground_truth,
+                std::slice::from_ref(&observation),
+                vec![tampered],
+                PaperPlanPolicy::default(),
+            )
+            .is_err()
+        );
+
+        let mut tampered = quote.clone();
+        tampered.market.leader = Address::ZERO;
+        tampered.market.creator = Address::ZERO;
+        assert!(
+            finalized_stonks_plans(
+                &HashMap::new(),
+                &HashMap::from([(tampered.tx_hash, 2097)]),
+                &ground_truth,
+                std::slice::from_ref(&observation),
+                vec![tampered],
+                PaperPlanPolicy::default(),
+            )
+            .is_err()
+        );
+
+        let mut tampered = quote.clone();
+        tampered.market.mirror = Address::ZERO;
+        assert!(
+            finalized_stonks_plans(
+                &HashMap::new(),
+                &HashMap::from([(tampered.tx_hash, 2097)]),
+                &ground_truth,
+                std::slice::from_ref(&observation),
+                vec![tampered],
+                PaperPlanPolicy::default(),
+            )
+            .is_err()
+        );
+
+        let mut tampered = quote;
+        tampered.market.positions[0].log_index += 1;
+        tampered.state_version.terminal_log_index =
+            tampered.market.positions.last().unwrap().log_index;
+        assert!(
+            finalized_stonks_plans(
+                &HashMap::new(),
+                &HashMap::from([(tampered.tx_hash, 2097)]),
+                &ground_truth,
+                std::slice::from_ref(&observation),
+                vec![tampered],
+                PaperPlanPolicy::default(),
+            )
+            .is_err()
+        );
     }
 
     #[test]

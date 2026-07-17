@@ -650,6 +650,15 @@ fn parse_receipt(
         .iter()
         .filter_map(|log| decode_event::<abi::Mint>(log, create.pool))
         .collect();
+    // The direct-launch receipt-end quote is the initialized/minted state.
+    // Any additional pool-emitted event (including a Swap or Burn) means that
+    // assumption is incomplete and must be handled as a separately reviewed
+    // profile instead of silently quoting the initialization state.
+    let pool_log_count = receipt
+        .logs
+        .iter()
+        .filter(|log| log.address == create.pool)
+        .count();
     let initialize_tick = initializes
         .first()
         .and_then(|(_, event)| i32::try_from(event.tick).ok());
@@ -657,6 +666,7 @@ fn parse_receipt(
         || pool_created.len() != 1
         || locks.len() != 1
         || mints.len() != 11
+        || pool_log_count != 12
         || initialize_tick != Some(WETH_TICK_LOWER)
     {
         return Err(StonksV3ObserveError::PositionDrift);
@@ -879,13 +889,15 @@ fn decode_event<E: SolEvent>(log: &ReceiptLog, emitter: Address) -> Option<(&Rec
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use alloy_primitives::aliases::{I24, U24};
     use alloy_sol_types::SolValue;
     use serde_json::Value;
     use std::collections::HashMap;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn hex_u64(value: &str) -> u64 {
         u64::from_str_radix(value.trim_start_matches("0x"), 16).unwrap()
@@ -1177,6 +1189,123 @@ mod tests {
         }
     }
 
+    pub(crate) async fn fixture_observation() -> StonksV3ObservationEvidence {
+        let (transaction, receipt, block) = proof_fixture();
+        let rpc = FixtureRpc::new(&transaction, &receipt, &block);
+        observe_with_rpc(&rpc, &transaction, &receipt, &block)
+            .await
+            .unwrap()
+    }
+
+    async fn spawn_fixture_json_rpc(
+        fixture: FixtureRpc,
+    ) -> (NoxaRpcClient, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let client = NoxaRpcClient::with_url(url).unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed_requests = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0_u8; 8 * 1024];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(read, 0);
+                    request.extend_from_slice(&chunk[..read]);
+                    if let Some(offset) =
+                        request.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        break offset + 4;
+                    }
+                };
+                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                while request.len() < header_end + content_length {
+                    let mut chunk = [0_u8; 8 * 1024];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(read, 0);
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                let body: Value =
+                    serde_json::from_slice(&request[header_end..header_end + content_length])
+                        .unwrap();
+                let params = body["params"].as_array().unwrap();
+                let result = match body["method"].as_str().unwrap() {
+                    "eth_getCode" => {
+                        let address: Address = serde_json::from_value(params[0].clone()).unwrap();
+                        let code = fixture.codes.get(&address).unwrap();
+                        Value::String(format!("0x{}", hex::encode(code)))
+                    }
+                    "eth_getStorageAt" => Value::String(format!("{:#x}", fixture.storage)),
+                    "eth_call" => {
+                        let call = params[0].as_object().unwrap();
+                        let address: Address = serde_json::from_value(call["to"].clone()).unwrap();
+                        let calldata =
+                            hex::decode(call["data"].as_str().unwrap().trim_start_matches("0x"))
+                                .unwrap();
+                        let selector: [u8; 4] = calldata[..4].try_into().unwrap();
+                        let response = fixture.calls.get(&(address, selector)).unwrap();
+                        Value::String(format!("0x{}", hex::encode(response)))
+                    }
+                    "eth_getBlockByNumber" => serde_json::json!({
+                        "number": format!("0x{:x}", fixture.block.l2_block_number),
+                        "l1BlockNumber": format!("0x{:x}", fixture.block.l1_block_number),
+                        "timestamp": format!("0x{:x}", fixture.block.timestamp),
+                        "hash": fixture.block.hash,
+                    }),
+                    method => panic!("unexpected fixture RPC method {method}"),
+                };
+                observed_requests.fetch_add(1, Ordering::SeqCst);
+                let response = serde_json::to_vec(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": body["id"].clone(),
+                    "result": result,
+                }))
+                .unwrap();
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    response.len()
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                stream.write_all(&response).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+        });
+        (client, requests, server)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concrete_noxa_rpc_loopback_proves_observation_then_independent_quote() {
+        let (transaction, receipt, block) = proof_fixture();
+        let fixture = FixtureRpc::new(&transaction, &receipt, &block);
+        let (rpc, requests, server) = spawn_fixture_json_rpc(fixture).await;
+        let evidence =
+            observe_stonks_v3_direct_launch_at_receipt_block(&rpc, &transaction, &receipt, &block)
+                .await
+                .unwrap();
+        let quote = crate::stonks_v3_receipt_quote::quote_stonks_v3_observation(&evidence).unwrap();
+        assert!(requests.load(Ordering::SeqCst) > 40);
+        assert_eq!(
+            rpc.metrics().logical_requests as usize,
+            requests.load(Ordering::SeqCst)
+        );
+        assert_eq!(quote.tx_hash, transaction.hash);
+        assert!(quote.entry.expected_output > U256::ZERO);
+        assert!(quote.full_position_exit.expected_output > U256::ZERO);
+        assert!(!quote.execution_eligible);
+        assert!(!quote.broadcast);
+        server.abort();
+    }
+
     #[test]
     fn launch_selectors_are_isolated_and_profile_is_observe_only() {
         assert_eq!(abi::launchCall::SELECTOR, STONKS_V3_LAUNCH_SELECTOR);
@@ -1292,6 +1421,15 @@ mod tests {
         wrong_order.logs[mint_index].log_index = 32;
         assert_eq!(
             parse_receipt(&wrong_order, transaction.from, &symbol),
+            Err(StonksV3ObserveError::PositionDrift)
+        );
+        let mut extra_pool_event = receipt.clone();
+        let mut unknown = extra_pool_event.logs[mint_index].clone();
+        unknown.log_index = 31;
+        unknown.topics[0] = B256::with_last_byte(9);
+        extra_pool_event.logs.push(unknown);
+        assert_eq!(
+            parse_receipt(&extra_pool_event, transaction.from, &symbol),
             Err(StonksV3ObserveError::PositionDrift)
         );
     }

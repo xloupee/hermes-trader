@@ -43,6 +43,7 @@ pub mod sequencer;
 pub mod signer;
 pub mod smart_account;
 pub mod stonks_v3_observer;
+pub mod stonks_v3_receipt_quote;
 pub mod testnet_orchestrator;
 pub mod tier2_curve;
 pub mod trading_runtime;
@@ -164,6 +165,13 @@ pub use sequencer::{
     classify_conditional_response,
 };
 pub use signer::{KeystoreTradeSigner, SignerLoadError, TradeSigner};
+pub use stonks_v3_observer::StonksV3ObservationEvidence;
+pub use stonks_v3_receipt_quote::{
+    StonksV3DependencyPins, StonksV3MarketEvidence, StonksV3PaperSwapQuote, StonksV3QuoteError,
+    StonksV3QuotePolicy, StonksV3ReceiptPaperQuote, StonksV3RuntimePin, StonksV3StateVersion,
+    quote_stonks_v3_observation, stonks_v3_dependency_pins, stonks_v3_observation_proof_keccak256,
+    stonks_v3_quote_policy, validate_stonks_v3_quote_replay,
+};
 pub use testnet_orchestrator::{
     CanaryError, ConditionalRetryDecision, ConditionalRetryState, DedicatedNonceManager,
     NonceError, NonceLease, NonceLeaseState, PreflightError, RiskError, RiskLedger, RiskLimits,

@@ -41,6 +41,9 @@ use hermes_feed::stonks_v3_observer::{
     STONKS_V3_LAUNCHER, StonksV3ObservationEvidence,
     observe_stonks_v3_direct_launch_at_receipt_block,
 };
+use hermes_feed::stonks_v3_receipt_quote::{
+    StonksV3ReceiptPaperQuote, quote_stonks_v3_observation,
+};
 use hermes_feed::tier2_curve::HOOD_FACTORY;
 use hermes_feed::{
     BankrDopplerExpectedProfile, BankrDopplerQuotePolicy, BankrDopplerReceiptPaperQuote,
@@ -282,6 +285,7 @@ struct ReconciledCandidate {
     clanker_quote: Option<ClankerReceiptPaperQuote>,
     bankr_quote: Option<BankrDopplerReceiptPaperQuote>,
     stonks_observation: Option<StonksV3ObservationEvidence>,
+    stonks_quote: Option<StonksV3ReceiptPaperQuote>,
     pons_quote: Option<PonsReceiptPaperQuote>,
     hood_quote: Option<HoodReceiptPaperQuote>,
     hood_migration: Option<HoodMigrationEvidence>,
@@ -456,6 +460,9 @@ async fn main() -> Result<()> {
         }
         if let Some(observation) = result.stonks_observation {
             println!("{}", serde_json::to_string(&observation)?);
+        }
+        if let Some(quote) = result.stonks_quote {
+            println!("{}", serde_json::to_string(&quote)?);
         }
         if let Some(quote) = result.pons_quote {
             println!("{}", serde_json::to_string(&quote)?);
@@ -813,6 +820,7 @@ async fn reconcile_candidate(
             let mut clanker_quote = None;
             let mut bankr_quote = None;
             let mut stonks_observation = None;
+            let mut stonks_quote = None;
             let mut pons_quote = None;
             let mut hood_quote = None;
             let mut hood_migration = None;
@@ -941,13 +949,25 @@ async fn reconcile_candidate(
                 )
                 .await
                 {
-                    Ok(observation) => {
+                    Ok(mut observation) => {
                         protocol_match = true;
                         truth_action = Some(ActionKind::Launch);
                         truth_token = Some(observation.asset);
                         truth_pool = Some(observation.pool);
-                        quote_status = QuoteStatus::NotApplicable;
-                        protocol_blocker = Some(observation.quote_blocker.clone());
+                        match quote_stonks_v3_observation(&observation) {
+                            Ok(quote) => {
+                                quote_status = QuoteStatus::Available;
+                                observation.quote_status = "available".into();
+                                observation.quote_blocker =
+                                    "receipt_confirmed_paper_quote_only_candidate_time_prediction_unavailable"
+                                        .into();
+                                stonks_quote = Some(quote);
+                            }
+                            Err(error) => {
+                                quote_status = QuoteStatus::Blocked;
+                                protocol_blocker = Some(format!("stonks_v3_strict_quote:{error}"));
+                            }
+                        }
                         stonks_observation = Some(observation);
                     }
                     Err(error) => {
@@ -1109,6 +1129,7 @@ async fn reconcile_candidate(
                 clanker_quote,
                 bankr_quote,
                 stonks_observation,
+                stonks_quote,
                 pons_quote,
                 hood_quote,
                 hood_migration,
@@ -1142,6 +1163,7 @@ async fn reconcile_candidate(
                 clanker_quote: None,
                 bankr_quote: None,
                 stonks_observation: None,
+                stonks_quote: None,
                 pons_quote: None,
                 hood_quote: None,
                 hood_migration: None,
@@ -1421,8 +1443,164 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn stonks_raw_proof_crosses_hermetic_concrete_reconciler_and_matches_quote_fixture() {
+        let proof: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/stonks-v3-direct-launch-fresh-rpc-proof.json"
+        ))
+        .unwrap();
+        let transcript: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/stonks-v3-concrete-rpc-transcript.json"
+        ))
+        .unwrap();
+        let runtime_code: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/stonks-v3-direct-launch-runtime-code.json"
+        ))
+        .unwrap();
+        let expected_quote: StonksV3ReceiptPaperQuote = serde_json::from_str(include_str!(
+            "../../tests/fixtures/stonks-v3-direct-launch-paper-quote.json"
+        ))
+        .unwrap();
+        let tx_hash = expected_quote.tx_hash;
+        let block_number = expected_quote.l2_block_number;
+        let block_tag = format!("0x{block_number:x}");
+        let mut steps = vec![
+            RpcStep {
+                method: "eth_getTransactionReceipt",
+                params: json!([tx_hash]),
+                result: proof["receipt"].clone(),
+            },
+            RpcStep {
+                method: "eth_getBlockByNumber",
+                params: json!([block_tag, false]),
+                result: proof["block"].clone(),
+            },
+            RpcStep {
+                method: "eth_getTransactionByHash",
+                params: json!([tx_hash]),
+                result: proof["transaction"].clone(),
+            },
+            RpcStep {
+                method: "eth_getBlockByNumber",
+                params: json!([format!("0x{block_number:x}"), false]),
+                result: proof["block"].clone(),
+            },
+        ];
+        for step in transcript["steps"].as_array().unwrap() {
+            let method = match step["method"].as_str().unwrap() {
+                "eth_getCode" => "eth_getCode",
+                "eth_getStorageAt" => "eth_getStorageAt",
+                "eth_call" => "eth_call",
+                "eth_getBlockByNumber" => "eth_getBlockByNumber",
+                method => panic!("unexpected Stonks transcript method {method}"),
+            };
+            let result = if method == "eth_getCode" {
+                let address = step["params"][0].as_str().unwrap().to_ascii_lowercase();
+                runtime_code["contracts"]
+                    .get(&address)
+                    .unwrap_or_else(|| panic!("missing Stonks runtime fixture for {address}"))
+                    .clone()
+            } else {
+                step["result"].clone()
+            };
+            steps.push(RpcStep {
+                method,
+                params: step["params"].clone(),
+                result,
+            });
+        }
+        let launched = proof["receipt"]["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|log| {
+                log["address"]
+                    .as_str()
+                    .unwrap()
+                    .eq_ignore_ascii_case("0x2a71f10b41ff0882c7be2a5c0644722314976b42")
+                    && log["topics"][0].as_str().unwrap().eq_ignore_ascii_case(
+                        "0xd241a654f2729cabac6fa4c5e434b2a989c4303df975fcecfa2a927b2f20001e",
+                    )
+            })
+            .unwrap();
+        let candidate = ObservedCandidate {
+            tx_hash,
+            launchpad: LaunchpadId::StonksV3,
+            observer_claim: false,
+            ground_truth_event: true,
+            ground_truth_hits: vec![GroundTruthHit {
+                l2_block_number: block_number,
+                block_hash: expected_quote.state_version.block_hash,
+                transaction_index: expected_quote.state_version.transaction_index,
+                log: ReceiptLog {
+                    address: launched["address"].as_str().unwrap().parse().unwrap(),
+                    log_index: u64::from_str_radix(
+                        launched["logIndex"]
+                            .as_str()
+                            .unwrap()
+                            .trim_start_matches("0x"),
+                        16,
+                    )
+                    .unwrap(),
+                    topics: launched["topics"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|topic| topic.as_str().unwrap().parse().unwrap())
+                        .collect(),
+                    data: Bytes::from(
+                        hex::decode(launched["data"].as_str().unwrap().trim_start_matches("0x"))
+                            .unwrap(),
+                    ),
+                },
+            }],
+            wrapper: WrapperKind::Direct,
+            wrapper_provenance: None,
+        };
+        let expected_requests = steps.len();
+        let (rpc, server) = spawn_exact_rpc_server(steps).await;
+        let reconciled = reconcile_candidate(
+            &rpc,
+            candidate,
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+            bankr_quote_policy(),
+            bankr_reconcile_profiles(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reconciled.evidence.quote_status,
+            QuoteStatus::Available,
+            "Stonks blocker: {:?}",
+            reconciled.evidence.protocol_blocker
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            rpc.metrics().logical_requests as usize,
+            expected_requests,
+            "Stonks transcript request count drift"
+        );
+        let consumed = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("Stonks concrete RPC transcript was not fully consumed")
+            .unwrap();
+        assert_eq!(consumed, expected_requests);
+        assert_eq!(rpc.metrics().logical_requests as usize, expected_requests);
+        assert_eq!(reconciled.evidence.quote_status, QuoteStatus::Available);
+        assert!(reconciled.evidence.protocol_blocker.is_none());
+        assert_eq!(reconciled.stonks_quote.as_ref(), Some(&expected_quote));
+        let observation = reconciled.stonks_observation.unwrap();
+        assert_eq!(observation.quote_status, "available");
+        assert!(!observation.paper_evidence_ready);
+        assert!(!expected_quote.candidate_time_prediction_available);
+        assert!(!expected_quote.authorizes_canary);
+        assert!(!expected_quote.execution_eligible);
+        assert!(!expected_quote.broadcast);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     #[ignore = "explicit public read-only production reconciler proof; not part of hermetic CI"]
-    async fn fresh_stonks_proof_crosses_concrete_noxa_rpc_reconciler_as_observe_only() {
+    async fn fresh_stonks_proof_crosses_concrete_noxa_rpc_reconciler_into_strict_paper_quote() {
         let tx_hash = alloy_primitives::b256!(
             "d53c3d8d8c76fd5f367d3d229a45e1aef65c0cdb712d94421f311f97fe6dd563"
         );
@@ -1465,10 +1643,20 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(reconciled.evidence.launchpad, LaunchpadId::StonksV3);
-        assert_eq!(reconciled.evidence.quote_status, QuoteStatus::NotApplicable);
+        assert_eq!(reconciled.evidence.quote_status, QuoteStatus::Available);
         assert!(reconciled.bankr_quote.is_none());
+        let quote = reconciled.stonks_quote.unwrap();
+        assert_eq!(quote.entry.amount_in, U256::from(1_000_000_000_000_000_u64));
+        assert!(quote.entry.expected_output > U256::ZERO);
+        assert!(quote.full_position_exit.expected_output > U256::ZERO);
+        assert!(!quote.candidate_time_prediction_available);
+        assert!(!quote.paper_evidence_ready);
+        assert!(!quote.authorizes_canary);
+        assert!(!quote.execution_eligible);
+        assert!(!quote.broadcast);
         let observation = reconciled.stonks_observation.unwrap();
         assert_eq!(observation.profile, "stonks_v3_direct_launch");
+        assert_eq!(observation.quote_status, "available");
         assert!(!observation.paper_evidence_ready);
         assert!(!observation.authorizes_canary);
         assert!(!observation.execution_eligible);

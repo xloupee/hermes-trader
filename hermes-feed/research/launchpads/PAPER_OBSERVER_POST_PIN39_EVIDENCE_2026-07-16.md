@@ -265,7 +265,93 @@ window on exact `bbef8b4` or later remains required. The separate clean1
 payable Tator-extension/two-position envelope remains unsupported and strictly
 quote-blocked.
 
-## Aggregate readiness decision
+## Clean4 current-code live cohort and corrected Pons classification
+
+The attempted clean3 window is excluded. Its `tee` persistence path failed
+closed on `ENOSPC`, so it is not treated as a complete feed, reconciliation
+window, latency sample, or readiness input. The failed clean3 directory and
+snapshot were left untouched for forensic provenance.
+
+Clean4 is the first complete live-only cohort for the current observer code.
+The release-build, build-idle window at
+`.runtime/paper-session-20260716-d00adac-clean4` used the private FIFO through
+`tee` topology and only emitted the `connected` and `coverage_closed` probe
+states. Its independently generated 39-pin startup snapshot was
+`.runtime/launchpad-observed-startup-pins39-d00adac-clean4.json`:
+
+- confirmed L2 block `11776795`, hash
+  `0x7d36b7564740627818e179445a8b4a48339a3339199953ef1dcc749879379de0`,
+  L1 block `25549548`, timestamp `1784256912`;
+- all 39 production expected pins passed validation without promoting observed
+  hashes into expected authority; and
+- snapshot SHA-256
+  `093180b4a1f339ddd65cb1b27af1c059e7d2897cb2533edc38f1a18695967592`.
+
+The persisted start anchor is block `11776968`, hash
+`0x3f5dd2f9d08061986968449a7ab39da9aa0303ac4d41555b46f462369af018ca`.
+The cutoff anchor is block `11782950`, hash
+`0x2f46f09656c28e7059be75b1b8a4dfdb05494fdd73d74f7f952767aa56862c5c`.
+The complete scored interval is `11776969..=11782950`, or 5,982 blocks. The
+window contains 6,617 raw rows, 6,618 observer rows, 75,571 isolated probe
+metric rows, 133 reconciliation rows, and 26 finalized rows. Both evidence
+directories are mode 0700 and every contained file is mode 0600.
+
+The latency values below come only from the live warm-state observer records.
+The post-window collector replay corrects Pons event-generation classification
+but does not replace or fabricate observation latency.
+
+| Launchpad | Truth | Confirmed | False positives | Missed (detector / coverage) | Live latency p50 / p95 / p99 | Quote result | Profile evidence |
+|---|---:|---:|---:|---:|---|---|---|
+| Bow | 0 | 0 | 0 | 0 (0 / 0) | - | no activity | no activity |
+| LaunchHood V3 | 4 | 4 | 0 | 0 (0 / 0) | 0.419 / 1.641 / 1.641 ms | 4/4 matched; zero identity, action, direction, prediction, or quote errors | embedded buy 4 |
+| Clanker | 6 | 6 | 0 | 0 (0 / 0) | 0.341 / 4.809 / 4.809 ms | 6/6 matched; zero identity, action, direction, prediction, or quote errors | extensionless 1; pinned extension 5 |
+| Bankr/Doppler | 4 | 4 | 0 | 0 (0 / 0) | 0.522 / 2.579 / 2.579 ms | 4/4 matched; zero identity, action, direction, prediction, or quote errors | V3/ERC-7579 4 |
+| Pons | 40 | 39 | 0 | 1 (1 / 0) | 0.346 / 1.475 / 1.957 ms | one current-generation row quote-blocked; 39 legacy rows not applicable | one hard detector miss |
+| Hood | 0 | 0 | 0 | 0 (0 / 0) | - | no activity | no activity |
+
+Bankr emitted ten claims: four confirmed observations, four reverted attempts,
+and two out-of-scope observations. Pons emitted 45 claims: 39 confirmed legacy
+observations and six out-of-scope observations. These reverted and
+out-of-range rows are not false positives.
+
+The 14 finalized paper plans comprise four LaunchHood plans at 9,801 bps
+simulated immediate round-trip return, six Clanker plans at 849 bps, and four
+Bankr plans at 97 bps. Every plan includes independent entry sizing, entry and
+exit slippage, a full-position exit quote and exit policy; every plan retains
+`execution_eligible: false` and `broadcast: false`.
+
+The exact Pons miss is transaction
+`0x7a13c94f90ddaa7d35d639f046f30a44d1d9b5fe449550fd0b75e5e65a0fb4c6`.
+It emitted a current-generation Pons event inside an unreviewed EIP-7702
+self-call using selector `0x3f707e6b`. At receipt block `11777530`, the account
+designator was
+`0xef0100dc44136e7ca3509a73fc6c22b6a6bd302bf9a1e2`, delegating to
+`0xdc44136e7ca3509a73fc6c22b6a6bd302bf9a1e2`; the delegated runtime hash was
+`0x6d7379e6220b87ceeade4a4e069c6a5ca4636fc228a0c948a0c87177860f3baa`.
+None is an independently reviewed production pin or per-account execution
+profile.
+
+Commit `0f8dab8` corrects collector classification by deriving Pons generation
+from the receipt event, rather than whether the observer happened to claim the
+transaction. The corrected replay at
+`.runtime/paper-session-20260716-d00adac-clean4-post-pons-generation-replay`
+therefore classifies the missed row as current generation, while intentionally
+preserving the observer miss and rejecting its quote with the invalid-envelope
+blocker. This is a classification correction, not support for the wrapper.
+Candidate provenance work is still under review and is not integrated or
+claimed as expected-pin authority. The designator, delegated runtime, and
+per-account execute profile all require independent pin review before this
+envelope can be supported or promoted.
+
+Clean4 establishes one of the three required current-code live windows. Its
+standalone readiness counts are LaunchHood 4, Clanker 6, Bankr 4, Pons 0,
+Bow 0, and Hood 0. Every launchpad remains `paper_evidence_ready: false`,
+`authorizes_canary: false`, and `execution_eligible: false`; Pons additionally
+has the hard detector miss. Clean4 is deliberately not added blindly to the
+historical replay aggregate below because that aggregate mixes older live code
+and replay-only cohorts with different evidence boundaries.
+
+## Historical replay aggregate readiness decision
 
 The conservative evaluator accepts the four non-overlapping anchored windows
 as complete scoring inputs, but every launchpad remains not ready and every
@@ -280,13 +366,17 @@ row retains `authorizes_canary: false` and `execution_eligible: false`:
 | Pons | 1 | current generation 1/10 | two identity mismatches on the current row |
 | Hood | 2 | current curve 2/10 | none |
 
-The four-window count does not replace the operational live requirement:
+This historical four-window count does not replace the operational live
+requirement:
 fresh1 may be build-contaminated, quiet1 is a replay, and clean1's live binary
 predated the long-name fix. Clean2 is build-idle and supplies useful live
 latency, but its binary predates the active-boundary fix. A new live window on
-exact `bbef8b4` or later is still required before any window can be called
-current-code promotion-grade. Passing one Clanker profile threshold does not
-override the 100-confirmation threshold or the sparse extensionless profile.
+exact `bbef8b4` or later was therefore required. Clean4 now supplies the first
+such complete current-code live-only cohort, but it is scored separately above
+and does not retroactively make these older cohorts promotion-grade. Passing
+one Clanker profile threshold does not override the 100-confirmation threshold,
+the three-current-window requirement, the sparse extensionless profile, or the
+clean4 Pons detector miss.
 
 ## Artifact integrity
 
@@ -319,6 +409,14 @@ The key local files are bound by these SHA-256 digests:
 | clean2 post-fix reconciliation | `3f452cecc35d2a661e917f09f7e62fdd6e2be6450a994596def857cc5c597f40` |
 | clean2 post-fix finalized output | `8301ac9c478da600a596ef0fb8dc24cb8f3d01bf08518cd7d9e5ae4dc40acd83` |
 | four-window aggregate readiness decision | `60c80b796393aa38ed2d6af3cc05c7b515fd1069568d7fe013d6740600a97abd` |
+| clean4 39-pin startup snapshot | `093180b4a1f339ddd65cb1b27af1c059e7d2897cb2533edc38f1a18695967592` |
+| clean4 raw feed | `445c6221facff2418bdca9ff24375f694d26bbaa0509c19bc73914a90c269fae` |
+| clean4 live observer output | `0217b91ec8d14950cc4263c401bfbd43e90f131c11439efc36864fbbb45e73fc` |
+| clean4 probe metrics | `fa9db668daba5c08d30b21f42471c49d1c0139c86360b70b41de933f401d7aff` |
+| clean4 live reconciliation | `a1e7d8e8b40d5a574fa99f983cefc9b634d029e67e6ec17e22899335d5a5d1bb` |
+| clean4 live finalized output | `b39447733c727fc8255d59a5ed98a8755d74d272e159a6a7f27b4cc40ee77c97` |
+| clean4 corrected-generation reconciliation | `314d7bc6f80f56b0f133ed9eef846fba87c3423c46bb731f85ae88cd63c58946` |
+| clean4 corrected-generation finalized output | `a01cad25800d648aba56e8bc5e525ed21831686c205dcd4528b2a2a050389546` |
 
 ## Remaining evidence gaps
 
@@ -328,8 +426,9 @@ complete non-overlapping windows, with zero false positives, detector misses,
 identity failures, direction failures, prediction failures, or quote failures.
 Current gaps include:
 
-1. Collect a new clean, build-idle warm-state window on exact `bbef8b4` or later;
-   then accumulate three promotion-grade live windows, not replay-only scores.
+1. Clean4 is the first clean, build-idle current-code warm-state window.
+   Accumulate two more complete non-overlapping current-code live windows, not
+   replay-only scores, while retaining the clean4 Pons hard miss.
 2. Observe both Clanker
    `extensionless_single_position` and `pinned_extension_five_position` at
    least ten times each. The pinned-extension profile has 15 observations, but

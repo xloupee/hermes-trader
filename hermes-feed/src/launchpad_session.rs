@@ -101,10 +101,18 @@ pub struct ValidatedPaperSession {
     pub executables: SessionExecutables,
 }
 
-pub fn ensure_compatible_independent_sessions(sessions: &[ValidatedPaperSession]) -> Result<()> {
+pub fn ensure_compatible_independent_sessions(
+    sessions: &[ValidatedPaperSession],
+    current_readiness_keccak256: B256,
+) -> Result<()> {
     let Some(first) = sessions.first() else {
         bail!("completed-session readiness requires at least one session");
     };
+    if current_readiness_keccak256 == B256::ZERO
+        || first.executables.readiness_keccak256 != current_readiness_keccak256
+    {
+        bail!("completed sessions were produced by a different readiness executable");
+    }
     let mut digests = HashSet::new();
     let mut boundaries = HashSet::new();
     for session in sessions {
@@ -918,7 +926,10 @@ mod tests {
             second.observed_snapshot_content_keccak256
         );
         assert_eq!(first.snapshot_boundary, second.snapshot_boundary);
-        assert!(ensure_compatible_independent_sessions(&[first, second]).is_err());
+        let readiness_keccak256 = first.executables.readiness_keccak256;
+        assert!(
+            ensure_compatible_independent_sessions(&[first, second], readiness_keccak256).is_err()
+        );
 
         let first = session(900);
         let mut second = session(901);
@@ -928,10 +939,27 @@ mod tests {
         let first = validate_completed_session(first.path()).unwrap();
         let second = validate_completed_session(second.path()).unwrap();
         assert!(
-            ensure_compatible_independent_sessions(&[first, second])
+            ensure_compatible_independent_sessions(&[first, second], B256::with_last_byte(5))
                 .unwrap_err()
                 .to_string()
                 .contains("mixed executable tuple")
+        );
+    }
+
+    #[test]
+    fn upgraded_readiness_evaluator_rejects_older_completed_sessions() {
+        let first = session(900);
+        let second = session(901);
+        first.complete().unwrap();
+        second.complete().unwrap();
+        let first = validate_completed_session(first.path()).unwrap();
+        let second = validate_completed_session(second.path()).unwrap();
+        let upgraded = B256::with_last_byte(99);
+        assert!(
+            ensure_compatible_independent_sessions(&[first, second], upgraded)
+                .unwrap_err()
+                .to_string()
+                .contains("different readiness executable")
         );
     }
 }

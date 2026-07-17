@@ -53,17 +53,19 @@ fn main() -> Result<()> {
     }
     let cli = Cli::parse();
     let trusted_mode = cli.complete_session.is_some() || !cli.session_dirs.is_empty();
-    if trusted_mode {
-        verify_expected_self_keccak256(
+    let verified_readiness_keccak256 = if trusted_mode {
+        Some(verify_expected_self_keccak256(
             cli.expected_self_keccak256
                 .context("trusted session mode requires --expected-self-keccak256")?,
-        )?;
-    }
+        )?)
+    } else {
+        None
+    };
     if let Some(directory) = cli.complete_session.as_ref() {
         if cli.input.is_some() || !cli.session_dirs.is_empty() {
             bail!("--complete-session cannot be combined with readiness inputs");
         }
-        let readiness_keccak256 = cli.expected_self_keccak256.expect("validated above");
+        let readiness_keccak256 = verified_readiness_keccak256.expect("validated above");
         let paper_bin = cli.paper_bin.as_ref().context("missing --paper-bin")?;
         let path = complete_session(
             directory,
@@ -95,7 +97,8 @@ fn main() -> Result<()> {
                 })?,
             );
         }
-        ensure_compatible_independent_sessions(&sessions)?;
+        let readiness_keccak256 = verified_readiness_keccak256.expect("validated above");
+        ensure_compatible_independent_sessions(&sessions, readiness_keccak256)?;
         let executables = sessions[0].executables.clone();
         let manifests = sessions
             .iter()
@@ -110,7 +113,7 @@ fn main() -> Result<()> {
             &manifests,
             executables.feed_keccak256,
             executables.chain_head_keccak256,
-            executables.readiness_keccak256,
+            readiness_keccak256,
         )?)?;
         return Ok(());
     }

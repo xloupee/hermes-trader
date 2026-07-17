@@ -404,10 +404,29 @@ observer rejected it because its strict receipt validator assumed the creator
 beneficiary must be first, while this launch's canonical address ordering put
 the protocol beneficiary first. The bounded fix derives beneficiary roles by
 identity and share while preserving canonical address ordering, then binds
-token vesting to the derived creator. As of this report commit, that fix exists
-only in an isolated worktree: it is not integrated or pushed, its tests are
-pending, and clean6 retains the detector miss and blocked quote. This
-provisional disposition does not authorize support or promotion.
+token vesting to the derived creator.
+
+The isolated fix commit `f0e59c7` was independently reviewed against
+`12e4e9e`: the read-only review found no P0-P2 issue and judged the bounded
+change integration-ready. It was integrated and pushed as exact commit
+`afde63ab49059ac5b178363a476f7086b03728ae`. Both the isolated and integrated
+trees passed `cargo test --release --all-targets`: 341 library tests and every
+binary target, including paper 24/24, reconciliation 14/14, pin snapshot 8/8,
+and runtime 29/29. The focused clean6 proof tests passed 2/2, the Bankr receipt
+quote module passed 30/30, strict release clippy with warnings denied passed,
+and formatting and diff checks passed.
+
+The diagnostic replay files
+`/private/tmp/clean6-f0e59c7-{observer,reconciliation,finalized}-replay.jsonl`
+apply that fix to clean6's exact persisted raw stream. The previously missed
+transaction now has `observer_claim: true` and `quote_status: available`.
+Bankr scores 10/10 confirmed and independently quoted, with zero false
+positives, detector misses, identity, action, direction, prediction, or quote
+mismatches; both `curve_ticks_v3` and `erc7579` reach 10 observations. This is
+only a bounded correctness diagnostic: its provenance says
+`acquisition: replay`, its latency measures replay backlog and is excluded,
+and it is not accepted as a promotion or live-readiness window. Clean6 itself
+remains prior-build `e975555` live evidence with the original detector miss.
 
 Clean6 finalized 16 independent paper plans: two LaunchHood, five Clanker, and
 nine Bankr. Their simulated immediate round-trip returns are 9,801, 849, and
@@ -435,6 +454,102 @@ Every clean6 readiness row remains `paper_evidence_ready: false`,
 `authorizes_canary: false`, and `execution_eligible: false`. Clean6 is not
 combined blindly with older live or replay cohorts whose completion and binary
 provenance do not satisfy the current manifest-trust boundary.
+
+## Clean7 current-build live evidence
+
+Clean7 is the first completed current-build live window on exact integrated
+commit `afde63ab49059ac5b178363a476f7086b03728ae`, at
+`.runtime/paper-session-20260716-afde63a-clean7`. It used the correct private
+FIFO through `tee` topology and has a schema-1 completion manifest that binds
+the frozen expected pins, startup snapshot, complete executable tuple,
+anchors, raw stream, observer output, independently collected receipt/event
+evidence, and independently finalized output. Probe state is exactly
+`connected` then `coverage_closed`, with zero reconnects.
+
+The independently generated startup snapshot is
+`.runtime/launchpad-observed-startup-pins39-afde63a-clean7.json`:
+
+- schema 4, `observed_startup_snapshot`, chain 4663, and 39 pins compared to
+  the pre-existing production expected-pin authority;
+- confirmed L2 block `11854687`, hash
+  `0xa159f6379c71ac0818941be277da69efd89d3d2aa1cee6a10b1b50d23ca3dae8`,
+  L1 block `25550197`, timestamp `1784264722`; and
+- SHA-256
+  `c35ca3623296d9ded74db02e5a8bc5a57ea98db6aa702be53a1f668c1f265680`.
+
+Observed values were not promoted into expected authority. The persisted
+start boundary is block `11854830`, hash
+`0xc728f5b9a496aa2ccf6c3175865fc25293de403219176250050065fb02ad3645`;
+the cutoff is block `11860795`, hash
+`0x7445e236f777e72e897cd192340911d3b584faaaa1432bdb0066e0dee36b18fd`.
+The snapshot-to-start gap is 143 blocks, below the 500-block manifest limit.
+The complete scored interval is `11854831..=11860795`, or 5,965 blocks.
+
+Clean7 contains 7,091 raw rows, 7,092 observer rows, 66,822 isolated probe
+metric rows, 101 reconciliation rows, and 22 finalized rows. The finalized
+rows comprise six per-launchpad metrics, six readiness windows, and ten paper
+plans. The session directory is mode 0700 and all contained artifacts, the
+source snapshot, and the standalone readiness result are mode 0600.
+
+The completion manifest binds the exact current-build executable tuple:
+feed `0x153e82c49ee04aebe5b1d7d610ac0fc08eca171067303b9bd49b907fc651a286`,
+paper/finalizer
+`0x775fe648869ac875ce3e02ba21c03f11cfe2d3fed86c18c7e5a5691ad50de829`,
+reconciler
+`0xf118803cc8cef736e53572a6d3b70f26618d9204a42ac08a7ba7f63e70a79832`,
+chain-head
+`0x6d428d3fcd934e67e71ff588ac6f68b81c16af4c78ca693d8aa87341971827fb`,
+and readiness
+`0x45af4d751e27e48e8ce543741792d3cd8c38f1de0e512e30e07ca5d23e7875b2`.
+It also binds expected-pin content
+`0x3319c7dfd7202170447a747de3e6dd0c6e1606a48b1c520caa59b3994db6d52b`
+and frozen snapshot content
+`0xeed6eb618a32f39be36d09bd070985a0d28786a80b2b2babbafd647d239a47ce`.
+
+| Launchpad | Truth | Confirmed | False positives | Missed (detector / coverage) | Live latency p50 / p95 / p99 | Quote result | Profile evidence |
+|---|---:|---:|---:|---:|---|---|---|
+| Bow | 0 | 0 | 0 | 0 (0 / 0) | - | no activity | payable 0; zero-buy 0 |
+| LaunchHood V3 | 4 | 4 | 0 | 0 (0 / 0) | 0.328 / 0.870 / 0.870 ms | 4/4 available and matched; zero identity, action, direction, prediction, or quote errors | embedded buy 4 |
+| Clanker | 3 | 3 | 0 | 0 (0 / 0) | 0.333 / 0.510 / 0.510 ms | 3/3 available and matched; zero identity, action, direction, prediction, or quote errors | extensionless 0; pinned extension 3 |
+| Bankr/Doppler | 3 | 3 | 0 | 0 (0 / 0) | 0.458 / 5.303 / 5.303 ms | 3/3 available and matched; zero identity, action, direction, prediction, or quote errors | V3 3; ERC-7579 3; V1/V2/direct 0 |
+| Pons | 25 | 25 | 0 | 0 (0 / 0) | 0.358 / 1.417 / 2.814 ms | 25 legacy/not applicable; zero current-generation quote-eligible rows | current generation 0 |
+| Hood | 0 | 0 | 0 | 0 (0 / 0) | - | no activity | current curve 0 |
+
+LaunchHood emitted five claims: four confirmations and one out-of-scope
+observation. Clanker emitted four: three confirmations and one out of scope.
+Bankr emitted eight: three confirmations, three reverted attempts, and two out
+of scope. Pons emitted 27: 25 confirmed legacy observations and two out of
+scope. Reverted and out-of-range records are not false positives. Across the
+six scored launchpads, clean7 has zero false positives, detector or coverage
+misses, identity mismatches, action or direction mismatches, prediction
+mismatches, and independent-quote mismatches.
+
+Clean7 finalized ten independent plans: four LaunchHood, three Clanker, and
+three Bankr. Every plan independently sizes `0.001 WETH`, applies 1% entry and
+exit slippage, quotes a full-position exit, retains the take-profit,
+stop-loss, and max-hold policy, does not reuse leader amounts, and keeps
+`execution_eligible: false` and `broadcast: false` at both levels.
+
+| Launchpad | Plans | Expected entry output | Entry minimum | Expected full exit | Exit minimum | Simulated round-trip return |
+|---|---:|---:|---:|---:|---:|---:|
+| LaunchHood V3 | 4 | `729729.244852920426979991` tokens | `722431.952404391222710191` | `0.000980107152180750 WETH` | `0.000970306080658942 WETH` | 9,801 bps |
+| Clanker | 3 | `2977989.243985511988125632` tokens | `2948209.351545656868244375` | `0.000084919129125191 WETH` | `0.000084069937833939 WETH` | 849 bps |
+| Bankr/Doppler | 3 | `904475.731970933213278599` tokens | `895430.974651223881145813` | `0.000009736782115644 WETH` | `0.000009639414294487 WETH` | 97 bps |
+
+The manifest-trusted clean7 readiness result is
+`.runtime/launchpad-readiness-afde63a-clean7.jsonl`. It accepts one submitted,
+complete, independent live window and binds the current readiness executable
+to the same exact executable tuple as the session. It reports quote-eligible
+counts of LaunchHood 4, Clanker 3, Bankr 3, and zero for Bow, Pons, and Hood.
+Every row remains `paper_evidence_ready: false`, `authorizes_canary: false`,
+and `execution_eligible: false` because the 100-confirmation, ten-per-profile,
+and three-window thresholds are not met.
+
+Clean7 is only **one of three** required non-overlapping live windows for the
+exact `afde63a` executable tuple. Clean6 cannot be combined with it by the
+trusted aggregator because clean6 is prior-build `e975555` live evidence, and
+the corrected clean6 pass is replay-only diagnostic evidence. No canary is
+authorized.
 
 ## Historical replay aggregate readiness decision
 
@@ -510,6 +625,17 @@ The key local files are bound by these SHA-256 digests:
 | clean6 live finalized output | `d49ff708445a6095b1fafc7f9e55ea364f5cb0d5d71cb5c8aab3e0357750e8f4` |
 | clean6 completion manifest | `19cc64b36e7166a4b1f0365606675792e9851e1d270de34d26ca3fd8d0eb30fb` |
 | clean6 readiness decision | `8da7d5c09205acfeca47914d0d9eb82870350aa52189ab1a0eb5faf3127790f6` |
+| clean6 fixed observer diagnostic replay | `4a1a7f0a8089d8559b025f514926a266963e2fda6c9e3c4f5e4a620579d9f3b6` |
+| clean6 fixed reconciliation diagnostic replay | `f4cb6c24978ed12f13566b190af6b7b44a6bdc488e64ce53a6febd17204388de` |
+| clean6 fixed finalized diagnostic replay | `614c7b7a2f1f262c5d38c476702da41ae8e450145060e64a39bcc2095a8df918` |
+| clean7 39-pin startup snapshot | `c35ca3623296d9ded74db02e5a8bc5a57ea98db6aa702be53a1f668c1f265680` |
+| clean7 raw feed | `fae35c564b52153c2c2914a03d22ddf7d0412b4205dfe209ee071783832cb578` |
+| clean7 live observer output | `98c96badf99cf51ef58dfe0bacdedb86546910135bc3fdcfefa0b342f035e29e` |
+| clean7 probe metrics | `c63892d67ddde7f2e2a98e8c71c6c0fe1e5c5c7d43c93f5f2e08221e0e23b823` |
+| clean7 live reconciliation | `06db15dc69ec4882a9372040897bbd8f07f3bce93a062b81f57e5d599cea8289` |
+| clean7 live finalized output | `ab5f332d3a18fabebcdc620e6517f93763661734a5acba2a0339e8a7c28193d2` |
+| clean7 completion manifest | `4fa4f90f0f89c2d9b989e299980a13aae3493238c942975a292cb8d260f9747f` |
+| clean7 readiness decision | `22afa42c75914036315818375f527e3c4625d0a9b0679dc647458cef13647b83` |
 
 ## Remaining evidence gaps
 
@@ -519,20 +645,22 @@ complete non-overlapping windows, with zero false positives, detector misses,
 identity failures, direction failures, prediction failures, or quote failures.
 Current gaps include:
 
-1. Clean6 is the first live window accepted by the current completion-manifest
-   trust boundary. Accumulate two more complete, non-overlapping,
-   provenance-compatible live windows, not replay-only scores. Retain both the
-   historical clean4 Pons miss and the clean6 Bankr miss as hard errors in
-   their respective evidence cohorts.
+1. Clean7 is only the first complete live window for the exact `afde63a`
+   executable tuple. Accumulate two more complete, non-overlapping windows
+   with the same trusted tuple, not replay-only scores. Keep clean6 classified
+   as prior-build live evidence and its fixed replay as a diagnostic only;
+   retain the historical clean4 Pons miss and the original clean6 Bankr miss
+   in their respective live cohorts.
 2. Observe both Clanker
    `extensionless_single_position` and `pinned_extension_five_position` at
    least ten times each. The pinned-extension profile has 15 observations, but
    extensionless remains at one. Keep the payable Tator-extension/two-position
    envelope quote-blocked pending separate pin and semantic review.
-3. Keep the clean6 Bankr beneficiary-order fix unpromoted until its exact real
-   proof and strict negative tests pass and the bounded change is integrated.
-   Expand Bankr beyond V3/ERC-7579: V1, V2, direct Airlock, and the remaining
-   per-stratum thresholds are still sparse or absent.
+3. The bounded Bankr beneficiary-order fix is independently reviewed, tested,
+   integrated, and proven by clean7's current-build live window, but its 3/100
+   quote count and 3/10 V3/ERC-7579 profile counts remain sparse. Expand Bankr
+   beyond V3/ERC-7579: V1, V2, direct Airlock, and the remaining per-stratum
+   thresholds are still absent.
 4. Keep the 37 fresh1 legacy Pons confirmations discovery-only; they are not a
    promotion profile. Collect current-generation observations with strict
    token/pool identity and quote validation instead.

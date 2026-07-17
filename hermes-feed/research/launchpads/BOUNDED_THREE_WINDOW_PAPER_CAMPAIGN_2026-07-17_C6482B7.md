@@ -17,8 +17,9 @@ The companion machine record is
 
 ## Collection and integrity
 
-- Each window used ten seconds of warmup followed by a bounded 300-second
-  scored interval.
+- Each probe duration was 300 seconds total, including about ten seconds of
+  warmup. Ground-truth coverage begins at the start anchor after `connected`;
+  the first non-warm/scored frame arrived about ten seconds later.
 - The expected-pin file stayed fixed at SHA-256
   `f1fa4f3080fc3d3c193a5de4424410bc747da784d465f118b6a67d2e74a93095`
   and Keccak-256
@@ -51,8 +52,10 @@ The companion machine record is
 
 ## Launchpad results
 
-Latency is observer-to-confirmed receipt/event reconciliation latency.
-Round-trip values are simulated quote-asset return basis points.
+Report latency is source receive (`frame_received_unix_ns`) to observer
+classification latency on confirmed rows. It does not include the separate
+independent receipt/event reconciliation RPC duration. Round-trip values are
+simulated quote-asset return basis points.
 
 | Launchpad | Confirmed / eligible | p50 / p95 / p99 | Entry / exit | FP / misses | Round trip p50 |
 |---|---:|---:|---:|---:|---:|
@@ -98,16 +101,21 @@ absence of evidence, not positive suppression coverage.
 
 ### Flap
 
-Flap remains discovery-only. The three ground-truth launch transactions below
-were deliberately not observer claims because prediction and quotes remain
-unavailable:
+Flap remains discovery-only. The three ground-truth transactions below are
+canonical `Portal.TokenCreated` events emitted by Portal
+`0x26605f322f7ff986f381bb9a6e3f5dab0beaeb09`; their event-data source/creator
+is the VaultPortal proxy `0xe9f7ab7de8fb8756acbb6a1cd13316a43308197b`:
 
 - `0x14f3fdb081d9af36e9dd06115654392a22de09ce167186c19757576b830ee1c9`
 - `0xcbb6e9d7d4bcd78b7124eafcf473b7a101a041b7415ee96eabb9f054ab3ecd8f`
 - `0x162df0a7add4d2aa017b51fc2c18863502210c08ec608f959d1feab8a0dad202`
 
-They remain scored detector misses and Flap remains explicitly blocked by
-`discovery_only_launchpad`.
+They had no observer claim because the VaultPortal selector/path remains
+intentionally unadmitted. Their generic reconciliation blocker is
+`flap_discovery_only_prediction_and_quotes_unavailable`, but that is not by
+itself the cause of these misses: the 152 direct Portal claims also lack
+quotes. The three remain scored detector misses, and Flap remains explicitly
+blocked by `discovery_only_launchpad`.
 
 ## Readiness and next bounded work
 

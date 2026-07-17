@@ -11,6 +11,9 @@
     "additional_window_started": false,
     "duration_seconds_per_window": 300,
     "warmup_seconds_per_window": 10,
+    "duration_includes_warmup": true,
+    "ground_truth_range_starts_at_start_anchor_after_connected": true,
+    "first_non_warm_frame_approximately_seconds_after_start_anchor": 10,
     "acquisition": "live_public_read_only",
     "paper_only": true
   },
@@ -46,6 +49,11 @@
     {"name": "window-c", "snapshot_l2_block": 12351487, "snapshot_l2_hash": "0x4cca0291793ac80286ef9e3f8ea1c66cd6cd99fdd6acbd47faafbea94ec64318", "l1_block": 25554344, "l1_timestamp": 1784314593, "from_l2_block": 12351559, "to_l2_block": 12354552, "pin_count": 41, "rpc_logical_requests": 83, "rpc_http_attempts": 83, "rpc_errors_or_retries": 0}
   ],
   "continuity_per_window": {"connected_records": 1, "coverage_closed_records": 1, "reconnects": 0, "sequence_gaps": 0, "missing_frames": 0, "duplicates_or_reordered": 0},
+  "latency_metric": {
+    "report_field": "latency_ns",
+    "meaning": "frame_received_unix_ns/source receive to observer classification latency on confirmed rows",
+    "excludes": "independent receipt and event reconciliation RPC duration"
+  },
   "launchpads": [
     {"launchpad": "bow", "confirmed": 0, "eligible": 0, "latency_ns": {"p50": null, "p95": null, "p99": null}, "entry_plans": 0, "exit_plans": 0, "false_positives": 0, "detector_misses": 1, "profile_counts": {"zero_initial_buy": 0, "payable_initial_buy": 0}, "round_trip_bps_p50": null},
     {"launchpad": "launch_hood_v3", "confirmed": 6, "eligible": 6, "latency_ns": {"p50": 366000, "p95": 552000, "p99": 552000}, "entry_plans": 6, "exit_plans": 6, "false_positives": 0, "detector_misses": 0, "profile_counts": {"embedded_initial_buy": 6}, "round_trip_bps_p50": 9801},
@@ -57,9 +65,9 @@
   ],
   "detector_misses": [
     {"launchpad": "bow", "tx_hash": "0x6460c0afc4cbdac9e5e5b62db5eb982a92d4affc7051ccf89daa1e5df332f100", "l2_block": 12351813, "reason": "v3_strict_quote:transaction and receipt envelope do not match the launch profile"},
-    {"launchpad": "flap", "tx_hash": "0x14f3fdb081d9af36e9dd06115654392a22de09ce167186c19757576b830ee1c9", "l2_block": 12345308, "reason": "flap_discovery_only_prediction_and_quotes_unavailable"},
-    {"launchpad": "flap", "tx_hash": "0xcbb6e9d7d4bcd78b7124eafcf473b7a101a041b7415ee96eabb9f054ab3ecd8f", "l2_block": 12345883, "reason": "flap_discovery_only_prediction_and_quotes_unavailable"},
-    {"launchpad": "flap", "tx_hash": "0x162df0a7add4d2aa017b51fc2c18863502210c08ec608f959d1feab8a0dad202", "l2_block": 12353471, "reason": "flap_discovery_only_prediction_and_quotes_unavailable"}
+    {"launchpad": "flap", "tx_hash": "0x14f3fdb081d9af36e9dd06115654392a22de09ce167186c19757576b830ee1c9", "l2_block": 12345308, "canonical_event": "Portal.TokenCreated", "portal": "0x26605f322f7ff986f381bb9a6e3f5dab0beaeb09", "event_data_source_or_creator": "0xe9f7ab7de8fb8756acbb6a1cd13316a43308197b", "cause": "VaultPortal selector/path intentionally unadmitted", "protocol_blocker": "flap_discovery_only_prediction_and_quotes_unavailable"},
+    {"launchpad": "flap", "tx_hash": "0xcbb6e9d7d4bcd78b7124eafcf473b7a101a041b7415ee96eabb9f054ab3ecd8f", "l2_block": 12345883, "canonical_event": "Portal.TokenCreated", "portal": "0x26605f322f7ff986f381bb9a6e3f5dab0beaeb09", "event_data_source_or_creator": "0xe9f7ab7de8fb8756acbb6a1cd13316a43308197b", "cause": "VaultPortal selector/path intentionally unadmitted", "protocol_blocker": "flap_discovery_only_prediction_and_quotes_unavailable"},
+    {"launchpad": "flap", "tx_hash": "0x162df0a7add4d2aa017b51fc2c18863502210c08ec608f959d1feab8a0dad202", "l2_block": 12353471, "canonical_event": "Portal.TokenCreated", "portal": "0x26605f322f7ff986f381bb9a6e3f5dab0beaeb09", "event_data_source_or_creator": "0xe9f7ab7de8fb8756acbb6a1cd13316a43308197b", "cause": "VaultPortal selector/path intentionally unadmitted", "protocol_blocker": "flap_discovery_only_prediction_and_quotes_unavailable"}
   ],
   "stonks_or_shared_airlock_suppression_records": 0,
   "readiness": {"all_paper_evidence_ready": false, "all_authorize_canary": false, "all_execution_eligible": false, "promotion_authorized": false}

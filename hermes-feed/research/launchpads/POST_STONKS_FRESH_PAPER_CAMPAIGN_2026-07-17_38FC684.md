@@ -2,14 +2,16 @@
 
 ## Verdict
 
-The exact pushed source commit
-`38fc684a67d648f7118ed3bdcf038422d866496a` produced three complete,
-sequential, non-overlapping, paper-only five-minute windows. The campaign
-accepted all three windows and excluded zero partial windows. Each window had
-a distinct fresh startup snapshot, 41/41 expected pins validated, exactly one
-`connected` followed by one `coverage_closed` continuity record, zero snapshot
-RPC errors, and a completion manifest published only after reconciliation and
-finalization.
+The campaign operator recorded a clean checkout at pushed source commit
+`38fc684a67d648f7118ed3bdcf038422d866496a` before the isolated build. The
+immutable runtime root does **not** encode or cryptographically bind that source
+SHA, so it is a checkout observation rather than a claim proved by the runtime
+artifacts. The runtime artifacts themselves prove three complete, sequential,
+non-overlapping, paper-only five-minute windows. The campaign accepted all
+three windows and excluded zero partial windows. Each window had a distinct
+fresh startup snapshot, 41/41 expected pins validated, exactly one `connected`
+followed by one `coverage_closed` continuity record, zero snapshot RPC errors,
+and a completion manifest published only after reconciliation and finalization.
 
 This sample does **not** support promotion. No launchpad is paper-evidence
 ready, no canary is authorized, and no plan is execution eligible. The fresh
@@ -39,11 +41,14 @@ deployment, Droplet, or server was accessed. Every finalized plan retained
 
 ## Exact tuple and orchestration
 
-The worktree was clean at the exact source SHA, on branch
+The operator recorded the worktree as clean at source SHA `38fc684`, on branch
 `codex/post-stonks-fresh-campaign`, with parent
-`e5ca09dc6c008cfd0decbe6ddbefba762bd67e26`. A fresh isolated release target
-was built before acquisition. The campaign runner locked these bytes and
-rechecked them between every phase and window.
+`e5ca09dc6c008cfd0decbe6ddbefba762bd67e26`, and recorded a fresh isolated
+release build before acquisition. Those are checkout/build observations, not
+fields bound by the immutable runtime root. The runtime campaign lock and
+manifests bind the seven executable bytes, expected pins, pin-snapshot binary,
+evidence-report binary, and local FIFO runner. They do not bind the source SHA
+or the top-level `run-launchpad-paper-campaign.sh` bytes.
 
 | Component | SHA-256 | Keccak-256 |
 | --- | --- | --- |
@@ -54,13 +59,15 @@ rechecked them between every phase and window.
 | `hermes-launchpad-readiness` | `5832da5200364f9e26bfbd64aab8fdae5e9c7d1cc1125450d375c08c32b856dc` | `0x79b76be11d407875ed59e0ac11f824eec7af41492d91df8e25b5f754613fe541` |
 | `hermes-launchpad-pin-snapshot` | `9b9ed6cacb5dc8a44a56fd239d235049bc4f1025b5a5af5e1cddb649eea6b525` | `0xd9105e290e12832b9db07c8fedff0044f1905d2ef8e803cf2605c4c609628ddd` |
 | `hermes-launchpad-evidence-report` | `0ff3b7be0f44edd0a30997a99c57dd29075d86be88563d8757d9628428d9e5f4` | `0xd9c443cd72e466a0947bc04b1438606f252f8c494fe9f339e37406f3a13e388a` |
-| Campaign runner | `4b6bae153ee747164a99ffee3f51ac323344c8ac06700a627e90b7e2ed07edf6` | `0x11c708fbb10e0f9d77659517762d035c4e1d32d271e5fde8ed275b582b24a7c1` |
+| Campaign runner (supplemental checkout hash; not runtime-bound) | `4b6bae153ee747164a99ffee3f51ac323344c8ac06700a627e90b7e2ed07edf6` | `0x11c708fbb10e0f9d77659517762d035c4e1d32d271e5fde8ed275b582b24a7c1` |
 | Local FIFO runner | `372770284a12a7f43b68208fc3bd244e0fdf82db1fed2f1e0f177027faf8aa45` | `0xb065b10aa70b8caaa586298346ac06d11f27871dd6c35e0e6f3249e876356fa3` |
 
-Both runner fixture suites passed. They cover the private FIFO/tee topology,
-phase publication, manifest-last behavior, semantic replay and byte-identical
+The operator also recorded both runner fixture suites passing. That
+supplemental checkout result covers the private FIFO/tee topology, phase
+publication, manifest-last behavior, semantic replay and byte-identical
 finalization, pin drift, tuple replacement, interruption, stale/overlapping
-windows, partial sessions, and artifact tampering.
+windows, partial sessions, and artifact tampering. It is not retroactively
+represented as an original campaign-manifest field.
 
 ## Expected pins and fresh snapshots
 
@@ -183,6 +190,26 @@ Those hashes validate historical fixtures only. They are not fresh campaign
 observations and do not clear a Stonks sample or readiness requirement.
 
 ## Independent miss forensics
+
+The supplemental
+`POST_STONKS_FRESH_PAPER_CAMPAIGN_2026-07-17_38FC684_MISS_FORENSICS.json`
+makes the three forensics results independently reproducible. Its SHA-256 is
+`9baef8a9abed896128090ea7d4188fb1fca1f184ee8b528524b40c46a40929ea`,
+its Keccak-256 is
+`0x011029a7d8989a691ef3428315083450b88a8f5f183251b047cb183e06c02b7f`,
+and it is 19,109 bytes. For every miss it binds the exact campaign
+reconciliation row; public read-only `eth_getTransactionByHash`,
+`eth_getTransactionReceipt`, `eth_getBlockByHash`, and receipt-block
+`eth_getCode` request parameters; canonical sorted-result digests; raw calldata
+digests; account designator and delegated runtime proofs; and deterministic ABI
+decode signatures and results. An independent reviewer can repeat the recorded
+requests, canonicalize `.result` with `jq -cS`, compare both digests, and repeat
+the listed `cast` decodes.
+
+This is supplemental evidence collected after the campaign. It did not mutate
+the campaign windows and is not part of the original session manifests. It
+closes the reproducibility gap without retroactively claiming a stronger
+original provenance boundary.
 
 ### Bankr reverse-orientation CurveTicksV4: two misses
 

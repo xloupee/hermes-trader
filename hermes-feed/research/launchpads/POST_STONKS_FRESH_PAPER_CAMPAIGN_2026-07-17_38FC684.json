@@ -4,6 +4,13 @@
   "source_commit": "38fc684a67d648f7118ed3bdcf038422d866496a",
   "source_parent": "e5ca09dc6c008cfd0decbe6ddbefba762bd67e26",
   "branch": "codex/post-stonks-fresh-campaign",
+  "provenance_boundary": {
+    "source_checkout_observation": "the campaign operator recorded a clean checkout at source_commit before building",
+    "source_commit_is_runtime_artifact_bound": false,
+    "campaign_runner_is_runtime_artifact_bound": false,
+    "runtime_bound_components": ["expected pins", "seven executable tuple", "pin snapshot binary", "evidence report binary", "local FIFO runner"],
+    "supplemental_checkout_hashes_are_runtime_proof": false
+  },
   "runtime_root": "/Users/kennethjiang/.codex/worktrees/hermes-post-stonks-campaign/hermes-feed/.runtime/post-stonks-38fc684/campaign-20260717T120432Z",
   "safety": {
     "paper_only": true,
@@ -36,8 +43,8 @@
       "hermes-launchpad-evidence-report": {"sha256":"0ff3b7be0f44edd0a30997a99c57dd29075d86be88563d8757d9628428d9e5f4","keccak256":"0xd9c443cd72e466a0947bc04b1438606f252f8c494fe9f339e37406f3a13e388a"}
     },
     "orchestration": {
-      "run-launchpad-paper-campaign.sh": {"sha256":"4b6bae153ee747164a99ffee3f51ac323344c8ac06700a627e90b7e2ed07edf6","keccak256":"0x11c708fbb10e0f9d77659517762d035c4e1d32d271e5fde8ed275b582b24a7c1"},
-      "run-launchpad-paper-local.sh": {"sha256":"372770284a12a7f43b68208fc3bd244e0fdf82db1fed2f1e0f177027faf8aa45","keccak256":"0xb065b10aa70b8caaa586298346ac06d11f27871dd6c35e0e6f3249e876356fa3"}
+      "run-launchpad-paper-campaign.sh": {"sha256":"4b6bae153ee747164a99ffee3f51ac323344c8ac06700a627e90b7e2ed07edf6","keccak256":"0x11c708fbb10e0f9d77659517762d035c4e1d32d271e5fde8ed275b582b24a7c1","runtime_artifact_bound":false,"evidence_role":"supplemental_checkout_hash_only"},
+      "run-launchpad-paper-local.sh": {"sha256":"372770284a12a7f43b68208fc3bd244e0fdf82db1fed2f1e0f177027faf8aa45","keccak256":"0xb065b10aa70b8caaa586298346ac06d11f27871dd6c35e0e6f3249e876356fa3","runtime_artifact_bound":true,"evidence_role":"campaign_lock_and_report_provenance"}
     }
   },
   "root_artifacts": {
@@ -45,6 +52,15 @@
     "expected-pins.locked.json": {"sha256":"36e632865b3fef00217fe5cb454f1fb7272025e81a8d25c3369eee0d4c1b8820","keccak256":"0x3a192547af7a76a47d5de1b8102da0dc0bb77b7047a53c855b7d264aefa1a34c"},
     "authoritative-readiness.jsonl": {"sha256":"5931a1c63f35ed3805932ddaf76bc805e31696f0be699edc6a7371534a4d3c74","keccak256":"0xffb320f3cc3b87dbcce947492f142557f2a1c472f784c7a0f6e261a794928618"},
     "launchpad-evidence-report.jsonl": {"sha256":"2a0b61a83eb3bdd44a3a6cac299571593b00e803b018211e3178d3126bfd7d3d","keccak256":"0xfa7c90544ad0f26bb755f792925e75e1d020801ac1e76ce4d27fb386cd7225a5"}
+  },
+  "supplemental_artifacts": {
+    "POST_STONKS_FRESH_PAPER_CAMPAIGN_2026-07-17_38FC684_MISS_FORENSICS.json": {
+      "sha256": "9baef8a9abed896128090ea7d4188fb1fca1f184ee8b528524b40c46a40929ea",
+      "keccak256": "0x011029a7d8989a691ef3428315083450b88a8f5f183251b047cb183e06c02b7f",
+      "bytes": 19109,
+      "part_of_original_campaign_manifest": false,
+      "purpose": "reproducible read-only RPC and deterministic decode evidence for all three misses"
+    }
   },
   "windows": [
     {
@@ -180,6 +196,9 @@
     "directory_modes_0700": true,
     "readiness_regeneration_byte_identical": true,
     "report_regeneration_byte_identical": true,
+    "source_commit_runtime_bound": false,
+    "campaign_runner_runtime_bound": false,
+    "miss_forensics_supplement_reproducible": true,
     "sample_sufficient_for_promotion": false,
     "any_paper_evidence_ready": false,
     "any_canary_authorized": false,

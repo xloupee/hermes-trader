@@ -30,6 +30,14 @@ block after all code, storage, semantic, and proof work. EIP-1967, Safe, and
 EIP-7702 implementation relationships are derived from chain state at that
 block; expected addresses are comparison inputs, never observation labels.
 
+LaunchHood startup separately requires the exact factory runtime and the
+factory's reviewed immutable `TOKEN_IMPL` dependency: implementation address
+`0x5fdf73abc7a232d91b03638c2f9a52c16ab0e3be`, 6,821 runtime bytes, and
+runtime hash
+`0xc4717d14bba5f205e8d92a9bf736e038467a353ce7053fcefa5c17da1dec6a47`.
+The factory runtime binds the immutable address; the fresh implementation pin
+independently binds the code at that address. Neither pin enables execution.
+
 ## Correct local topology
 
 Use the wrapper so raw frames and probe metrics cannot be confused:

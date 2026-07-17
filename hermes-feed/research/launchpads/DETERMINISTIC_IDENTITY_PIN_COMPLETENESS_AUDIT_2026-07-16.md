@@ -21,6 +21,13 @@ mean the schema contains dependencies introduced by pending deterministic
 predictors. `pin_requests` can only observe addresses represented by the
 current expected-profile types.
 
+The LaunchHood follow-up closes one such gap by adding the independently
+reviewed token implementation address, 6,821-byte length, and runtime hash to
+expected authority, snapshot requests, startup validation, and the paper
+registry. The factory runtime remains the independent authority for the
+immutable implementation address; the new pin separately attests the deployed
+bytes. A successful complete snapshot therefore contains one additional pin.
+
 Independent `eth_getCode` reads at the reviewed boundary and latest returned
 the same length/hash for every new address below.
 
@@ -49,11 +56,9 @@ the same length/hash for every new address below.
    completeness test alongside the Bankr dependency test.
 3. Preserve the Bankr token-implementation request and completeness test from
    its pending batch.
-4. Decide the LaunchHood boundary explicitly:
-   - identity-only paper prediction: factory runtime plus immutable-address
-     relationship is sufficient, while runtime semantics remain unknown; or
-   - any token-semantic/quote/execution claim: add the implementation runtime
-     to expected pins and the fresh snapshot before promotion.
+4. Preserve the explicit LaunchHood implementation address/length/runtime pin
+   and its separate factory-immutable relationship check. This closes startup
+   identity completeness but does not make execution ready.
 5. Do not admit an arbitrary Clanker calldata hook into a quote-ready or
    executable profile merely because its pool ID is deterministic. Runtime and
    mutable factory-enablement evidence are separate requirements.

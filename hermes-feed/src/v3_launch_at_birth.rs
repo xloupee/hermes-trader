@@ -13,10 +13,12 @@ use crate::noxa_abi::{V3ExactInputIntent, encode_v3_exact_input_single};
 use crate::noxa_predict::{create2_address, predict_v3_pool_address};
 use crate::robinhood::{
     BOW_LAUNCH_FACTORY, BOW_LAUNCH_FACTORY_RUNTIME_KECCAK256, CHAIN_ID, LAUNCHHOOD_V3_FACTORY,
-    LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION, UNISWAP_V3_FACTORY, UNISWAP_V3_FACTORY_RUNTIME_KECCAK256,
-    UNISWAP_V3_POOL_INIT_CODE_KECCAK256, UNISWAP_V3_POSITION_MANAGER,
-    UNISWAP_V3_POSITION_MANAGER_RUNTIME_KECCAK256, UNISWAP_V3_SWAP_ROUTER_02,
-    UNISWAP_V3_SWAP_ROUTER_02_RUNTIME_KECCAK256, WETH, WETH_RUNTIME_KECCAK256,
+    LAUNCHHOOD_V3_FACTORY_RUNTIME_KECCAK256, LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION,
+    LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_RUNTIME_KECCAK256, UNISWAP_V3_FACTORY,
+    UNISWAP_V3_FACTORY_RUNTIME_KECCAK256, UNISWAP_V3_POOL_INIT_CODE_KECCAK256,
+    UNISWAP_V3_POSITION_MANAGER, UNISWAP_V3_POSITION_MANAGER_RUNTIME_KECCAK256,
+    UNISWAP_V3_SWAP_ROUTER_02, UNISWAP_V3_SWAP_ROUTER_02_RUNTIME_KECCAK256, WETH,
+    WETH_RUNTIME_KECCAK256,
 };
 
 const V3_FEE: u32 = 10_000;
@@ -148,6 +150,14 @@ impl V3LaunchAtBirthAdapter {
         }
         let expected = [
             (BOW_LAUNCH_FACTORY, BOW_LAUNCH_FACTORY_RUNTIME_KECCAK256),
+            (
+                LAUNCHHOOD_V3_FACTORY,
+                LAUNCHHOOD_V3_FACTORY_RUNTIME_KECCAK256,
+            ),
+            (
+                LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION,
+                LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_RUNTIME_KECCAK256,
+            ),
             (WETH, WETH_RUNTIME_KECCAK256),
             (UNISWAP_V3_FACTORY, UNISWAP_V3_FACTORY_RUNTIME_KECCAK256),
             (
@@ -434,6 +444,14 @@ mod tests {
             ContractCodeSnapshot {
                 address: BOW_LAUNCH_FACTORY,
                 runtime_code_hash: BOW_LAUNCH_FACTORY_RUNTIME_KECCAK256,
+            },
+            ContractCodeSnapshot {
+                address: LAUNCHHOOD_V3_FACTORY,
+                runtime_code_hash: LAUNCHHOOD_V3_FACTORY_RUNTIME_KECCAK256,
+            },
+            ContractCodeSnapshot {
+                address: LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION,
+                runtime_code_hash: LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_RUNTIME_KECCAK256,
             },
             ContractCodeSnapshot {
                 address: WETH,
@@ -901,6 +919,16 @@ mod tests {
         bad[0].runtime_code_hash = B256::ZERO;
         assert_eq!(
             V3LaunchAtBirthAdapter::new(CHAIN_ID, &bad).unwrap_err(),
+            V3LaunchError::CodeIdentity
+        );
+        let mut bad_implementation = pins();
+        bad_implementation
+            .iter_mut()
+            .find(|pin| pin.address == LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION)
+            .unwrap()
+            .runtime_code_hash = B256::ZERO;
+        assert_eq!(
+            V3LaunchAtBirthAdapter::new(CHAIN_ID, &bad_implementation).unwrap_err(),
             V3LaunchError::CodeIdentity
         );
         assert_eq!(

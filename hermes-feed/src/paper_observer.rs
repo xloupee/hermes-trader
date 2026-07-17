@@ -48,10 +48,13 @@ use crate::pons::{
 };
 use crate::robinhood::{
     ACTIVE_NOXA_FACTORY_RUNTIME_KECCAK256, ACTIVE_NOXA_LAUNCH_FACTORY, BOW_LAUNCH_FACTORY,
-    CHAIN_ID, LAUNCHHOOD_V3_FACTORY, NOXA_FACTORY_RUNTIME_KECCAK256, NOXA_LAUNCH_FACTORY,
-    UNISWAP_V3_FACTORY, UNISWAP_V3_FACTORY_RUNTIME_KECCAK256, UNISWAP_V3_POSITION_MANAGER,
-    UNISWAP_V3_POSITION_MANAGER_RUNTIME_KECCAK256, UNISWAP_V3_SWAP_ROUTER_02,
-    UNISWAP_V3_SWAP_ROUTER_02_RUNTIME_KECCAK256, WETH, WETH_RUNTIME_KECCAK256,
+    CHAIN_ID, LAUNCHHOOD_V3_FACTORY, LAUNCHHOOD_V3_FACTORY_RUNTIME_KECCAK256,
+    LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION, LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_CODE_BYTES,
+    LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_RUNTIME_KECCAK256, NOXA_FACTORY_RUNTIME_KECCAK256,
+    NOXA_LAUNCH_FACTORY, UNISWAP_V3_FACTORY, UNISWAP_V3_FACTORY_RUNTIME_KECCAK256,
+    UNISWAP_V3_POSITION_MANAGER, UNISWAP_V3_POSITION_MANAGER_RUNTIME_KECCAK256,
+    UNISWAP_V3_SWAP_ROUTER_02, UNISWAP_V3_SWAP_ROUTER_02_RUNTIME_KECCAK256, WETH,
+    WETH_RUNTIME_KECCAK256,
 };
 use crate::smart_account::{
     AccountExecutionProfile, ContractPin as SmartContractPin, ENTRY_POINT_V07,
@@ -259,6 +262,7 @@ pub struct PaperExpectedPins {
     pub pons_v3: ConfiguredPonsV3,
     pub bow_factory_runtime_hash: B256,
     pub launchhood_v3_factory_runtime_hash: B256,
+    pub launchhood_v3_token_implementation: ConfiguredRuntimeIdentity,
     pub hood_factory_runtime_hash: Option<B256>,
     #[serde(default)]
     pub hood_curve: Option<HoodExpectedProfile>,
@@ -287,6 +291,14 @@ pub struct ConfiguredPonsV3 {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfiguredPonsRuntimeIdentity {
+    pub address: Address,
+    pub code_bytes: usize,
+    pub runtime_hash: B256,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfiguredRuntimeIdentity {
     pub address: Address,
     pub code_bytes: usize,
     pub runtime_hash: B256,
@@ -731,6 +743,7 @@ impl PaperLaunchpadObserver {
     ) -> Result<Self, PaperObserverError> {
         validate_document_pair(&expected, &observed)?;
         validate_observed_pins(&observed)?;
+        validate_launchhood_identity(&expected, &observed.pins)?;
         let pons_profile = expected.pons_v3.expected_profile()?;
         let hood_profile = match (expected.provenance, expected.hood_curve.as_ref()) {
             (ExpectedPinsProvenance::ReviewedProtocolPins, Some(profile)) => {
@@ -814,6 +827,8 @@ impl PaperLaunchpadObserver {
             CHAIN_ID,
             &[
                 observed_code(BOW_LAUNCH_FACTORY),
+                observed_code(LAUNCHHOOD_V3_FACTORY),
+                observed_code(LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION),
                 observed_code(WETH),
                 observed_code(UNISWAP_V3_FACTORY),
                 observed_code(UNISWAP_V3_POSITION_MANAGER),
@@ -1569,12 +1584,20 @@ fn paper_specs(
                 &[(LAUNCHHOOD_V3_FACTORY, LAUNCHHOOD_V3_LAUNCH_SELECTOR)],
                 &direct,
             ),
-            with_shared_v3(vec![contract_pin(
-                ContractRole::LaunchFactory,
-                LAUNCHHOOD_V3_FACTORY,
-                None,
-                expected.launchhood_v3_factory_runtime_hash,
-            )]),
+            with_shared_v3(vec![
+                contract_pin(
+                    ContractRole::LaunchFactory,
+                    LAUNCHHOOD_V3_FACTORY,
+                    None,
+                    expected.launchhood_v3_factory_runtime_hash,
+                ),
+                contract_pin(
+                    ContractRole::Implementation,
+                    expected.launchhood_v3_token_implementation.address,
+                    None,
+                    expected.launchhood_v3_token_implementation.runtime_hash,
+                ),
+            ]),
             RouteKind::V3SingleHop,
         ),
         spec(
@@ -1890,6 +1913,36 @@ fn contract_pin(
         implementation,
         runtime_code_hash,
     }
+}
+
+fn validate_launchhood_identity(
+    expected: &PaperExpectedPins,
+    observed: &[ObservedRuntimePin],
+) -> Result<(), PaperObserverError> {
+    let implementation = expected.launchhood_v3_token_implementation;
+    if expected.launchhood_v3_factory_runtime_hash != LAUNCHHOOD_V3_FACTORY_RUNTIME_KECCAK256
+        || implementation.address != LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION
+        || implementation.code_bytes != LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_CODE_BYTES
+        || implementation.runtime_hash != LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_RUNTIME_KECCAK256
+    {
+        return Err(PaperObserverError::Startup(
+            "LaunchHood factory immutable or token implementation authority drifted".into(),
+        ));
+    }
+    let observed_implementation = find_observed_pin(observed, implementation.address, None)
+        .ok_or_else(|| {
+            PaperObserverError::Startup(
+                "fresh startup snapshot is missing the LaunchHood token implementation".into(),
+            )
+        })?;
+    if observed_implementation.runtime_hash != implementation.runtime_hash
+        || observed_implementation.code_bytes != Some(implementation.code_bytes)
+    {
+        return Err(PaperObserverError::Startup(
+            "fresh LaunchHood token implementation identity drifted".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_document_pair(
@@ -2251,7 +2304,12 @@ mod tests {
                     .collect(),
             },
             bow_factory_runtime_hash: crate::robinhood::BOW_LAUNCH_FACTORY_RUNTIME_KECCAK256,
-            launchhood_v3_factory_runtime_hash: B256::with_last_byte(11),
+            launchhood_v3_factory_runtime_hash: LAUNCHHOOD_V3_FACTORY_RUNTIME_KECCAK256,
+            launchhood_v3_token_implementation: ConfiguredRuntimeIdentity {
+                address: LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION,
+                code_bytes: LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_CODE_BYTES,
+                runtime_hash: LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_RUNTIME_KECCAK256,
+            },
             hood_factory_runtime_hash: Some(B256::with_last_byte(1)),
             hood_curve: None,
             leavehood_factory_proxy_runtime_hash: Some(B256::with_last_byte(2)),
@@ -2289,7 +2347,16 @@ mod tests {
                     None,
                     crate::robinhood::BOW_LAUNCH_FACTORY_RUNTIME_KECCAK256,
                 ),
-                observed(LAUNCHHOOD_V3_FACTORY, None, B256::with_last_byte(11)),
+                observed(
+                    LAUNCHHOOD_V3_FACTORY,
+                    None,
+                    LAUNCHHOOD_V3_FACTORY_RUNTIME_KECCAK256,
+                ),
+                observed(
+                    LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION,
+                    None,
+                    LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_RUNTIME_KECCAK256,
+                ),
                 observed(
                     crate::launchpad_adapters::CLANKER_FACTORY,
                     None,
@@ -2402,10 +2469,14 @@ mod tests {
             address,
             implementation,
             runtime_hash,
-            code_bytes: PonsAdapter::required_startup_identities()
-                .iter()
-                .find(|identity| identity.address == address)
-                .map(|identity| identity.code_bytes),
+            code_bytes: if address == LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION {
+                Some(LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_CODE_BYTES)
+            } else {
+                PonsAdapter::required_startup_identities()
+                    .iter()
+                    .find(|identity| identity.address == address)
+                    .map(|identity| identity.code_bytes)
+            },
         }
     }
 
@@ -2683,6 +2754,66 @@ mod tests {
         let (expected, mut observed) = startup();
         observed.pins.push(observed.pins[0]);
         assert!(PaperLaunchpadObserver::from_startup_snapshots(expected, observed).is_err());
+    }
+
+    #[test]
+    fn launchhood_immutable_and_runtime_identity_are_both_required() {
+        let (expected, observed) = startup();
+        PaperLaunchpadObserver::from_startup_snapshots(expected.clone(), observed.clone()).unwrap();
+
+        let mut wrong_factory = expected.clone();
+        wrong_factory.launchhood_v3_factory_runtime_hash = B256::with_last_byte(0xf1);
+        assert!(
+            PaperLaunchpadObserver::from_startup_snapshots(wrong_factory, observed.clone())
+                .is_err()
+        );
+
+        let mut wrong_address = expected.clone();
+        wrong_address.launchhood_v3_token_implementation.address = Address::with_last_byte(0xf2);
+        assert!(
+            PaperLaunchpadObserver::from_startup_snapshots(wrong_address, observed.clone())
+                .is_err()
+        );
+
+        let mut wrong_hash = expected.clone();
+        wrong_hash.launchhood_v3_token_implementation.runtime_hash = B256::with_last_byte(0xf3);
+        assert!(
+            PaperLaunchpadObserver::from_startup_snapshots(wrong_hash, observed.clone()).is_err()
+        );
+
+        let mut wrong_length = expected.clone();
+        wrong_length.launchhood_v3_token_implementation.code_bytes += 1;
+        assert!(
+            PaperLaunchpadObserver::from_startup_snapshots(wrong_length, observed.clone()).is_err()
+        );
+
+        let mut missing = observed.clone();
+        missing
+            .pins
+            .retain(|pin| pin.address != LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION);
+        assert!(PaperLaunchpadObserver::from_startup_snapshots(expected.clone(), missing).is_err());
+
+        let mut observed_hash_drift = observed.clone();
+        find_observed_mut(
+            &mut observed_hash_drift.pins,
+            LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION,
+        )
+        .runtime_hash = B256::with_last_byte(0xf4);
+        assert!(
+            PaperLaunchpadObserver::from_startup_snapshots(expected.clone(), observed_hash_drift,)
+                .is_err()
+        );
+
+        let mut observed_length_drift = observed;
+        find_observed_mut(
+            &mut observed_length_drift.pins,
+            LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION,
+        )
+        .code_bytes = Some(LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_CODE_BYTES + 1);
+        assert!(
+            PaperLaunchpadObserver::from_startup_snapshots(expected, observed_length_drift)
+                .is_err()
+        );
     }
 
     #[test]

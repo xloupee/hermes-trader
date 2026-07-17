@@ -22,6 +22,11 @@
   },
   "bow_factory_runtime_hash": "0x8d56cbcdf72dbf04ed8170d55878cc894997ccc54c2ab0aec782274eb7fe7a14",
   "launchhood_v3_factory_runtime_hash": "0x9b785dd157fe757dd427822df3e2bc3a1b6134f1d338b21c36c3de279bb67766",
+  "launchhood_v3_token_implementation": {
+    "address": "0x5fdf73abc7a232d91b03638c2f9a52c16ab0e3be",
+    "code_bytes": 6821,
+    "runtime_hash": "0xc4717d14bba5f205e8d92a9bf736e038467a353ce7053fcefa5c17da1dec6a47"
+  },
   "hood_factory_runtime_hash": "0x4aa0ce56b5b67d27f2fab59dcb796fa552d10ceafdecb06e088cdd254c92c0fc",
   "hood_curve": {
     "identities": [

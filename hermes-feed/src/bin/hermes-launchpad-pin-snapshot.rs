@@ -27,8 +27,10 @@ use hermes_feed::paper_observer::{
 };
 use hermes_feed::robinhood::{
     ACTIVE_NOXA_LAUNCH_FACTORY, BOW_LAUNCH_FACTORY, CHAIN_ID, LAUNCHHOOD_V3_FACTORY,
-    NOXA_LAUNCH_FACTORY, PUBLIC_RPC_URL, UNISWAP_V3_FACTORY, UNISWAP_V3_POSITION_MANAGER,
-    UNISWAP_V3_SWAP_ROUTER_02, WETH,
+    LAUNCHHOOD_V3_FACTORY_RUNTIME_KECCAK256, LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION,
+    LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_CODE_BYTES,
+    LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_RUNTIME_KECCAK256, NOXA_LAUNCH_FACTORY, PUBLIC_RPC_URL,
+    UNISWAP_V3_FACTORY, UNISWAP_V3_POSITION_MANAGER, UNISWAP_V3_SWAP_ROUTER_02, WETH,
 };
 use hermes_feed::smart_account::{
     AccountExecutionProfile, ContractPin, ENTRY_POINT_V07, EntryPointCall, SmartAccountPin,
@@ -341,6 +343,7 @@ fn pin_requests(expected: Option<&PaperExpectedPins>) -> Result<Vec<PinRequest>>
         request(ACTIVE_NOXA_LAUNCH_FACTORY, None),
         request(BOW_LAUNCH_FACTORY, None),
         request(LAUNCHHOOD_V3_FACTORY, None),
+        request(LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION, None),
         request(CLANKER_FACTORY, None),
         request(DOPPLER_CREATE_EMITTER, None),
         request(V4_POOL_MANAGER, None),
@@ -360,6 +363,16 @@ fn pin_requests(expected: Option<&PaperExpectedPins>) -> Result<Vec<PinRequest>>
     );
 
     if let Some(expected) = expected {
+        if expected.launchhood_v3_factory_runtime_hash != LAUNCHHOOD_V3_FACTORY_RUNTIME_KECCAK256
+            || expected.launchhood_v3_token_implementation.address
+                != LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION
+            || expected.launchhood_v3_token_implementation.code_bytes
+                != LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_CODE_BYTES
+            || expected.launchhood_v3_token_implementation.runtime_hash
+                != LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_RUNTIME_KECCAK256
+        {
+            bail!("reviewed LaunchHood factory/implementation identity drifted");
+        }
         if let Some(profile) = &expected.hood_curve {
             profile.validate()?;
             let singleton = profile
@@ -929,6 +942,25 @@ mod tests {
         .unwrap();
         let profile = BankrDopplerExpectedProfile::production();
         let requests = pin_requests(Some(&expected)).unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.address == LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION)
+                .count(),
+            1
+        );
+        assert_eq!(
+            expected.launchhood_v3_token_implementation.address,
+            LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION
+        );
+        assert_eq!(
+            expected.launchhood_v3_token_implementation.code_bytes,
+            LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_CODE_BYTES
+        );
+        assert_eq!(
+            expected.launchhood_v3_token_implementation.runtime_hash,
+            LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION_RUNTIME_KECCAK256
+        );
         for address in [
             profile.airlock.address,
             profile.pool_manager.address,

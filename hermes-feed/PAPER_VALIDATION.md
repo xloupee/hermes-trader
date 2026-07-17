@@ -68,7 +68,8 @@ cargo build --release \
   --bin hermes-feed \
   --bin hermes-launchpad-paper \
   --bin hermes-launchpad-reconcile \
-  --bin hermes-launchpad-v3-paper-quote
+  --bin hermes-launchpad-chain-head \
+  --bin hermes-launchpad-readiness
 
 scripts/run-launchpad-paper-local.sh \
   config/launchpad-expected-pins.production.json \
@@ -88,15 +89,29 @@ transactions, unreconciled observations, and p50/p95/p99 reconciliation
 latency. Missing evidence is `unreconciled`, never silently counted as a false
 positive.
 
-The read-only collector produces that evidence directly from observer output:
+The wrapper runs the read-only collector with the same frozen session inputs,
+preflight-verified executable, and anchored coverage window. For inspection of
+an already captured window, the equivalent direct invocation is:
 
 ```sh
-target/release/hermes-launchpad-reconcile \
+RECONCILER=target/release/hermes-launchpad-reconcile
+RECONCILER_DIGEST=$("$RECONCILER" --print-self-digest)
+read -r START_HEAD START_HASH \
+  < .runtime/launchpad-paper-session/start-anchor.txt
+read -r CUTOFF_HEAD CUTOFF_HASH \
+  < .runtime/launchpad-paper-session/cutoff-anchor.txt
+
+"$RECONCILER" \
+  --expected-self-keccak256 "$RECONCILER_DIGEST" \
   --acquisition live \
   --input .runtime/launchpad-paper-session/launchpad-paper.jsonl \
-  --expected-pins config/launchpad-expected-pins.production.json \
-  --observed-startup-snapshot .runtime/launchpad-observed-startup.json \
-  > .runtime/launchpad-paper-session/reconciliation-evidence.jsonl
+  --expected-pins .runtime/launchpad-paper-session/expected-pins.input.json \
+  --observed-startup-snapshot .runtime/launchpad-paper-session/observed-startup-snapshot.input.json \
+  --concurrency 1 \
+  --ground-truth-start-head "$START_HEAD" \
+  --ground-truth-start-hash "$START_HASH" \
+  --ground-truth-cutoff-head "$CUTOFF_HEAD" \
+  --ground-truth-cutoff-hash "$CUTOFF_HASH"
 ```
 
 It accepts only successful chain-4663 receipts with exact protocol emitter and

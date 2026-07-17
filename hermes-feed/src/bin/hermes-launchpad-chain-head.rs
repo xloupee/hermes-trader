@@ -1,6 +1,8 @@
+use alloy_primitives::B256;
 use anyhow::{Result, bail};
 use clap::Parser;
 use hermes_feed::NoxaRpcClient;
+use hermes_feed::evidence_provenance::{maybe_print_self_digest, verify_expected_self_keccak256};
 use hermes_feed::robinhood::{CHAIN_ID, PUBLIC_RPC_URL};
 use serde_json::json;
 
@@ -10,6 +12,8 @@ use serde_json::json;
     about = "Read one canonical Robinhood L2 head without mutation"
 )]
 struct Cli {
+    #[arg(long)]
+    expected_self_keccak256: B256,
     #[arg(long, default_value = PUBLIC_RPC_URL)]
     rpc_url: String,
     #[arg(long)]
@@ -21,7 +25,11 @@ struct Cli {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    if maybe_print_self_digest()? {
+        return Ok(());
+    }
     let args = Cli::parse();
+    verify_expected_self_keccak256(args.expected_self_keccak256)?;
     let rpc = NoxaRpcClient::with_url(args.rpc_url)?;
     let chain_id = rpc.chain_id().await?;
     if chain_id != CHAIN_ID {

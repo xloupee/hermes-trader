@@ -29,6 +29,8 @@ pub struct ObserverEvidenceProvenance {
     pub acquisition: EvidenceAcquisition,
     pub expected_pins_content_keccak256: B256,
     pub observed_snapshot_content_keccak256: B256,
+    pub observed_snapshot_l2_block_number: u64,
+    pub observed_snapshot_l2_block_hash: B256,
     pub observer_paper_binary_keccak256: B256,
 }
 
@@ -37,6 +39,8 @@ impl ObserverEvidenceProvenance {
         if self.schema_version != EVIDENCE_PROVENANCE_SCHEMA_VERSION
             || self.expected_pins_content_keccak256 == B256::ZERO
             || self.observed_snapshot_content_keccak256 == B256::ZERO
+            || self.observed_snapshot_l2_block_number == 0
+            || self.observed_snapshot_l2_block_hash == B256::ZERO
             || self.observer_paper_binary_keccak256 == B256::ZERO
         {
             bail!("observer evidence provenance is incomplete or unsupported");
@@ -74,6 +78,8 @@ pub struct LaunchpadReadinessProvenance {
     pub acquisition: EvidenceAcquisition,
     pub expected_pins_content_keccak256: B256,
     pub observed_snapshot_content_keccak256: B256,
+    pub observed_snapshot_l2_block_number: u64,
+    pub observed_snapshot_l2_block_hash: B256,
     pub observer_paper_binary_keccak256: B256,
     pub reconciler_binary_keccak256: B256,
     pub finalizer_paper_binary_keccak256: B256,
@@ -86,6 +92,8 @@ impl LaunchpadReadinessProvenance {
         if self.schema_version != EVIDENCE_PROVENANCE_SCHEMA_VERSION
             || self.expected_pins_content_keccak256 == B256::ZERO
             || self.observed_snapshot_content_keccak256 == B256::ZERO
+            || self.observed_snapshot_l2_block_number == 0
+            || self.observed_snapshot_l2_block_hash == B256::ZERO
             || self.observer_paper_binary_keccak256 == B256::ZERO
             || self.reconciler_binary_keccak256 == B256::ZERO
             || self.finalizer_paper_binary_keccak256 == B256::ZERO
@@ -112,6 +120,7 @@ pub struct AggregatedReadinessProvenance {
     pub reconciler_binary_keccak256: B256,
     pub finalizer_paper_binary_keccak256: B256,
     pub observed_snapshot_content_keccak256: Vec<B256>,
+    pub session_manifest_content_keccak256: Vec<B256>,
 }
 
 pub fn read_bytes_with_keccak(path: &Path, description: &str) -> Result<(Vec<u8>, B256)> {
@@ -137,4 +146,44 @@ pub fn current_executable_keccak256() -> Result<B256> {
     let executable = std::env::current_exe().context("resolve current executable")?;
     let (_, digest) = read_bytes_with_keccak(&executable, "current executable")?;
     Ok(digest)
+}
+
+pub fn verify_expected_self_keccak256(expected: B256) -> Result<B256> {
+    if expected == B256::ZERO {
+        bail!("expected self executable digest is zero");
+    }
+    let actual = current_executable_keccak256()?;
+    if actual != expected {
+        bail!("current executable digest does not match launcher preflight");
+    }
+    Ok(actual)
+}
+
+/// Handle the standalone launcher preflight before Clap requires normal-mode
+/// arguments. Returns true after printing the exact current executable digest.
+pub fn maybe_print_self_digest() -> Result<bool> {
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if args.len() == 1 && args[0] == "--print-self-digest" {
+        println!("{}", current_executable_keccak256()?);
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expected_self_digest_rejects_zero_and_mismatch() {
+        let actual = current_executable_keccak256().unwrap();
+        assert_eq!(verify_expected_self_keccak256(actual).unwrap(), actual);
+        assert!(verify_expected_self_keccak256(B256::ZERO).is_err());
+        let mismatch = if actual == B256::with_last_byte(1) {
+            B256::with_last_byte(2)
+        } else {
+            B256::with_last_byte(1)
+        };
+        assert!(verify_expected_self_keccak256(mismatch).is_err());
+    }
 }

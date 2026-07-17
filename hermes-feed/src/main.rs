@@ -6,10 +6,11 @@ use std::sync::mpsc::{SyncSender, TrySendError};
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use futures_util::StreamExt;
+use hermes_feed::evidence_provenance::{maybe_print_self_digest, verify_expected_self_keccak256};
 use hermes_feed::feed::BroadcastMessage;
 use hermes_feed::{
     CacheCheckpoint, Candidate, ConfirmedReserveCache, FeedDecoder, Filter, FrameReport,
@@ -25,6 +26,8 @@ use tokio_tungstenite::tungstenite::Message;
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Cli {
+    #[arg(long, global = true)]
+    expected_self_keccak256: Option<B256>,
     #[command(subcommand)]
     command: Command,
 }
@@ -442,7 +445,19 @@ impl Drop for OutputSink {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    match Cli::parse().command {
+    if maybe_print_self_digest()? {
+        return Ok(());
+    }
+    let cli = Cli::parse();
+    if matches!(&cli.command, Command::Probe(_)) {
+        verify_expected_self_keccak256(
+            cli.expected_self_keccak256
+                .context("probe requires --expected-self-keccak256")?,
+        )?;
+    } else if let Some(expected) = cli.expected_self_keccak256 {
+        verify_expected_self_keccak256(expected)?;
+    }
+    match cli.command {
         Command::Probe(args) => probe(args).await,
         Command::Replay(args) => replay(args).await,
         Command::Compare(args) => compare(args),

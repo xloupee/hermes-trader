@@ -10,7 +10,8 @@ use clap::Parser;
 use hermes_feed::evidence_provenance::{
     EVIDENCE_PROVENANCE_SCHEMA_VERSION, EvidenceAcquisition, LaunchpadReadinessProvenance,
     ObserverEvidenceProvenance, ReconciliationEvidenceProvenance, current_executable_keccak256,
-    read_bytes_with_keccak, read_json_with_keccak,
+    maybe_print_self_digest, read_bytes_with_keccak, read_json_with_keccak,
+    verify_expected_self_keccak256,
 };
 use hermes_feed::feed::BroadcastMessage;
 use hermes_feed::launchpad_adapter::{ActionKind, LaunchpadId};
@@ -46,6 +47,10 @@ fn unix_now_ns() -> u64 {
     about = "Unified paper-only launchpad observer for Nitro feed frames"
 )]
 struct Cli {
+    /// Launcher-preflight digest of this exact executable. Required for live
+    /// acquisition so pathname replacement cannot silently change the build.
+    #[arg(long)]
+    expected_self_keccak256: Option<B256>,
     /// Whether the observer consumes a live producer stream or saved feed bytes.
     /// This value is bound into every readiness window and cannot be inferred
     /// safely from `--input -` alone.
@@ -433,6 +438,8 @@ fn finalized_readiness_provenance(
         acquisition: observer.acquisition,
         expected_pins_content_keccak256: observer.expected_pins_content_keccak256,
         observed_snapshot_content_keccak256: observer.observed_snapshot_content_keccak256,
+        observed_snapshot_l2_block_number: observer.observed_snapshot_l2_block_number,
+        observed_snapshot_l2_block_hash: observer.observed_snapshot_l2_block_hash,
         observer_paper_binary_keccak256: observer.observer_paper_binary_keccak256,
         reconciler_binary_keccak256: reconciler.reconciler_binary_keccak256,
         finalizer_paper_binary_keccak256,
@@ -856,6 +863,9 @@ fn promotion_validations(
 }
 
 fn main() -> Result<()> {
+    if maybe_print_self_digest()? {
+        return Ok(());
+    }
     let args = Cli::parse();
     if args.expected_pins.canonicalize()? == args.observed_startup_snapshot.canonicalize()? {
         anyhow::bail!("expected pins and observed startup snapshot must be separate files");
@@ -864,12 +874,23 @@ fn main() -> Result<()> {
         read_json_with_keccak(&args.expected_pins, "expected pins")?;
     let (observed, observed_snapshot_content_keccak256): (PaperObservedStartupSnapshot, B256) =
         read_json_with_keccak(&args.observed_startup_snapshot, "observed startup snapshot")?;
-    let paper_binary_keccak256 = current_executable_keccak256()?;
+    let paper_binary_keccak256 = match args.expected_self_keccak256 {
+        Some(expected) => verify_expected_self_keccak256(expected)?,
+        None if args.acquisition == EvidenceAcquisition::Live => {
+            anyhow::bail!("live paper mode requires --expected-self-keccak256")
+        }
+        None => current_executable_keccak256()?,
+    };
+    let observed_boundary = observed
+        .observed_at
+        .context("observed startup snapshot has no canonical boundary")?;
     let invocation_provenance = ObserverEvidenceProvenance {
         schema_version: EVIDENCE_PROVENANCE_SCHEMA_VERSION,
         acquisition: args.acquisition,
         expected_pins_content_keccak256,
         observed_snapshot_content_keccak256,
+        observed_snapshot_l2_block_number: observed_boundary.l2_block_number,
+        observed_snapshot_l2_block_hash: observed_boundary.l2_block_hash,
         observer_paper_binary_keccak256: paper_binary_keccak256,
     };
     invocation_provenance.validate()?;
@@ -3107,6 +3128,8 @@ mod tests {
             acquisition: EvidenceAcquisition::Live,
             expected_pins_content_keccak256: B256::with_last_byte(1),
             observed_snapshot_content_keccak256: B256::with_last_byte(2),
+            observed_snapshot_l2_block_number: 900,
+            observed_snapshot_l2_block_hash: B256::with_last_byte(8),
             observer_paper_binary_keccak256: B256::with_last_byte(3),
             reconciler_binary_keccak256: B256::with_last_byte(4),
             finalizer_paper_binary_keccak256: B256::with_last_byte(3),
@@ -3592,6 +3615,8 @@ mod tests {
             acquisition: EvidenceAcquisition::Live,
             expected_pins_content_keccak256: B256::with_last_byte(1),
             observed_snapshot_content_keccak256: B256::with_last_byte(2),
+            observed_snapshot_l2_block_number: 900,
+            observed_snapshot_l2_block_hash: B256::with_last_byte(8),
             observer_paper_binary_keccak256: B256::with_last_byte(3),
         };
         let observed = ObservedOutputCandidates {
@@ -3723,6 +3748,8 @@ mod tests {
             acquisition: EvidenceAcquisition::Live,
             expected_pins_content_keccak256: B256::with_last_byte(1),
             observed_snapshot_content_keccak256: B256::with_last_byte(2),
+            observed_snapshot_l2_block_number: 900,
+            observed_snapshot_l2_block_hash: B256::with_last_byte(8),
             observer_paper_binary_keccak256: B256::with_last_byte(3),
         };
 
@@ -3770,6 +3797,8 @@ mod tests {
             acquisition: EvidenceAcquisition::Live,
             expected_pins_content_keccak256: B256::with_last_byte(1),
             observed_snapshot_content_keccak256: B256::with_last_byte(2),
+            observed_snapshot_l2_block_number: 900,
+            observed_snapshot_l2_block_hash: B256::with_last_byte(8),
             observer_paper_binary_keccak256: B256::with_last_byte(3),
         };
         let provenance = ReconciliationEvidenceProvenance {

@@ -69,6 +69,10 @@ retains the latest completed head response as the cutoff anchor. It rejects a
 session with any connect/read/disconnect error, waits for recorder and FIFO
 drain, and checks the tee and observer exit statuses independently before
 starting receipt/event work. Existing evidence paths are never overwritten.
+Observer, reconciliation, and finalized JSONL are written to same-directory
+`.partial` paths and atomically renamed only after their phase exits
+successfully. The final completion manifest is published last; a failed phase
+can retain diagnostics but cannot leave a canonical promotion input.
 
 The wrapper persists the exact start and cutoff number/hash pairs as
 mode-`0600` `start-anchor.txt` and `cutoff-anchor.txt` files after a successful
@@ -106,7 +110,9 @@ run directly. Its stdout is the receipt/event and quote JSONL consumed by the
 paper finalizer:
 
 ```sh
+RECONCILER_DIGEST=$(hermes-launchpad-reconcile --print-self-digest)
 hermes-launchpad-reconcile \
+  --expected-self-keccak256 "$RECONCILER_DIGEST" \
   --acquisition live \
   --input .runtime/paper-session/launchpad-paper.jsonl \
   --expected-pins .runtime/paper-session/expected-pins.input.json \
@@ -123,7 +129,9 @@ Finalize with both immutable phase outputs and the same acquisition label and
 startup-input bytes:
 
 ```sh
+PAPER_DIGEST=$(hermes-launchpad-paper --print-self-digest)
 hermes-launchpad-paper \
+  --expected-self-keccak256 "$PAPER_DIGEST" \
   --acquisition live \
   --expected-pins .runtime/paper-session/expected-pins.input.json \
   --observed-startup-snapshot .runtime/paper-session/observed-startup-snapshot.input.json \
@@ -231,7 +239,10 @@ and feed them to:
 
 ```sh
 cargo run --release --bin hermes-launchpad-readiness -- \
-  --input .runtime/readiness-windows.jsonl \
+  --expected-self-keccak256 "$(target/release/hermes-launchpad-readiness --print-self-digest)" \
+  --session-dir .runtime/paper-session-1 \
+  --session-dir .runtime/paper-session-2 \
+  --session-dir .runtime/paper-session-3 \
   > .runtime/launchpad-readiness.jsonl
 ```
 
@@ -264,6 +275,8 @@ Each input row binds one reconciled measurement window with these fields:
     "acquisition": "live",
     "expected_pins_content_keccak256": "0x...",
     "observed_snapshot_content_keccak256": "0x...",
+    "observed_snapshot_l2_block_number": 1000,
+    "observed_snapshot_l2_block_hash": "0x...",
     "observer_paper_binary_keccak256": "0x...",
     "reconciler_binary_keccak256": "0x...",
     "finalizer_paper_binary_keccak256": "0x...",
@@ -288,6 +301,24 @@ different content hashes across sessions; each hash is retained in aggregate
 output after startup validation instead of forcing reuse of a stale snapshot.
 Existing pre-provenance readiness rows can still be decoded by the new schema
 but are explicitly ineligible for promotion and must not be backfilled by hand.
+Likewise, free-standing `--input` JSONL is diagnostic only and emits
+`input_trust: untrusted_input`; it can never set `paper_evidence_ready` true.
+
+Each trusted session must contain a mode-`0600`
+`session-completion-manifest.json` that hashes the canonical finalized,
+observer, reconciliation, raw-feed, probe-metrics, frozen expected pins, frozen
+observed snapshot, and both anchors. It also records the preflight hashes of the
+feed, paper, reconciler, chain-head, and readiness executables. Every process
+recomputes an `--expected-self-keccak256` after exec, so replacing a pathname
+after launcher preflight fails closed. Probe state must be exactly `connected`
+then `coverage_closed`, without connection/read/disconnect errors.
+
+The observed snapshot boundary must precede the start anchor by no more than
+500 L2 blocks. Independent live sessions must use distinct observed-snapshot
+content hashes; reusing one startup snapshot cannot satisfy the window floor.
+This manifest is an integrity/completeness boundary for accidental edits and
+mixed artifacts. It is not cryptographic authentication against a malicious
+local writer who can replace evidence and regenerate its manifest.
 
 `quote_eligible_confirmed_observations` counts independently revalidated quote
 records. Profile and envelope counters are derived from those same typed quote

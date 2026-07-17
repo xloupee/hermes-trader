@@ -20,6 +20,7 @@ pub mod launchpad_adapters;
 pub mod launchpad_ground_truth;
 pub mod launchpad_readiness;
 pub mod launchpad_registry;
+pub mod launchpad_session;
 pub mod noxa_abi;
 pub mod noxa_candidate;
 pub mod noxa_launch;

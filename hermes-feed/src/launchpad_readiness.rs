@@ -120,12 +120,20 @@ pub struct LaunchpadReadinessRecord {
     pub paper_evidence_ready: bool,
     pub authorizes_canary: bool,
     pub execution_eligible: bool,
+    pub input_trust: ReadinessInputTrust,
     pub policy: LaunchpadReadinessPolicy,
     pub totals: LaunchpadReadinessTotals,
     pub supported_profile_envelopes: Vec<ProfileEnvelopeReadiness>,
     pub failures: Vec<LaunchpadReadinessFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance: Option<AggregatedReadinessProvenance>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessInputTrust {
+    UntrustedInput,
+    CompletedSessionManifest,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -174,7 +182,39 @@ pub fn supported_profile_envelopes(launchpad: LaunchpadId) -> Option<&'static [&
 pub fn evaluate_launchpad_readiness(
     windows: &[LaunchpadReadinessWindow],
 ) -> Result<Vec<LaunchpadReadinessRecord>, LaunchpadReadinessError> {
-    let aggregate_provenance = validate_promotion_provenance(windows)?;
+    evaluate_with_trust(windows, ReadinessInputTrust::UntrustedInput, &[])
+}
+
+pub fn evaluate_completed_session_readiness(
+    windows: &[LaunchpadReadinessWindow],
+    session_manifest_content_keccak256: &[B256],
+) -> Result<Vec<LaunchpadReadinessRecord>, LaunchpadReadinessError> {
+    if windows.is_empty()
+        || session_manifest_content_keccak256.is_empty()
+        || session_manifest_content_keccak256.contains(&B256::ZERO)
+    {
+        return Err(LaunchpadReadinessError::InvalidProvenance);
+    }
+    evaluate_with_trust(
+        windows,
+        ReadinessInputTrust::CompletedSessionManifest,
+        session_manifest_content_keccak256,
+    )
+}
+
+fn evaluate_with_trust(
+    windows: &[LaunchpadReadinessWindow],
+    input_trust: ReadinessInputTrust,
+    session_manifest_content_keccak256: &[B256],
+) -> Result<Vec<LaunchpadReadinessRecord>, LaunchpadReadinessError> {
+    let mut aggregate_provenance = validate_promotion_provenance(windows)?;
+    if let Some(provenance) = aggregate_provenance.as_mut() {
+        provenance.session_manifest_content_keccak256 = session_manifest_content_keccak256.to_vec();
+        provenance
+            .session_manifest_content_keccak256
+            .sort_unstable();
+        provenance.session_manifest_content_keccak256.dedup();
+    }
     let mut indexed: HashMap<LaunchpadId, Vec<&LaunchpadReadinessWindow>> = HashMap::new();
     for window in windows {
         if window.record_type != "launchpad_paper_readiness_window" {
@@ -214,6 +254,7 @@ pub fn evaluate_launchpad_readiness(
                 launchpad,
                 indexed.remove(&launchpad).unwrap_or_default(),
                 aggregate_provenance.clone(),
+                input_trust,
             )
         })
         .collect()
@@ -267,6 +308,7 @@ fn validate_promotion_provenance(
         reconciler_binary_keccak256: first.reconciler_binary_keccak256,
         finalizer_paper_binary_keccak256: first.finalizer_paper_binary_keccak256,
         observed_snapshot_content_keccak256: observed_snapshots.into_iter().collect(),
+        session_manifest_content_keccak256: Vec::new(),
     }))
 }
 
@@ -274,6 +316,7 @@ fn evaluate_one(
     launchpad: LaunchpadId,
     windows: Vec<&LaunchpadReadinessWindow>,
     provenance: Option<AggregatedReadinessProvenance>,
+    input_trust: ReadinessInputTrust,
 ) -> Result<LaunchpadReadinessRecord, LaunchpadReadinessError> {
     let policy = LaunchpadReadinessPolicy::conservative();
     let complete_windows = windows.iter().filter(|window| window.complete).count();
@@ -372,6 +415,9 @@ fn evaluate_one(
         prediction_mismatches,
     );
     push_zero_failure(&mut failures, "quote_mismatches_present", quote_mismatches);
+    if input_trust == ReadinessInputTrust::UntrustedInput {
+        push_zero_failure(&mut failures, "untrusted_readiness_input", 1);
+    }
 
     Ok(LaunchpadReadinessRecord {
         record_type: "launchpad_paper_readiness",
@@ -379,6 +425,7 @@ fn evaluate_one(
         paper_evidence_ready: failures.is_empty(),
         authorizes_canary: false,
         execution_eligible: false,
+        input_trust,
         policy,
         totals,
         supported_profile_envelopes: profile_readiness,
@@ -462,6 +509,8 @@ mod tests {
             acquisition: EvidenceAcquisition::Live,
             expected_pins_content_keccak256: B256::with_last_byte(1),
             observed_snapshot_content_keccak256: B256::with_last_byte(10 + index),
+            observed_snapshot_l2_block_number: 900 + u64::from(index),
+            observed_snapshot_l2_block_hash: B256::with_last_byte(40 + index),
             observer_paper_binary_keccak256: B256::with_last_byte(2),
             reconciler_binary_keccak256: B256::with_last_byte(3),
             finalizer_paper_binary_keccak256: B256::with_last_byte(2),
@@ -513,11 +562,19 @@ mod tests {
             window(LaunchpadId::BankrDoppler, 1, 33),
             window(LaunchpadId::BankrDoppler, 2, 33),
         ];
-        let records = evaluate_launchpad_readiness(&windows).unwrap();
+        let records = evaluate_completed_session_readiness(
+            &windows,
+            &[B256::with_last_byte(90), B256::with_last_byte(91)],
+        )
+        .unwrap();
         let bankr = record(&records, LaunchpadId::BankrDoppler);
         assert!(bankr.paper_evidence_ready);
         assert!(!bankr.authorizes_canary);
         assert!(!bankr.execution_eligible);
+        assert_eq!(
+            bankr.input_trust,
+            ReadinessInputTrust::CompletedSessionManifest
+        );
         assert_eq!(bankr.totals.quote_eligible_confirmed_observations, 100);
         assert_eq!(bankr.totals.independent_complete_windows, 3);
         assert!(
@@ -525,6 +582,25 @@ mod tests {
                 .supported_profile_envelopes
                 .iter()
                 .all(|profile| profile.observations == 12 && profile.ready)
+        );
+    }
+
+    #[test]
+    fn free_standing_threshold_rows_are_explicitly_untrusted_and_never_ready() {
+        let windows = [
+            window(LaunchpadId::BankrDoppler, 0, 34),
+            window(LaunchpadId::BankrDoppler, 1, 33),
+            window(LaunchpadId::BankrDoppler, 2, 33),
+        ];
+        let records = evaluate_launchpad_readiness(&windows).unwrap();
+        let bankr = record(&records, LaunchpadId::BankrDoppler);
+        assert!(!bankr.paper_evidence_ready);
+        assert_eq!(bankr.input_trust, ReadinessInputTrust::UntrustedInput);
+        assert!(
+            bankr
+                .failures
+                .iter()
+                .any(|failure| failure.code == "untrusted_readiness_input")
         );
     }
 

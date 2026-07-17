@@ -9,7 +9,8 @@ use clap::Parser;
 use futures_util::{StreamExt, stream};
 use hermes_feed::evidence_provenance::{
     EvidenceAcquisition, ObserverEvidenceProvenance, ReconciliationEvidenceProvenance,
-    current_executable_keccak256, read_bytes_with_keccak, read_json_with_keccak,
+    current_executable_keccak256, maybe_print_self_digest, read_bytes_with_keccak,
+    read_json_with_keccak, verify_expected_self_keccak256,
 };
 use hermes_feed::flap_abi::{decode_flap_token_bought, decode_flap_token_created};
 use hermes_feed::launchpad_adapter::{ActionKind, LaunchpadId};
@@ -54,6 +55,8 @@ use tokio::time::{Instant, sleep};
     about = "Read-only receipt/event reconciler for launchpad paper observations"
 )]
 struct Cli {
+    #[arg(long)]
+    expected_self_keccak256: Option<B256>,
     /// Provenance asserted by the observer input. Live and replay evidence can
     /// never be silently interchanged.
     #[arg(long, value_enum)]
@@ -278,6 +281,9 @@ fn validate_reconciler_provenance_inputs(
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    if maybe_print_self_digest()? {
+        return Ok(());
+    }
     let args = Cli::parse();
     if args.expected_pins.canonicalize()? == args.observed_startup_snapshot.canonicalize()? {
         bail!("expected pins and observed startup snapshot must be separate files");
@@ -305,7 +311,13 @@ async fn main() -> Result<()> {
     let reconciliation_provenance = ReconciliationEvidenceProvenance {
         record_type: "launchpad_reconciliation_provenance".into(),
         observer: observer_input.provenance.clone(),
-        reconciler_binary_keccak256: current_executable_keccak256()?,
+        reconciler_binary_keccak256: match args.expected_self_keccak256 {
+            Some(expected) => verify_expected_self_keccak256(expected)?,
+            None if args.acquisition == EvidenceAcquisition::Live => {
+                bail!("live reconciliation requires --expected-self-keccak256")
+            }
+            None => current_executable_keccak256()?,
+        },
         observer_output_content_keccak256: observer_input.source_content_keccak256,
     };
     reconciliation_provenance.validate()?;
@@ -1202,6 +1214,8 @@ mod tests {
             acquisition: EvidenceAcquisition::Live,
             expected_pins_content_keccak256: B256::with_last_byte(1),
             observed_snapshot_content_keccak256: B256::with_last_byte(2),
+            observed_snapshot_l2_block_number: 900,
+            observed_snapshot_l2_block_hash: B256::with_last_byte(8),
             observer_paper_binary_keccak256: B256::with_last_byte(3),
         }
     }

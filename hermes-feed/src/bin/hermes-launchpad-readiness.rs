@@ -2,9 +2,17 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use alloy_primitives::B256;
+use anyhow::{Context, Result, bail};
 use clap::Parser;
-use hermes_feed::launchpad_readiness::{LaunchpadReadinessWindow, evaluate_launchpad_readiness};
+use hermes_feed::evidence_provenance::{maybe_print_self_digest, verify_expected_self_keccak256};
+use hermes_feed::launchpad_readiness::{
+    LaunchpadReadinessWindow, evaluate_completed_session_readiness, evaluate_launchpad_readiness,
+};
+use hermes_feed::launchpad_session::{
+    SessionExecutables, complete_session, ensure_distinct_observed_snapshots,
+    validate_completed_session,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -12,21 +20,90 @@ use hermes_feed::launchpad_readiness::{LaunchpadReadinessWindow, evaluate_launch
     about = "Evaluate conservative paper-observer sample readiness; never authorizes execution"
 )]
 struct Cli {
-    /// JSONL readiness-window records, or `-` for stdin.
-    #[arg(long, default_value = "-")]
-    input: PathBuf,
+    /// Free-standing JSONL readiness rows. This mode is diagnostic and always
+    /// emits `input_trust: untrusted_input` with readiness false.
+    #[arg(long)]
+    input: Option<PathBuf>,
+    /// Completed wrapper session directory. Repeat for independent sessions.
+    #[arg(long = "session-dir")]
+    session_dirs: Vec<PathBuf>,
+    /// Validate canonical artifacts and atomically publish the final completion
+    /// manifest. Used by the local runner only after every phase succeeds.
+    #[arg(long)]
+    complete_session: Option<PathBuf>,
+    #[arg(long)]
+    expected_self_keccak256: Option<B256>,
+    #[arg(long)]
+    feed_keccak256: Option<B256>,
+    #[arg(long)]
+    paper_keccak256: Option<B256>,
+    #[arg(long)]
+    reconciler_keccak256: Option<B256>,
+    #[arg(long)]
+    chain_head_keccak256: Option<B256>,
 }
 
 fn main() -> Result<()> {
+    if maybe_print_self_digest()? {
+        return Ok(());
+    }
     let cli = Cli::parse();
-    let reader: Box<dyn BufRead> = if cli.input == Path::new("-") {
+    let trusted_mode = cli.complete_session.is_some() || !cli.session_dirs.is_empty();
+    if trusted_mode {
+        verify_expected_self_keccak256(
+            cli.expected_self_keccak256
+                .context("trusted session mode requires --expected-self-keccak256")?,
+        )?;
+    }
+    if let Some(directory) = cli.complete_session.as_ref() {
+        if cli.input.is_some() || !cli.session_dirs.is_empty() {
+            bail!("--complete-session cannot be combined with readiness inputs");
+        }
+        let readiness_keccak256 = cli.expected_self_keccak256.expect("validated above");
+        let path = complete_session(
+            directory,
+            SessionExecutables {
+                feed_keccak256: cli.feed_keccak256.context("missing --feed-keccak256")?,
+                paper_keccak256: cli.paper_keccak256.context("missing --paper-keccak256")?,
+                reconciler_keccak256: cli
+                    .reconciler_keccak256
+                    .context("missing --reconciler-keccak256")?,
+                chain_head_keccak256: cli
+                    .chain_head_keccak256
+                    .context("missing --chain-head-keccak256")?,
+                readiness_keccak256,
+            },
+        )?;
+        println!("{}", path.display());
+        return Ok(());
+    }
+    if !cli.session_dirs.is_empty() {
+        if cli.input.is_some() {
+            bail!("--input cannot be combined with --session-dir");
+        }
+        let mut windows = Vec::new();
+        let mut manifests = Vec::new();
+        let mut snapshots = Vec::new();
+        for directory in &cli.session_dirs {
+            let session = validate_completed_session(directory)
+                .with_context(|| format!("validate completed session {}", directory.display()))?;
+            snapshots.push(session.observed_snapshot_content_keccak256);
+            manifests.push(session.manifest_content_keccak256);
+            windows.extend(session.windows);
+        }
+        ensure_distinct_observed_snapshots(snapshots)?;
+        emit(evaluate_completed_session_readiness(&windows, &manifests)?)?;
+        return Ok(());
+    }
+
+    let input = cli.input.unwrap_or_else(|| PathBuf::from("-"));
+    let reader: Box<dyn BufRead> = if input == Path::new("-") {
         Box::new(BufReader::new(io::stdin().lock()))
     } else {
-        Box::new(BufReader::new(File::open(&cli.input).with_context(
-            || format!("open readiness input {}", cli.input.display()),
-        )?))
+        Box::new(BufReader::new(File::open(&input).with_context(|| {
+            format!("open readiness input {}", input.display())
+        })?))
     };
-
     let mut windows = Vec::new();
     for (index, line) in reader.lines().enumerate() {
         let line_number = index + 1;
@@ -34,15 +111,17 @@ fn main() -> Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let window = serde_json::from_str::<LaunchpadReadinessWindow>(&line)
-            .with_context(|| format!("decode readiness input line {line_number}"))?;
-        windows.push(window);
-    }
-    for record in evaluate_launchpad_readiness(&windows).context("evaluate launchpad readiness")? {
-        println!(
-            "{}",
-            serde_json::to_string(&record).context("encode launchpad readiness record")?
+        windows.push(
+            serde_json::from_str::<LaunchpadReadinessWindow>(&line)
+                .with_context(|| format!("decode readiness input line {line_number}"))?,
         );
+    }
+    emit(evaluate_launchpad_readiness(&windows)?)
+}
+
+fn emit(records: Vec<hermes_feed::launchpad_readiness::LaunchpadReadinessRecord>) -> Result<()> {
+    for record in records {
+        println!("{}", serde_json::to_string(&record)?);
     }
     Ok(())
 }

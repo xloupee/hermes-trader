@@ -147,12 +147,45 @@ struct ReconciliationMetrics {
     pool_prediction_missing: usize,
     pool_prediction_matches: usize,
     pool_prediction_mismatches: usize,
+    independent_quote_validation_eligible: usize,
+    independent_quote_validation_missing: usize,
+    independent_quote_validation_matches: usize,
+    independent_quote_validation_mismatches: usize,
+    entry_direction_eligible: usize,
+    entry_direction_missing: usize,
+    entry_direction_matches: usize,
+    entry_direction_mismatches: usize,
+    exit_direction_eligible: usize,
+    exit_direction_missing: usize,
+    exit_direction_matches: usize,
+    exit_direction_mismatches: usize,
     observation_latency_p50_ns: Option<u64>,
     observation_latency_p95_ns: Option<u64>,
     observation_latency_p99_ns: Option<u64>,
     reconciliation_rpc_duration_p50_ns: Option<u64>,
     reconciliation_rpc_duration_p95_ns: Option<u64>,
     reconciliation_rpc_duration_p99_ns: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PromotionValidation {
+    quote_matches: bool,
+    entry_direction_matches: bool,
+    exit_direction_matches: bool,
+}
+
+#[derive(Debug, Default)]
+struct PromotionValidations {
+    by_key: HashMap<(B256, LaunchpadId), PromotionValidation>,
+}
+
+impl PromotionValidations {
+    fn record(&mut self, key: (B256, LaunchpadId), validation: PromotionValidation) {
+        self.by_key
+            .entry(key)
+            .and_modify(|existing| *existing = PromotionValidation::default())
+            .or_insert(validation);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -328,6 +361,153 @@ struct FinalizedV3PaperPlan {
     broadcast: bool,
 }
 
+fn promotion_validations(
+    ground_truth: &ConfirmedGroundTruth,
+    records: &ReconciliationRecords,
+    policy: PaperPlanPolicy,
+    pons_profile: hermes_feed::PonsExpectedProfile,
+    hood_profile: &HoodExpectedProfile,
+) -> PromotionValidations {
+    let mut validations = PromotionValidations::default();
+    let sequence_for = |key| HashMap::from([(key, 1_u64)]);
+    let expected_token = |key| {
+        ground_truth
+            .by_key
+            .get(&key)
+            .filter(|binding| binding.quote_status == QuoteStatus::Available)
+            .and_then(|binding| binding.token)
+    };
+
+    for quote in &records.v3_quotes {
+        let key = (quote.tx_hash, quote.launchpad);
+        let quote_matches = finalized_v3_plans(
+            &sequence_for(key),
+            ground_truth,
+            vec![quote.clone()],
+            policy,
+        )
+        .is_ok_and(|plans| plans.len() == 1);
+        let token = expected_token(key);
+        validations.record(
+            key,
+            PromotionValidation {
+                quote_matches,
+                entry_direction_matches: token.is_some_and(|token| {
+                    quote.entry.state_after.token_in == hermes_feed::robinhood::WETH
+                        && quote.entry.state_after.token_out == token
+                }),
+                exit_direction_matches: token.is_some_and(|token| {
+                    quote.full_position_exit.state_after.token_in == token
+                        && quote.full_position_exit.state_after.token_out
+                            == hermes_feed::robinhood::WETH
+                }),
+            },
+        );
+    }
+    for quote in &records.clanker_quotes {
+        let key = (quote.tx_hash, quote.launchpad);
+        let quote_matches = finalized_clanker_plans(
+            &sequence_for(key),
+            ground_truth,
+            vec![quote.clone()],
+            policy,
+        )
+        .is_ok_and(|plans| plans.len() == 1);
+        let token = expected_token(key);
+        validations.record(
+            key,
+            PromotionValidation {
+                quote_matches,
+                entry_direction_matches: token.is_some_and(|token| {
+                    quote.entry.core_state_after.token_in == hermes_feed::robinhood::WETH
+                        && quote.entry.core_state_after.token_out == token
+                }),
+                exit_direction_matches: token.is_some_and(|token| {
+                    quote.full_position_exit.core_state_after.token_in == token
+                        && quote.full_position_exit.core_state_after.token_out
+                            == hermes_feed::robinhood::WETH
+                }),
+            },
+        );
+    }
+    for quote in &records.bankr_quotes {
+        let key = (quote.tx_hash, quote.launchpad);
+        let quote_matches = finalized_bankr_plans(
+            &sequence_for(key),
+            ground_truth,
+            vec![quote.clone()],
+            policy,
+        )
+        .is_ok_and(|plans| plans.len() == 1);
+        let token = expected_token(key);
+        validations.record(
+            key,
+            PromotionValidation {
+                quote_matches,
+                entry_direction_matches: token.is_some_and(|token| {
+                    quote.entry.core_state_after.token_in == hermes_feed::robinhood::WETH
+                        && quote.entry.core_state_after.token_out == token
+                }),
+                exit_direction_matches: token.is_some_and(|token| {
+                    quote.full_position_exit.core_state_after.token_in == token
+                        && quote.full_position_exit.core_state_after.token_out
+                            == hermes_feed::robinhood::WETH
+                }),
+            },
+        );
+    }
+    for quote in &records.pons_quotes {
+        let key = (quote.tx_hash, quote.launchpad);
+        let quote_matches = finalized_pons_plans(
+            &sequence_for(key),
+            ground_truth,
+            vec![quote.clone()],
+            policy,
+            pons_profile,
+        )
+        .is_ok_and(|plans| plans.len() == 1);
+        let token = expected_token(key);
+        validations.record(
+            key,
+            PromotionValidation {
+                quote_matches,
+                entry_direction_matches: token.is_some_and(|token| {
+                    quote.entry.state_after.token_in == hermes_feed::robinhood::WETH
+                        && quote.entry.state_after.token_out == token
+                }),
+                exit_direction_matches: token.is_some_and(|token| {
+                    quote.full_position_exit.state_after.token_in == token
+                        && quote.full_position_exit.state_after.token_out
+                            == hermes_feed::robinhood::WETH
+                }),
+            },
+        );
+    }
+    for quote in &records.hood_quotes {
+        let key = (quote.tx_hash, quote.launchpad);
+        let quote_matches = finalized_hood_plans(
+            &sequence_for(key),
+            ground_truth,
+            vec![quote.clone()],
+            policy,
+            hood_profile,
+        )
+        .is_ok_and(|plans| plans.len() == 1);
+        validations.record(
+            key,
+            PromotionValidation {
+                quote_matches,
+                // Hood's typed entry and exit records have no caller-provided token
+                // direction fields. Independent curve buy/sell rederivation in the
+                // finalizer is therefore the direction authority for both legs.
+                entry_direction_matches: quote_matches,
+                exit_direction_matches: quote_matches,
+            },
+        );
+    }
+    validations
+}
+
 fn main() -> Result<()> {
     let args = Cli::parse();
     if args.expected_pins.canonicalize()? == args.observed_startup_snapshot.canonicalize()? {
@@ -386,10 +566,21 @@ fn main() -> Result<()> {
         let records = read_reconciliation_records(reconciliation_path)?;
         validate_hood_migration_records(&records.evidence, &records.hood_migrations)?;
         let ground_truth = ConfirmedGroundTruth::from_records(&records)?;
+        let promotion = promotion_validations(
+            &ground_truth,
+            &records,
+            plan_policy,
+            pons_profile,
+            &hood_profile,
+        );
+        // Emit promotion evidence before fail-closed plan construction so a
+        // tampered quote remains an explicit mismatch instead of disappearing
+        // behind the finalizer error.
         for metrics in reconciliation_metrics(
             &observed_candidates,
             &records.evidence,
             records.ground_truth_window.as_ref(),
+            &promotion,
         )? {
             println!("{}", serde_json::to_string(&metrics)?);
         }
@@ -527,10 +718,20 @@ fn main() -> Result<()> {
         let records = read_reconciliation_records(&path)?;
         validate_hood_migration_records(&records.evidence, &records.hood_migrations)?;
         let ground_truth = ConfirmedGroundTruth::from_records(&records)?;
+        let promotion = promotion_validations(
+            &ground_truth,
+            &records,
+            plan_policy,
+            pons_profile,
+            &hood_profile,
+        );
+        // Preserve mismatch telemetry even when the plan finalizer below
+        // rejects the corresponding quote record.
         for metrics in reconciliation_metrics(
             &observed_candidates,
             &records.evidence,
             records.ground_truth_window.as_ref(),
+            &promotion,
         )? {
             println!("{}", serde_json::to_string(&metrics)?);
         }
@@ -2099,6 +2300,7 @@ fn reconciliation_metrics(
     observed: &ObservedOutputCandidates,
     evidence: &[ReconciliationEvidence],
     window: Option<&GroundTruthWindow>,
+    promotion: &PromotionValidations,
 ) -> Result<Vec<ReconciliationMetrics>> {
     let window = window.context(
         "authoritative reconciliation metrics require a complete ground-truth coverage manifest",
@@ -2216,6 +2418,47 @@ fn reconciliation_metrics(
             );
         }
 
+        let quote_eligible_keys = truth
+            .iter()
+            .filter(|(_, record)| record.quote_status == QuoteStatus::Available)
+            .map(|(key, _)| *key)
+            .collect::<Vec<_>>();
+        let mut quote_missing = 0_usize;
+        let mut quote_matches = 0_usize;
+        let mut quote_mismatches = 0_usize;
+        let mut entry_direction_missing = 0_usize;
+        let mut entry_direction_matches = 0_usize;
+        let mut entry_direction_mismatches = 0_usize;
+        let mut exit_direction_missing = 0_usize;
+        let mut exit_direction_matches = 0_usize;
+        let mut exit_direction_mismatches = 0_usize;
+        for key in &quote_eligible_keys {
+            match promotion.by_key.get(key) {
+                None => {
+                    quote_missing += 1;
+                    entry_direction_missing += 1;
+                    exit_direction_missing += 1;
+                }
+                Some(validation) => {
+                    if validation.quote_matches {
+                        quote_matches += 1;
+                    } else {
+                        quote_mismatches += 1;
+                    }
+                    if validation.entry_direction_matches {
+                        entry_direction_matches += 1;
+                    } else {
+                        entry_direction_mismatches += 1;
+                    }
+                    if validation.exit_direction_matches {
+                        exit_direction_matches += 1;
+                    } else {
+                        exit_direction_mismatches += 1;
+                    }
+                }
+            }
+        }
+
         let mut observer_latencies = confirmed_keys
             .iter()
             .filter_map(|key| observed.observer_latency_ns.get(key).copied())
@@ -2281,6 +2524,18 @@ fn reconciliation_metrics(
             pool_prediction_missing: pool_missing,
             pool_prediction_matches: pool_matches,
             pool_prediction_mismatches: pool_mismatches,
+            independent_quote_validation_eligible: quote_eligible_keys.len(),
+            independent_quote_validation_missing: quote_missing,
+            independent_quote_validation_matches: quote_matches,
+            independent_quote_validation_mismatches: quote_mismatches,
+            entry_direction_eligible: quote_eligible_keys.len(),
+            entry_direction_missing,
+            entry_direction_matches,
+            entry_direction_mismatches,
+            exit_direction_eligible: quote_eligible_keys.len(),
+            exit_direction_missing,
+            exit_direction_matches,
+            exit_direction_mismatches,
             observation_latency_p50_ns: percentile(&observer_latencies, 50),
             observation_latency_p95_ns: percentile(&observer_latencies, 95),
             observation_latency_p99_ns: percentile(&observer_latencies, 99),
@@ -2514,8 +2769,19 @@ mod tests {
             evidence_row(feed_missed_key, false, true, true, QuoteStatus::Available),
         ];
 
+        let promotion = PromotionValidations {
+            by_key: HashMap::from([(
+                confirmed_key,
+                PromotionValidation {
+                    quote_matches: true,
+                    entry_direction_matches: true,
+                    exit_direction_matches: true,
+                },
+            )]),
+        };
         let metrics =
-            reconciliation_metrics(&observed, &evidence, Some(&complete_window(3))).unwrap();
+            reconciliation_metrics(&observed, &evidence, Some(&complete_window(3)), &promotion)
+                .unwrap();
         let bow = metrics
             .iter()
             .find(|row| row.launchpad == LaunchpadId::Bow)
@@ -2525,6 +2791,10 @@ mod tests {
         assert_eq!(bow.action_prediction_matches, 1);
         assert_eq!(bow.token_prediction_matches, 1);
         assert_eq!(bow.pool_prediction_matches, 1);
+        assert_eq!(bow.independent_quote_validation_eligible, 1);
+        assert_eq!(bow.independent_quote_validation_matches, 1);
+        assert_eq!(bow.entry_direction_matches, 1);
+        assert_eq!(bow.exit_direction_matches, 1);
         let clanker = metrics
             .iter()
             .find(|row| row.launchpad == LaunchpadId::Clanker)
@@ -2543,6 +2813,10 @@ mod tests {
         assert_eq!(hood.missed_transactions, 1);
         assert_eq!(hood.detector_misses, 1);
         assert_eq!(hood.feed_coverage_misses, 0);
+        assert_eq!(hood.independent_quote_validation_eligible, 1);
+        assert_eq!(hood.independent_quote_validation_missing, 1);
+        assert_eq!(hood.entry_direction_missing, 1);
+        assert_eq!(hood.exit_direction_missing, 1);
         let bankr = metrics
             .iter()
             .find(|row| row.launchpad == LaunchpadId::BankrDoppler)
@@ -2998,6 +3272,83 @@ mod tests {
         forged_positions.market.positions[0].liquidity += U256::from(1_u8);
         assert!(clanker_quote_profile_is_consistent(&forged_positions));
         assert!(finalize_clanker_quote(forged_positions).is_err());
+    }
+
+    fn clanker_promotion_validation(quote: ClankerReceiptPaperQuote) -> PromotionValidation {
+        let key = (quote.tx_hash, quote.launchpad);
+        let ground_truth = quote_authority(
+            key,
+            ActionKind::Launch,
+            quote.market.token,
+            None,
+            quote.state_version.l2_block_number,
+            quote.state_version.block_hash,
+            quote.state_version.transaction_index,
+        );
+        let records = ReconciliationRecords {
+            clanker_quotes: vec![quote],
+            ..ReconciliationRecords::default()
+        };
+        promotion_validations(
+            &ground_truth,
+            &records,
+            PaperPlanPolicy {
+                max_input_wei: U256::from(1_000_000_000_000_000_u64),
+                slippage_bps: 100,
+                ..PaperPlanPolicy::default()
+            },
+            hermes_feed::PonsExpectedProfile::production(),
+            &HoodExpectedProfile::production(),
+        )
+        .by_key[&key]
+    }
+
+    #[test]
+    fn promotion_telemetry_uses_rederivation_for_matches_and_coordinated_forgery() {
+        let quote = clanker_quote_fixture();
+        assert_eq!(
+            clanker_promotion_validation(quote.clone()),
+            PromotionValidation {
+                quote_matches: true,
+                entry_direction_matches: true,
+                exit_direction_matches: true,
+            }
+        );
+
+        let mut forged = quote;
+        forged.entry.expected_output += U256::from(1_u8);
+        forged.entry.min_receive = forged.entry.expected_output;
+        forged.full_position_exit.amount_in = forged.entry.expected_output;
+        forged.full_position_exit.core_amount_in = forged.entry.expected_output;
+        forged
+            .full_position_exit
+            .core_state_after
+            .amount_in_requested = forged.entry.expected_output;
+        forged
+            .full_position_exit
+            .core_state_after
+            .amount_in_consumed = forged.entry.expected_output;
+        forged.full_position_exit.expected_output += U256::from(1_u8);
+        forged.full_position_exit.min_receive = forged.full_position_exit.expected_output;
+        forged.simulated_round_trip_return_bps += U256::from(1_u8);
+        let validation = clanker_promotion_validation(forged.clone());
+        assert!(!validation.quote_matches);
+        assert!(validation.entry_direction_matches);
+        assert!(validation.exit_direction_matches);
+        assert!(finalize_clanker_quote(forged).is_err());
+    }
+
+    #[test]
+    fn promotion_telemetry_rejects_wrong_entry_direction() {
+        let mut quote = clanker_quote_fixture();
+        std::mem::swap(
+            &mut quote.entry.core_state_after.token_in,
+            &mut quote.entry.core_state_after.token_out,
+        );
+        let validation = clanker_promotion_validation(quote);
+        assert!(!validation.quote_matches);
+        assert!(!validation.entry_direction_matches);
+        assert!(validation.exit_direction_matches);
     }
 
     #[test]

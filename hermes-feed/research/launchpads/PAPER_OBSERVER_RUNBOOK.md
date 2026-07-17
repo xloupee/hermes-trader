@@ -99,6 +99,13 @@ zero-activity rows.
 - `reconciliation_rpc_duration_*`: separate post-EOF receipt/state RPC time.
 - `quote_available`, `quote_blocked`, and `quote_not_applicable`: quote status
   over raw ground-truth transactions; quote failure never erases event truth.
+- `independent_quote_validation_*`: quote-eligible ground-truth transactions
+  split into missing quote records, independently rederived matches, and
+  mismatches. A malformed or coordinated forged quote is counted as a mismatch
+  before final plan construction fails closed.
+- `entry_direction_*` and `exit_direction_*`: the same eligible population,
+  scored against the independently reconciled token and the canonical quote
+  asset. Typed Hood curve legs use independently rederived buy/sell semantics.
 
 Action, token, and address-pool comparisons are counted only when independent
 truth contains that field. V4 `pool_id` comparison remains separate from an

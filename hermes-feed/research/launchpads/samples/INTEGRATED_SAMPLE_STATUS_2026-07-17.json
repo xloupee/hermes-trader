@@ -1,0 +1,295 @@
+{
+  "schema_version": 1,
+  "record_type": "launchpad_sample_integration_status",
+  "evidence_date": "2026-07-17",
+  "disposition": "integrated_paper_evidence_complete_with_explicit_fail_closed_gaps",
+  "promotion_ready": false,
+  "integration": {
+    "branch": "codex/samples-integration",
+    "base_branch": "agent/local-bankr-paper-observer",
+    "base_commit": "3829a7b2dccb2c651c85a920e19c2f705607ab6d",
+    "pre_status_head": "1b8dc11a04e63a2d4693132b00f872bc0bdac815",
+    "import_method": "reviewed disjoint cherry-picks",
+    "source_branch_count": 7,
+    "all_source_parents_exact_base": true,
+    "all_source_remote_tips_matched": true,
+    "all_source_diffs_add_only": true,
+    "all_source_diffs_within_declared_paths": true,
+    "shared_source_changes": 0,
+    "shared_config_changes": 0,
+    "cargo_or_lockfile_changes": 0
+  },
+  "network": {
+    "name": "Robinhood Chain mainnet",
+    "chain_id": 4663,
+    "public_rpc_endpoint": "https://rpc.mainnet.chain.robinhood.com",
+    "blockscout_endpoint": "https://robinhoodchain.blockscout.com/api",
+    "wallet_filtering": false,
+    "rpc_concurrency": 1
+  },
+  "imports": [
+    {
+      "launchpad": "launchhood_v3",
+      "source_branch": "codex/samples-launchhood-v3",
+      "source_commit": "70bbf6576b41b38670bb9fc46b0a2c7d6687cf73",
+      "integration_commit": "d8d8811556b2c8b9a2cc93ca400a216dadcc6dfb",
+      "owned_prefix": "hermes-feed/research/launchpads/samples/launchhood_v3/",
+      "imported_file_count": 2,
+      "primary_evidence": "hermes-feed/research/launchpads/samples/launchhood_v3/launchhood_v3_samples_2026-07-17.json",
+      "primary_evidence_sha256": "df22b57acb55e4ebb878a29408777ce0e5e1ae61c7990e6d1ee64304c0e96e3a"
+    },
+    {
+      "launchpad": "clanker",
+      "source_branch": "codex/samples-clanker",
+      "source_commit": "f41fae9fd66ab412238a806d9deb8514fceb6d28",
+      "integration_commit": "9ed1267893288ec2aaf03dc1ba10050d15b61934",
+      "owned_prefix": "hermes-feed/research/launchpads/samples/clanker/",
+      "imported_file_count": 16,
+      "primary_evidence": "hermes-feed/research/launchpads/samples/clanker/clanker-paper-samples-2026-07-17.json",
+      "primary_evidence_sha256": "6a95b89e8c788f1c4ccaef0f82b1c98ce0d13df1849a8c8e60d0f77863b41d37"
+    },
+    {
+      "launchpad": "bankr_doppler",
+      "source_branch": "codex/samples-bankr-doppler",
+      "source_commit": "dc5203ecb5d485a7e2bb18d9a69e61ead599b18d",
+      "integration_commit": "f4ce961eb8d6818579073e363e454221fe1a8631",
+      "owned_prefix": "hermes-feed/research/launchpads/samples/bankr_doppler/",
+      "imported_file_count": 3,
+      "primary_evidence": "hermes-feed/research/launchpads/samples/bankr_doppler/evidence.json",
+      "primary_evidence_sha256": "3b336ee0bf9b80fae74fe33e80b16cb5b9e7717caa620bb710d191ebec04747c"
+    },
+    {
+      "launchpad": "bow",
+      "source_branch": "codex/samples-bow",
+      "source_commit": "f43d8abedaf46a2d633bacdb0c7247648fc192f3",
+      "integration_commit": "00c64a86d80b4711b96faa20b55da915d15b7d46",
+      "owned_prefix": "hermes-feed/research/launchpads/samples/bow/",
+      "imported_file_count": 2,
+      "primary_evidence": "hermes-feed/research/launchpads/samples/bow/bow_samples_2026-07-17.json",
+      "primary_evidence_sha256": "f3526a276ca07c9e87861bef6808929ad3d07aa46d819244ba540831d9b92fd2"
+    },
+    {
+      "launchpad": "pons",
+      "source_branch": "codex/samples-pons",
+      "source_commit": "57e55bfd251e4483877eb4b60a5c339f0ee0f720",
+      "integration_commit": "f6975287ee37f44f34019155ab2e4981c6f36bf0",
+      "owned_prefix": "hermes-feed/research/launchpads/samples/pons/",
+      "imported_file_count": 3,
+      "primary_evidence": "hermes-feed/research/launchpads/samples/pons/PONS_SAMPLES.json",
+      "primary_evidence_sha256": "11b9c708d1cb2c6e4b8fc7843e40f93802e41358c8fc73bedf54beb91e52251a"
+    },
+    {
+      "launchpad": "hood",
+      "source_branch": "codex/samples-hood",
+      "source_commit": "3c53a4ce55d95070bf92ea5dd6367d86c361b9c9",
+      "integration_commit": "12250d597c8103fe58949440ec4d447f37f4b083",
+      "owned_prefix": "hermes-feed/research/launchpads/samples/hood/",
+      "imported_file_count": 7,
+      "primary_evidence": [
+        {
+          "path": "hermes-feed/research/launchpads/samples/hood/scan.json",
+          "sha256": "fad9788db820159e426535e2ce0b025f44ee1520f0ad26fdd6b78855e4b0871b"
+        },
+        {
+          "path": "hermes-feed/research/launchpads/samples/hood/replay.json",
+          "sha256": "c4c4ae9493dcf07ea4c1fa3368635a3763df541a1eb8d4b7cbd19ceefef08bd4"
+        },
+        {
+          "path": "hermes-feed/research/launchpads/samples/hood/pins.json",
+          "sha256": "52fb464581118290d1ef53075c6f0749d826503aa7bc103867438b9b28c20e12"
+        }
+      ]
+    },
+    {
+      "launchpad": "flap",
+      "source_branch": "codex/samples-flap-discovery",
+      "source_commit": "e3c982327af467feccdc200f5cb27c0a53e61843",
+      "integration_commit": "1b8dc11a04e63a2d4693132b00f872bc0bdac815",
+      "owned_prefix": "hermes-feed/research/launchpads/samples/flap/",
+      "imported_file_count": 3,
+      "primary_evidence": "hermes-feed/research/launchpads/samples/flap/flap_discovery_evidence.json",
+      "primary_evidence_sha256": "df28947fa1deb02d8d010d5bc070577a56af4b0ab5e587e1d16e0b5af161d186"
+    }
+  ],
+  "launchpads": {
+    "launchhood_v3": {
+      "scan": {
+        "from_block": 12359274,
+        "from_block_hash": "0x34e34c8b34ca8ed20d4ffb7e3419050b06db58078b66562528d0c4bc1ab047ef",
+        "to_block": 12459273,
+        "to_block_hash": "0x59c36d4866806364928fef1512c9b9cdbac629aeceabe500686e4f28ce87486c",
+        "blocks": 100000,
+        "canonical_events": 21,
+        "stop_reason": "target_reached"
+      },
+      "profiles": {"embedded_initial_buy": 10},
+      "confirmed": 10,
+      "quote_eligible": 10,
+      "entry_plans": 10,
+      "full_exit_plans": 10,
+      "slippage_bps": 100,
+      "round_trip_return_bps": 9801,
+      "mismatch_or_miss_count": 0,
+      "transaction_hashes_bound_by": "primary_evidence.samples[].tx_hash"
+    },
+    "clanker": {
+      "scan": {
+        "start_exclusive_block": 12010617,
+        "start_exclusive_hash": "0x214159a9f94e8c113de186cd63f71ea0f2b4fa6b1e2ee3e7eba6dc5b9ef71e82",
+        "cutoff_inclusive_block": 12460617,
+        "cutoff_inclusive_hash": "0x62f973b0212ab7580baa4576633a3cfdd3f0c51ddd33549622f02af98c02fc28",
+        "blocks": 450000,
+        "canonical_factory_topic_events": 1573
+      },
+      "profiles": {
+        "extensionless_single_position": {"candidates": 13, "confirmed_quote_eligible": 10, "blocked": 3},
+        "pinned_extension_five_position": {"confirmed_quote_eligible": 10}
+      },
+      "quote_eligible": 20,
+      "entry_and_full_exit_plans": 20,
+      "slippage_bps": 100,
+      "round_trip_return_bps_hex": "0x351",
+      "selected_identity_or_quote_mismatches": 0,
+      "live_detector_false_positives": "not_measured",
+      "live_detector_misses": "not_measured",
+      "transaction_hashes_bound_by": "primary_evidence.profile_results plus imported raw reconciliation JSONL"
+    },
+    "bankr_doppler": {
+      "scan": {
+        "blocks": 629227,
+        "canonical_airlock_events": 939,
+        "windows": [
+          {"name": "historical_v1", "from_block": 10976000, "to_block": 10978000, "inventory_sha256": "c5950186402705f2b6924c482614aab1b090e97c79acfe56d9cf49bdf56e44fb"},
+          {"name": "generational_v2_v5", "from_block": 11623000, "to_block": 12200000, "inventory_sha256": "e1ceeaf0e3e7a59e3b2b7ddaca14a42132456e995815fffc0b0c8f0fa9385c62"},
+          {"name": "recent_head", "from_block": 12409000, "to_block": 12459224, "inventory_sha256": "ef75803e086c686462dee662376dbe0bc9dddb5a2cd7fc9bdfce5f28c9c1f1e0"}
+        ]
+      },
+      "profiles": {
+        "curve_ticks_v1": "historically_observed_not_observed_recently",
+        "curve_ticks_v2": "historically_observed_not_observed_recently",
+        "curve_ticks_v3": {"recent": 45, "status": "active_observed"},
+        "curve_ticks_v4": {"recent": 31, "status": "active_observed"},
+        "curve_ticks_v5": "historically_observed_not_observed_recently"
+      },
+      "targeted_samples": 11,
+      "paper_plans": 6,
+      "sample_classification_or_identity_mismatches": 0,
+      "sample_scan_misses": 0,
+      "recent_unknown_or_unsupported": 20,
+      "explicitly_unsupported": ["direct_airlock_curve_ticks_v5", "unknown_curve_or_account_shape"],
+      "transaction_hashes_bound_by": "primary_evidence.samples[].tx_hash and recent_profile_inventory",
+      "gap": "V1 and V3 lack standalone exported plan JSON at this source commit; recent V3 exact standalone plans require a separately reviewed shared quote-path change"
+    },
+    "bow": {
+      "scan": {
+        "from_block": 11709264,
+        "from_block_hash": "0x7d83e9b3c5e55a140f2073a55bd56c84d6359100c1030a59708ddc38b0cb27c9",
+        "to_block": 12459263,
+        "to_block_hash": "0xfe88815533e15801060f5c822e9446d0008d63267c1c46b87db1f3d65e1fc328",
+        "blocks": 750000,
+        "canonical_events": 67
+      },
+      "profiles": {"zero_initial_buy": 10, "payable_initial_buy": 10},
+      "quote_eligible": 20,
+      "entry_and_full_exit_plans": 20,
+      "slippage_bps": 100,
+      "round_trip_return_bps": 9801,
+      "selected_replay_mismatches": 0,
+      "unsupported_scored_misses": 1,
+      "unsupported_transaction": "0x6460c0afc4cbdac9e5e5b62db5eb982a92d4affc7051ccf89daa1e5df332f100",
+      "transaction_hashes_bound_by": "primary_evidence.samples[].tx_hash and strict_misses[].tx_hash"
+    },
+    "pons": {
+      "scan": {
+        "from_block": 11709128,
+        "from_block_hash": "0x50171c6554a341753702adb83dd51b513ed2830aa03eaf656ffd2cd8b475bc0f",
+        "to_block": 12459127,
+        "to_block_hash": "0x24ffa780c655d47e8b1bf9efd9fe0ae435821e4660d0ea99605685c590d6c584",
+        "blocks": 750000,
+        "current_generation_events": 82,
+        "legacy_generation_events_separate": 7094
+      },
+      "profiles": {"current_canonical_direct": 10},
+      "quote_eligible": 10,
+      "prediction_token_matches": 10,
+      "prediction_pool_matches": 10,
+      "entry_slippage_full_exit_plans": 10,
+      "targeted_mismatch_or_miss_count": 0,
+      "rotating_wrappers_fail_closed": 51,
+      "ambiguous_transaction_lookups_fail_closed": 2,
+      "transaction_hashes_bound_by": "primary_evidence.samples[].tx_hash"
+    },
+    "hood": {
+      "scan": {
+        "blocks": 750000,
+        "ranges": [
+          {"name": "migration_span", "from_block": 10079778, "from_hash": "0x3078ae0a96e0ba2f7bf2486af344589ef2f21111f14aacd40fb178ddf02c5c7a", "to_block": 10794005, "to_hash": "0x1e375ae5befed86bb9e96b20f77f0419ef427dad2b2c9848f9cee3500a42eab0", "blocks": 714228},
+          {"name": "current_curve_span", "from_block": 11700000, "from_hash": "0xf4289e7270acbb066701b36aae0d3cfc1a6ae98872007f71a7719e0522b94ceb", "to_block": 11735771, "to_hash": "0x5c2239cfea25ff0637d45a9ff79f6dbabcded062e7962d5c6503fa5f9fee9f43", "blocks": 35772}
+        ],
+        "runtime_pin_checks": 20,
+        "runtime_pin_mismatches": 0
+      },
+      "profiles": {
+        "current_curve": {"exact_plans": 10, "actions": {"launch": 4, "buy": 3, "sell": 3}},
+        "migrated_v3_boundary": {"scopes": 10, "exact_plans": 5, "strict_topology_blocks": 5}
+      },
+      "quote_eligible": 15,
+      "slippage_bps": 100,
+      "transaction_hashes_bound_by": "replay.json current_curve[].candidate.transaction_hash and migrated_v3_boundary[].candidate.transaction_hash"
+    },
+    "flap": {
+      "scan": {
+        "from_block": 12200729,
+        "from_block_hash": "0x105142014d12422cb5eb93cc9c6585770ebcf10939492e2691a8382d4ea44573",
+        "to_block": 12450728,
+        "to_block_hash": "0xa67f945c14e517799212eea5cf960cf81757c30d4a42a139b961da1ed7bbbaf8",
+        "blocks": 250000,
+        "rpc_requests": 6826
+      },
+      "canonical_portal_token_created": 3343,
+      "confirmed": 3343,
+      "direct_portal_origin": 3242,
+      "vault_portal_origin": 101,
+      "false_positives": 0,
+      "in_range_misses": 0,
+      "action_mismatches": 0,
+      "token_bought_controls_not_substituted": 22516,
+      "token_sold_controls_not_substituted": 13808,
+      "quote_eligible": 0,
+      "entry_exit_slippage_outcomes": "unavailable_by_design",
+      "transaction_hashes_bound_by": "primary_evidence.claims[].transaction_hash",
+      "gap": "single-public-RPC canonical log completeness was not independently cross-checked with a second provider or Blockscout"
+    }
+  },
+  "aggregate": {
+    "sum_of_task_scanned_blocks_not_unique_union": 3679227,
+    "quote_or_plan_rows": 81,
+    "source_artifact_json_parse_failures": 0,
+    "semantic_unsafe_truthy_flags": 0,
+    "imported_paths_outside_samples_namespace": 0,
+    "shared_source_or_config_changes": 0
+  },
+  "unresolved": [
+    "Bankr V1 and V3 do not have standalone exported plan JSON at the pinned source commit; no shared quote code was changed here.",
+    "Bankr scan windows bind exact ranges and ordered event-inventory digests, while exact endpoint block hashes are not present in its source evidence artifact.",
+    "Twenty recent Bankr Airlock events remain unknown or unsupported and fail closed.",
+    "One Bow wrapped Multicall3 launch remains an unsupported scored miss.",
+    "Fifty-one rotating Pons wrappers and two ambiguous transaction lookups remain fail closed.",
+    "Five Hood migration scopes remain blocked by strict receipt topology and must not be converted into plans without a separately reviewed verifier change.",
+    "Clanker live detector false-positive and miss rates were not measured by the historical replay.",
+    "Flap zero in-range misses are relative to one public RPC canonical log set; independent provider completeness remains unresolved."
+  ],
+  "safety": {
+    "paper_only": true,
+    "execution_eligible": false,
+    "wallet_or_key_access": false,
+    "signing": false,
+    "transaction_construction": false,
+    "broadcast": false,
+    "canary": false,
+    "deployment": false,
+    "droplet_or_server_access": false,
+    "production_mutation": false,
+    "merge_to_main": false
+  }
+}

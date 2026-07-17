@@ -359,7 +359,7 @@ Supported strata are fixed in code so an input cannot omit a difficult stratum:
 - Clanker: `extensionless_single_position`,
   `pinned_extension_five_position`;
 - Bankr/Doppler: `curve_ticks_v1`, `curve_ticks_v2`, `curve_ticks_v3`,
-  `direct_airlock`, `erc7579`;
+  `curve_ticks_v4`, `curve_ticks_v5`, `direct_airlock`, `erc7579`;
 - Pons: `current_generation`; and
 - Hood: `current_curve`.
 

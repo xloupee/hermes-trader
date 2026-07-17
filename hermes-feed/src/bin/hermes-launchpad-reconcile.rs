@@ -1321,11 +1321,11 @@ mod tests {
 
     #[derive(Deserialize)]
     struct BankrV4ProofSet {
-        launches: Vec<BankrV4Proof>,
+        launches: Vec<BankrProof>,
     }
 
     #[derive(Deserialize)]
-    struct BankrV4Proof {
+    struct BankrProof {
         envelope: String,
         transaction: RobinhoodTransaction,
         block: RobinhoodBlock,
@@ -1672,7 +1672,7 @@ mod tests {
         .unwrap()
     }
 
-    fn assert_bankr_v4_runtime_fixture(fixture: &BankrV4RuntimeFixture) {
+    fn assert_bankr_runtime_fixture(fixture: &BankrV4RuntimeFixture, verified_blocks: usize) {
         assert_eq!(fixture.schema_version, 1);
         assert_eq!(fixture.chain_id, CHAIN_ID);
         assert_eq!(fixture.rpc_url, PUBLIC_RPC_URL);
@@ -1680,7 +1680,7 @@ mod tests {
             fixture.acquisition,
             "read_only_eth_getCode_at_exact_receipt_blocks"
         );
-        assert_eq!(fixture.verified_l2_blocks.len(), 2);
+        assert_eq!(fixture.verified_l2_blocks.len(), verified_blocks);
 
         let profile = BankrDopplerExpectedProfile::production();
         let delegation = profile.smart_account.delegation_implementation.unwrap();
@@ -1767,8 +1767,8 @@ mod tests {
     }
 
     fn bankr_rpc_steps(
-        proof: &BankrV4Proof,
-        expected_quote: &BankrDopplerReceiptPaperQuote,
+        proof: &BankrProof,
+        leader: Address,
         fixture: &BankrV4RuntimeFixture,
         drift_role: Option<&str>,
     ) -> Vec<RpcStep> {
@@ -1803,7 +1803,7 @@ mod tests {
             },
             RpcStep {
                 method: "eth_getCode",
-                params: json!([expected_quote.market.leader, tag]),
+                params: json!([leader, tag]),
                 result: json!(designator),
             },
             RpcStep {
@@ -1844,10 +1844,14 @@ mod tests {
                 .iter()
                 .find(|runtime| runtime.role == "entry_point_v07")
                 .unwrap();
+            let mut code = runtime.code.clone();
+            if drift_role == Some("entry_point_v07") {
+                code.push_str("00");
+            }
             steps.push(RpcStep {
                 method: "eth_getCode",
                 params: json!([runtime.address, tag]),
-                result: json!(runtime.code),
+                result: json!(code),
             });
         }
         if drift_role.is_none() {
@@ -2088,7 +2092,7 @@ mod tests {
         ))
         .unwrap();
         let runtime_fixture = bankr_v4_runtime_fixture();
-        assert_bankr_v4_runtime_fixture(&runtime_fixture);
+        assert_bankr_runtime_fixture(&runtime_fixture, 2);
         assert_eq!(frames.frames.len(), 2);
         assert!(
             frames
@@ -2149,7 +2153,8 @@ mod tests {
                     WrapperKind::Direct
                 }
             );
-            let steps = bankr_rpc_steps(proof, &expected_quote, &runtime_fixture, None);
+            let steps =
+                bankr_rpc_steps(proof, expected_quote.market.leader, &runtime_fixture, None);
             let expected_requests = steps.len();
             let (rpc, server) = spawn_exact_rpc_server(steps).await;
             let reconciled = reconcile_candidate(
@@ -2216,7 +2221,12 @@ mod tests {
             "../../tests/fixtures/bankr-doppler-v4-finaltuple-direct-paper-quote.json"
         ))
         .unwrap();
-        let steps = bankr_rpc_steps(proof, &expected_quote, &runtime_fixture, Some("airlock"));
+        let steps = bankr_rpc_steps(
+            proof,
+            expected_quote.market.leader,
+            &runtime_fixture,
+            Some("airlock"),
+        );
         let expected_requests = steps.len();
         let (rpc, server) = spawn_exact_rpc_server(steps).await;
         let rejected = reconcile_candidate(
@@ -2250,6 +2260,118 @@ mod tests {
         assert!(rejected.pons_quote.is_none());
         assert!(rejected.hood_quote.is_none());
         assert!(rejected.hood_migration.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bankr_v5_raw_nitro_frame_crosses_strict_parser_and_concrete_rpc_reconciler() {
+        let frames: BankrV4RawFrames = serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v5-fresh-raw-frame.json"
+        ))
+        .unwrap();
+        let proofs: BankrV4ProofSet = serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v5-fresh-six-live-proofs.json"
+        ))
+        .unwrap();
+        let runtime_fixture: BankrV4RuntimeFixture = serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v5-concrete-reconciler-runtime-code.json"
+        ))
+        .unwrap();
+        let expected_quote: BankrDopplerReceiptPaperQuote = serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v5-fresh-paper-quote.json"
+        ))
+        .unwrap();
+        assert_bankr_runtime_fixture(&runtime_fixture, 1);
+        assert_eq!(frames.frames.len(), 1);
+        assert_eq!(runtime_fixture.verified_l2_blocks.len(), 1);
+        let frame = &frames.frames[0];
+        let proof = proofs
+            .launches
+            .iter()
+            .find(|proof| proof.transaction.hash == frame.tx_hash)
+            .unwrap();
+        assert_eq!(proof.envelope, "erc7579");
+        assert_eq!(
+            expected_quote.market.create_profile_version,
+            hermes_feed::BankrCreateProfileVersion::CurveTicksV5
+        );
+        assert_eq!(
+            expected_quote.market.envelope,
+            hermes_feed::BankrEnvelopeKind::Erc7579
+        );
+        let runtime_block = &runtime_fixture.verified_l2_blocks[0];
+        assert_eq!(runtime_block.transaction_hash, frame.tx_hash);
+        assert_eq!(runtime_block.l2_block_number, proof.receipt.l2_block_number);
+        assert_eq!(
+            runtime_block.block_tag,
+            format!("0x{:x}", proof.receipt.l2_block_number)
+        );
+        let candidate = exact_bankr_candidate(frame);
+        assert_eq!(candidate.wrapper, WrapperKind::Erc4337);
+
+        let steps = bankr_rpc_steps(proof, expected_quote.market.leader, &runtime_fixture, None);
+        let expected_requests = steps.len();
+        let (rpc, server) = spawn_exact_rpc_server(steps).await;
+        let reconciled = reconcile_candidate(
+            &rpc,
+            candidate,
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+            bankr_quote_policy(),
+            bankr_reconcile_profiles(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .unwrap()
+                .unwrap(),
+            expected_requests
+        );
+        assert_eq!(rpc.metrics().logical_requests as usize, expected_requests);
+        assert!(reconciled.evidence.receipt_status);
+        assert!(reconciled.evidence.protocol_event_match);
+        assert!(reconciled.evidence.observer_claim);
+        assert_eq!(reconciled.evidence.quote_status, QuoteStatus::Available);
+        assert_eq!(reconciled.bankr_quote.as_ref(), Some(&expected_quote));
+        assert!(!expected_quote.execution_eligible);
+        assert!(!expected_quote.broadcast);
+
+        let steps = bankr_rpc_steps(
+            proof,
+            expected_quote.market.leader,
+            &runtime_fixture,
+            Some("entry_point_v07"),
+        );
+        let expected_requests = steps.len();
+        let (rpc, server) = spawn_exact_rpc_server(steps).await;
+        let blocked = reconcile_candidate(
+            &rpc,
+            exact_bankr_candidate(frame),
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+            bankr_quote_policy(),
+            bankr_reconcile_profiles(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .unwrap()
+                .unwrap(),
+            expected_requests
+        );
+        assert_eq!(blocked.evidence.quote_status, QuoteStatus::Blocked);
+        assert!(
+            blocked
+                .evidence
+                .protocol_blocker
+                .as_deref()
+                .unwrap()
+                .contains("receipt-block dependency")
+        );
+        assert!(blocked.bankr_quote.is_none());
     }
 
     #[test]

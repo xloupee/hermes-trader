@@ -297,6 +297,7 @@ fn readiness_windows(
             BankrCreateProfileVersion::CurveTicksV2 => "curve_ticks_v2",
             BankrCreateProfileVersion::CurveTicksV3 => "curve_ticks_v3",
             BankrCreateProfileVersion::CurveTicksV4 => "curve_ticks_v4",
+            BankrCreateProfileVersion::CurveTicksV5 => "curve_ticks_v5",
         };
         let envelope = match quote.market.envelope {
             BankrEnvelopeKind::DirectAirlock => "direct_airlock",
@@ -2375,8 +2376,15 @@ fn bankr_quote_arithmetic_is_consistent(
     else {
         return false;
     };
-    if quote.market.create_profile_version == BankrCreateProfileVersion::CurveTicksV4
-        && quote.market.token < profile.weth.address
+    if matches!(
+        quote.market.create_profile_version,
+        BankrCreateProfileVersion::CurveTicksV4 | BankrCreateProfileVersion::CurveTicksV5
+    ) && quote.market.token < profile.weth.address
+    {
+        return false;
+    }
+    if quote.market.create_profile_version == BankrCreateProfileVersion::CurveTicksV5
+        && quote.market.envelope != BankrEnvelopeKind::Erc7579
     {
         return false;
     }
@@ -2388,10 +2396,12 @@ fn bankr_quote_arithmetic_is_consistent(
         | (BankrCreateProfileVersion::CurveTicksV2, true) => -229_600,
         (BankrCreateProfileVersion::CurveTicksV3, true) => -229_400,
         (BankrCreateProfileVersion::CurveTicksV4, true) => return false,
+        (BankrCreateProfileVersion::CurveTicksV5, true) => return false,
         (BankrCreateProfileVersion::CurveTicksV1, false) => 229_800,
         (BankrCreateProfileVersion::CurveTicksV2, false) => 229_600,
         (BankrCreateProfileVersion::CurveTicksV3, false) => 229_400,
         (BankrCreateProfileVersion::CurveTicksV4, false) => 229_400,
+        (BankrCreateProfileVersion::CurveTicksV5, false) => 229_200,
     };
     let expected_position_ranges = match (
         quote.market.create_profile_version,
@@ -2407,6 +2417,7 @@ fn bankr_quote_arithmetic_is_consistent(
             (-119_400, 887_200, B256::with_last_byte(1)),
         ],
         (BankrCreateProfileVersion::CurveTicksV4, true) => return false,
+        (BankrCreateProfileVersion::CurveTicksV5, true) => return false,
         (BankrCreateProfileVersion::CurveTicksV1, false) => [
             (119_800, 229_800, B256::ZERO),
             (-887_200, 119_800, B256::with_last_byte(1)),
@@ -2421,6 +2432,10 @@ fn bankr_quote_arithmetic_is_consistent(
         ],
         (BankrCreateProfileVersion::CurveTicksV4, false) => [
             (119_200, 229_400, B256::ZERO),
+            (-887_200, 119_200, B256::with_last_byte(1)),
+        ],
+        (BankrCreateProfileVersion::CurveTicksV5, false) => [
+            (119_200, 229_200, B256::ZERO),
             (-887_200, 119_200, B256::with_last_byte(1)),
         ],
     };
@@ -3916,6 +3931,7 @@ mod tests {
             BankrCreateProfileVersion::CurveTicksV2 => "curve_ticks_v2",
             BankrCreateProfileVersion::CurveTicksV3 => "curve_ticks_v3",
             BankrCreateProfileVersion::CurveTicksV4 => "curve_ticks_v4",
+            BankrCreateProfileVersion::CurveTicksV5 => "curve_ticks_v5",
         };
         let envelope = match quote.market.envelope {
             BankrEnvelopeKind::DirectAirlock => "direct_airlock",
@@ -3959,8 +3975,12 @@ mod tests {
     }
 
     #[test]
-    fn validated_real_v4_envelopes_drive_metrics_and_readiness_fail_closed() {
-        for quote in [bankr_v4_quote_fixture(), bankr_v4_direct_quote_fixture()] {
+    fn validated_real_v4_and_v5_envelopes_drive_metrics_and_readiness_fail_closed() {
+        for quote in [
+            bankr_v4_quote_fixture(),
+            bankr_v4_direct_quote_fixture(),
+            bankr_v5_quote_fixture(),
+        ] {
             let key = (quote.tx_hash, quote.launchpad);
             let mut evidence = evidence_row(key, true, true, true, QuoteStatus::Available);
             evidence.token = Some(quote.market.token);
@@ -4045,10 +4065,12 @@ mod tests {
                 .iter()
                 .find(|row| row.launchpad == LaunchpadId::BankrDoppler)
                 .unwrap();
-            assert_eq!(
-                bankr_window.profile_envelope_observations["curve_ticks_v4"],
-                1
-            );
+            let curve = match quote.market.create_profile_version {
+                BankrCreateProfileVersion::CurveTicksV4 => "curve_ticks_v4",
+                BankrCreateProfileVersion::CurveTicksV5 => "curve_ticks_v5",
+                other => panic!("unexpected real quote profile {other:?}"),
+            };
+            assert_eq!(bankr_window.profile_envelope_observations[curve], 1);
             let envelope = match quote.market.envelope {
                 BankrEnvelopeKind::DirectAirlock => "direct_airlock",
                 BankrEnvelopeKind::Erc7579 => "erc7579",
@@ -4367,6 +4389,13 @@ mod tests {
     fn bankr_v4_direct_quote_fixture() -> BankrDopplerReceiptPaperQuote {
         serde_json::from_str(include_str!(
             "../../tests/fixtures/bankr-doppler-v4-finaltuple-direct-paper-quote.json"
+        ))
+        .unwrap()
+    }
+
+    fn bankr_v5_quote_fixture() -> BankrDopplerReceiptPaperQuote {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v5-fresh-paper-quote.json"
         ))
         .unwrap()
     }
@@ -4812,6 +4841,20 @@ mod tests {
             assert!(!v4_plans[0].execution_eligible);
             assert!(!v4_plans[0].broadcast);
         }
+
+        let v5_quote = bankr_v5_quote_fixture();
+        assert_eq!(
+            v5_quote.market.create_profile_version,
+            BankrCreateProfileVersion::CurveTicksV5
+        );
+        assert_eq!(v5_quote.market.envelope, BankrEnvelopeKind::Erc7579);
+        let v5_plans = finalize_bankr_quote(v5_quote).unwrap();
+        assert_eq!(v5_plans.len(), 1);
+        assert_eq!(v5_plans[0].status, "quoted_execution_gated");
+        assert!(v5_plans[0].expected_output > U256::ZERO);
+        assert!(v5_plans[0].exit_expected_output > U256::ZERO);
+        assert!(!v5_plans[0].execution_eligible);
+        assert!(!v5_plans[0].broadcast);
     }
 
     #[test]
@@ -4875,6 +4918,18 @@ mod tests {
 
     #[test]
     fn tampered_bankr_quote_arithmetic_cannot_finalize() {
+        let mut wrong_v5_envelope = bankr_v5_quote_fixture();
+        wrong_v5_envelope.market.envelope = BankrEnvelopeKind::DirectAirlock;
+        wrong_v5_envelope.market.outer_bundler = None;
+        wrong_v5_envelope.market.user_operation_log_index = None;
+        wrong_v5_envelope.state_version.terminal_log_index =
+            wrong_v5_envelope.market.launch_log_index;
+        assert!(!bankr_quote_arithmetic_is_consistent(
+            &wrong_v5_envelope,
+            PaperPlanPolicy::default()
+        ));
+        assert!(finalize_bankr_quote(wrong_v5_envelope).is_err());
+
         let mut wrong_v4_orientation = bankr_v4_quote_fixture();
         wrong_v4_orientation.market.token = Address::with_last_byte(1);
         wrong_v4_orientation.market.pool_id = B256::with_last_byte(1);

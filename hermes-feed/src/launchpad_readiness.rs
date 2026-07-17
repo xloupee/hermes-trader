@@ -171,6 +171,7 @@ pub fn supported_profile_envelopes(launchpad: LaunchpadId) -> Option<&'static [&
             "curve_ticks_v2",
             "curve_ticks_v3",
             "curve_ticks_v4",
+            "curve_ticks_v5",
             "direct_airlock",
             "erc7579",
         ]),
@@ -574,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn bankr_curve_v4_and_envelopes_are_orthogonal_readiness_strata() {
+    fn bankr_curve_versions_and_envelopes_are_orthogonal_readiness_strata() {
         assert_eq!(
             supported_profile_envelopes(LaunchpadId::BankrDoppler),
             Some(
@@ -583,6 +584,7 @@ mod tests {
                     "curve_ticks_v2",
                     "curve_ticks_v3",
                     "curve_ticks_v4",
+                    "curve_ticks_v5",
                     "direct_airlock",
                     "erc7579",
                 ]
@@ -590,19 +592,21 @@ mod tests {
             )
         );
 
-        let mut evidence = window(LaunchpadId::BankrDoppler, 0, 16);
+        let mut evidence = window(LaunchpadId::BankrDoppler, 0, 22);
         evidence.profile_envelope_observations = BTreeMap::from([
             ("curve_ticks_v4".into(), 16),
+            ("curve_ticks_v5".into(), 6),
             ("direct_airlock".into(), 1),
-            ("erc7579".into(), 15),
+            ("erc7579".into(), 21),
         ]);
         let records = evaluate_launchpad_readiness(std::slice::from_ref(&evidence)).unwrap();
         let bankr = record(&records, LaunchpadId::BankrDoppler);
         assert!(!bankr.authorizes_canary);
         assert!(!bankr.execution_eligible);
         assert_eq!(evidence.profile_envelope_observations["curve_ticks_v4"], 16);
+        assert_eq!(evidence.profile_envelope_observations["curve_ticks_v5"], 6);
         assert_eq!(evidence.profile_envelope_observations["direct_airlock"], 1);
-        assert_eq!(evidence.profile_envelope_observations["erc7579"], 15);
+        assert_eq!(evidence.profile_envelope_observations["erc7579"], 21);
     }
 
     #[test]

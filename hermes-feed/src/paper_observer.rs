@@ -1360,6 +1360,15 @@ impl PaperLaunchpadObserver {
                         })?,
                     )
                     .map_err(|error| PaperObserverError::Adapter(error.to_string()))?;
+                    if prediction.create_profile_version
+                        == crate::BankrCreateProfileVersion::CurveTicksV5
+                        && wrapper != WrapperKind::Erc4337
+                    {
+                        return Err(PaperObserverError::Adapter(
+                            "Bankr CurveTicksV5 is admitted only through the evidenced ERC7579 envelope"
+                                .into(),
+                        ));
+                    }
                     (Some(prediction.token), Some(prediction.pool_id))
                 } else {
                     match &observed {
@@ -2465,6 +2474,13 @@ mod tests {
         .unwrap()
     }
 
+    fn bankr_v5_raw_frames() -> BankrV4RawFrameFixture {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/bankr-doppler-v5-fresh-raw-frame.json"
+        ))
+        .unwrap()
+    }
+
     fn startup() -> (PaperExpectedPins, PaperObservedStartupSnapshot) {
         let expected = PaperExpectedPins {
             schema_version: 4,
@@ -3067,6 +3083,94 @@ mod tests {
                 other => panic!("unexpected fixture envelope {other}"),
             }
         }
+    }
+
+    #[test]
+    fn exact_raw_nitro_bankr_v5_erc7579_emits_one_strict_async_request() {
+        let frames = bankr_v5_raw_frames();
+        assert_eq!(frames.frames.len(), 1);
+        let frame = &frames.frames[0];
+        assert_eq!(frame.window, "window-a");
+        assert_eq!(frame.line, 3100);
+        assert_eq!(frame.envelope, "erc7579");
+        assert_eq!(frame.received_unix_ns, 1_784_278_482_394_028_000);
+        assert_eq!(
+            frame.payload_sha256,
+            "8c17197e9de53e4a65288729d0daf0c08a1489dde12ddb76350c8628dc6988b3"
+        );
+        let mut payload_line = frame.payload.as_bytes().to_vec();
+        payload_line.push(b'\n');
+        assert_eq!(
+            hex::encode(Sha256::digest(payload_line)),
+            frame.payload_sha256
+        );
+
+        let mut runtime = PaperFeedRuntime::new(bankr_v4_observer());
+        let broadcast: BroadcastMessage = serde_json::from_str(&frame.payload).unwrap();
+        let report = runtime
+            .decode_received_at(&broadcast, frame.received_unix_ns)
+            .unwrap();
+        assert!(report.rejections.is_empty());
+        let observation = report
+            .observations
+            .iter()
+            .find(|row| row.tx_hash == frame.tx_hash)
+            .unwrap();
+        assert_eq!(observation.launchpad, LaunchpadId::BankrDoppler);
+        assert_eq!(observation.wrapper, WrapperKind::Erc4337);
+        assert_eq!(observation.leader_origin, LeaderOrigin::Erc4337Sender);
+        assert!(
+            observation
+                .predicted_token
+                .is_some_and(|token| token > WETH)
+        );
+        assert!(observation.predicted_pool_id.is_some());
+        assert!(!observation.live_execution_enabled);
+        assert_eq!(
+            report
+                .reconciliation_requests
+                .iter()
+                .filter(|row| row.tx_hash == frame.tx_hash)
+                .count(),
+            1
+        );
+        assert!(report.trade_plans.iter().all(|plan| !plan.broadcast));
+    }
+
+    #[test]
+    fn exact_curve_ticks_v5_direct_airlock_is_rejected_before_async_request() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/bankr-doppler-v5-fresh-six-live-proofs.json"
+        ))
+        .unwrap();
+        let transaction: crate::RobinhoodTransaction =
+            serde_json::from_value(fixture["launches"][0]["transaction"].clone()).unwrap();
+        let profile = BankrDopplerExpectedProfile::production();
+        let discovered = discover_entry_point_v07_erc7579(
+            EntryPointCall {
+                chain_id: CHAIN_ID,
+                destination: profile.entry_point,
+                outer_bundler: transaction.from,
+                calldata: &transaction.input,
+            },
+            profile.entry_point,
+            SmartContractPin {
+                address: profile.airlock.address,
+                runtime_code_hash: profile.airlock.runtime_code_hash,
+            },
+        )
+        .unwrap();
+        let direct = signed_transaction(profile.airlock.address, discovered.calldata.to_vec());
+        let mut runtime = PaperFeedRuntime::new(bankr_v4_observer());
+        let report = runtime.decode(&feed(&direct)).unwrap();
+        assert!(report.observations.is_empty());
+        assert!(report.reconciliation_requests.is_empty());
+        assert_eq!(report.rejections.len(), 1);
+        assert!(
+            report.rejections[0]
+                .reason
+                .contains("only through the evidenced ERC7579 envelope")
+        );
     }
 
     #[test]

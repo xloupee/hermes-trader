@@ -117,7 +117,7 @@
     "provenance": "public explorer API evidence; independent from RPC state proofs",
     "url": "https://robinhoodchain.blockscout.com/api/v2/smart-contracts/0xe5789d9d5616dd8ec66de95bb31a29ac1c847769",
     "fetched_at": "2026-07-17T18:16:00Z",
-    "raw_response_bytes": 442773,
+    "raw_response_bytes": 445541,
     "raw_response_sha256": "155b182c938231ae67187e282a64d4f6f742a2fa49ca76d21c73023bbcc7d16c",
     "raw_response_keccak256": "0x512fcde839c85d0f64b51ecc1c68fc21fbec89e2acc2ff75bea163daf9778208",
     "name": "VaultPortal",

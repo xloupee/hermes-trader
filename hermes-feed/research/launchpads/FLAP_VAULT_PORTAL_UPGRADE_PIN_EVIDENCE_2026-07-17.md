@@ -68,7 +68,7 @@ reported `VaultPortal`, fully verified source, unchanged bytecode, Solidity
 `version`, `newTokenV6WithVault`, and `newTokenV7WithVault`. This is public
 explorer evidence, not an RPC state proof.
 
-The raw 442,773-byte response fetched from
+The raw 445,541-byte response fetched from
 `https://robinhoodchain.blockscout.com/api/v2/smart-contracts/0xe5789d9d5616dd8ec66de95bb31a29ac1c847769`
 had SHA-256
 `155b182c938231ae67187e282a64d4f6f742a2fa49ca76d21c73023bbcc7d16c`

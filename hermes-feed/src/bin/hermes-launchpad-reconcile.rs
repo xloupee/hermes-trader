@@ -13,7 +13,9 @@ use hermes_feed::evidence_provenance::{
     current_executable_keccak256, maybe_print_self_digest, read_bytes_with_keccak,
     read_json_with_keccak, verify_expected_self_keccak256,
 };
-use hermes_feed::flap_abi::{FLAP_TOKEN_CREATED_TOPIC, decode_flap_token_created};
+use hermes_feed::flap_abi::{
+    FLAP_DISCOVERY_ONLY_BLOCKER, FLAP_TOKEN_CREATED_TOPIC, decode_flap_token_created,
+};
 use hermes_feed::flap_identity::FLAP_PORTAL_PROXY;
 use hermes_feed::launchpad_adapter::{ActionKind, LaunchpadId, WrapperKind};
 use hermes_feed::launchpad_adapters::{
@@ -1045,6 +1047,17 @@ async fn reconcile_candidates(
                     bail!("Pons event identity disagrees with strict quote identity");
                 }
             }
+            if receipt.status && candidate.launchpad == LaunchpadId::Flap {
+                if protocol_match {
+                    truth_action = Some(ActionKind::Launch);
+                    truth_token =
+                        Some(flap_launch_token(&receipt.logs).context(
+                            "Flap launch reconciliation requires exactly one TokenCreated",
+                        )?);
+                }
+                quote_status = QuoteStatus::NotApplicable;
+                protocol_blocker = Some(FLAP_DISCOVERY_ONLY_BLOCKER.into());
+            }
             if receipt.status && candidate.launchpad == LaunchpadId::HoodFun {
                 let transaction = rpc
                     .transaction_by_hash(candidate.tx_hash)
@@ -1604,11 +1617,7 @@ fn topic_address(log: &ReceiptLog, index: usize) -> Option<alloy_primitives::Add
 
 fn protocol_event_match(launchpad: LaunchpadId, logs: &[ReceiptLog]) -> bool {
     if launchpad == LaunchpadId::Flap {
-        return logs
-            .iter()
-            .filter(|log| decode_flap_token_created(CHAIN_ID, log).is_some())
-            .count()
-            == 1;
+        return flap_launch_token(logs).is_some();
     }
     logs.iter().any(|log| match launchpad {
         LaunchpadId::Noxa => {
@@ -1653,6 +1662,14 @@ fn protocol_event_match(launchpad: LaunchpadId, logs: &[ReceiptLog]) -> bool {
         }
         LaunchpadId::TrenchToday | LaunchpadId::LeaveHood => false,
     })
+}
+
+fn flap_launch_token(logs: &[ReceiptLog]) -> Option<alloy_primitives::Address> {
+    let mut created = logs
+        .iter()
+        .filter_map(|log| decode_flap_token_created(CHAIN_ID, log));
+    let token = created.next()?.token;
+    created.next().is_none().then_some(token)
 }
 
 fn exact_topic(log: &ReceiptLog, address: alloy_primitives::Address, topic: B256) -> bool {
@@ -3642,6 +3659,7 @@ mod tests {
             assert!(protocol_event_match(LaunchpadId::Flap, &logs));
             let duplicate_created = [created.clone(), created.clone()];
             assert!(!protocol_event_match(LaunchpadId::Flap, &duplicate_created));
+            assert_eq!(flap_launch_token(&duplicate_created), None);
             assert_eq!(launchpad_for_ground_truth_log(bought), None);
             assert!(!protocol_event_match(
                 LaunchpadId::Flap,
@@ -3649,6 +3667,7 @@ mod tests {
             ));
 
             let decoded = decode_flap_token_created(CHAIN_ID, created).unwrap();
+            assert_eq!(flap_launch_token(&logs), Some(decoded.token));
             if proof["kind"] == "vault" {
                 assert_eq!(destination, FLAP_VAULT_PORTAL_PROXY);
                 assert_eq!(decoded.creator, FLAP_VAULT_PORTAL_PROXY);

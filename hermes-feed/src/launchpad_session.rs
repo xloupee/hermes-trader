@@ -19,7 +19,7 @@ use serde_json::Value;
 use crate::evidence_provenance::{
     EVIDENCE_PROVENANCE_SCHEMA_VERSION, EvidenceAcquisition, read_bytes_with_keccak,
 };
-use crate::launchpad_readiness::LaunchpadReadinessWindow;
+use crate::launchpad_readiness::{LaunchpadReadinessWindow, READINESS_LAUNCHPADS};
 use crate::paper_observer::PaperObservedStartupSnapshot;
 
 pub const SESSION_MANIFEST_FILE: &str = "session-completion-manifest.json";
@@ -521,8 +521,8 @@ fn read_finalized_windows(path: &Path) -> Result<Vec<LaunchpadReadinessWindow>> 
             windows.push(serde_json::from_value(value)?);
         }
     }
-    if windows.len() != 6 {
-        bail!("finalized output must contain exactly six readiness rows");
+    if windows.len() != READINESS_LAUNCHPADS.len() {
+        bail!("finalized output must contain exactly seven readiness rows");
     }
     Ok(windows)
 }
@@ -569,6 +569,9 @@ fn validate_windows(
         {
             bail!("readiness window disagrees with completed session evidence");
         }
+    }
+    if launchpads != READINESS_LAUNCHPADS.into_iter().collect() {
+        bail!("finalized output readiness launchpads are incomplete or unsupported");
     }
     if snapshot.l2_block_number > start.l2_block_number {
         bail!("snapshot boundary follows session start");
@@ -727,6 +730,7 @@ mod tests {
             LaunchpadId::BankrDoppler,
             LaunchpadId::Pons,
             LaunchpadId::HoodFun,
+            LaunchpadId::Flap,
         ];
         let mut finalized = Vec::new();
         for launchpad in launchpads {
@@ -771,7 +775,7 @@ mod tests {
         let directory = session(900);
         directory.complete().unwrap();
         let validated = validate_completed_session(directory.path()).unwrap();
-        assert_eq!(validated.windows.len(), 6);
+        assert_eq!(validated.windows.len(), 7);
         assert_ne!(validated.manifest_content_keccak256, B256::ZERO);
     }
 

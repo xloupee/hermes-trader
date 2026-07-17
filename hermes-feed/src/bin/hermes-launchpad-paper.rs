@@ -14,9 +14,12 @@ use hermes_feed::evidence_provenance::{
     verify_expected_self_keccak256,
 };
 use hermes_feed::feed::BroadcastMessage;
+use hermes_feed::flap_abi::FLAP_DISCOVERY_ONLY_BLOCKER;
 use hermes_feed::launchpad_adapter::{ActionKind, LaunchpadId};
 use hermes_feed::launchpad_ground_truth::launchpad_for_ground_truth_log;
-use hermes_feed::launchpad_readiness::{LaunchpadReadinessWindow, supported_profile_envelopes};
+use hermes_feed::launchpad_readiness::{
+    LaunchpadReadinessWindow, READINESS_LAUNCHPADS, supported_profile_envelopes,
+};
 use hermes_feed::paper_observer::{
     PaperExpectedPins, PaperFeedRuntime, PaperLaunchpadObserver, PaperObservedStartupSnapshot,
     PaperPlanPolicy,
@@ -256,14 +259,7 @@ fn readiness_windows(
     validate_ground_truth_window(window, &records.evidence)?;
 
     let mut profile_counts = HashMap::<LaunchpadId, BTreeMap<String, u64>>::new();
-    for launchpad in [
-        LaunchpadId::Bow,
-        LaunchpadId::LaunchHoodV3,
-        LaunchpadId::Clanker,
-        LaunchpadId::BankrDoppler,
-        LaunchpadId::Pons,
-        LaunchpadId::HoodFun,
-    ] {
+    for launchpad in READINESS_LAUNCHPADS {
         profile_counts.insert(
             launchpad,
             supported_profile_envelopes(launchpad)
@@ -3305,16 +3301,8 @@ fn reconciliation_metrics(
         }
     }
 
-    const LAUNCHPADS: [LaunchpadId; 6] = [
-        LaunchpadId::Bow,
-        LaunchpadId::LaunchHoodV3,
-        LaunchpadId::Clanker,
-        LaunchpadId::BankrDoppler,
-        LaunchpadId::Pons,
-        LaunchpadId::HoodFun,
-    ];
-    let mut rows = Vec::with_capacity(LAUNCHPADS.len());
-    for launchpad in LAUNCHPADS {
+    let mut rows = Vec::with_capacity(READINESS_LAUNCHPADS.len());
+    for launchpad in READINESS_LAUNCHPADS {
         let truth = indexed
             .iter()
             .filter(|((_, id, _), record)| {
@@ -3587,10 +3575,13 @@ fn reconciliation_metrics(
 /// exact legacy classification before excluding them; ambiguous/current Pons
 /// evidence continues to fail closed as prediction-eligible.
 fn identity_prediction_applicable(record: &ReconciliationEvidence) -> bool {
-    !(record.launchpad == LaunchpadId::Pons
+    !((record.launchpad == LaunchpadId::Pons
         && record.pons_generation == Some(hermes_feed::PonsGeneration::Legacy)
         && record.quote_status == QuoteStatus::NotApplicable
         && record.protocol_blocker.as_deref() == Some(PONS_LEGACY_DISCOVERY_BLOCKER))
+        || (record.launchpad == LaunchpadId::Flap
+            && record.quote_status == QuoteStatus::NotApplicable
+            && record.protocol_blocker.as_deref() == Some(FLAP_DISCOVERY_ONLY_BLOCKER)))
 }
 
 fn compare_prediction<T: Copy + Eq>(
@@ -3625,6 +3616,9 @@ mod tests {
     use std::io::Write;
 
     use alloy_primitives::{Address, keccak256};
+    use hermes_feed::flap_abi::{
+        FLAP_DISCOVERY_ONLY_BLOCKER, FLAP_TOKEN_CREATED_TOPIC, decode_flap_token_created,
+    };
     use hermes_feed::launchpad_adapters::{
         CLANKER_FACTORY, CLANKER_TOKEN_CREATED_TOPIC, DOPPLER_CREATE_EMITTER, DOPPLER_CREATE_TOPIC,
     };
@@ -3788,6 +3782,194 @@ mod tests {
                 .then_some(hermes_feed::PonsGeneration::Current),
             protocol_blocker: None,
         }
+    }
+
+    fn flap_created_log(kind: &str) -> (hermes_feed::noxa_abi::ReceiptLog, Address) {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/flap-anchored-live-proofs.json"
+        ))
+        .unwrap();
+        let proof = fixture["proofs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|proof| proof["kind"] == kind)
+            .unwrap();
+        let value = proof["receipt"]["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|log| {
+                log["topics"][0].as_str().unwrap() == format!("{FLAP_TOKEN_CREATED_TOPIC:#x}")
+            })
+            .unwrap();
+        let log = hermes_feed::noxa_abi::ReceiptLog {
+            address: value["address"].as_str().unwrap().parse().unwrap(),
+            topics: value["topics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|topic| topic.as_str().unwrap().parse().unwrap())
+                .collect(),
+            data: alloy_primitives::Bytes::from(
+                hex::decode(value["data"].as_str().unwrap().trim_start_matches("0x")).unwrap(),
+            ),
+            log_index: u64::from_str_radix(
+                value["logIndex"].as_str().unwrap().trim_start_matches("0x"),
+                16,
+            )
+            .unwrap(),
+        };
+        let token = decode_flap_token_created(hermes_feed::robinhood::CHAIN_ID, &log)
+            .unwrap()
+            .token;
+        (log, token)
+    }
+
+    #[test]
+    fn flap_metrics_and_readiness_rows_score_discovery_without_promotion() {
+        let direct_key = (
+            "0x5335b58ddb1003d170ec178fc8b46b428983952883d19c9771d4295851cebbe5"
+                .parse()
+                .unwrap(),
+            LaunchpadId::Flap,
+        );
+        let vault_key = (
+            "0x248848fd509496412f4c3c138b907168282b65b94aafa581258c9e1f685af2ff"
+                .parse()
+                .unwrap(),
+            LaunchpadId::Flap,
+        );
+        let (direct_log, direct_token) = flap_created_log("direct_tax_v3");
+        let (vault_log, vault_token) = flap_created_log("vault");
+        let evidence = [
+            ReconciliationEvidence {
+                record_type: "launchpad_reconciliation_evidence".into(),
+                tx_hash: direct_key.0,
+                launchpad: LaunchpadId::Flap,
+                scope_token: None,
+                receipt_status: true,
+                protocol_event_match: true,
+                observer_claim: true,
+                ground_truth_event: true,
+                ground_truth_hits: vec![GroundTruthHit {
+                    l2_block_number: 10,
+                    block_hash: B256::with_last_byte(10),
+                    transaction_index: 1,
+                    log: direct_log,
+                }],
+                action: Some(ActionKind::Launch),
+                token: Some(direct_token),
+                pool: None,
+                pool_id: None,
+                quote_status: QuoteStatus::NotApplicable,
+                l2_block_number: Some(10),
+                block_hash: Some(B256::with_last_byte(10)),
+                transaction_index: Some(1),
+                reconciliation_started_unix_ns: 100,
+                reconciliation_completed_unix_ns: 150,
+                pons_generation: None,
+                protocol_blocker: Some(FLAP_DISCOVERY_ONLY_BLOCKER.into()),
+            },
+            ReconciliationEvidence {
+                record_type: "launchpad_reconciliation_evidence".into(),
+                tx_hash: vault_key.0,
+                launchpad: LaunchpadId::Flap,
+                scope_token: None,
+                receipt_status: true,
+                protocol_event_match: true,
+                observer_claim: false,
+                ground_truth_event: true,
+                ground_truth_hits: vec![GroundTruthHit {
+                    l2_block_number: 11,
+                    block_hash: B256::with_last_byte(11),
+                    transaction_index: 2,
+                    log: vault_log,
+                }],
+                action: Some(ActionKind::Launch),
+                token: Some(vault_token),
+                pool: None,
+                pool_id: None,
+                quote_status: QuoteStatus::NotApplicable,
+                l2_block_number: Some(11),
+                block_hash: Some(B256::with_last_byte(11)),
+                transaction_index: Some(2),
+                reconciliation_started_unix_ns: 200,
+                reconciliation_completed_unix_ns: 250,
+                pons_generation: None,
+                protocol_blocker: Some(FLAP_DISCOVERY_ONLY_BLOCKER.into()),
+            },
+        ];
+        let observed = ObservedOutputCandidates {
+            claims: HashMap::from([(
+                direct_key,
+                ObserverClaim {
+                    action: Some(ActionKind::Launch),
+                    predicted_token: None,
+                    predicted_pool: None,
+                    predicted_pool_id: None,
+                },
+            )]),
+            feed_transactions: HashMap::from([(direct_key.0, 1), (vault_key.0, 2)]),
+            observer_latency_ns: HashMap::from([(direct_key, 42)]),
+            ..ObservedOutputCandidates::default()
+        };
+        let records = ReconciliationRecords {
+            evidence: evidence.to_vec(),
+            ground_truth_window: Some(complete_window(2)),
+            ..ReconciliationRecords::default()
+        };
+        let promotion = PromotionValidations::default();
+        let metrics = reconciliation_metrics(
+            &observed,
+            &records.evidence,
+            records.ground_truth_window.as_ref(),
+            &promotion,
+        )
+        .unwrap();
+        assert_eq!(metrics.len(), 7);
+        let flap = metrics
+            .iter()
+            .find(|row| row.launchpad == LaunchpadId::Flap)
+            .unwrap();
+        assert_eq!(flap.confirmed_observations, 1);
+        assert_eq!(flap.missed_transactions, 1);
+        assert_eq!(flap.detector_misses, 1);
+        assert_eq!(flap.action_prediction_eligible, 1);
+        assert_eq!(flap.action_prediction_matches, 1);
+        assert_eq!(flap.action_prediction_mismatches, 0);
+        assert_eq!(flap.token_prediction_eligible, 0);
+        assert_eq!(flap.independent_quote_validation_eligible, 0);
+        assert_eq!(flap.observation_latency_p50_ns, Some(42));
+
+        let windows =
+            readiness_windows(&records, &metrics, &promotion, &readiness_provenance()).unwrap();
+        assert_eq!(windows.len(), 7);
+        let flap_window = windows
+            .iter()
+            .find(|window| window.launchpad == LaunchpadId::Flap)
+            .unwrap();
+        assert_eq!(flap_window.quote_eligible_confirmed_observations, 0);
+        assert_eq!(
+            flap_window.profile_envelope_observations["discovery_only"],
+            0
+        );
+        assert_eq!(flap_window.direction_mismatches, 0);
+        let readiness =
+            hermes_feed::launchpad_readiness::evaluate_launchpad_readiness(&windows).unwrap();
+        let flap_readiness = readiness
+            .iter()
+            .find(|record| record.launchpad == LaunchpadId::Flap)
+            .unwrap();
+        assert!(!flap_readiness.paper_evidence_ready);
+        assert!(!flap_readiness.authorizes_canary);
+        assert!(!flap_readiness.execution_eligible);
+        assert!(
+            flap_readiness
+                .failures
+                .iter()
+                .any(|failure| failure.code == "discovery_only_launchpad")
+        );
     }
 
     #[test]
@@ -4279,13 +4461,13 @@ mod tests {
         let evaluated =
             hermes_feed::launchpad_readiness::evaluate_launchpad_readiness(&parsed).unwrap();
 
-        assert_eq!(parsed.len(), 6);
+        assert_eq!(parsed.len(), 7);
         assert!(
             parsed
                 .iter()
                 .all(|row| row.provenance.as_ref() == Some(&readiness_provenance()))
         );
-        assert_eq!(evaluated.len(), 6);
+        assert_eq!(evaluated.len(), 7);
         let bow_window = parsed
             .iter()
             .find(|row| row.launchpad == LaunchpadId::Bow)

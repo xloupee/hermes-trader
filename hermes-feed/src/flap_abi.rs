@@ -28,7 +28,7 @@ sol! {
         uint256 amount,
         uint256 quoteAmount,
         uint256 fee,
-        uint256 circulatingSupply
+        uint256 postPrice
     );
 
     event TokenSold(
@@ -38,13 +38,15 @@ sol! {
         uint256 amount,
         uint256 quoteAmount,
         uint256 fee,
-        uint256 circulatingSupply
+        uint256 postPrice
     );
 }
 
 pub const FLAP_TOKEN_CREATED_TOPIC: B256 = TokenCreated::SIGNATURE_HASH;
 pub const FLAP_TOKEN_BOUGHT_TOPIC: B256 = TokenBought::SIGNATURE_HASH;
 pub const FLAP_TOKEN_SOLD_TOPIC: B256 = TokenSold::SIGNATURE_HASH;
+pub const FLAP_DISCOVERY_ONLY_BLOCKER: &str =
+    "flap_discovery_only_prediction_and_quotes_unavailable";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct FlapTokenCreated {
@@ -69,7 +71,7 @@ pub struct FlapTokenBought {
     /// the quote token and decimals must come from the pinned token profile.
     pub raw_quote_amount: U256,
     pub raw_fee: U256,
-    pub circulating_supply: U256,
+    pub post_price: U256,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -180,7 +182,7 @@ pub fn decode_flap_token_bought(chain_id: u64, log: &ReceiptLog) -> Option<FlapT
         amount: decoded.amount,
         raw_quote_amount: decoded.quoteAmount,
         raw_fee: decoded.fee,
-        circulating_supply: decoded.circulatingSupply,
+        post_price: decoded.postPrice,
     })
 }
 
@@ -216,7 +218,7 @@ mod tests {
             amount: U256::from(100),
             quoteAmount: U256::from(10),
             fee: U256::from(1),
-            circulatingSupply: U256::from(1_000),
+            postPrice: U256::from(1_000),
         };
         ReceiptLog {
             address,

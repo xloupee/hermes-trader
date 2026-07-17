@@ -82,7 +82,6 @@ use crate::v3_launch_at_birth::{
 
 pub const FLAP_STANDARD_LAUNCH_SELECTOR: [u8; 4] = [0x2e, 0x2f, 0xdb, 0xd9];
 pub const FLAP_TAX_V3_LAUNCH_SELECTOR: [u8; 4] = [0x8c, 0xb5, 0x77, 0x2c];
-pub const FLAP_VAULT_LAUNCH_SELECTOR: [u8; 4] = [0x1b, 0x80, 0x62, 0x20];
 const MAX_OPAQUE_CALLDATA: usize = 128 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1501,13 +1500,6 @@ impl PaperLaunchpadObserver {
                         "malformed Flap launch envelope".into(),
                     ));
                 }
-                if destination == FLAP_VAULT_PORTAL_PROXY
-                    && !is_bounded_flap_vault_abi_envelope(input)
-                {
-                    return Err(PaperObserverError::Adapter(
-                        "malformed Flap VaultPortal launch envelope".into(),
-                    ));
-                }
                 (
                     LaunchpadId::Flap,
                     "launch_discovery",
@@ -1810,7 +1802,6 @@ fn paper_specs(
                 &[
                     (FLAP_PORTAL_PROXY, FLAP_STANDARD_LAUNCH_SELECTOR),
                     (FLAP_PORTAL_PROXY, FLAP_TAX_V3_LAUNCH_SELECTOR),
-                    (FLAP_VAULT_PORTAL_PROXY, FLAP_VAULT_LAUNCH_SELECTOR),
                 ],
                 &direct,
             ),
@@ -2058,32 +2049,6 @@ fn paper_specs(
         ));
     }
     Ok(specs)
-}
-
-/// Validate only the ABI envelope proven for the source-unverified VaultPortal
-/// implementation: exact selector, one top-level dynamic argument at the
-/// canonical offset, whole ABI words, and a bounded non-empty payload. The
-/// tuple fields intentionally remain opaque and unavailable to prediction or
-/// quoting until the implementation semantics are independently verified.
-fn is_bounded_flap_vault_abi_envelope(input: &[u8]) -> bool {
-    const WORD: usize = 32;
-
-    if input.len() > MAX_OPAQUE_CALLDATA
-        || input.len() < 4 + 2 * WORD
-        || !(input.len() - 4).is_multiple_of(WORD)
-        || input.get(..4) != Some(FLAP_VAULT_LAUNCH_SELECTOR.as_slice())
-        || word_as_usize(&input[4..4 + WORD]) != Some(WORD)
-    {
-        return false;
-    }
-    input[4 + WORD..].iter().any(|byte| *byte != 0)
-}
-
-fn word_as_usize(word: &[u8]) -> Option<usize> {
-    if word.len() != 32 || word[..24].iter().any(|byte| *byte != 0) {
-        return None;
-    }
-    usize::try_from(u64::from_be_bytes(word[24..].try_into().ok()?)).ok()
 }
 
 fn spec(
@@ -2905,7 +2870,7 @@ mod tests {
     }
 
     #[test]
-    fn real_flap_direct_and_vault_launches_remain_strict_discovery_only() {
+    fn real_flap_direct_is_discovery_only_and_unverified_vault_selector_is_rejected() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../tests/fixtures/flap-anchored-live-proofs.json"
         ))
@@ -2926,6 +2891,43 @@ mod tests {
             let signer: Address = transaction["from"].as_str().unwrap().parse().unwrap();
             let destination: Address = transaction["to"].as_str().unwrap().parse().unwrap();
             let value: U256 = transaction["value"].as_str().unwrap().parse().unwrap();
+            if proof["kind"] == "vault" {
+                assert_eq!(destination, FLAP_VAULT_PORTAL_PROXY);
+                assert_eq!(&input[..4], [0x1b, 0x80, 0x62, 0x20]);
+                assert!(!observer.might_observe(destination, &input[..4]));
+                assert!(
+                    observer
+                        .observe_call(
+                            tx_hash,
+                            signer,
+                            signer,
+                            LeaderOrigin::DirectSigner,
+                            WrapperKind::Direct,
+                            destination,
+                            value,
+                            &input,
+                        )
+                        .is_err()
+                );
+                let mut aligned_trailing_junk = input.clone();
+                aligned_trailing_junk.extend_from_slice(&[0_u8; 32]);
+                assert!(
+                    observer
+                        .observe_call(
+                            tx_hash,
+                            signer,
+                            signer,
+                            LeaderOrigin::DirectSigner,
+                            WrapperKind::Direct,
+                            destination,
+                            value,
+                            &aligned_trailing_junk,
+                        )
+                        .is_err()
+                );
+                continue;
+            }
+
             let observation = observer
                 .observe_call(
                     tx_hash,
@@ -2938,7 +2940,6 @@ mod tests {
                     &input,
                 )
                 .unwrap();
-
             assert_eq!(observation.tx_hash, tx_hash);
             assert_eq!(observation.leader, signer);
             assert_eq!(observation.outer_signer, signer);
@@ -2949,30 +2950,8 @@ mod tests {
             assert_eq!(observation.predicted_pool, None);
             assert_eq!(observation.predicted_pool_id, None);
             assert!(!observation.live_execution_enabled);
-
-            if proof["kind"] == "vault" {
-                assert_eq!(destination, FLAP_VAULT_PORTAL_PROXY);
-                assert_eq!(&input[..4], FLAP_VAULT_LAUNCH_SELECTOR);
-                let mut trailing_junk = input.clone();
-                trailing_junk.push(0);
-                assert!(
-                    observer
-                        .observe_call(
-                            tx_hash,
-                            signer,
-                            signer,
-                            LeaderOrigin::DirectSigner,
-                            WrapperKind::Direct,
-                            destination,
-                            value,
-                            &trailing_junk,
-                        )
-                        .is_err()
-                );
-            }
         }
 
-        assert!(observer.might_observe(FLAP_VAULT_PORTAL_PROXY, &FLAP_VAULT_LAUNCH_SELECTOR));
         assert!(!observer.might_observe(FLAP_VAULT_PORTAL_PROXY, &FLAP_STANDARD_LAUNCH_SELECTOR));
         assert!(!observer.might_observe(FLAP_VAULT_PORTAL_PROXY, &FLAP_TAX_V3_LAUNCH_SELECTOR));
         let capability = observer

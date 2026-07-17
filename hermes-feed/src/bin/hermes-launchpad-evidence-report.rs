@@ -12,22 +12,13 @@ use hermes_feed::evidence_provenance::{
 };
 use hermes_feed::launchpad_adapter::LaunchpadId;
 use hermes_feed::launchpad_readiness::{
-    evaluate_completed_session_readiness, supported_profile_envelopes,
+    READINESS_LAUNCHPADS, evaluate_completed_session_readiness, supported_profile_envelopes,
 };
 use hermes_feed::launchpad_session::{
     ValidatedPaperSession, ensure_compatible_independent_sessions, validate_completed_session,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
-
-const LAUNCHPADS: [LaunchpadId; 6] = [
-    LaunchpadId::Bow,
-    LaunchpadId::LaunchHoodV3,
-    LaunchpadId::Clanker,
-    LaunchpadId::BankrDoppler,
-    LaunchpadId::Pons,
-    LaunchpadId::HoodFun,
-];
 
 #[derive(Debug, Parser)]
 #[command(about = "Deterministic, paper-only aggregate over completed launchpad evidence sessions")]
@@ -235,7 +226,7 @@ fn main() -> Result<()> {
         collect_plans(directory, &mut entries, &mut exits, &mut round_trips)?;
     }
 
-    for launchpad in LAUNCHPADS {
+    for launchpad in READINESS_LAUNCHPADS {
         let counts = aggregate.remove(&launchpad).unwrap_or_default();
         let mut samples = latencies.remove(&launchpad).unwrap_or_default();
         samples.sort_unstable();
@@ -447,7 +438,7 @@ fn collect_metrics(directory: &Path, aggregate: &mut HashMap<LaunchpadId, Counts
         )?;
         // Collapsed mismatch counters are already cross-checked through readiness windows.
     }
-    if seen.len() != LAUNCHPADS.len() {
+    if seen.len() != READINESS_LAUNCHPADS.len() {
         bail!("finalized evidence must contain one metrics row per launchpad");
     }
     Ok(())
@@ -718,6 +709,16 @@ mod tests {
         assert_eq!(percentile(&values, 50), Some(30));
         assert_eq!(percentile(&values, 95), Some(50));
         assert_eq!(percentile::<u64>(&[], 99), None);
+    }
+
+    #[test]
+    fn campaign_report_launchpad_set_includes_discovery_only_flap() {
+        assert_eq!(READINESS_LAUNCHPADS.len(), 7);
+        assert!(READINESS_LAUNCHPADS.contains(&LaunchpadId::Flap));
+        assert_eq!(
+            supported_profile_envelopes(LaunchpadId::Flap),
+            Some(["discovery_only"].as_slice())
+        );
     }
 
     #[test]

@@ -20,13 +20,14 @@ pub const MIN_QUOTE_ELIGIBLE_CONFIRMED: u64 = 100;
 pub const MIN_PROFILE_ENVELOPE_OBSERVATIONS: u64 = 10;
 pub const MIN_INDEPENDENT_COMPLETE_WINDOWS: usize = 3;
 
-const READINESS_LAUNCHPADS: [LaunchpadId; 6] = [
+pub const READINESS_LAUNCHPADS: [LaunchpadId; 7] = [
     LaunchpadId::Bow,
     LaunchpadId::LaunchHoodV3,
     LaunchpadId::Clanker,
     LaunchpadId::BankrDoppler,
     LaunchpadId::Pons,
     LaunchpadId::HoodFun,
+    LaunchpadId::Flap,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -177,6 +178,7 @@ pub fn supported_profile_envelopes(launchpad: LaunchpadId) -> Option<&'static [&
         ]),
         LaunchpadId::Pons => Some(&["current_generation"]),
         LaunchpadId::HoodFun => Some(&["current_curve", "migrated_v3_boundary"]),
+        LaunchpadId::Flap => Some(&["discovery_only"]),
         _ => None,
     }
 }
@@ -434,6 +436,9 @@ fn evaluate_one(
         prediction_mismatches,
     );
     push_zero_failure(&mut failures, "quote_mismatches_present", quote_mismatches);
+    if launchpad == LaunchpadId::Flap {
+        push_zero_failure(&mut failures, "discovery_only_launchpad", 1);
+    }
     if input_trust == ReadinessInputTrust::UntrustedInput {
         push_zero_failure(&mut failures, "untrusted_readiness_input", 1);
     }
@@ -690,6 +695,31 @@ mod tests {
     #[test]
     fn observe_only_stonks_is_absent_from_promotion_readiness_set() {
         assert!(!READINESS_LAUNCHPADS.contains(&LaunchpadId::StonksV3));
+    }
+
+    #[test]
+    fn flap_is_reported_but_remains_unconditionally_discovery_only() {
+        assert!(READINESS_LAUNCHPADS.contains(&LaunchpadId::Flap));
+        let mut windows = [
+            window(LaunchpadId::Flap, 0, 100),
+            window(LaunchpadId::Flap, 1, 100),
+            window(LaunchpadId::Flap, 2, 100),
+        ];
+        for window in &mut windows {
+            window
+                .profile_envelope_observations
+                .insert("discovery_only".into(), 100);
+        }
+        let records = evaluate_launchpad_readiness(&windows).unwrap();
+        let flap = record(&records, LaunchpadId::Flap);
+        assert!(!flap.paper_evidence_ready);
+        assert!(!flap.authorizes_canary);
+        assert!(!flap.execution_eligible);
+        assert!(
+            flap.failures
+                .iter()
+                .any(|failure| failure.code == "discovery_only_launchpad")
+        );
     }
 
     #[test]

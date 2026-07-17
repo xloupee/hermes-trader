@@ -145,7 +145,12 @@ signer, broadcast path, deployment, or canary. The evaluator always emits
 `paper_evidence_ready` is true. Promotion remains a separate, explicitly
 authorized review after production-pin validation and paper evidence.
 
-Feed one `launchpad_paper_readiness_window` JSON object per line to:
+After anchored reconciliation, `hermes-launchpad-paper` automatically emits one
+`launchpad_paper_readiness_window` JSON object for each of the six launchpads.
+The rows are derived from the validated ground-truth manifest, reconciliation
+metrics, promotion validation, and typed quote records; there is no CLI input
+for hand-authored counts. Collect those emitted rows across independent runs
+and feed them to:
 
 ```sh
 cargo run --release --bin hermes-launchpad-readiness -- \
@@ -180,13 +185,20 @@ Each input row binds one reconciled measurement window with these fields:
 }
 ```
 
-The row must be derived from the anchored paper-observer and reconciliation
-artifacts. `complete` means receipt/event reconciliation finished and both
-nonzero boundary hashes were confirmed canonical. Independent windows are
+`complete` means receipt/event reconciliation finished and both nonzero
+boundary hashes were confirmed canonical. Independent windows are
 complete, non-overlapping L2 ranges. Duplicate or overlapping ranges and
 incomplete windows cannot increase the sample or per-profile totals. Error
 counters are conservatively accumulated over every submitted row, so discarded
 or overlapping evidence cannot hide an error.
+
+`quote_eligible_confirmed_observations` counts independently revalidated quote
+records. Profile and envelope counters are derived from those same typed quote
+records. Bankr curve version and outer envelope are orthogonal dimensions, so
+one validated Bankr quote contributes once to its curve stratum and once to its
+envelope stratum. Missing prediction or validation evidence is conservatively
+counted with mismatches: token/pool fields form identity, entry/exit checks form
+direction, action forms prediction, and independent quote replay forms quote.
 
 The fixed readiness policy is evaluated independently for every launchpad:
 

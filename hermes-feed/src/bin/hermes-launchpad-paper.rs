@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -10,6 +10,7 @@ use clap::Parser;
 use hermes_feed::feed::BroadcastMessage;
 use hermes_feed::launchpad_adapter::{ActionKind, LaunchpadId};
 use hermes_feed::launchpad_ground_truth::launchpad_for_ground_truth_log;
+use hermes_feed::launchpad_readiness::{LaunchpadReadinessWindow, supported_profile_envelopes};
 use hermes_feed::paper_observer::{
     PaperExpectedPins, PaperFeedRuntime, PaperLaunchpadObserver, PaperObservedStartupSnapshot,
     PaperPlanPolicy,
@@ -177,6 +178,182 @@ struct PromotionValidation {
 #[derive(Debug, Default)]
 struct PromotionValidations {
     by_key: HashMap<(B256, LaunchpadId), PromotionValidation>,
+}
+
+fn readiness_windows(
+    records: &ReconciliationRecords,
+    metrics: &[ReconciliationMetrics],
+    promotion: &PromotionValidations,
+) -> Result<Vec<LaunchpadReadinessWindow>> {
+    let window = records
+        .ground_truth_window
+        .as_ref()
+        .context("readiness emission requires a ground-truth coverage manifest")?;
+    validate_ground_truth_window(window, &records.evidence)?;
+
+    let mut profile_counts = HashMap::<LaunchpadId, BTreeMap<String, u64>>::new();
+    for launchpad in [
+        LaunchpadId::Bow,
+        LaunchpadId::LaunchHoodV3,
+        LaunchpadId::Clanker,
+        LaunchpadId::BankrDoppler,
+        LaunchpadId::Pons,
+        LaunchpadId::HoodFun,
+    ] {
+        profile_counts.insert(
+            launchpad,
+            supported_profile_envelopes(launchpad)
+                .context("readiness launchpad has no supported profile list")?
+                .iter()
+                .map(|profile| ((*profile).to_owned(), 0))
+                .collect(),
+        );
+    }
+
+    let is_validated = |key| {
+        promotion
+            .by_key
+            .get(&key)
+            .is_some_and(|validation| validation.quote_matches)
+    };
+    let mut increment = |launchpad: LaunchpadId, profile: &'static str| -> Result<()> {
+        let count = profile_counts
+            .get_mut(&launchpad)
+            .and_then(|counts| counts.get_mut(profile))
+            .context("validated quote resolved to an unsupported readiness profile")?;
+        *count = count
+            .checked_add(1)
+            .context("readiness profile counter overflow")?;
+        Ok(())
+    };
+
+    for quote in &records.v3_quotes {
+        if !is_validated((quote.tx_hash, quote.launchpad)) {
+            continue;
+        }
+        match quote.launchpad {
+            LaunchpadId::Bow if quote.market.swap_count == 0 => {
+                increment(LaunchpadId::Bow, "zero_initial_buy")?;
+            }
+            LaunchpadId::Bow => increment(LaunchpadId::Bow, "payable_initial_buy")?,
+            LaunchpadId::LaunchHoodV3 => {
+                increment(LaunchpadId::LaunchHoodV3, "embedded_initial_buy")?;
+            }
+            _ => anyhow::bail!("validated V3 quote has unsupported readiness launchpad"),
+        }
+    }
+    for quote in &records.clanker_quotes {
+        if !is_validated((quote.tx_hash, quote.launchpad)) {
+            continue;
+        }
+        let profile = match quote.market.liquidity_profile {
+            ClankerLiquidityProfile::ExtensionlessSinglePosition => "extensionless_single_position",
+            ClankerLiquidityProfile::PinnedExtensionFivePosition => {
+                "pinned_extension_five_position"
+            }
+        };
+        increment(LaunchpadId::Clanker, profile)?;
+    }
+    for quote in &records.bankr_quotes {
+        if !is_validated((quote.tx_hash, quote.launchpad)) {
+            continue;
+        }
+        let curve = match quote.market.create_profile_version {
+            BankrCreateProfileVersion::CurveTicksV1 => "curve_ticks_v1",
+            BankrCreateProfileVersion::CurveTicksV2 => "curve_ticks_v2",
+        };
+        let envelope = match quote.market.envelope {
+            BankrEnvelopeKind::DirectAirlock => "direct_airlock",
+            BankrEnvelopeKind::Erc7579 => "erc7579",
+        };
+        // Curve and outer-envelope strata are orthogonal. The same independently
+        // validated quote intentionally contributes once to each dimension.
+        increment(LaunchpadId::BankrDoppler, curve)?;
+        increment(LaunchpadId::BankrDoppler, envelope)?;
+    }
+    for quote in &records.pons_quotes {
+        if is_validated((quote.tx_hash, quote.launchpad)) {
+            increment(LaunchpadId::Pons, "current_generation")?;
+        }
+    }
+    for quote in &records.hood_quotes {
+        if is_validated((quote.tx_hash, quote.launchpad)) {
+            increment(LaunchpadId::HoodFun, "current_curve")?;
+        }
+    }
+
+    if metrics.len() != profile_counts.len() {
+        anyhow::bail!("readiness emission requires exactly one metrics row per launchpad");
+    }
+    let mut seen = HashSet::new();
+    metrics
+        .iter()
+        .map(|row| {
+            if !seen.insert(row.launchpad) {
+                anyhow::bail!("duplicate readiness metrics row for {:?}", row.launchpad);
+            }
+            let as_u64 = |value: usize, field: &'static str| {
+                u64::try_from(value).with_context(|| format!("{field} exceeds u64"))
+            };
+            let checked_sum = |values: &[usize], field: &'static str| -> Result<u64> {
+                values.iter().try_fold(0_u64, |total, value| {
+                    total
+                        .checked_add(as_u64(*value, field)?)
+                        .with_context(|| format!("{field} overflows u64"))
+                })
+            };
+            Ok(LaunchpadReadinessWindow {
+                record_type: "launchpad_paper_readiness_window".to_owned(),
+                launchpad: row.launchpad,
+                coverage_from_l2_block: window.from_l2_block,
+                coverage_to_l2_block: window.to_l2_block,
+                start_head_hash: window.start_head_hash,
+                cutoff_head_hash: window.cutoff_head_hash,
+                complete: window.complete,
+                quote_eligible_confirmed_observations: as_u64(
+                    row.independent_quote_validation_matches,
+                    "independent quote validation matches",
+                )?,
+                profile_envelope_observations: profile_counts
+                    .remove(&row.launchpad)
+                    .context("metrics row has unsupported readiness launchpad")?,
+                false_positives: as_u64(row.false_positives, "false positives")?,
+                detector_misses: as_u64(row.detector_misses, "detector misses")?,
+                identity_mismatches: checked_sum(
+                    &[
+                        row.token_prediction_missing,
+                        row.token_prediction_mismatches,
+                        row.pool_prediction_missing,
+                        row.pool_prediction_mismatches,
+                    ],
+                    "identity mismatches",
+                )?,
+                direction_mismatches: checked_sum(
+                    &[
+                        row.entry_direction_missing,
+                        row.entry_direction_mismatches,
+                        row.exit_direction_missing,
+                        row.exit_direction_mismatches,
+                    ],
+                    "direction mismatches",
+                )?,
+                prediction_mismatches: checked_sum(
+                    &[
+                        row.action_prediction_missing,
+                        row.action_prediction_mismatches,
+                    ],
+                    "prediction mismatches",
+                )?,
+                quote_mismatches: checked_sum(
+                    &[
+                        row.independent_quote_validation_missing,
+                        row.independent_quote_validation_mismatches,
+                    ],
+                    "quote mismatches",
+                )?,
+            })
+        })
+        .collect()
 }
 
 impl PromotionValidations {
@@ -576,13 +753,18 @@ fn main() -> Result<()> {
         // Emit promotion evidence before fail-closed plan construction so a
         // tampered quote remains an explicit mismatch instead of disappearing
         // behind the finalizer error.
-        for metrics in reconciliation_metrics(
+        let metrics = reconciliation_metrics(
             &observed_candidates,
             &records.evidence,
             records.ground_truth_window.as_ref(),
             &promotion,
-        )? {
+        )?;
+        let readiness = readiness_windows(&records, &metrics, &promotion)?;
+        for metrics in metrics {
             println!("{}", serde_json::to_string(&metrics)?);
+        }
+        for window in readiness {
+            println!("{}", serde_json::to_string(&window)?);
         }
         for plan in finalized_v3_plans(
             &observed_candidates.feed_sequences,
@@ -727,13 +909,18 @@ fn main() -> Result<()> {
         );
         // Preserve mismatch telemetry even when the plan finalizer below
         // rejects the corresponding quote record.
-        for metrics in reconciliation_metrics(
+        let metrics = reconciliation_metrics(
             &observed_candidates,
             &records.evidence,
             records.ground_truth_window.as_ref(),
             &promotion,
-        )? {
+        )?;
+        let readiness = readiness_windows(&records, &metrics, &promotion)?;
+        for metrics in metrics {
             println!("{}", serde_json::to_string(&metrics)?);
+        }
+        for window in readiness {
+            println!("{}", serde_json::to_string(&window)?);
         }
         for plan in finalized_v3_plans(
             &observed_candidates.feed_sequences,
@@ -2824,6 +3011,193 @@ mod tests {
         assert_eq!(bankr.missed_transactions, 1);
         assert_eq!(bankr.detector_misses, 0);
         assert_eq!(bankr.feed_coverage_misses, 1);
+    }
+
+    #[test]
+    fn finalized_readiness_rows_pipe_directly_into_the_evaluator() {
+        let quote = quote_fixture();
+        let key = (quote.tx_hash, quote.launchpad);
+        let mut evidence = evidence_row(key, true, true, true, QuoteStatus::Available);
+        evidence.action = Some(ActionKind::Launch);
+        evidence.token = Some(quote.market.token);
+        evidence.pool = Some(quote.market.pool);
+        evidence.l2_block_number = Some(quote.state_version.l2_block_number);
+        evidence.block_hash = Some(quote.state_version.block_hash);
+        evidence.transaction_index = Some(quote.state_version.transaction_index);
+        evidence.ground_truth_hits[0].l2_block_number = quote.state_version.l2_block_number;
+        evidence.ground_truth_hits[0].block_hash = quote.state_version.block_hash;
+        evidence.ground_truth_hits[0].transaction_index = quote.state_version.transaction_index;
+        let window = GroundTruthWindow {
+            record_type: "launchpad_ground_truth_window".into(),
+            start_head: quote.state_version.l2_block_number - 1,
+            start_head_hash: B256::with_last_byte(9),
+            cutoff_head: quote.state_version.l2_block_number,
+            cutoff_head_hash: quote.state_version.block_hash,
+            from_l2_block: quote.state_version.l2_block_number,
+            to_l2_block: quote.state_version.l2_block_number,
+            confirmations: 2,
+            scanned_blocks: 1,
+            complete: true,
+            event_logs: 1,
+            unique_protocol_keys: 1,
+        };
+        let records = ReconciliationRecords {
+            evidence: vec![evidence],
+            v3_quotes: vec![quote.clone()],
+            ground_truth_window: Some(window),
+            ..ReconciliationRecords::default()
+        };
+        let observed = ObservedOutputCandidates {
+            observer_latency_ns: HashMap::from([(key, 50)]),
+            feed_sequences: HashMap::from([(key, 7)]),
+            feed_transactions: HashMap::from([(key.0, 7)]),
+            claims: HashMap::from([(
+                key,
+                ObserverClaim {
+                    action: Some(ActionKind::Launch),
+                    predicted_token: Some(quote.market.token),
+                    predicted_pool: Some(quote.market.pool),
+                },
+            )]),
+            ..ObservedOutputCandidates::default()
+        };
+        let ground_truth = ConfirmedGroundTruth::from_records(&records).unwrap();
+        let promotion = promotion_validations(
+            &ground_truth,
+            &records,
+            PaperPlanPolicy {
+                max_input_wei: U256::from(1_000_u64),
+                slippage_bps: 100,
+                ..PaperPlanPolicy::default()
+            },
+            hermes_feed::PonsExpectedProfile::production(),
+            &HoodExpectedProfile::production(),
+        );
+        let metrics = reconciliation_metrics(
+            &observed,
+            &records.evidence,
+            records.ground_truth_window.as_ref(),
+            &promotion,
+        )
+        .unwrap();
+        let emitted = readiness_windows(&records, &metrics, &promotion).unwrap();
+        let jsonl = emitted
+            .iter()
+            .map(|row| serde_json::to_string(row).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed = jsonl
+            .lines()
+            .map(|line| serde_json::from_str::<LaunchpadReadinessWindow>(line).unwrap())
+            .collect::<Vec<_>>();
+        let evaluated =
+            hermes_feed::launchpad_readiness::evaluate_launchpad_readiness(&parsed).unwrap();
+
+        assert_eq!(parsed.len(), 6);
+        assert_eq!(evaluated.len(), 6);
+        let bow_window = parsed
+            .iter()
+            .find(|row| row.launchpad == LaunchpadId::Bow)
+            .unwrap();
+        assert_eq!(bow_window.quote_eligible_confirmed_observations, 1);
+        assert_eq!(
+            bow_window.profile_envelope_observations["zero_initial_buy"],
+            1
+        );
+        assert_eq!(
+            bow_window.profile_envelope_observations["payable_initial_buy"],
+            0
+        );
+        assert_eq!(bow_window.identity_mismatches, 0);
+        assert_eq!(bow_window.direction_mismatches, 0);
+        assert_eq!(bow_window.prediction_mismatches, 0);
+        assert_eq!(bow_window.quote_mismatches, 0);
+        assert!(evaluated.iter().all(|row| !row.authorizes_canary));
+        assert!(evaluated.iter().all(|row| !row.execution_eligible));
+    }
+
+    #[test]
+    fn validated_bankr_quote_counts_curve_and_envelope_strata() {
+        let quote = bankr_quote_fixture();
+        let key = (quote.tx_hash, quote.launchpad);
+        let mut evidence = evidence_row(key, true, true, true, QuoteStatus::Available);
+        evidence.token = Some(quote.market.token);
+        evidence.pool = None;
+        evidence.l2_block_number = Some(quote.state_version.l2_block_number);
+        evidence.block_hash = Some(quote.state_version.block_hash);
+        evidence.transaction_index = Some(quote.state_version.transaction_index);
+        evidence.ground_truth_hits[0].l2_block_number = quote.state_version.l2_block_number;
+        evidence.ground_truth_hits[0].block_hash = quote.state_version.block_hash;
+        evidence.ground_truth_hits[0].transaction_index = quote.state_version.transaction_index;
+        let window = GroundTruthWindow {
+            record_type: "launchpad_ground_truth_window".into(),
+            start_head: quote.state_version.l2_block_number - 1,
+            start_head_hash: B256::with_last_byte(9),
+            cutoff_head: quote.state_version.l2_block_number,
+            cutoff_head_hash: quote.state_version.block_hash,
+            from_l2_block: quote.state_version.l2_block_number,
+            to_l2_block: quote.state_version.l2_block_number,
+            confirmations: 2,
+            scanned_blocks: 1,
+            complete: true,
+            event_logs: 1,
+            unique_protocol_keys: 1,
+        };
+        let records = ReconciliationRecords {
+            evidence: vec![evidence],
+            bankr_quotes: vec![quote.clone()],
+            ground_truth_window: Some(window),
+            ..ReconciliationRecords::default()
+        };
+        let observed = ObservedOutputCandidates {
+            feed_transactions: HashMap::from([(key.0, 7)]),
+            claims: HashMap::from([(
+                key,
+                ObserverClaim {
+                    action: Some(ActionKind::Launch),
+                    predicted_token: Some(quote.market.token),
+                    predicted_pool: None,
+                },
+            )]),
+            ..ObservedOutputCandidates::default()
+        };
+        let ground_truth = ConfirmedGroundTruth::from_records(&records).unwrap();
+        let promotion = promotion_validations(
+            &ground_truth,
+            &records,
+            PaperPlanPolicy {
+                max_input_wei: U256::from(1_000_000_000_000_000_u64),
+                slippage_bps: 100,
+                ..PaperPlanPolicy::default()
+            },
+            hermes_feed::PonsExpectedProfile::production(),
+            &HoodExpectedProfile::production(),
+        );
+        let metrics = reconciliation_metrics(
+            &observed,
+            &records.evidence,
+            records.ground_truth_window.as_ref(),
+            &promotion,
+        )
+        .unwrap();
+        let windows = readiness_windows(&records, &metrics, &promotion).unwrap();
+        let bankr = windows
+            .iter()
+            .find(|row| row.launchpad == LaunchpadId::BankrDoppler)
+            .unwrap();
+        let curve = match quote.market.create_profile_version {
+            BankrCreateProfileVersion::CurveTicksV1 => "curve_ticks_v1",
+            BankrCreateProfileVersion::CurveTicksV2 => "curve_ticks_v2",
+        };
+        let envelope = match quote.market.envelope {
+            BankrEnvelopeKind::DirectAirlock => "direct_airlock",
+            BankrEnvelopeKind::Erc7579 => "erc7579",
+        };
+
+        assert_eq!(bankr.quote_eligible_confirmed_observations, 1);
+        assert_eq!(bankr.profile_envelope_observations[curve], 1);
+        assert_eq!(bankr.profile_envelope_observations[envelope], 1);
+        assert_eq!(bankr.profile_envelope_observations.values().sum::<u64>(), 2);
     }
 
     #[test]

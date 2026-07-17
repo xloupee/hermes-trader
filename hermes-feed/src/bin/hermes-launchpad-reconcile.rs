@@ -7,6 +7,7 @@ use alloy_primitives::{B256, U256, keccak256};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use futures_util::{StreamExt, stream};
+use hermes_feed::bankr_receipt_quote::quote_bankr_doppler_launch_receipt_at_receipt_block;
 use hermes_feed::evidence_provenance::{
     EvidenceAcquisition, ObserverEvidenceProvenance, ReconciliationEvidenceProvenance,
     current_executable_keccak256, maybe_print_self_digest, read_bytes_with_keccak,
@@ -41,14 +42,32 @@ use hermes_feed::{
     ClankerQuotePolicy, ClankerReceiptPaperQuote, ClankerV4ExpectedProfile,
     Eip7702SelfBatchExpectedPins, Eip7702SelfBatchProvenance, HoodExpectedProfile,
     HoodMigrationEvidence, HoodQuotePolicy, HoodReceiptPaperQuote, NoxaRpcClient, PonsQuotePolicy,
-    PonsReceiptPaperQuote, V3ReceiptPaperQuote, V3ReceiptQuotePolicy,
-    quote_bankr_doppler_launch_receipt_at_receipt_block, quote_clanker_launch_receipt,
+    PonsReceiptPaperQuote, V3ReceiptPaperQuote, V3ReceiptQuotePolicy, quote_clanker_launch_receipt,
     quote_hood_curve_receipt, quote_pons_eip7702_provenance_receipt, quote_pons_launch_receipt,
     quote_v3_launch_receipt, verify_hood_graduation_receipt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::{Instant, sleep};
+
+async fn collect_bankr_quote(
+    rpc: &NoxaRpcClient,
+    transaction: &hermes_feed::RobinhoodTransaction,
+    receipt: &hermes_feed::NoxaReceipt,
+    block: &hermes_feed::RobinhoodBlock,
+    profile: BankrDopplerExpectedProfile,
+    policy: BankrDopplerQuotePolicy,
+) -> Result<BankrDopplerReceiptPaperQuote, hermes_feed::BankrQuoteError> {
+    quote_bankr_doppler_launch_receipt_at_receipt_block(
+        rpc,
+        transaction,
+        receipt,
+        block,
+        profile,
+        policy,
+    )
+    .await
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -836,7 +855,7 @@ async fn reconcile_candidate(
                     .with_context(|| format!("missing transaction {}", candidate.tx_hash))?;
                 let block = rpc.block_by_number(receipt.l2_block_number).await?;
                 if let Some(profile) = profiles.bankr {
-                    match quote_bankr_doppler_launch_receipt_at_receipt_block(
+                    match collect_bankr_quote(
                         rpc,
                         &transaction,
                         &receipt,
@@ -1264,15 +1283,85 @@ fn unix_now_ns() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::io::Cursor;
     use std::str::FromStr;
 
     use alloy_primitives::{Address, Bytes};
-    use hermes_feed::{NoxaReceipt, RobinhoodTransaction};
+    use hermes_feed::bankr_receipt_quote::BANKR_CREATE_SELECTOR;
+    use hermes_feed::feed::BroadcastMessage;
+    use hermes_feed::paper_observer::{
+        ConfiguredBankrDopplerV4, ConfiguredCallPin, ConfiguredSmartAccount,
+        ConfiguredSmartAccounts, ObservedRuntimePin, PaperFeedRuntime,
+    };
+    use hermes_feed::{NoxaReceipt, RobinhoodBlock, RobinhoodTransaction};
     use serde::Deserialize;
     use serde_json::json;
+    use sha2::{Digest, Sha256};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+
+    #[derive(Deserialize)]
+    struct BankrV4RawFrames {
+        frames: Vec<BankrV4RawFrame>,
+    }
+
+    #[derive(Deserialize)]
+    struct BankrV4RawFrame {
+        window: String,
+        line: u64,
+        tx_hash: B256,
+        envelope: String,
+        source_path: String,
+        payload_sha256: String,
+        received_unix_ns: u64,
+        payload: String,
+    }
+
+    #[derive(Deserialize)]
+    struct BankrV4ProofSet {
+        launches: Vec<BankrV4Proof>,
+    }
+
+    #[derive(Deserialize)]
+    struct BankrV4Proof {
+        envelope: String,
+        transaction: RobinhoodTransaction,
+        block: RobinhoodBlock,
+        receipt: NoxaReceipt,
+    }
+
+    #[derive(Deserialize)]
+    struct BankrV4RuntimeFixture {
+        schema_version: u32,
+        chain_id: u64,
+        rpc_url: String,
+        acquisition: String,
+        verified_l2_blocks: Vec<BankrV4RuntimeBlock>,
+        runtimes: Vec<BankrV4RuntimeCode>,
+    }
+
+    #[derive(Deserialize)]
+    struct BankrV4RuntimeBlock {
+        l2_block_number: u64,
+        block_tag: String,
+        transaction_hash: B256,
+    }
+
+    #[derive(Deserialize)]
+    struct BankrV4RuntimeCode {
+        role: String,
+        address: Address,
+        runtime_hash: B256,
+        code: String,
+    }
+
+    struct RpcStep {
+        method: &'static str,
+        params: Value,
+        result: Value,
+    }
 
     fn observer_provenance() -> ObserverEvidenceProvenance {
         ObserverEvidenceProvenance {
@@ -1295,6 +1384,119 @@ mod tests {
             "signing": false,
             "candidate_time_rpc": false
         })
+    }
+
+    fn exact_bankr_v4_startup() -> (PaperExpectedPins, PaperObservedStartupSnapshot) {
+        let mut expected: PaperExpectedPins = serde_json::from_str(include_str!(
+            "../../tests/fixtures/launchpad-paper-expected-pins.synthetic.json"
+        ))
+        .unwrap();
+        let mut observed: PaperObservedStartupSnapshot = serde_json::from_str(include_str!(
+            "../../tests/fixtures/launchpad-paper-observed-startup.synthetic.json"
+        ))
+        .unwrap();
+        let profile = BankrDopplerExpectedProfile::production();
+        expected.bankr_doppler_v4 = Some(ConfiguredBankrDopplerV4 {
+            airlock_runtime_hash: profile.airlock.runtime_code_hash,
+            pool_manager_runtime_hash: profile.pool_manager.runtime_code_hash,
+            initializer_runtime_hash: profile.initializer.runtime_code_hash,
+            rehype_hook_runtime_hash: profile.rehype_hook.runtime_code_hash,
+            token_factory_runtime_hash: profile.token_factory.runtime_code_hash,
+            token_implementation_runtime_hash: profile.token_implementation.runtime_code_hash,
+            governance_factory_runtime_hash: profile.governance_factory.runtime_code_hash,
+            liquidity_migrator_runtime_hash: profile.liquidity_migrator.runtime_code_hash,
+            standard_lp_fee_ppm: profile.standard_lp_fee_ppm,
+            max_lp_fee_ppm: profile.max_lp_fee_ppm,
+            hook_fee_denominator_ppm: profile.hook_fee_denominator_ppm,
+            hook_start_fee_ppm: profile.hook_start_fee_ppm,
+            hook_end_fee_ppm: profile.hook_end_fee_ppm,
+            hook_duration_seconds: profile.hook_duration_seconds,
+            quote_delay_guard_seconds: profile.quote_delay_guard_seconds,
+            tick_spacing: profile.tick_spacing,
+            pool_allocation_bps: profile.pool_allocation_bps,
+            primary_curve_share_bps: profile.primary_curve_share_bps,
+            secondary_curve_share_bps: profile.secondary_curve_share_bps,
+            creator_beneficiary_bps: profile.creator_beneficiary_bps,
+            protocol_beneficiary_bps: profile.protocol_beneficiary_bps,
+        });
+        expected.bankr_doppler_calls = vec![ConfiguredCallPin {
+            destination: profile.airlock.address,
+            runtime_hash: profile.airlock.runtime_code_hash,
+            selector: BANKR_CREATE_SELECTOR,
+        }];
+        let delegation = profile.smart_account.delegation_implementation.unwrap();
+        expected.erc4337 = Some(ConfiguredSmartAccounts {
+            entry_point_runtime_hash: profile.entry_point.runtime_code_hash,
+            accounts: vec![ConfiguredSmartAccount {
+                account: profile.smart_account.account.address,
+                runtime_hash: profile.smart_account.account.runtime_code_hash,
+                execution_profile: profile.smart_account.execution_profile,
+                factory: None,
+                factory_runtime_hash: None,
+                delegation_implementation: Some(delegation.address),
+                delegation_runtime_hash: Some(delegation.runtime_code_hash),
+            }],
+        });
+        let pin = |address, implementation, runtime_hash| ObservedRuntimePin {
+            address,
+            implementation,
+            runtime_hash,
+            code_bytes: None,
+        };
+        observed.pins.extend([
+            pin(
+                profile.airlock.address,
+                None,
+                profile.airlock.runtime_code_hash,
+            ),
+            pin(
+                profile.pool_manager.address,
+                None,
+                profile.pool_manager.runtime_code_hash,
+            ),
+            pin(
+                profile.initializer.address,
+                None,
+                profile.initializer.runtime_code_hash,
+            ),
+            pin(
+                profile.rehype_hook.address,
+                None,
+                profile.rehype_hook.runtime_code_hash,
+            ),
+            pin(
+                profile.token_factory.address,
+                None,
+                profile.token_factory.runtime_code_hash,
+            ),
+            pin(
+                profile.token_implementation.address,
+                None,
+                profile.token_implementation.runtime_code_hash,
+            ),
+            pin(
+                profile.governance_factory.address,
+                None,
+                profile.governance_factory.runtime_code_hash,
+            ),
+            pin(
+                profile.liquidity_migrator.address,
+                None,
+                profile.liquidity_migrator.runtime_code_hash,
+            ),
+            pin(
+                profile.entry_point.address,
+                None,
+                profile.entry_point.runtime_code_hash,
+            ),
+            pin(
+                profile.smart_account.account.address,
+                Some(delegation.address),
+                profile.smart_account.account.runtime_code_hash,
+            ),
+            pin(delegation.address, None, delegation.runtime_code_hash),
+        ]);
+        (expected, observed)
     }
 
     fn log(address: alloy_primitives::Address, topic: B256) -> ReceiptLog {
@@ -1340,6 +1542,376 @@ mod tests {
         read_observer_input_from_reader(Cursor::new(bytes), digest)
     }
 
+    fn rpc_block_value(block: &RobinhoodBlock) -> Value {
+        json!({
+            "number": format!("0x{:x}", block.l2_block_number),
+            "l1BlockNumber": format!("0x{:x}", block.l1_block_number),
+            "timestamp": format!("0x{:x}", block.timestamp),
+            "hash": block.hash,
+        })
+    }
+
+    fn rpc_transaction_value(transaction: &RobinhoodTransaction) -> Value {
+        json!({
+            "hash": transaction.hash,
+            "from": transaction.from,
+            "to": transaction.to,
+            "input": format!("0x{}", hex::encode(transaction.input.as_ref())),
+            "value": format!("{:#x}", transaction.value),
+            "blockNumber": transaction
+                .l2_block_number
+                .map(|number| format!("0x{number:x}")),
+            "transactionIndex": transaction
+                .transaction_index
+                .map(|index| format!("0x{index:x}")),
+        })
+    }
+
+    fn rpc_receipt_value(receipt: &NoxaReceipt) -> Value {
+        let logs = receipt
+            .logs
+            .iter()
+            .map(|log| {
+                json!({
+                    "address": log.address,
+                    "logIndex": format!("0x{:x}", log.log_index),
+                    "topics": log.topics,
+                    "data": format!("0x{}", hex::encode(log.data.as_ref())),
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "transactionHash": receipt.transaction_hash,
+            "blockHash": receipt.block_hash,
+            "status": if receipt.status { "0x1" } else { "0x0" },
+            "blockNumber": format!("0x{:x}", receipt.l2_block_number),
+            "l1BlockNumber": receipt
+                .l1_block_number
+                .map(|number| format!("0x{number:x}")),
+            "transactionIndex": format!("0x{:x}", receipt.transaction_index),
+            "gasUsed": receipt.gas_used.map(|gas| format!("0x{gas:x}")),
+            "effectiveGasPrice": receipt
+                .effective_gas_price
+                .map(|price| format!("{price:#x}")),
+            "logs": logs,
+        })
+    }
+
+    async fn spawn_exact_rpc_server(
+        steps: Vec<RpcStep>,
+    ) -> (NoxaRpcClient, tokio::task::JoinHandle<usize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let rpc = NoxaRpcClient::with_url(url).unwrap();
+        let server = tokio::spawn(async move {
+            let expected_count = steps.len();
+            for step in steps {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0_u8; 8 * 1024];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(read, 0, "RPC client closed before sending headers");
+                    request.extend_from_slice(&chunk[..read]);
+                    if let Some(offset) =
+                        request.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        break offset + 4;
+                    }
+                };
+                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .expect("RPC request omitted Content-Length");
+                while request.len() < header_end + content_length {
+                    let mut chunk = [0_u8; 8 * 1024];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(read, 0, "RPC request body ended early");
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                assert_eq!(
+                    request.len(),
+                    header_end + content_length,
+                    "RPC request contained trailing bytes"
+                );
+                let body: Value =
+                    serde_json::from_slice(&request[header_end..header_end + content_length])
+                        .unwrap();
+                assert_eq!(body["jsonrpc"], "2.0");
+                assert_eq!(body["id"], 1);
+                assert_eq!(body["method"], step.method);
+                assert_eq!(body["params"], step.params);
+                let response = serde_json::to_vec(&json!({
+                    "jsonrpc": "2.0",
+                    "id": body["id"].clone(),
+                    "result": step.result,
+                }))
+                .unwrap();
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    response.len()
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                stream.write_all(&response).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+            expected_count
+        });
+        (rpc, server)
+    }
+
+    fn bankr_v4_runtime_fixture() -> BankrV4RuntimeFixture {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v4-concrete-reconciler-runtime-code.json"
+        ))
+        .unwrap()
+    }
+
+    fn assert_bankr_v4_runtime_fixture(fixture: &BankrV4RuntimeFixture) {
+        assert_eq!(fixture.schema_version, 1);
+        assert_eq!(fixture.chain_id, CHAIN_ID);
+        assert_eq!(fixture.rpc_url, PUBLIC_RPC_URL);
+        assert_eq!(
+            fixture.acquisition,
+            "read_only_eth_getCode_at_exact_receipt_blocks"
+        );
+        assert_eq!(fixture.verified_l2_blocks.len(), 2);
+
+        let profile = BankrDopplerExpectedProfile::production();
+        let delegation = profile.smart_account.delegation_implementation.unwrap();
+        let expected = [
+            (
+                "airlock",
+                profile.airlock.address,
+                profile.airlock.runtime_code_hash,
+            ),
+            (
+                "pool_manager",
+                profile.pool_manager.address,
+                profile.pool_manager.runtime_code_hash,
+            ),
+            (
+                "initializer",
+                profile.initializer.address,
+                profile.initializer.runtime_code_hash,
+            ),
+            (
+                "rehype_hook",
+                profile.rehype_hook.address,
+                profile.rehype_hook.runtime_code_hash,
+            ),
+            (
+                "token_factory",
+                profile.token_factory.address,
+                profile.token_factory.runtime_code_hash,
+            ),
+            (
+                "token_implementation",
+                profile.token_implementation.address,
+                profile.token_implementation.runtime_code_hash,
+            ),
+            (
+                "governance_factory",
+                profile.governance_factory.address,
+                profile.governance_factory.runtime_code_hash,
+            ),
+            (
+                "liquidity_migrator",
+                profile.liquidity_migrator.address,
+                profile.liquidity_migrator.runtime_code_hash,
+            ),
+            ("weth", profile.weth.address, profile.weth.runtime_code_hash),
+            (
+                "entry_point_v07",
+                profile.entry_point.address,
+                profile.entry_point.runtime_code_hash,
+            ),
+            (
+                "kernel_delegation",
+                delegation.address,
+                delegation.runtime_code_hash,
+            ),
+        ];
+        assert_eq!(fixture.runtimes.len(), expected.len());
+        let mut addresses = HashSet::new();
+        for (runtime, (role, address, runtime_hash)) in fixture.runtimes.iter().zip(expected) {
+            assert_eq!(runtime.role, role);
+            assert_eq!(runtime.address, address);
+            assert_eq!(runtime.runtime_hash, runtime_hash);
+            assert!(addresses.insert(runtime.address));
+            let code = hex::decode(
+                runtime
+                    .code
+                    .strip_prefix("0x")
+                    .expect("runtime code is not hex-prefixed"),
+            )
+            .unwrap();
+            assert!(!code.is_empty());
+            assert_eq!(keccak256(&code), runtime.runtime_hash);
+        }
+    }
+
+    fn runtime_code(fixture: &BankrV4RuntimeFixture, role: &str) -> String {
+        fixture
+            .runtimes
+            .iter()
+            .find(|runtime| runtime.role == role)
+            .unwrap_or_else(|| panic!("missing runtime fixture role {role}"))
+            .code
+            .clone()
+    }
+
+    fn bankr_rpc_steps(
+        proof: &BankrV4Proof,
+        expected_quote: &BankrDopplerReceiptPaperQuote,
+        fixture: &BankrV4RuntimeFixture,
+        drift_role: Option<&str>,
+    ) -> Vec<RpcStep> {
+        let profile = BankrDopplerExpectedProfile::production();
+        let delegation = profile.smart_account.delegation_implementation.unwrap();
+        let tag = format!("0x{:x}", proof.receipt.l2_block_number);
+        let designator = format!("0xef0100{}", hex::encode(delegation.address.as_slice()));
+        assert_eq!(
+            keccak256(hex::decode(designator.trim_start_matches("0x")).unwrap()),
+            profile.smart_account.account.runtime_code_hash
+        );
+        let mut steps = vec![
+            RpcStep {
+                method: "eth_getTransactionReceipt",
+                params: json!([proof.transaction.hash]),
+                result: rpc_receipt_value(&proof.receipt),
+            },
+            RpcStep {
+                method: "eth_getBlockByNumber",
+                params: json!([tag, false]),
+                result: rpc_block_value(&proof.block),
+            },
+            RpcStep {
+                method: "eth_getTransactionByHash",
+                params: json!([proof.transaction.hash]),
+                result: rpc_transaction_value(&proof.transaction),
+            },
+            RpcStep {
+                method: "eth_getBlockByNumber",
+                params: json!([tag, false]),
+                result: rpc_block_value(&proof.block),
+            },
+            RpcStep {
+                method: "eth_getCode",
+                params: json!([expected_quote.market.leader, tag]),
+                result: json!(designator),
+            },
+            RpcStep {
+                method: "eth_getCode",
+                params: json!([delegation.address, tag]),
+                result: json!(runtime_code(fixture, "kernel_delegation")),
+            },
+        ];
+        for role in [
+            "airlock",
+            "pool_manager",
+            "initializer",
+            "rehype_hook",
+            "token_factory",
+            "token_implementation",
+            "governance_factory",
+            "liquidity_migrator",
+            "weth",
+        ] {
+            let runtime = fixture
+                .runtimes
+                .iter()
+                .find(|runtime| runtime.role == role)
+                .unwrap();
+            let mut code = runtime.code.clone();
+            if drift_role == Some(role) {
+                code.push_str("00");
+            }
+            steps.push(RpcStep {
+                method: "eth_getCode",
+                params: json!([runtime.address, tag]),
+                result: json!(code),
+            });
+        }
+        if proof.envelope == "erc7579" {
+            let runtime = fixture
+                .runtimes
+                .iter()
+                .find(|runtime| runtime.role == "entry_point_v07")
+                .unwrap();
+            steps.push(RpcStep {
+                method: "eth_getCode",
+                params: json!([runtime.address, tag]),
+                result: json!(runtime.code),
+            });
+        }
+        if drift_role.is_none() {
+            steps.push(RpcStep {
+                method: "eth_getBlockByNumber",
+                params: json!([tag, false]),
+                result: rpc_block_value(&proof.block),
+            });
+        }
+        steps
+    }
+
+    fn exact_bankr_candidate(frame: &BankrV4RawFrame) -> ObservedCandidate {
+        let (expected, observed) = exact_bankr_v4_startup();
+        let observer = PaperLaunchpadObserver::from_startup_snapshots(expected, observed).unwrap();
+        let mut runtime = PaperFeedRuntime::new(observer);
+        let broadcast: BroadcastMessage = serde_json::from_str(&frame.payload).unwrap();
+        let report = runtime
+            .decode_received_at(&broadcast, frame.received_unix_ns)
+            .unwrap();
+        assert!(report.rejections.is_empty());
+        assert_eq!(
+            report
+                .reconciliation_requests
+                .iter()
+                .filter(|request| {
+                    request.tx_hash == frame.tx_hash
+                        && request.launchpad == LaunchpadId::BankrDoppler
+                })
+                .count(),
+            1
+        );
+        let serialized_frame = json!({
+            "record_type": "launchpad_paper_frame",
+            "report": report,
+        });
+        parse_observer_frame(serialized_frame)
+            .unwrap()
+            .candidates
+            .into_iter()
+            .find_map(|(key, candidate)| {
+                (key == (frame.tx_hash, LaunchpadId::BankrDoppler)).then_some(candidate)
+            })
+            .expect("strict collector parser omitted exact Bankr request")
+    }
+
+    fn bankr_reconcile_profiles() -> ReconcileProfiles {
+        ReconcileProfiles {
+            clanker: None,
+            bankr: Some(BankrDopplerExpectedProfile::production()),
+            pons: hermes_feed::PonsExpectedProfile::production(),
+            pons_eip7702: None,
+            hood: HoodExpectedProfile::production(),
+        }
+    }
+
+    fn bankr_quote_policy() -> V3ReceiptQuotePolicy {
+        V3ReceiptQuotePolicy {
+            amount_in: U256::from(1_000_000_000_000_000_u64),
+            max_amount_in: U256::from(10_000_000_000_000_000_u64),
+            slippage_bps: 100,
+        }
+    }
+
     #[test]
     fn collector_is_driven_by_exact_async_reconciliation_requests() {
         let input = parse_observer_frame(observer_frame()).unwrap();
@@ -1369,6 +1941,315 @@ mod tests {
                 .to_string()
                 .contains("feed provenance disagrees")
         );
+    }
+
+    #[test]
+    fn exact_v4_raw_requests_strictly_parse_and_bind_collector_quotes_for_both_envelopes() {
+        let frames: BankrV4RawFrames = serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v4-finaltuple-raw-frames.json"
+        ))
+        .unwrap();
+        let proofs: BankrV4ProofSet = serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v4-finaltuple-window-abc-live-proofs.json"
+        ))
+        .unwrap();
+        let capabilities = capabilities_record();
+        assert_eq!(capabilities["candidate_time_rpc"], false);
+        assert_eq!(capabilities["broadcast"], false);
+        assert_eq!(capabilities["signing"], false);
+
+        for frame in frames.frames {
+            let (expected_window, expected_line, expected_received_unix_ns, expected_sha256) =
+                match frame.envelope.as_str() {
+                    "erc7579" => (
+                        "window-a",
+                        2762,
+                        1_784_271_655_711_031_000,
+                        "4672011994f731bc6ca47ac8538c00539eb02c64854f8facbff1e2fff7291e75",
+                    ),
+                    "direct_airlock" => (
+                        "window-b",
+                        1661,
+                        1_784_271_886_078_187_000,
+                        "2da502bfbc533b2188390ef7190c8f5316fb8084914f4cf821a83578d1c66a84",
+                    ),
+                    other => panic!("unexpected fixture envelope {other}"),
+                };
+            let mut payload_line = frame.payload.as_bytes().to_vec();
+            payload_line.push(b'\n');
+            assert_eq!(frame.payload_sha256, expected_sha256);
+            assert_eq!(hex::encode(Sha256::digest(&payload_line)), expected_sha256);
+            assert_eq!(frame.received_unix_ns, expected_received_unix_ns);
+            assert!(
+                frame
+                    .source_path
+                    .ends_with(&format!("/windows/{expected_window}/raw-feed.jsonl"))
+            );
+            assert_eq!(
+                (frame.window.as_str(), frame.line),
+                (expected_window, expected_line)
+            );
+            let (expected, observed) = exact_bankr_v4_startup();
+            let observer =
+                PaperLaunchpadObserver::from_startup_snapshots(expected, observed).unwrap();
+            let mut runtime = PaperFeedRuntime::new(observer);
+            let broadcast: BroadcastMessage = serde_json::from_str(&frame.payload).unwrap();
+            let report = runtime
+                .decode_received_at(&broadcast, frame.received_unix_ns)
+                .unwrap();
+            assert!(report.rejections.is_empty());
+            assert_eq!(
+                report
+                    .reconciliation_requests
+                    .iter()
+                    .filter(|request| {
+                        request.tx_hash == frame.tx_hash
+                            && request.launchpad == LaunchpadId::BankrDoppler
+                    })
+                    .count(),
+                1
+            );
+            let frame_value = json!({
+                "record_type": "launchpad_paper_frame",
+                "report": report,
+            });
+            let parsed = parse_observer_frame(frame_value.clone()).unwrap();
+            let candidate = parsed
+                .candidates
+                .get(&(frame.tx_hash, LaunchpadId::BankrDoppler))
+                .unwrap();
+            assert!(candidate.observer_claim);
+            assert_eq!(
+                candidate.wrapper,
+                if frame.envelope == "erc7579" {
+                    WrapperKind::Erc4337
+                } else {
+                    WrapperKind::Direct
+                }
+            );
+
+            let proof = proofs
+                .launches
+                .iter()
+                .find(|proof| proof.transaction.hash == frame.tx_hash)
+                .unwrap();
+            assert_eq!(proof.envelope, frame.envelope);
+            let quote: BankrDopplerReceiptPaperQuote =
+                serde_json::from_str(if frame.envelope == "erc7579" {
+                    include_str!(
+                        "../../tests/fixtures/bankr-doppler-v4-finaltuple-paper-quote.json"
+                    )
+                } else {
+                    include_str!(
+                        "../../tests/fixtures/bankr-doppler-v4-finaltuple-direct-paper-quote.json"
+                    )
+                })
+                .unwrap();
+            assert_eq!(quote.tx_hash, frame.tx_hash);
+            assert_eq!(quote.tx_hash, proof.receipt.transaction_hash);
+            assert_eq!(quote.state_version.block_hash, proof.block.hash);
+            assert_eq!(
+                quote.state_version.l2_block_number,
+                proof.block.l2_block_number
+            );
+            assert_eq!(
+                quote.market.create_profile_version,
+                hermes_feed::BankrCreateProfileVersion::CurveTicksV4
+            );
+            assert_eq!(
+                quote.market.envelope,
+                if frame.envelope == "erc7579" {
+                    hermes_feed::BankrEnvelopeKind::Erc7579
+                } else {
+                    hermes_feed::BankrEnvelopeKind::DirectAirlock
+                }
+            );
+            assert!(quote.entry.expected_output > U256::ZERO);
+            assert!(quote.full_position_exit.expected_output > U256::ZERO);
+            assert!(!quote.execution_eligible);
+            assert!(!quote.broadcast);
+            let mut malformed_request = frame_value;
+            *malformed_request
+                .pointer_mut("/report/reconciliation_requests/0/evidence_source")
+                .unwrap() = json!("observer_inference");
+            assert!(parse_observer_frame(malformed_request).is_err());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bankr_v4_exact_raw_frames_cross_concrete_rpc_collector_dispatch_and_fail_closed_on_code_drift()
+     {
+        let frames: BankrV4RawFrames = serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v4-finaltuple-raw-frames.json"
+        ))
+        .unwrap();
+        let proofs: BankrV4ProofSet = serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v4-finaltuple-window-abc-live-proofs.json"
+        ))
+        .unwrap();
+        let runtime_fixture = bankr_v4_runtime_fixture();
+        assert_bankr_v4_runtime_fixture(&runtime_fixture);
+        assert_eq!(frames.frames.len(), 2);
+        assert!(
+            frames
+                .frames
+                .iter()
+                .any(|frame| frame.envelope == "erc7579")
+        );
+        assert!(
+            frames
+                .frames
+                .iter()
+                .any(|frame| frame.envelope == "direct_airlock")
+        );
+        assert!(
+            frames
+                .frames
+                .iter()
+                .all(|frame| matches!(frame.envelope.as_str(), "erc7579" | "direct_airlock"))
+        );
+        let capabilities = capabilities_record();
+        assert_eq!(capabilities["candidate_time_rpc"], false);
+        assert_eq!(capabilities["broadcast"], false);
+        assert_eq!(capabilities["signing"], false);
+
+        for frame in &frames.frames {
+            let proof = proofs
+                .launches
+                .iter()
+                .find(|proof| proof.transaction.hash == frame.tx_hash)
+                .unwrap();
+            let runtime_block = runtime_fixture
+                .verified_l2_blocks
+                .iter()
+                .find(|block| block.transaction_hash == frame.tx_hash)
+                .unwrap();
+            assert_eq!(runtime_block.l2_block_number, proof.receipt.l2_block_number);
+            assert_eq!(
+                runtime_block.block_tag,
+                format!("0x{:x}", proof.receipt.l2_block_number)
+            );
+            let expected_quote: BankrDopplerReceiptPaperQuote =
+                serde_json::from_str(if frame.envelope == "erc7579" {
+                    include_str!(
+                        "../../tests/fixtures/bankr-doppler-v4-finaltuple-paper-quote.json"
+                    )
+                } else {
+                    include_str!(
+                        "../../tests/fixtures/bankr-doppler-v4-finaltuple-direct-paper-quote.json"
+                    )
+                })
+                .unwrap();
+            let candidate = exact_bankr_candidate(frame);
+            assert_eq!(
+                candidate.wrapper,
+                if frame.envelope == "erc7579" {
+                    WrapperKind::Erc4337
+                } else {
+                    WrapperKind::Direct
+                }
+            );
+            let steps = bankr_rpc_steps(proof, &expected_quote, &runtime_fixture, None);
+            let expected_requests = steps.len();
+            let (rpc, server) = spawn_exact_rpc_server(steps).await;
+            let reconciled = reconcile_candidate(
+                &rpc,
+                candidate,
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+                bankr_quote_policy(),
+                bankr_reconcile_profiles(),
+            )
+            .await
+            .unwrap();
+            let consumed = tokio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .expect("concrete RPC transcript was not fully consumed")
+                .unwrap();
+            assert_eq!(consumed, expected_requests);
+            assert_eq!(rpc.metrics().logical_requests as usize, expected_requests);
+
+            assert!(reconciled.evidence.receipt_status);
+            assert!(reconciled.evidence.protocol_event_match);
+            assert!(reconciled.evidence.observer_claim);
+            assert_eq!(reconciled.evidence.action, Some(ActionKind::Launch));
+            assert_eq!(reconciled.evidence.token, Some(expected_quote.market.token));
+            assert_eq!(reconciled.evidence.pool, None);
+            assert_eq!(
+                reconciled.evidence.pool_id,
+                Some(expected_quote.market.pool_id)
+            );
+            assert_eq!(reconciled.evidence.quote_status, QuoteStatus::Available);
+            assert_eq!(
+                reconciled.evidence.l2_block_number,
+                Some(proof.receipt.l2_block_number)
+            );
+            assert_eq!(
+                reconciled.evidence.block_hash,
+                Some(proof.receipt.block_hash)
+            );
+            assert!(reconciled.evidence.protocol_blocker.is_none());
+            let actual_quote = reconciled.bankr_quote.as_ref().unwrap();
+            assert_eq!(actual_quote, &expected_quote);
+            assert!(actual_quote.entry.expected_output > U256::ZERO);
+            assert!(actual_quote.full_position_exit.expected_output > U256::ZERO);
+            assert!(!actual_quote.execution_eligible);
+            assert!(!actual_quote.broadcast);
+            assert!(reconciled.v3_quote.is_none());
+            assert!(reconciled.clanker_quote.is_none());
+            assert!(reconciled.pons_quote.is_none());
+            assert!(reconciled.hood_quote.is_none());
+            assert!(reconciled.hood_migration.is_none());
+        }
+
+        let frame = frames
+            .frames
+            .iter()
+            .find(|frame| frame.envelope == "direct_airlock")
+            .unwrap();
+        let proof = proofs
+            .launches
+            .iter()
+            .find(|proof| proof.transaction.hash == frame.tx_hash)
+            .unwrap();
+        let expected_quote: BankrDopplerReceiptPaperQuote = serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v4-finaltuple-direct-paper-quote.json"
+        ))
+        .unwrap();
+        let steps = bankr_rpc_steps(proof, &expected_quote, &runtime_fixture, Some("airlock"));
+        let expected_requests = steps.len();
+        let (rpc, server) = spawn_exact_rpc_server(steps).await;
+        let rejected = reconcile_candidate(
+            &rpc,
+            exact_bankr_candidate(frame),
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+            bankr_quote_policy(),
+            bankr_reconcile_profiles(),
+        )
+        .await
+        .unwrap();
+        let consumed = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("drift RPC transcript was not fully consumed")
+            .unwrap();
+        assert_eq!(consumed, expected_requests);
+        assert_eq!(rpc.metrics().logical_requests as usize, expected_requests);
+        assert_eq!(rejected.evidence.quote_status, QuoteStatus::Blocked);
+        assert!(
+            rejected
+                .evidence
+                .protocol_blocker
+                .as_deref()
+                .unwrap()
+                .contains("receipt-block dependency")
+        );
+        assert!(rejected.bankr_quote.is_none());
+        assert!(rejected.v3_quote.is_none());
+        assert!(rejected.clanker_quote.is_none());
+        assert!(rejected.pons_quote.is_none());
+        assert!(rejected.hood_quote.is_none());
+        assert!(rejected.hood_migration.is_none());
     }
 
     #[test]

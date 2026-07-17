@@ -2424,8 +2424,46 @@ mod tests {
     use base64::Engine;
     use k256::ecdsa::signature::hazmat::PrehashSigner;
     use k256::ecdsa::{RecoveryId, Signature as K256Signature, SigningKey};
+    use sha2::{Digest, Sha256};
 
     use super::*;
+
+    #[derive(Deserialize)]
+    struct BankrV4RawFrameFixture {
+        frames: Vec<BankrV4RawFrame>,
+    }
+
+    #[derive(Deserialize)]
+    struct BankrV4RawFrame {
+        window: String,
+        line: u64,
+        tx_hash: B256,
+        envelope: String,
+        source_path: String,
+        payload_sha256: String,
+        received_unix_ns: u64,
+        payload: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StrictPaperReconciliationRequest {
+        tx_hash: B256,
+        launchpad: LaunchpadId,
+        feed_sequence: u64,
+        l1_block_number: u64,
+        l1_timestamp: u64,
+        evidence_source: String,
+        initial_decision_dependency: bool,
+        wrapper: WrapperKind,
+    }
+
+    fn bankr_v4_raw_frames() -> BankrV4RawFrameFixture {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/bankr-doppler-v4-finaltuple-raw-frames.json"
+        ))
+        .unwrap()
+    }
 
     fn startup() -> (PaperExpectedPins, PaperObservedStartupSnapshot) {
         let expected = PaperExpectedPins {
@@ -2758,6 +2796,106 @@ mod tests {
         PaperLaunchpadObserver::from_startup_snapshots(expected, observed).unwrap()
     }
 
+    fn bankr_v4_observer() -> PaperLaunchpadObserver {
+        let (mut expected, mut observed_snapshot) = startup();
+        let profile = BankrDopplerExpectedProfile::production();
+        expected.bankr_doppler_v4 = Some(ConfiguredBankrDopplerV4 {
+            airlock_runtime_hash: profile.airlock.runtime_code_hash,
+            pool_manager_runtime_hash: profile.pool_manager.runtime_code_hash,
+            initializer_runtime_hash: profile.initializer.runtime_code_hash,
+            rehype_hook_runtime_hash: profile.rehype_hook.runtime_code_hash,
+            token_factory_runtime_hash: profile.token_factory.runtime_code_hash,
+            token_implementation_runtime_hash: profile.token_implementation.runtime_code_hash,
+            governance_factory_runtime_hash: profile.governance_factory.runtime_code_hash,
+            liquidity_migrator_runtime_hash: profile.liquidity_migrator.runtime_code_hash,
+            standard_lp_fee_ppm: profile.standard_lp_fee_ppm,
+            max_lp_fee_ppm: profile.max_lp_fee_ppm,
+            hook_fee_denominator_ppm: profile.hook_fee_denominator_ppm,
+            hook_start_fee_ppm: profile.hook_start_fee_ppm,
+            hook_end_fee_ppm: profile.hook_end_fee_ppm,
+            hook_duration_seconds: profile.hook_duration_seconds,
+            quote_delay_guard_seconds: profile.quote_delay_guard_seconds,
+            tick_spacing: profile.tick_spacing,
+            pool_allocation_bps: profile.pool_allocation_bps,
+            primary_curve_share_bps: profile.primary_curve_share_bps,
+            secondary_curve_share_bps: profile.secondary_curve_share_bps,
+            creator_beneficiary_bps: profile.creator_beneficiary_bps,
+            protocol_beneficiary_bps: profile.protocol_beneficiary_bps,
+        });
+        expected.bankr_doppler_calls = vec![ConfiguredCallPin {
+            destination: profile.airlock.address,
+            runtime_hash: profile.airlock.runtime_code_hash,
+            selector: BANKR_CREATE_SELECTOR,
+        }];
+        let delegation = profile.smart_account.delegation_implementation.unwrap();
+        expected.erc4337 = Some(ConfiguredSmartAccounts {
+            entry_point_runtime_hash: profile.entry_point.runtime_code_hash,
+            accounts: vec![ConfiguredSmartAccount {
+                account: profile.smart_account.account.address,
+                runtime_hash: profile.smart_account.account.runtime_code_hash,
+                execution_profile: profile.smart_account.execution_profile,
+                factory: None,
+                factory_runtime_hash: None,
+                delegation_implementation: Some(delegation.address),
+                delegation_runtime_hash: Some(delegation.runtime_code_hash),
+            }],
+        });
+        observed_snapshot.pins.extend([
+            observed(
+                profile.airlock.address,
+                None,
+                profile.airlock.runtime_code_hash,
+            ),
+            observed(
+                profile.pool_manager.address,
+                None,
+                profile.pool_manager.runtime_code_hash,
+            ),
+            observed(
+                profile.initializer.address,
+                None,
+                profile.initializer.runtime_code_hash,
+            ),
+            observed(
+                profile.rehype_hook.address,
+                None,
+                profile.rehype_hook.runtime_code_hash,
+            ),
+            observed(
+                profile.token_factory.address,
+                None,
+                profile.token_factory.runtime_code_hash,
+            ),
+            observed(
+                profile.token_implementation.address,
+                None,
+                profile.token_implementation.runtime_code_hash,
+            ),
+            observed(
+                profile.governance_factory.address,
+                None,
+                profile.governance_factory.runtime_code_hash,
+            ),
+            observed(
+                profile.liquidity_migrator.address,
+                None,
+                profile.liquidity_migrator.runtime_code_hash,
+            ),
+            observed(
+                profile.entry_point.address,
+                None,
+                profile.entry_point.runtime_code_hash,
+            ),
+            observed(
+                profile.smart_account.account.address,
+                Some(delegation.address),
+                profile.smart_account.account.runtime_code_hash,
+            ),
+            observed(delegation.address, None, delegation.runtime_code_hash),
+        ]);
+        PaperLaunchpadObserver::from_startup_snapshots(expected, observed_snapshot).unwrap()
+    }
+
     #[test]
     fn raw_signed_nitro_fixture_reaches_registry_adapter_and_observation_output() {
         let observer = observer();
@@ -2810,6 +2948,153 @@ mod tests {
         assert_eq!(report.reconciliation_requests.len(), 1);
         assert_eq!(report.reconciliation_requests[0].feed_sequence, 42);
         assert!(!report.reconciliation_requests[0].initial_decision_dependency);
+    }
+
+    #[test]
+    fn exact_raw_signed_bankr_v4_envelopes_emit_strict_async_requests() {
+        let frames = bankr_v4_raw_frames();
+        assert_eq!(frames.frames.len(), 2);
+        for frame in frames.frames {
+            let (expected_window, expected_line, expected_received_unix_ns, expected_sha256) =
+                match frame.envelope.as_str() {
+                    "erc7579" => (
+                        "window-a",
+                        2762,
+                        1_784_271_655_711_031_000,
+                        "4672011994f731bc6ca47ac8538c00539eb02c64854f8facbff1e2fff7291e75",
+                    ),
+                    "direct_airlock" => (
+                        "window-b",
+                        1661,
+                        1_784_271_886_078_187_000,
+                        "2da502bfbc533b2188390ef7190c8f5316fb8084914f4cf821a83578d1c66a84",
+                    ),
+                    other => panic!("unexpected fixture envelope {other}"),
+                };
+            let mut payload_line = frame.payload.as_bytes().to_vec();
+            payload_line.push(b'\n');
+            assert_eq!(frame.payload_sha256, expected_sha256);
+            assert_eq!(hex::encode(Sha256::digest(&payload_line)), expected_sha256);
+            assert_eq!(frame.received_unix_ns, expected_received_unix_ns);
+            assert!(
+                frame
+                    .source_path
+                    .ends_with(&format!("/windows/{expected_window}/raw-feed.jsonl"))
+            );
+            assert_eq!(
+                (frame.window.as_str(), frame.line),
+                (expected_window, expected_line)
+            );
+            let mut runtime = PaperFeedRuntime::new(bankr_v4_observer());
+            let broadcast: BroadcastMessage = serde_json::from_str(&frame.payload).unwrap();
+            let report = runtime
+                .decode_received_at(&broadcast, frame.received_unix_ns)
+                .unwrap();
+            assert!(report.rejections.is_empty());
+            assert_eq!(
+                report
+                    .observations
+                    .iter()
+                    .filter(|row| row.launchpad == LaunchpadId::BankrDoppler)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                report
+                    .reconciliation_requests
+                    .iter()
+                    .filter(|row| row.launchpad == LaunchpadId::BankrDoppler)
+                    .count(),
+                1
+            );
+            assert!(
+                report
+                    .observations
+                    .iter()
+                    .all(|row| !row.live_execution_enabled)
+            );
+            assert!(report.trade_plans.iter().all(|plan| !plan.broadcast));
+            let observation = report
+                .observations
+                .iter()
+                .find(|row| row.tx_hash == frame.tx_hash)
+                .unwrap();
+            assert_eq!(observation.tx_hash, frame.tx_hash);
+            assert_eq!(observation.launchpad, LaunchpadId::BankrDoppler);
+            assert!(
+                observation
+                    .predicted_token
+                    .is_some_and(|token| token > WETH)
+            );
+            assert!(observation.predicted_pool_id.is_some());
+            assert!(!observation.live_execution_enabled);
+            let request_row = report
+                .reconciliation_requests
+                .iter()
+                .find(|row| row.tx_hash == frame.tx_hash)
+                .unwrap();
+            let request_value = serde_json::to_value(request_row).unwrap();
+            let request: StrictPaperReconciliationRequest =
+                serde_json::from_value(request_value).unwrap();
+            assert_eq!(request.tx_hash, frame.tx_hash);
+            assert_eq!(request.launchpad, LaunchpadId::BankrDoppler);
+            assert_eq!(request.feed_sequence, observation.feed_sequence.unwrap());
+            assert_eq!(
+                request.l1_block_number,
+                observation.l1_block_number.unwrap()
+            );
+            assert_eq!(request.l1_timestamp, observation.l1_timestamp.unwrap());
+            assert_eq!(
+                request.evidence_source,
+                "independent_receipt_and_protocol_events"
+            );
+            assert!(!request.initial_decision_dependency);
+            match frame.envelope.as_str() {
+                "erc7579" => {
+                    assert_eq!(observation.wrapper, WrapperKind::Erc4337);
+                    assert_eq!(observation.leader_origin, LeaderOrigin::Erc4337Sender);
+                    assert_eq!(request.wrapper, WrapperKind::Erc4337);
+                    assert_eq!(
+                        observation.detail["smart_account_identity"],
+                        "receipt_block_eip7702_verification_required"
+                    );
+                }
+                "direct_airlock" => {
+                    assert_eq!(observation.wrapper, WrapperKind::Direct);
+                    assert_eq!(observation.leader_origin, LeaderOrigin::DirectSigner);
+                    assert_eq!(request.wrapper, WrapperKind::Direct);
+                }
+                other => panic!("unexpected fixture envelope {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_curve_ticks_v4_is_rejected_before_reconciliation_request() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/bankr-doppler-v4-finaltuple-window-abc-live-proofs.json"
+        ))
+        .unwrap();
+        let input = fixture["launches"][9]["transaction"]["input"]
+            .as_str()
+            .unwrap();
+        let mut calldata = hex::decode(input.strip_prefix("0x").unwrap()).unwrap();
+        let boundary_word_end = 4 + 32 + 12 * 32 + 32 + 32 + 32 + 32;
+        calldata[boundary_word_end - 1] ^= 1;
+        let transaction = signed_transaction(
+            BankrDopplerExpectedProfile::production().airlock.address,
+            calldata,
+        );
+        let mut runtime = PaperFeedRuntime::new(bankr_v4_observer());
+        let report = runtime.decode(&feed(&transaction)).unwrap();
+        assert!(report.observations.is_empty());
+        assert!(report.reconciliation_requests.is_empty());
+        assert_eq!(report.rejections.len(), 1);
+        assert!(
+            report.rejections[0]
+                .reason
+                .contains("exact reviewed profile")
+        );
     }
 
     #[test]

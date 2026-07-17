@@ -296,6 +296,7 @@ fn readiness_windows(
             BankrCreateProfileVersion::CurveTicksV1 => "curve_ticks_v1",
             BankrCreateProfileVersion::CurveTicksV2 => "curve_ticks_v2",
             BankrCreateProfileVersion::CurveTicksV3 => "curve_ticks_v3",
+            BankrCreateProfileVersion::CurveTicksV4 => "curve_ticks_v4",
         };
         let envelope = match quote.market.envelope {
             BankrEnvelopeKind::DirectAirlock => "direct_airlock",
@@ -2374,6 +2375,11 @@ fn bankr_quote_arithmetic_is_consistent(
     else {
         return false;
     };
+    if quote.market.create_profile_version == BankrCreateProfileVersion::CurveTicksV4
+        && quote.market.token < profile.weth.address
+    {
+        return false;
+    }
     let expected_initialize_tick = match (
         quote.market.create_profile_version,
         quote.market.token < profile.weth.address,
@@ -2381,9 +2387,11 @@ fn bankr_quote_arithmetic_is_consistent(
         (BankrCreateProfileVersion::CurveTicksV1, true)
         | (BankrCreateProfileVersion::CurveTicksV2, true) => -229_600,
         (BankrCreateProfileVersion::CurveTicksV3, true) => -229_400,
+        (BankrCreateProfileVersion::CurveTicksV4, true) => return false,
         (BankrCreateProfileVersion::CurveTicksV1, false) => 229_800,
         (BankrCreateProfileVersion::CurveTicksV2, false) => 229_600,
         (BankrCreateProfileVersion::CurveTicksV3, false) => 229_400,
+        (BankrCreateProfileVersion::CurveTicksV4, false) => 229_400,
     };
     let expected_position_ranges = match (
         quote.market.create_profile_version,
@@ -2398,6 +2406,7 @@ fn bankr_quote_arithmetic_is_consistent(
             (-229_400, -119_400, B256::ZERO),
             (-119_400, 887_200, B256::with_last_byte(1)),
         ],
+        (BankrCreateProfileVersion::CurveTicksV4, true) => return false,
         (BankrCreateProfileVersion::CurveTicksV1, false) => [
             (119_800, 229_800, B256::ZERO),
             (-887_200, 119_800, B256::with_last_byte(1)),
@@ -2409,6 +2418,10 @@ fn bankr_quote_arithmetic_is_consistent(
         (BankrCreateProfileVersion::CurveTicksV3, false) => [
             (119_400, 229_400, B256::ZERO),
             (-887_200, 119_400, B256::with_last_byte(1)),
+        ],
+        (BankrCreateProfileVersion::CurveTicksV4, false) => [
+            (119_200, 229_400, B256::ZERO),
+            (-887_200, 119_200, B256::with_last_byte(1)),
         ],
     };
     let Ok(expected_initialize_sqrt_price_x96) = get_sqrt_ratio_at_tick(expected_initialize_tick)
@@ -3902,6 +3915,7 @@ mod tests {
             BankrCreateProfileVersion::CurveTicksV1 => "curve_ticks_v1",
             BankrCreateProfileVersion::CurveTicksV2 => "curve_ticks_v2",
             BankrCreateProfileVersion::CurveTicksV3 => "curve_ticks_v3",
+            BankrCreateProfileVersion::CurveTicksV4 => "curve_ticks_v4",
         };
         let envelope = match quote.market.envelope {
             BankrEnvelopeKind::DirectAirlock => "direct_airlock",
@@ -3942,6 +3956,126 @@ mod tests {
                 .identity_mismatches,
             1
         );
+    }
+
+    #[test]
+    fn validated_real_v4_envelopes_drive_metrics_and_readiness_fail_closed() {
+        for quote in [bankr_v4_quote_fixture(), bankr_v4_direct_quote_fixture()] {
+            let key = (quote.tx_hash, quote.launchpad);
+            let mut evidence = evidence_row(key, true, true, true, QuoteStatus::Available);
+            evidence.token = Some(quote.market.token);
+            evidence.pool = None;
+            evidence.pool_id = Some(quote.market.pool_id);
+            evidence.l2_block_number = Some(quote.state_version.l2_block_number);
+            evidence.block_hash = Some(quote.state_version.block_hash);
+            evidence.transaction_index = Some(quote.state_version.transaction_index);
+            evidence.ground_truth_hits[0].l2_block_number = quote.state_version.l2_block_number;
+            evidence.ground_truth_hits[0].block_hash = quote.state_version.block_hash;
+            evidence.ground_truth_hits[0].transaction_index = quote.state_version.transaction_index;
+            let records = ReconciliationRecords {
+                evidence: vec![evidence],
+                bankr_quotes: vec![quote.clone()],
+                ground_truth_window: Some(GroundTruthWindow {
+                    record_type: "launchpad_ground_truth_window".into(),
+                    start_head: quote.state_version.l2_block_number - 1,
+                    start_head_hash: B256::with_last_byte(9),
+                    cutoff_head: quote.state_version.l2_block_number,
+                    cutoff_head_hash: quote.state_version.block_hash,
+                    from_l2_block: quote.state_version.l2_block_number,
+                    to_l2_block: quote.state_version.l2_block_number,
+                    confirmations: 2,
+                    scanned_blocks: 1,
+                    complete: true,
+                    event_logs: 1,
+                    unique_protocol_keys: 1,
+                }),
+                ..ReconciliationRecords::default()
+            };
+            let observed = ObservedOutputCandidates {
+                feed_transactions: HashMap::from([(key.0, 7)]),
+                claims: HashMap::from([(
+                    key,
+                    ObserverClaim {
+                        action: Some(ActionKind::Launch),
+                        predicted_token: Some(quote.market.token),
+                        predicted_pool: None,
+                        predicted_pool_id: Some(quote.market.pool_id),
+                    },
+                )]),
+                ..ObservedOutputCandidates::default()
+            };
+            let ground_truth = ConfirmedGroundTruth::from_records(&records).unwrap();
+            let promotion = promotion_validations(
+                &ground_truth,
+                &records,
+                PaperPlanPolicy {
+                    max_input_wei: U256::from(1_000_000_000_000_000_u64),
+                    slippage_bps: 100,
+                    ..PaperPlanPolicy::default()
+                },
+                hermes_feed::PonsExpectedProfile::production(),
+                &HoodExpectedProfile::production(),
+            );
+            let metrics = reconciliation_metrics(
+                &observed,
+                &records.evidence,
+                records.ground_truth_window.as_ref(),
+                &promotion,
+            )
+            .unwrap();
+            let bankr_metrics = metrics
+                .iter()
+                .find(|row| row.launchpad == LaunchpadId::BankrDoppler)
+                .unwrap();
+            assert_eq!(bankr_metrics.false_positives, 0);
+            assert_eq!(bankr_metrics.missed_transactions, 0);
+            assert_eq!(bankr_metrics.detector_misses, 0);
+            assert_eq!(bankr_metrics.action_prediction_mismatches, 0);
+            assert_eq!(bankr_metrics.token_prediction_mismatches, 0);
+            assert_eq!(bankr_metrics.pool_prediction_mismatches, 0);
+            assert_eq!(bankr_metrics.pool_id_prediction_mismatches, 0);
+            assert_eq!(bankr_metrics.independent_quote_validation_mismatches, 0);
+            assert_eq!(bankr_metrics.entry_direction_mismatches, 0);
+            assert_eq!(bankr_metrics.exit_direction_mismatches, 0);
+            assert_eq!(bankr_metrics.independent_quote_validation_matches, 1);
+
+            let windows =
+                readiness_windows(&records, &metrics, &promotion, &readiness_provenance()).unwrap();
+            let bankr_window = windows
+                .iter()
+                .find(|row| row.launchpad == LaunchpadId::BankrDoppler)
+                .unwrap();
+            assert_eq!(
+                bankr_window.profile_envelope_observations["curve_ticks_v4"],
+                1
+            );
+            let envelope = match quote.market.envelope {
+                BankrEnvelopeKind::DirectAirlock => "direct_airlock",
+                BankrEnvelopeKind::Erc7579 => "erc7579",
+            };
+            assert_eq!(bankr_window.profile_envelope_observations[envelope], 1);
+            assert_eq!(
+                bankr_window
+                    .profile_envelope_observations
+                    .values()
+                    .sum::<u64>(),
+                2
+            );
+            assert_eq!(bankr_window.identity_mismatches, 0);
+            assert_eq!(bankr_window.direction_mismatches, 0);
+            assert_eq!(bankr_window.prediction_mismatches, 0);
+            assert_eq!(bankr_window.quote_mismatches, 0);
+            let evaluated =
+                hermes_feed::launchpad_readiness::evaluate_launchpad_readiness(&windows).unwrap();
+            let bankr = evaluated
+                .iter()
+                .find(|row| row.launchpad == LaunchpadId::BankrDoppler)
+                .unwrap();
+            assert!(!bankr.authorizes_canary);
+            assert!(!bankr.execution_eligible);
+            assert!(!quote.execution_eligible);
+            assert!(!quote.broadcast);
+        }
     }
 
     #[test]
@@ -4219,6 +4353,20 @@ mod tests {
     fn bankr_quote_fixture() -> BankrDopplerReceiptPaperQuote {
         serde_json::from_str(include_str!(
             "../../tests/fixtures/bankr-doppler-v2-paper-quote.json"
+        ))
+        .unwrap()
+    }
+
+    fn bankr_v4_quote_fixture() -> BankrDopplerReceiptPaperQuote {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v4-finaltuple-paper-quote.json"
+        ))
+        .unwrap()
+    }
+
+    fn bankr_v4_direct_quote_fixture() -> BankrDopplerReceiptPaperQuote {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v4-finaltuple-direct-paper-quote.json"
         ))
         .unwrap()
     }
@@ -4643,6 +4791,27 @@ mod tests {
         assert!(plans[0].min_receive > U256::ZERO);
         assert!(!plans[0].execution_eligible);
         assert!(!plans[0].broadcast);
+
+        for (v4_quote, expected_envelope) in [
+            (bankr_v4_quote_fixture(), BankrEnvelopeKind::Erc7579),
+            (
+                bankr_v4_direct_quote_fixture(),
+                BankrEnvelopeKind::DirectAirlock,
+            ),
+        ] {
+            assert_eq!(
+                v4_quote.market.create_profile_version,
+                BankrCreateProfileVersion::CurveTicksV4
+            );
+            assert_eq!(v4_quote.market.envelope, expected_envelope);
+            let v4_plans = finalize_bankr_quote(v4_quote).unwrap();
+            assert_eq!(v4_plans.len(), 1);
+            assert_eq!(v4_plans[0].status, "quoted_execution_gated");
+            assert!(v4_plans[0].expected_output > U256::ZERO);
+            assert!(v4_plans[0].exit_expected_output > U256::ZERO);
+            assert!(!v4_plans[0].execution_eligible);
+            assert!(!v4_plans[0].broadcast);
+        }
     }
 
     #[test]
@@ -4706,6 +4875,19 @@ mod tests {
 
     #[test]
     fn tampered_bankr_quote_arithmetic_cannot_finalize() {
+        let mut wrong_v4_orientation = bankr_v4_quote_fixture();
+        wrong_v4_orientation.market.token = Address::with_last_byte(1);
+        wrong_v4_orientation.market.pool_id = B256::with_last_byte(1);
+        assert!(
+            wrong_v4_orientation.market.token
+                < BankrDopplerExpectedProfile::production().weth.address
+        );
+        assert!(!bankr_quote_arithmetic_is_consistent(
+            &wrong_v4_orientation,
+            PaperPlanPolicy::default()
+        ));
+        assert!(finalize_bankr_quote(wrong_v4_orientation).is_err());
+
         let mut output = bankr_quote_fixture();
         output.entry.expected_output += U256::from(1_u8);
         assert!(finalize_bankr_quote(output).is_err());

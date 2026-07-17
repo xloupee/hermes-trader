@@ -234,6 +234,10 @@ pub struct ClankerMarketEvidence {
     pub starting_tick: i32,
     pub initialize_sqrt_price_x96: U256,
     pub initialize_tick: i32,
+    /// Active V4 liquidity reconstructed only from the confirmed receipt's
+    /// ordered `ModifyLiquidity` events at the initialized tick.
+    #[serde(default)]
+    pub receipt_end_active_liquidity: U256,
     pub initialize_log_index: u64,
     pub last_liquidity_log_index: u64,
     pub launch_log_index: u64,
@@ -532,9 +536,7 @@ pub fn quote_clanker_launch_receipt(
             u128::try_from(position.liquidity).map_err(|_| ClankerQuoteError::LiquiditySequence)?,
         )?;
     }
-    if state.liquidity != 0 {
-        return Err(ClankerQuoteError::LiquiditySequence);
-    }
+    let receipt_end_active_liquidity = U256::from(state.liquidity);
 
     let entry_protocol_fee = exact_input_protocol_fee(policy.amount_in, entry_protocol_fee_ppm)?;
     let entry_core_amount = policy
@@ -625,6 +627,7 @@ pub fn quote_clanker_launch_receipt(
             starting_tick: launch.starting_tick,
             initialize_sqrt_price_x96: sqrt_price_x96,
             initialize_tick,
+            receipt_end_active_liquidity,
             initialize_log_index,
             last_liquidity_log_index,
             launch_log_index: launch.log_index,
@@ -794,7 +797,7 @@ pub fn validate_clanker_quote_replay(
                 .map_err(|_| ClankerQuoteError::QuoteReplayMismatch)?,
         )?;
     }
-    if state.liquidity != 0 {
+    if U256::from(state.liquidity) != market.receipt_end_active_liquidity {
         return Err(ClankerQuoteError::QuoteReplayMismatch);
     }
     let entry_protocol_fee = exact_input_protocol_fee(policy.amount_in, entry_protocol_fee_ppm)?;
@@ -1148,6 +1151,26 @@ mod tests {
     }
 
     #[derive(Deserialize)]
+    struct ActiveBoundaryFixture {
+        transaction: RobinhoodTransaction,
+        block: RobinhoodBlock,
+        receipt: NoxaReceipt,
+        evidence: ActiveBoundaryEvidence,
+    }
+
+    #[derive(Deserialize)]
+    struct ActiveBoundaryEvidence {
+        source: String,
+        token0_is_clanker: bool,
+        extension: Address,
+        extensions_supply: U256,
+        pool_id: B256,
+        initialize_tick: i32,
+        position_log_indices: Vec<u64>,
+        embedded_swap_log_indices: Vec<u64>,
+    }
+
+    #[derive(Deserialize)]
     struct TatorNegativeFixture {
         transaction: RobinhoodTransaction,
         block: RobinhoodBlock,
@@ -1197,6 +1220,13 @@ mod tests {
     fn extensionless_live_fixture() -> LiveFixture {
         serde_json::from_str(include_str!(
             "../tests/fixtures/clanker-v4-extensionless-live-proof.json"
+        ))
+        .unwrap()
+    }
+
+    fn active_boundary_live_fixture() -> ActiveBoundaryFixture {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/clanker-v4-token0-active-boundary-live-proof.json"
         ))
         .unwrap()
     }
@@ -1441,6 +1471,95 @@ mod tests {
         assert_eq!(quote.state_version.terminal_log_index, 39);
         assert!(!quote.execution_eligible);
         assert!(!quote.broadcast);
+    }
+
+    #[test]
+    fn token0_launch_reconstructs_receipt_end_active_boundary_liquidity() {
+        let fixture = active_boundary_live_fixture();
+        let profile = ClankerV4ExpectedProfile::production();
+        let expected_tx_hash = alloy_primitives::b256!(
+            "decb471e034489fb24c4dfa4f4aa71d0af49b0e90835018b093011bfaa91d712"
+        );
+        assert_eq!(fixture.transaction.hash, expected_tx_hash);
+        assert_eq!(fixture.receipt.transaction_hash, expected_tx_hash);
+        assert_eq!(
+            fixture.evidence.source,
+            "robinhood_public_rpc_exact_confirmed_receipt_projection"
+        );
+        assert!(fixture.evidence.token0_is_clanker);
+        assert_eq!(fixture.evidence.extension, profile.extension.address);
+        assert_eq!(
+            fixture.evidence.extensions_supply,
+            U256::from_str_radix("409f9cbc7c4a04c220000000", 16).unwrap()
+        );
+        assert_eq!(
+            fixture.evidence.pool_id,
+            alloy_primitives::b256!(
+                "40b795ff71297c3288c9ed30edad1bb65de6367c8c3459c608529409c57f1e0a"
+            )
+        );
+        assert_eq!(fixture.evidence.initialize_tick, -230_400);
+        assert_eq!(fixture.evidence.position_log_indices, [13, 15, 17, 19, 21]);
+        assert!(fixture.evidence.embedded_swap_log_indices.is_empty());
+
+        let quote = quote_clanker_launch_receipt(
+            &fixture.transaction,
+            &fixture.receipt,
+            &fixture.block,
+            profile,
+            policy(),
+        )
+        .unwrap();
+        assert_eq!(
+            quote.market.liquidity_profile,
+            ClankerLiquidityProfile::PinnedExtensionFivePosition
+        );
+        assert_eq!(quote.market.pool_id, fixture.evidence.pool_id);
+        assert_eq!(
+            quote.market.initialize_tick,
+            fixture.evidence.initialize_tick
+        );
+        assert_eq!(quote.market.position_count, 5);
+        assert_eq!(
+            quote
+                .market
+                .positions
+                .iter()
+                .map(|position| position.log_index)
+                .collect::<Vec<_>>(),
+            fixture.evidence.position_log_indices
+        );
+        assert_eq!(
+            quote.market.positions[0].tick_lower,
+            quote.market.initialize_tick
+        );
+        assert_eq!(quote.market.positions[0].tick_upper, -214_000);
+        assert_eq!(
+            quote.market.receipt_end_active_liquidity,
+            U256::from_str_radix("1e14523facb63841c753", 16).unwrap()
+        );
+        validate_clanker_quote_replay(&quote, profile, policy()).unwrap();
+
+        let mut forged_active_liquidity = quote.clone();
+        forged_active_liquidity.market.receipt_end_active_liquidity += U256::from(1_u8);
+        assert!(matches!(
+            validate_clanker_quote_replay(&forged_active_liquidity, profile, policy()),
+            Err(ClankerQuoteError::QuoteReplayMismatch)
+        ));
+
+        let mut forged_position = quote.clone();
+        forged_position.market.positions[0].liquidity += U256::from(1_u8);
+        assert!(matches!(
+            validate_clanker_quote_replay(&forged_position, profile, policy()),
+            Err(ClankerQuoteError::QuoteReplayMismatch)
+        ));
+
+        let mut forged_initialize_tick = quote;
+        forged_initialize_tick.market.initialize_tick += 200;
+        assert!(matches!(
+            validate_clanker_quote_replay(&forged_initialize_tick, profile, policy()),
+            Err(ClankerQuoteError::QuoteReplayMismatch)
+        ));
     }
 
     #[test]

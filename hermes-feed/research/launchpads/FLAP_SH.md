@@ -1,5 +1,11 @@
 # Flap.sh on Robinhood Chain (chain 4663)
 
+> Historical snapshot notice: the VaultPortal implementation recorded below
+> was superseded by the independently reviewed 2026-07-17 upgrade evidence in
+> [FLAP_VAULT_PORTAL_UPGRADE_PIN_EVIDENCE_2026-07-17.md](./FLAP_VAULT_PORTAL_UPGRADE_PIN_EVIDENCE_2026-07-17.md).
+> The original snapshot is intentionally preserved rather than silently
+> rewritten.
+
 Research snapshot: 2026-07-16 04:47 UTC
 
 Hermes baseline: `5c1827ec57a155e24c30bb32204ffa76352991ea`

@@ -228,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_arbitrary_vault_and_unverified_vault_portal() {
+    fn rejects_arbitrary_vault_and_source_verified_vault_portal() {
         let mut arbitrary_vault = input();
         arbitrary_vault.vault = FlapVaultVariant::External;
         assert_eq!(
@@ -239,7 +239,7 @@ mod tests {
         let mut vault_portal = input();
         vault_portal.source = FlapPortalVariant::VaultPortal;
         vault_portal.destination = vault_portal.source.proxy();
-        vault_portal.implementation_source_verified = false;
+        vault_portal.implementation_source_verified = true;
         assert_eq!(
             prepare_flap_paper_assessment(vault_portal),
             Err(FlapSafetyError::WrongDestination)

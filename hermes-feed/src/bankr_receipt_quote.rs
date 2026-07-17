@@ -1234,12 +1234,35 @@ fn validate_create_calldata(
         .checked_mul(U256::from(profile.protocol_beneficiary_bps))
         .ok_or(BankrQuoteError::ArithmeticOverflow)?
         / U256::from(BPS_DENOMINATOR);
-    if init.beneficiaries[0].beneficiary == Address::ZERO
-        || init.beneficiaries[0].beneficiary >= BANKR_PROTOCOL_BENEFICIARY
-        || U256::from(init.beneficiaries[0].shares) != creator_share
-        || init.beneficiaries[1].beneficiary != BANKR_PROTOCOL_BENEFICIARY
-        || U256::from(init.beneficiaries[1].shares) != protocol_share
-    {
+    if init.beneficiaries[0].beneficiary >= init.beneficiaries[1].beneficiary {
+        return Err(BankrQuoteError::CreateCalldata);
+    }
+    let mut creator_beneficiary = None;
+    let mut protocol_beneficiary_seen = false;
+    let mut total_beneficiary_share = U256::ZERO;
+    for beneficiary in &init.beneficiaries {
+        let share = U256::from(beneficiary.shares);
+        total_beneficiary_share = total_beneficiary_share
+            .checked_add(share)
+            .ok_or(BankrQuoteError::ArithmeticOverflow)?;
+        if beneficiary.beneficiary == BANKR_PROTOCOL_BENEFICIARY {
+            if protocol_beneficiary_seen || share != protocol_share {
+                return Err(BankrQuoteError::CreateCalldata);
+            }
+            protocol_beneficiary_seen = true;
+        } else if beneficiary.beneficiary == Address::ZERO
+            || creator_beneficiary.is_some()
+            || share != creator_share
+        {
+            return Err(BankrQuoteError::CreateCalldata);
+        } else {
+            creator_beneficiary = Some(beneficiary.beneficiary);
+        }
+    }
+    let Some(creator_beneficiary) = creator_beneficiary else {
+        return Err(BankrQuoteError::CreateCalldata);
+    };
+    if !protocol_beneficiary_seen || total_beneficiary_share != WAD {
         return Err(BankrQuoteError::CreateCalldata);
     }
     let mut token_call = Vec::with_capacity(4 + create.tokenFactoryData.len());
@@ -1260,7 +1283,7 @@ fn validate_create_calldata(
         || token.schedules.len() != 1
         || token.schedules[0].cliff != 2_592_000
         || token.schedules[0].duration != 63_072_000
-        || token.beneficiaries.as_slice() != [init.beneficiaries[0].beneficiary]
+        || token.beneficiaries.as_slice() != [creator_beneficiary]
         || token.scheduleIds.as_slice() != [U256::ZERO]
         || token.amounts.as_slice() != [unsold_supply]
         || uri.len() != 66
@@ -1913,6 +1936,29 @@ mod tests {
         create_profile_version: String,
     }
 
+    #[derive(Debug, Deserialize)]
+    struct Clean6BeneficiaryOrderProof {
+        chain_id: u64,
+        tx_hash: B256,
+        block_number: String,
+        block_hash: B256,
+        transaction_index: String,
+        transaction_type: String,
+        receipt_status: String,
+        outer_bundler: Address,
+        entry_point: Address,
+        outer_input: Bytes,
+        user_operation_sender: Address,
+        account_designator: Bytes,
+        delegation_implementation: Address,
+        token: Address,
+        pool_id: B256,
+        creator_beneficiary: Address,
+        protocol_beneficiary: Address,
+        beneficiary_order: Vec<String>,
+        create_profile_version: String,
+    }
+
     fn curve_ticks_v3_proofs() -> Vec<CurveTicksV3Proof> {
         serde_json::from_str(include_str!(
             "../tests/fixtures/bankr-doppler-v3-quiet1-proof.json"
@@ -1923,6 +1969,13 @@ mod tests {
     fn long_name_live_proof() -> LongNameLiveProof {
         serde_json::from_str(include_str!(
             "../tests/fixtures/bankr-doppler-v3-long-name-live-proof.json"
+        ))
+        .unwrap()
+    }
+
+    fn clean6_beneficiary_order_proof() -> Clean6BeneficiaryOrderProof {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/bankr-doppler-v3-clean6-beneficiary-order-proof.json"
         ))
         .unwrap()
     }
@@ -2533,6 +2586,255 @@ mod tests {
     }
 
     #[test]
+    fn clean6_protocol_first_beneficiaries_are_an_exact_erc7579_proof() {
+        let proof = clean6_beneficiary_order_proof();
+        let profile = BankrDopplerExpectedProfile::production();
+        assert_eq!(proof.chain_id, CHAIN_ID);
+        assert_eq!(
+            proof.tx_hash,
+            alloy_primitives::b256!(
+                "c85b51ecb810158b02511586552295fc26e2720764a9b4a4a9a9cda774efdc20"
+            )
+        );
+        assert_eq!(proof.block_number, "0xb47d15");
+        assert_eq!(
+            proof.block_hash,
+            alloy_primitives::b256!(
+                "acf9c1d3989f0dc99a2a2f3d232a520764ce6e1d0fe44466faade61d80587fc3"
+            )
+        );
+        assert_eq!(proof.transaction_index, "0x5");
+        assert_eq!(proof.transaction_type, "0x2");
+        assert_eq!(proof.receipt_status, "0x1");
+        assert_eq!(proof.entry_point, profile.entry_point.address);
+        assert_eq!(
+            proof.outer_input.get(..4),
+            Some([0x76, 0x5e, 0x82, 0x7f].as_slice())
+        );
+        assert_eq!(proof.delegation_implementation, BANKR_KERNEL_IMPLEMENTATION);
+        assert_eq!(keccak256(kernel_runtime()), BANKR_KERNEL_RUNTIME_HASH);
+        let mut expected_designator = vec![0xef, 0x01, 0x00];
+        expected_designator.extend_from_slice(proof.delegation_implementation.as_slice());
+        assert_eq!(proof.account_designator.as_ref(), expected_designator);
+        assert_eq!(
+            keccak256(&proof.account_designator),
+            profile.smart_account.account.runtime_code_hash
+        );
+        assert_eq!(
+            profile
+                .smart_account
+                .delegation_implementation
+                .expect("production ERC-7579 profile pins its delegation implementation")
+                .address,
+            proof.delegation_implementation
+        );
+
+        let discovered = discover_entry_point_v07_erc7579(
+            EntryPointCall {
+                chain_id: proof.chain_id,
+                destination: profile.entry_point,
+                outer_bundler: proof.outer_bundler,
+                calldata: &proof.outer_input,
+            },
+            profile.entry_point,
+            ContractPin {
+                address: profile.airlock.address,
+                runtime_code_hash: profile.airlock.runtime_code_hash,
+            },
+        )
+        .unwrap();
+        assert_eq!(discovered.leader, proof.user_operation_sender);
+        assert_eq!(discovered.outer_bundler, proof.outer_bundler);
+        assert_eq!(discovered.target, profile.airlock.address);
+        assert_eq!(discovered.value, U256::ZERO);
+
+        let call = abi::createCall::abi_decode(&discovered.calldata).unwrap();
+        assert_eq!(call.abi_encode().as_slice(), discovered.calldata.as_ref());
+        let init = decode_initializer_data(&call);
+        let token = decode_token_factory_data(&call);
+        let creator_share = WAD * U256::from(9_500_u16) / U256::from(10_000_u16);
+        let protocol_share = WAD * U256::from(500_u16) / U256::from(10_000_u16);
+        assert_eq!(
+            proof
+                .beneficiary_order
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["protocol", "creator"]
+        );
+        assert_eq!(proof.protocol_beneficiary, BANKR_PROTOCOL_BENEFICIARY);
+        assert_eq!(init.beneficiaries.len(), 2);
+        assert_eq!(
+            init.beneficiaries[0].beneficiary,
+            proof.protocol_beneficiary
+        );
+        assert_eq!(U256::from(init.beneficiaries[0].shares), protocol_share);
+        assert_eq!(init.beneficiaries[1].beneficiary, proof.creator_beneficiary);
+        assert_eq!(U256::from(init.beneficiaries[1].shares), creator_share);
+        assert_eq!(token.beneficiaries.as_slice(), [proof.creator_beneficiary]);
+        assert_eq!(init.curves.len(), 2);
+        assert_eq!(i32::try_from(init.curves[0].tickLower).unwrap(), -229_400);
+        assert_eq!(i32::try_from(init.curves[0].tickUpper).unwrap(), -119_400);
+        assert_eq!(
+            init.curves[0].shares,
+            WAD * U256::from(99_u8) / U256::from(100_u8)
+        );
+        assert_eq!(i32::try_from(init.curves[1].tickLower).unwrap(), -119_400);
+        assert_eq!(i32::try_from(init.curves[1].tickUpper).unwrap(), 887_200);
+        assert_eq!(init.curves[1].shares, WAD / U256::from(100_u8));
+        let decoded = validate_create_calldata(&call, profile).unwrap();
+        assert_eq!(
+            decoded.profile_version,
+            BankrCreateProfileVersion::CurveTicksV3
+        );
+        assert_eq!(proof.create_profile_version, "curve_ticks_v3");
+        assert!(validate_bankr_create_calldata_for_observation(
+            &discovered.calldata
+        ));
+        let prediction = predict_bankr_create_identity(&discovered.calldata, profile).unwrap();
+        assert_eq!(prediction.token, proof.token);
+        assert_eq!(prediction.pool_id, proof.pool_id);
+
+        let mut unsorted = call;
+        let mut unsorted_init = init;
+        unsorted_init.beneficiaries.swap(0, 1);
+        replace_initializer_data(&mut unsorted, &unsorted_init);
+        assert!(validate_create_calldata(&unsorted, profile).is_err());
+        assert!(!validate_bankr_create_calldata_for_observation(
+            &unsorted.abi_encode()
+        ));
+
+        let creator_first_proof = curve_ticks_v3_proofs().remove(0);
+        let creator_first_call = abi::createCall::abi_decode(&creator_first_proof.create_calldata)
+            .expect("reviewed creator-first proof is canonical create calldata");
+        let creator_first_init = decode_initializer_data(&creator_first_call);
+        let creator_first_token = decode_token_factory_data(&creator_first_call);
+        assert_ne!(
+            creator_first_init.beneficiaries[0].beneficiary,
+            BANKR_PROTOCOL_BENEFICIARY
+        );
+        assert_eq!(
+            creator_first_init.beneficiaries[1].beneficiary,
+            BANKR_PROTOCOL_BENEFICIARY
+        );
+        assert!(
+            creator_first_init.beneficiaries[0].beneficiary
+                < creator_first_init.beneficiaries[1].beneficiary
+        );
+        assert_eq!(
+            creator_first_token.beneficiaries.as_slice(),
+            [creator_first_init.beneficiaries[0].beneficiary]
+        );
+        assert_eq!(
+            validate_create_calldata(&creator_first_call, profile)
+                .unwrap()
+                .profile_version,
+            BankrCreateProfileVersion::CurveTicksV3
+        );
+    }
+
+    #[test]
+    fn clean6_beneficiary_binding_rejects_weight_identity_and_shape_drift() {
+        let proof = clean6_beneficiary_order_proof();
+        let profile = BankrDopplerExpectedProfile::production();
+        let discovered = discover_entry_point_v07_erc7579(
+            EntryPointCall {
+                chain_id: proof.chain_id,
+                destination: profile.entry_point,
+                outer_bundler: proof.outer_bundler,
+                calldata: &proof.outer_input,
+            },
+            profile.entry_point,
+            ContractPin {
+                address: profile.airlock.address,
+                runtime_code_hash: profile.airlock.runtime_code_hash,
+            },
+        )
+        .unwrap();
+        let call = abi::createCall::abi_decode(&discovered.calldata).unwrap();
+        let rejects = |call: &abi::createCall| {
+            assert!(validate_create_calldata(call, profile).is_err());
+            assert!(!validate_bankr_create_calldata_for_observation(
+                &call.abi_encode()
+            ));
+        };
+
+        let mut swapped_weights = call.clone();
+        let mut init = decode_initializer_data(&swapped_weights);
+        let protocol_share = init.beneficiaries[0].shares;
+        init.beneficiaries[0].shares = init.beneficiaries[1].shares;
+        init.beneficiaries[1].shares = protocol_share;
+        replace_initializer_data(&mut swapped_weights, &init);
+        rejects(&swapped_weights);
+
+        let mut total_share_drift = call.clone();
+        let mut init = decode_initializer_data(&total_share_drift);
+        init.beneficiaries[1].shares += alloy_primitives::Uint::from(1_u8);
+        replace_initializer_data(&mut total_share_drift, &init);
+        rejects(&total_share_drift);
+
+        let mut wrong_protocol = call.clone();
+        let mut init = decode_initializer_data(&wrong_protocol);
+        init.beneficiaries[0].beneficiary = Address::with_last_byte(1);
+        replace_initializer_data(&mut wrong_protocol, &init);
+        rejects(&wrong_protocol);
+
+        let mut wrong_creator = call.clone();
+        let mut init = decode_initializer_data(&wrong_creator);
+        init.beneficiaries[1].beneficiary = Address::with_last_byte(2);
+        replace_initializer_data(&mut wrong_creator, &init);
+        rejects(&wrong_creator);
+
+        let mut wrong_vesting = call.clone();
+        let mut token = decode_token_factory_data(&wrong_vesting);
+        token.beneficiaries[0] = Address::with_last_byte(3);
+        replace_token_factory_data(&mut wrong_vesting, &token);
+        rejects(&wrong_vesting);
+
+        let mut duplicate_protocol = call.clone();
+        let mut init = decode_initializer_data(&duplicate_protocol);
+        init.beneficiaries[1].beneficiary = BANKR_PROTOCOL_BENEFICIARY;
+        replace_initializer_data(&mut duplicate_protocol, &init);
+        rejects(&duplicate_protocol);
+
+        let mut duplicate_creator = call.clone();
+        let mut init = decode_initializer_data(&duplicate_creator);
+        init.beneficiaries[0].beneficiary = proof.creator_beneficiary;
+        replace_initializer_data(&mut duplicate_creator, &init);
+        rejects(&duplicate_creator);
+
+        let mut zero_creator = call.clone();
+        let mut init = decode_initializer_data(&zero_creator);
+        init.beneficiaries[1].beneficiary = Address::ZERO;
+        let mut token = decode_token_factory_data(&zero_creator);
+        token.beneficiaries[0] = Address::ZERO;
+        replace_initializer_data(&mut zero_creator, &init);
+        replace_token_factory_data(&mut zero_creator, &token);
+        rejects(&zero_creator);
+
+        let mut extra_initializer_beneficiary = call.clone();
+        let mut init = decode_initializer_data(&extra_initializer_beneficiary);
+        init.beneficiaries.push(init.beneficiaries[0].clone());
+        replace_initializer_data(&mut extra_initializer_beneficiary, &init);
+        rejects(&extra_initializer_beneficiary);
+
+        let mut extra_vesting_beneficiary = call.clone();
+        let mut token = decode_token_factory_data(&extra_vesting_beneficiary);
+        token.beneficiaries.push(proof.creator_beneficiary);
+        replace_token_factory_data(&mut extra_vesting_beneficiary, &token);
+        rejects(&extra_vesting_beneficiary);
+
+        let mut malformed_initializer = call;
+        let mut malformed_data = malformed_initializer
+            .createData
+            .poolInitializerData
+            .to_vec();
+        malformed_data.push(0);
+        malformed_initializer.createData.poolInitializerData = malformed_data.into();
+        rejects(&malformed_initializer);
+    }
+
+    #[test]
     fn live_curve_ticks_v3_long_name_is_an_exact_bounded_proof() {
         let proof = long_name_live_proof();
         let profile = BankrDopplerExpectedProfile::production();
@@ -2878,17 +3180,15 @@ mod tests {
         let mut mutated = call.clone();
         replace_token_factory_data(&mut mutated, &mutated_token);
         rejects(&mutated);
-        for unordered in [BANKR_PROTOCOL_BENEFICIARY, Address::from([0xff; 20])] {
-            let mut mutated = call.clone();
-            let mut init =
-                abi::DopplerInitData::abi_decode(&mutated.createData.poolInitializerData).unwrap();
-            init.beneficiaries[0].beneficiary = unordered;
-            replace_initializer_data(&mut mutated, &init);
-            let mut mutated_token = token.clone();
-            mutated_token.beneficiaries[0] = unordered;
-            replace_token_factory_data(&mut mutated, &mutated_token);
-            rejects(&mutated);
-        }
+        let mut mutated = call.clone();
+        let mut init =
+            abi::DopplerInitData::abi_decode(&mutated.createData.poolInitializerData).unwrap();
+        init.beneficiaries[0].beneficiary = BANKR_PROTOCOL_BENEFICIARY;
+        replace_initializer_data(&mut mutated, &init);
+        let mut mutated_token = token.clone();
+        mutated_token.beneficiaries[0] = BANKR_PROTOCOL_BENEFICIARY;
+        replace_token_factory_data(&mut mutated, &mutated_token);
+        rejects(&mutated);
         let mut mutated_token = token.clone();
         mutated_token.scheduleIds[0] = U256::from(1_u8);
         let mut mutated = call.clone();

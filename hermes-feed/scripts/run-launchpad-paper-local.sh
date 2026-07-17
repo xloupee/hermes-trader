@@ -6,8 +6,8 @@ if [[ "$#" -lt 3 ]]; then
   exit 64
 fi
 
-expected_pins=$1
-observed_snapshot=$2
+expected_pins_source=$1
+observed_snapshot_source=$2
 output_dir=$3
 shift 3
 probe_args=("$@")
@@ -18,11 +18,11 @@ reconcile_bin=${HERMES_LAUNCHPAD_RECONCILE_BIN:-./target/release/hermes-launchpa
 head_bin=${HERMES_LAUNCHPAD_CHAIN_HEAD_BIN:-./target/release/hermes-launchpad-chain-head}
 reconcile_concurrency=${HERMES_RECONCILE_CONCURRENCY:-1}
 
-if [[ ! -f "$expected_pins" || ! -f "$observed_snapshot" ]]; then
+if [[ ! -f "$expected_pins_source" || ! -f "$observed_snapshot_source" ]]; then
   echo "expected pins and observed snapshot must be existing regular files" >&2
   exit 66
 fi
-if [[ "$expected_pins" -ef "$observed_snapshot" ]]; then
+if [[ "$expected_pins_source" -ef "$observed_snapshot_source" ]]; then
   echo "expected pins and observed snapshot must be independent files" >&2
   exit 65
 fi
@@ -44,15 +44,24 @@ reconciliation_output=$output_dir/reconciliation-evidence.jsonl
 finalized_output=$output_dir/launchpad-paper-finalized.jsonl
 start_anchor=$output_dir/start-anchor.txt
 cutoff_anchor=$output_dir/cutoff-anchor.txt
+expected_pins=$output_dir/expected-pins.input.json
+observed_snapshot=$output_dir/observed-startup-snapshot.input.json
 
 for path in "$raw_fifo" "$observer_fifo" "$raw_feed" "$observer_output" \
   "$probe_metrics" "$reconciliation_output" "$finalized_output" "$start_anchor" \
-  "$cutoff_anchor"; do
+  "$cutoff_anchor" "$expected_pins" "$observed_snapshot"; do
   if [[ -e "$path" ]]; then
     echo "refusing to overwrite existing evidence path $path" >&2
     exit 73
   fi
 done
+
+# Freeze both startup authorities before any child starts. Every phase hashes
+# and decodes these exact bytes, so a caller cannot mutate an external path
+# between observation, reconciliation, and finalization.
+cp "$expected_pins_source" "$expected_pins"
+cp "$observed_snapshot_source" "$observed_snapshot"
+chmod 600 "$expected_pins" "$observed_snapshot"
 
 mkfifo "$raw_fifo" "$observer_fifo"
 chmod 600 "$raw_fifo" "$observer_fifo"
@@ -78,6 +87,7 @@ trap cleanup EXIT INT TERM HUP
 # observable. The no-output writer keeps the raw FIFO open until probe drain is
 # complete, without leaking an inherited shell descriptor.
 "$paper_bin" \
+  --acquisition live \
   --expected-pins "$expected_pins" \
   --observed-startup-snapshot "$observed_snapshot" \
   --input - \
@@ -182,6 +192,7 @@ fi
 paper_pid=
 
 "$reconcile_bin" \
+  --acquisition live \
   --input "$observer_output" \
   --expected-pins "$expected_pins" \
   --observed-startup-snapshot "$observed_snapshot" \
@@ -193,6 +204,7 @@ paper_pid=
   > "$reconciliation_output"
 
 "$paper_bin" \
+  --acquisition live \
   --expected-pins "$expected_pins" \
   --observed-startup-snapshot "$observed_snapshot" \
   --observer-output-input "$observer_output" \
@@ -200,4 +212,5 @@ paper_pid=
   > "$finalized_output"
 
 chmod 600 "$raw_feed" "$observer_output" "$probe_metrics" \
-  "$reconciliation_output" "$finalized_output" "$start_anchor" "$cutoff_anchor"
+  "$reconciliation_output" "$finalized_output" "$start_anchor" "$cutoff_anchor" \
+  "$expected_pins" "$observed_snapshot"

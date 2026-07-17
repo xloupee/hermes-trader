@@ -1,12 +1,17 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Cursor};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result};
 use clap::Parser;
+use hermes_feed::evidence_provenance::{
+    EVIDENCE_PROVENANCE_SCHEMA_VERSION, EvidenceAcquisition, LaunchpadReadinessProvenance,
+    ObserverEvidenceProvenance, ReconciliationEvidenceProvenance, current_executable_keccak256,
+    read_bytes_with_keccak, read_json_with_keccak,
+};
 use hermes_feed::feed::BroadcastMessage;
 use hermes_feed::launchpad_adapter::{ActionKind, LaunchpadId};
 use hermes_feed::launchpad_ground_truth::launchpad_for_ground_truth_log;
@@ -41,6 +46,11 @@ fn unix_now_ns() -> u64 {
     about = "Unified paper-only launchpad observer for Nitro feed frames"
 )]
 struct Cli {
+    /// Whether the observer consumes a live producer stream or saved feed bytes.
+    /// This value is bound into every readiness window and cannot be inferred
+    /// safely from `--input -` alone.
+    #[arg(long, value_enum)]
+    acquisition: EvidenceAcquisition,
     /// Reviewed protocol-owned expected pins. Never use an observed snapshot here.
     #[arg(long)]
     expected_pins: PathBuf,
@@ -70,6 +80,17 @@ struct Cli {
     paper_stop_loss_bps: u16,
     #[arg(long, default_value_t = 300)]
     paper_max_hold_seconds: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PaperCapabilitiesRecord {
+    record_type: String,
+    provenance: ObserverEvidenceProvenance,
+    capabilities: Value,
+    broadcast: bool,
+    signing: bool,
+    candidate_time_rpc: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -191,6 +212,7 @@ fn readiness_windows(
     records: &ReconciliationRecords,
     metrics: &[ReconciliationMetrics],
     promotion: &PromotionValidations,
+    provenance: &LaunchpadReadinessProvenance,
 ) -> Result<Vec<LaunchpadReadinessWindow>> {
     let window = records
         .ground_truth_window
@@ -361,6 +383,7 @@ fn readiness_windows(
                     ],
                     "quote mismatches",
                 )?,
+                provenance: Some(provenance.clone()),
             })
         })
         .collect()
@@ -375,6 +398,51 @@ impl PromotionValidations {
     }
 }
 
+fn finalized_readiness_provenance(
+    invocation: &ObserverEvidenceProvenance,
+    finalizer_paper_binary_keccak256: B256,
+    observed: &ObservedOutputCandidates,
+    reconciliation: &ReconciliationRecords,
+) -> Result<LaunchpadReadinessProvenance> {
+    invocation.validate()?;
+    let observer = observed
+        .provenance
+        .as_ref()
+        .context("observer output has no capabilities provenance record")?;
+    observer.validate()?;
+    let reconciler = reconciliation
+        .provenance
+        .as_ref()
+        .context("reconciliation output has no provenance record")?;
+    reconciler.validate()?;
+    if observer.acquisition != invocation.acquisition
+        || observer.expected_pins_content_keccak256 != invocation.expected_pins_content_keccak256
+        || observer.observed_snapshot_content_keccak256
+            != invocation.observed_snapshot_content_keccak256
+    {
+        anyhow::bail!("finalizer inputs disagree with observer evidence provenance");
+    }
+    if reconciler.observer != *observer {
+        anyhow::bail!("reconciler provenance disagrees with observer provenance");
+    }
+    if reconciler.observer_output_content_keccak256 != observed.source_content_keccak256 {
+        anyhow::bail!("observer output content hash disagrees with reconciler provenance");
+    }
+    let provenance = LaunchpadReadinessProvenance {
+        schema_version: EVIDENCE_PROVENANCE_SCHEMA_VERSION,
+        acquisition: observer.acquisition,
+        expected_pins_content_keccak256: observer.expected_pins_content_keccak256,
+        observed_snapshot_content_keccak256: observer.observed_snapshot_content_keccak256,
+        observer_paper_binary_keccak256: observer.observer_paper_binary_keccak256,
+        reconciler_binary_keccak256: reconciler.reconciler_binary_keccak256,
+        finalizer_paper_binary_keccak256,
+        observer_output_content_keccak256: observed.source_content_keccak256,
+        reconciliation_output_content_keccak256: reconciliation.source_content_keccak256,
+    };
+    provenance.validate()?;
+    Ok(provenance)
+}
+
 #[derive(Debug, Default)]
 struct ReconciliationRecords {
     evidence: Vec<ReconciliationEvidence>,
@@ -385,6 +453,8 @@ struct ReconciliationRecords {
     hood_quotes: Vec<HoodReceiptPaperQuote>,
     hood_migrations: Vec<HoodMigrationEvidence>,
     ground_truth_window: Option<GroundTruthWindow>,
+    provenance: Option<ReconciliationEvidenceProvenance>,
+    source_content_keccak256: B256,
 }
 
 #[derive(Debug, Default)]
@@ -394,6 +464,8 @@ struct ObservedOutputCandidates {
     feed_sequences: HashMap<(B256, LaunchpadId), u64>,
     feed_transactions: HashMap<B256, u64>,
     claims: HashMap<(B256, LaunchpadId), ObserverClaim>,
+    provenance: Option<ObserverEvidenceProvenance>,
+    source_content_keccak256: B256,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -788,25 +860,19 @@ fn main() -> Result<()> {
     if args.expected_pins.canonicalize()? == args.observed_startup_snapshot.canonicalize()? {
         anyhow::bail!("expected pins and observed startup snapshot must be separate files");
     }
-    let expected: PaperExpectedPins = serde_json::from_reader(BufReader::new(
-        File::open(&args.expected_pins)
-            .with_context(|| format!("open expected pins {}", args.expected_pins.display()))?,
-    ))
-    .with_context(|| format!("decode expected pins {}", args.expected_pins.display()))?;
-    let observed: PaperObservedStartupSnapshot = serde_json::from_reader(BufReader::new(
-        File::open(&args.observed_startup_snapshot).with_context(|| {
-            format!(
-                "open observed startup snapshot {}",
-                args.observed_startup_snapshot.display()
-            )
-        })?,
-    ))
-    .with_context(|| {
-        format!(
-            "decode observed startup snapshot {}",
-            args.observed_startup_snapshot.display()
-        )
-    })?;
+    let (expected, expected_pins_content_keccak256): (PaperExpectedPins, B256) =
+        read_json_with_keccak(&args.expected_pins, "expected pins")?;
+    let (observed, observed_snapshot_content_keccak256): (PaperObservedStartupSnapshot, B256) =
+        read_json_with_keccak(&args.observed_startup_snapshot, "observed startup snapshot")?;
+    let paper_binary_keccak256 = current_executable_keccak256()?;
+    let invocation_provenance = ObserverEvidenceProvenance {
+        schema_version: EVIDENCE_PROVENANCE_SCHEMA_VERSION,
+        acquisition: args.acquisition,
+        expected_pins_content_keccak256,
+        observed_snapshot_content_keccak256,
+        observer_paper_binary_keccak256: paper_binary_keccak256,
+    };
+    invocation_provenance.validate()?;
     let pons_profile = expected.pons_v3.expected_profile()?;
     let hood_profile = expected
         .hood_curve
@@ -820,6 +886,11 @@ fn main() -> Result<()> {
         .is_some_and(|path| path == &args.input)
     {
         anyhow::bail!("feed input and reconciliation evidence must be independent files");
+    }
+    if args.reconciliation_input.is_some() && args.observer_output_input.is_none() {
+        anyhow::bail!(
+            "provenance-bound finalization requires --observer-output-input with --reconciliation-input; use observer-only mode for live ingestion"
+        );
     }
     let observer = PaperLaunchpadObserver::from_startup_snapshots(expected, observed)?;
     let plan_policy = PaperPlanPolicy {
@@ -839,6 +910,12 @@ fn main() -> Result<()> {
         }
         let observed_candidates = read_observed_output_candidates(observer_path)?;
         let records = read_reconciliation_records(reconciliation_path)?;
+        let provenance = finalized_readiness_provenance(
+            &invocation_provenance,
+            paper_binary_keccak256,
+            &observed_candidates,
+            &records,
+        )?;
         validate_hood_migration_records(&records.evidence, &records.hood_migrations)?;
         let ground_truth = ConfirmedGroundTruth::from_records(&records)?;
         let promotion = promotion_validations(
@@ -857,7 +934,7 @@ fn main() -> Result<()> {
             records.ground_truth_window.as_ref(),
             &promotion,
         )?;
-        let readiness = readiness_windows(&records, &metrics, &promotion)?;
+        let readiness = readiness_windows(&records, &metrics, &promotion, &provenance)?;
         for metrics in metrics {
             println!("{}", serde_json::to_string(&metrics)?);
         }
@@ -914,6 +991,7 @@ fn main() -> Result<()> {
         "{}",
         serde_json::to_string(&json!({
             "record_type": "launchpad_paper_capabilities",
+            "provenance": invocation_provenance,
             "capabilities": runtime.capabilities(),
             "broadcast": false,
             "signing": false,
@@ -1014,7 +1092,13 @@ fn main() -> Result<()> {
             records.ground_truth_window.as_ref(),
             &promotion,
         )?;
-        let readiness = readiness_windows(&records, &metrics, &promotion)?;
+        let provenance = finalized_readiness_provenance(
+            &invocation_provenance,
+            paper_binary_keccak256,
+            &observed_candidates,
+            &records,
+        )?;
+        let readiness = readiness_windows(&records, &metrics, &promotion, &provenance)?;
         for metrics in metrics {
             println!("{}", serde_json::to_string(&metrics)?);
         }
@@ -1068,14 +1152,14 @@ fn main() -> Result<()> {
 }
 
 fn read_observed_output_candidates(path: &Path) -> Result<ObservedOutputCandidates> {
-    let input = BufReader::new(
-        File::open(path).with_context(|| format!("open observer output {}", path.display()))?,
-    );
+    let (bytes, source_content_keccak256) = read_bytes_with_keccak(path, "observer output")?;
+    let input = BufReader::new(Cursor::new(bytes));
     let mut received: HashMap<(B256, LaunchpadId), u64> = HashMap::new();
     let mut latencies: HashMap<(B256, LaunchpadId), u64> = HashMap::new();
     let mut sequences: HashMap<(B256, LaunchpadId), u64> = HashMap::new();
     let mut feed_transactions: HashMap<B256, u64> = HashMap::new();
     let mut claims = HashMap::new();
+    let mut provenance = None;
     for (index, line) in input.lines().enumerate() {
         let line = line.with_context(|| format!("read observer line {}", index + 1))?;
         if line.trim().is_empty() {
@@ -1083,8 +1167,29 @@ fn read_observed_output_candidates(path: &Path) -> Result<ObservedOutputCandidat
         }
         let value: Value = serde_json::from_str(&line)
             .with_context(|| format!("decode observer line {}", index + 1))?;
-        if value.get("record_type").and_then(Value::as_str) != Some("launchpad_paper_frame") {
-            continue;
+        match value.get("record_type").and_then(Value::as_str) {
+            Some("launchpad_paper_capabilities") => {
+                if provenance.is_some() {
+                    anyhow::bail!("duplicate paper capabilities provenance record");
+                }
+                let capabilities: PaperCapabilitiesRecord = serde_json::from_value(value)
+                    .with_context(|| {
+                        format!("decode capabilities on observer line {}", index + 1)
+                    })?;
+                if capabilities.record_type != "launchpad_paper_capabilities"
+                    || capabilities.broadcast
+                    || capabilities.signing
+                    || capabilities.candidate_time_rpc
+                    || !capabilities.capabilities.is_array()
+                {
+                    anyhow::bail!("paper capabilities record is unsafe or malformed");
+                }
+                capabilities.provenance.validate()?;
+                provenance = Some(capabilities.provenance);
+                continue;
+            }
+            Some("launchpad_paper_frame") => {}
+            _ => continue,
         }
         let transactions = value
             .pointer("/report/transactions")
@@ -1178,21 +1283,24 @@ fn read_observed_output_candidates(path: &Path) -> Result<ObservedOutputCandidat
                 .or_insert(observer_latency_ns);
         }
     }
+    let provenance = provenance.context("observer output has no paper capabilities provenance")?;
     Ok(ObservedOutputCandidates {
         received_unix_ns: received,
         observer_latency_ns: latencies,
         feed_sequences: sequences,
         feed_transactions,
         claims,
+        provenance: Some(provenance),
+        source_content_keccak256,
     })
 }
 
 fn read_reconciliation_records(path: &Path) -> Result<ReconciliationRecords> {
     let mut records = ReconciliationRecords::default();
-    let input = BufReader::new(
-        File::open(path)
-            .with_context(|| format!("open reconciliation evidence {}", path.display()))?,
-    );
+    let (bytes, source_content_keccak256) =
+        read_bytes_with_keccak(path, "reconciliation evidence")?;
+    records.source_content_keccak256 = source_content_keccak256;
+    let input = BufReader::new(Cursor::new(bytes));
     for (index, line) in input.lines().enumerate() {
         let line = line.with_context(|| {
             format!(
@@ -1210,6 +1318,21 @@ fn read_reconciliation_records(path: &Path) -> Result<ReconciliationRecords> {
                 )
             })?;
             match value.get("record_type").and_then(Value::as_str) {
+                Some("launchpad_reconciliation_provenance") => {
+                    if records.provenance.is_some() {
+                        anyhow::bail!("duplicate reconciliation provenance record");
+                    }
+                    let provenance: ReconciliationEvidenceProvenance =
+                        serde_json::from_value(value).with_context(|| {
+                            format!(
+                                "decode reconciliation provenance line {} from {}",
+                                index + 1,
+                                path.display()
+                            )
+                        })?;
+                    provenance.validate()?;
+                    records.provenance = Some(provenance);
+                }
                 Some("launchpad_ground_truth_window") => {
                     if records.ground_truth_window.is_some() {
                         anyhow::bail!("duplicate ground-truth coverage manifest");
@@ -2954,6 +3077,8 @@ fn percentile(values: &[u64], percentile: usize) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use alloy_primitives::{Address, keccak256};
     use hermes_feed::launchpad_adapters::{
         CLANKER_FACTORY, CLANKER_TOKEN_CREATED_TOPIC, DOPPLER_CREATE_EMITTER, DOPPLER_CREATE_TOPIC,
@@ -2975,6 +3100,31 @@ mod tests {
     };
 
     use super::*;
+
+    fn readiness_provenance() -> LaunchpadReadinessProvenance {
+        LaunchpadReadinessProvenance {
+            schema_version: EVIDENCE_PROVENANCE_SCHEMA_VERSION,
+            acquisition: EvidenceAcquisition::Live,
+            expected_pins_content_keccak256: B256::with_last_byte(1),
+            observed_snapshot_content_keccak256: B256::with_last_byte(2),
+            observer_paper_binary_keccak256: B256::with_last_byte(3),
+            reconciler_binary_keccak256: B256::with_last_byte(4),
+            finalizer_paper_binary_keccak256: B256::with_last_byte(3),
+            observer_output_content_keccak256: B256::with_last_byte(5),
+            reconciliation_output_content_keccak256: B256::with_last_byte(6),
+        }
+    }
+
+    fn capabilities_json(provenance: &ObserverEvidenceProvenance) -> Value {
+        json!({
+            "record_type": "launchpad_paper_capabilities",
+            "provenance": provenance,
+            "capabilities": [],
+            "broadcast": false,
+            "signing": false,
+            "candidate_time_rpc": false
+        })
+    }
 
     fn quote_authority(
         key: (B256, LaunchpadId),
@@ -3260,7 +3410,8 @@ mod tests {
             ground_truth_window: Some(window.clone()),
             ..ReconciliationRecords::default()
         };
-        let readiness = readiness_windows(&records, &metrics, &promotion).unwrap();
+        let readiness =
+            readiness_windows(&records, &metrics, &promotion, &readiness_provenance()).unwrap();
         let pons = readiness
             .iter()
             .find(|row| row.launchpad == LaunchpadId::Pons)
@@ -3307,8 +3458,13 @@ mod tests {
             ground_truth_window: Some(window),
             ..ReconciliationRecords::default()
         };
-        let current_readiness =
-            readiness_windows(&current_records, &current_metrics, &promotion).unwrap();
+        let current_readiness = readiness_windows(
+            &current_records,
+            &current_metrics,
+            &promotion,
+            &readiness_provenance(),
+        )
+        .unwrap();
         assert_eq!(
             current_readiness
                 .iter()
@@ -3387,7 +3543,8 @@ mod tests {
             &promotion,
         )
         .unwrap();
-        let emitted = readiness_windows(&records, &metrics, &promotion).unwrap();
+        let emitted =
+            readiness_windows(&records, &metrics, &promotion, &readiness_provenance()).unwrap();
         let jsonl = emitted
             .iter()
             .map(|row| serde_json::to_string(row).unwrap())
@@ -3401,6 +3558,11 @@ mod tests {
             hermes_feed::launchpad_readiness::evaluate_launchpad_readiness(&parsed).unwrap();
 
         assert_eq!(parsed.len(), 6);
+        assert!(
+            parsed
+                .iter()
+                .all(|row| row.provenance.as_ref() == Some(&readiness_provenance()))
+        );
         assert_eq!(evaluated.len(), 6);
         let bow_window = parsed
             .iter()
@@ -3421,6 +3583,210 @@ mod tests {
         assert_eq!(bow_window.quote_mismatches, 0);
         assert!(evaluated.iter().all(|row| !row.authorizes_canary));
         assert!(evaluated.iter().all(|row| !row.execution_eligible));
+    }
+
+    #[test]
+    fn finalizer_binds_the_exact_provenance_chain_and_rejects_tampering() {
+        let observer = ObserverEvidenceProvenance {
+            schema_version: EVIDENCE_PROVENANCE_SCHEMA_VERSION,
+            acquisition: EvidenceAcquisition::Live,
+            expected_pins_content_keccak256: B256::with_last_byte(1),
+            observed_snapshot_content_keccak256: B256::with_last_byte(2),
+            observer_paper_binary_keccak256: B256::with_last_byte(3),
+        };
+        let observed = ObservedOutputCandidates {
+            provenance: Some(observer.clone()),
+            source_content_keccak256: B256::with_last_byte(4),
+            ..ObservedOutputCandidates::default()
+        };
+        let reconciliation_provenance = ReconciliationEvidenceProvenance {
+            record_type: "launchpad_reconciliation_provenance".into(),
+            observer: observer.clone(),
+            reconciler_binary_keccak256: B256::with_last_byte(5),
+            observer_output_content_keccak256: B256::with_last_byte(4),
+        };
+        let records = ReconciliationRecords {
+            provenance: Some(reconciliation_provenance),
+            source_content_keccak256: B256::with_last_byte(6),
+            ..ReconciliationRecords::default()
+        };
+        let bound =
+            finalized_readiness_provenance(&observer, B256::with_last_byte(3), &observed, &records)
+                .unwrap();
+        assert_eq!(
+            bound.observer_output_content_keccak256,
+            B256::with_last_byte(4)
+        );
+        assert_eq!(
+            bound.reconciliation_output_content_keccak256,
+            B256::with_last_byte(6)
+        );
+
+        let mut wrong_inputs = observer.clone();
+        wrong_inputs.expected_pins_content_keccak256 = B256::with_last_byte(9);
+        assert!(
+            finalized_readiness_provenance(
+                &wrong_inputs,
+                B256::with_last_byte(3),
+                &observed,
+                &records
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("disagree with observer")
+        );
+
+        let mut wrong_snapshot = observer.clone();
+        wrong_snapshot.observed_snapshot_content_keccak256 = B256::with_last_byte(9);
+        assert!(
+            finalized_readiness_provenance(
+                &wrong_snapshot,
+                B256::with_last_byte(3),
+                &observed,
+                &records
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("disagree with observer")
+        );
+
+        let mut wrong_acquisition = observer.clone();
+        wrong_acquisition.acquisition = EvidenceAcquisition::Replay;
+        assert!(
+            finalized_readiness_provenance(
+                &wrong_acquisition,
+                B256::with_last_byte(3),
+                &observed,
+                &records
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("disagree with observer")
+        );
+
+        let mut wrong_reconciler = records;
+        wrong_reconciler
+            .provenance
+            .as_mut()
+            .unwrap()
+            .observer_output_content_keccak256 = B256::with_last_byte(9);
+        assert!(
+            finalized_readiness_provenance(
+                &observer,
+                B256::with_last_byte(3),
+                &observed,
+                &wrong_reconciler
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("content hash")
+        );
+
+        assert!(
+            finalized_readiness_provenance(
+                &observer,
+                B256::with_last_byte(9),
+                &observed,
+                &ReconciliationRecords {
+                    provenance: Some(ReconciliationEvidenceProvenance {
+                        record_type: "launchpad_reconciliation_provenance".into(),
+                        observer: observer.clone(),
+                        reconciler_binary_keccak256: B256::with_last_byte(5),
+                        observer_output_content_keccak256: B256::with_last_byte(4),
+                    }),
+                    source_content_keccak256: B256::with_last_byte(6),
+                    ..ReconciliationRecords::default()
+                }
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("different observer and finalizer")
+        );
+
+        assert!(
+            finalized_readiness_provenance(
+                &observer,
+                B256::with_last_byte(3),
+                &observed,
+                &ReconciliationRecords::default()
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("no provenance record")
+        );
+    }
+
+    #[test]
+    fn observer_output_parser_requires_one_safe_capabilities_provenance_record() {
+        let provenance = ObserverEvidenceProvenance {
+            schema_version: EVIDENCE_PROVENANCE_SCHEMA_VERSION,
+            acquisition: EvidenceAcquisition::Live,
+            expected_pins_content_keccak256: B256::with_last_byte(1),
+            observed_snapshot_content_keccak256: B256::with_last_byte(2),
+            observer_paper_binary_keccak256: B256::with_last_byte(3),
+        };
+
+        let mut valid = tempfile::NamedTempFile::new().unwrap();
+        writeln!(valid, "{}", capabilities_json(&provenance)).unwrap();
+        let parsed = read_observed_output_candidates(valid.path()).unwrap();
+        assert_eq!(parsed.provenance, Some(provenance.clone()));
+        assert_ne!(parsed.source_content_keccak256, B256::ZERO);
+
+        let mut missing = tempfile::NamedTempFile::new().unwrap();
+        writeln!(missing, "{{\"record_type\":\"unrelated\"}}").unwrap();
+        assert!(
+            read_observed_output_candidates(missing.path())
+                .unwrap_err()
+                .to_string()
+                .contains("no paper capabilities provenance")
+        );
+
+        let mut duplicate = tempfile::NamedTempFile::new().unwrap();
+        writeln!(duplicate, "{}", capabilities_json(&provenance)).unwrap();
+        writeln!(duplicate, "{}", capabilities_json(&provenance)).unwrap();
+        assert!(
+            read_observed_output_candidates(duplicate.path())
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate paper capabilities")
+        );
+
+        let mut unsafe_record = capabilities_json(&provenance);
+        unsafe_record["signing"] = json!(true);
+        let mut unsafe_file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(unsafe_file, "{unsafe_record}").unwrap();
+        assert!(
+            read_observed_output_candidates(unsafe_file.path())
+                .unwrap_err()
+                .to_string()
+                .contains("unsafe or malformed")
+        );
+    }
+
+    #[test]
+    fn reconciliation_parser_rejects_duplicate_provenance_records() {
+        let observer = ObserverEvidenceProvenance {
+            schema_version: EVIDENCE_PROVENANCE_SCHEMA_VERSION,
+            acquisition: EvidenceAcquisition::Live,
+            expected_pins_content_keccak256: B256::with_last_byte(1),
+            observed_snapshot_content_keccak256: B256::with_last_byte(2),
+            observer_paper_binary_keccak256: B256::with_last_byte(3),
+        };
+        let provenance = ReconciliationEvidenceProvenance {
+            record_type: "launchpad_reconciliation_provenance".into(),
+            observer,
+            reconciler_binary_keccak256: B256::with_last_byte(4),
+            observer_output_content_keccak256: B256::with_last_byte(5),
+        };
+        let mut duplicate = tempfile::NamedTempFile::new().unwrap();
+        writeln!(duplicate, "{}", serde_json::to_string(&provenance).unwrap()).unwrap();
+        writeln!(duplicate, "{}", serde_json::to_string(&provenance).unwrap()).unwrap();
+        assert!(
+            read_reconciliation_records(duplicate.path())
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate reconciliation provenance")
+        );
     }
 
     #[test]
@@ -3497,7 +3863,8 @@ mod tests {
         assert_eq!(bankr_metrics.pool_prediction_eligible, 0);
         assert_eq!(bankr_metrics.pool_id_prediction_eligible, 1);
         assert_eq!(bankr_metrics.pool_id_prediction_matches, 1);
-        let windows = readiness_windows(&records, &metrics, &promotion).unwrap();
+        let windows =
+            readiness_windows(&records, &metrics, &promotion, &readiness_provenance()).unwrap();
         let bankr = windows
             .iter()
             .find(|row| row.launchpad == LaunchpadId::BankrDoppler)
@@ -3531,7 +3898,13 @@ mod tests {
             .unwrap();
         assert_eq!(forged_bankr_metrics.pool_id_prediction_matches, 0);
         assert_eq!(forged_bankr_metrics.pool_id_prediction_mismatches, 1);
-        let forged_windows = readiness_windows(&records, &forged_metrics, &promotion).unwrap();
+        let forged_windows = readiness_windows(
+            &records,
+            &forged_metrics,
+            &promotion,
+            &readiness_provenance(),
+        )
+        .unwrap();
         assert_eq!(
             forged_windows
                 .iter()

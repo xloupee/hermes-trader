@@ -52,7 +52,7 @@ The live topology is:
 ```text
 hermes-feed probe --record <mode-0600 FIFO>   (stdout remains metrics only)
   -> tee raw-feed.jsonl
-  -> hermes-launchpad-paper --input -
+  -> hermes-launchpad-paper --acquisition live --input -
 ```
 
 The checked-in local runner enforces a mode-0600 FIFO, a mode-0700 output
@@ -72,8 +72,9 @@ scripts/run-launchpad-paper-local.sh \
   .runtime/launchpad-paper-session
 ```
 
-Receipt/event evidence must be collected independently and may be supplied
-after feed EOF with `--reconciliation-input <evidence.jsonl>`. Each JSONL row
+Receipt/event evidence must be collected independently and is supplied after
+feed EOF in finalize-only mode with both `--observer-output-input
+<observer.jsonl>` and `--reconciliation-input <evidence.jsonl>`. Each JSONL row
 contains `tx_hash`, `launchpad`, `receipt_status`, `protocol_event_match`, and
 `observed_unix_ns`. Fully validated Bow/LaunchHood V3, Clanker, Bankr/Doppler,
 current Pons, and Hood curve receipts also include protocol-specific typed
@@ -87,6 +88,7 @@ The read-only collector produces that evidence directly from observer output:
 
 ```sh
 target/release/hermes-launchpad-reconcile \
+  --acquisition live \
   --input .runtime/launchpad-paper-session/launchpad-paper.jsonl \
   --expected-pins config/launchpad-expected-pins.production.json \
   --observed-startup-snapshot .runtime/launchpad-observed-startup.json \
@@ -109,7 +111,8 @@ price, tick, and liquidity. Bow's proven zero-value profile rejects any swap.
 The default independent paper size is 0.001 WETH with 1% slippage and a hard
 0.01 WETH maximum. A quote row contains non-null entry output/minimum and an
 immediate full-position exit quote. Feeding the mixed evidence stream back to
-`hermes-launchpad-paper --reconciliation-input` emits a
+`hermes-launchpad-paper --acquisition live --observer-output-input
+<observer.jsonl> --reconciliation-input <evidence.jsonl>` emits a
 `launchpad_paper_finalized_plan` row joined to the original feed sequence.
 Bow/LaunchHood plans remain `quoted_restriction_gated`; the other admitted
 paper quotes remain `quoted_execution_gated`. All are

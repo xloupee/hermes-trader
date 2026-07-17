@@ -7,6 +7,7 @@ pub mod clanker_receipt_quote;
 pub mod copy_observation;
 pub mod copy_policy;
 pub mod decoder;
+pub mod evidence_provenance;
 pub mod feed;
 pub mod flap_abi;
 pub mod flap_identity;

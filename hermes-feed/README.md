@@ -35,6 +35,7 @@ Reproduce the checked-in raw-feed fixture end to end:
 
 ```sh
 cargo run --bin hermes-launchpad-paper -- \
+  --acquisition replay \
   --expected-pins tests/fixtures/launchpad-paper-expected-pins.synthetic.json \
   --observed-startup-snapshot tests/fixtures/launchpad-paper-observed-startup.synthetic.json \
   --input tests/fixtures/launchpad-paper-raw-feed.jsonl

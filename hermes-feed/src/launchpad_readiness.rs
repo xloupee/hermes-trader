@@ -5,12 +5,15 @@
 //! deterministic statement about whether the paper evidence sample is large
 //! and clean enough for a separate human-controlled promotion review.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use alloy_primitives::B256;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::evidence_provenance::{
+    AggregatedReadinessProvenance, EvidenceAcquisition, LaunchpadReadinessProvenance,
+};
 use crate::launchpad_adapter::LaunchpadId;
 
 pub const MIN_QUOTE_ELIGIBLE_CONFIRMED: u64 = 100;
@@ -44,6 +47,10 @@ pub struct LaunchpadReadinessWindow {
     pub direction_mismatches: u64,
     pub prediction_mismatches: u64,
     pub quote_mismatches: u64,
+    /// Old windows remain decodable for an explicit fail-closed error, but can
+    /// never contribute to promotion readiness without exact provenance.
+    #[serde(default)]
+    pub provenance: Option<LaunchpadReadinessProvenance>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -117,6 +124,8 @@ pub struct LaunchpadReadinessRecord {
     pub totals: LaunchpadReadinessTotals,
     pub supported_profile_envelopes: Vec<ProfileEnvelopeReadiness>,
     pub failures: Vec<LaunchpadReadinessFailure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<AggregatedReadinessProvenance>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -133,6 +142,12 @@ pub enum LaunchpadReadinessError {
     InvalidProfileEnvelopeCount,
     #[error("readiness counter aggregation overflowed")]
     CounterOverflow,
+    #[error("readiness window is missing or has invalid provenance")]
+    InvalidProvenance,
+    #[error("replay evidence is not eligible for promotion readiness")]
+    ReplayNotPromotionEligible,
+    #[error("readiness input mixes expected-pin or build provenance")]
+    MixedPromotionProvenance,
 }
 
 pub fn supported_profile_envelopes(launchpad: LaunchpadId) -> Option<&'static [&'static str]> {
@@ -159,6 +174,7 @@ pub fn supported_profile_envelopes(launchpad: LaunchpadId) -> Option<&'static [&
 pub fn evaluate_launchpad_readiness(
     windows: &[LaunchpadReadinessWindow],
 ) -> Result<Vec<LaunchpadReadinessRecord>, LaunchpadReadinessError> {
+    let aggregate_provenance = validate_promotion_provenance(windows)?;
     let mut indexed: HashMap<LaunchpadId, Vec<&LaunchpadReadinessWindow>> = HashMap::new();
     for window in windows {
         if window.record_type != "launchpad_paper_readiness_window" {
@@ -193,13 +209,71 @@ pub fn evaluate_launchpad_readiness(
 
     READINESS_LAUNCHPADS
         .into_iter()
-        .map(|launchpad| evaluate_one(launchpad, indexed.remove(&launchpad).unwrap_or_default()))
+        .map(|launchpad| {
+            evaluate_one(
+                launchpad,
+                indexed.remove(&launchpad).unwrap_or_default(),
+                aggregate_provenance.clone(),
+            )
+        })
         .collect()
+}
+
+fn validate_promotion_provenance(
+    windows: &[LaunchpadReadinessWindow],
+) -> Result<Option<AggregatedReadinessProvenance>, LaunchpadReadinessError> {
+    let Some(first) = windows.first() else {
+        return Ok(None);
+    };
+    let first = first
+        .provenance
+        .as_ref()
+        .ok_or(LaunchpadReadinessError::InvalidProvenance)?;
+    first
+        .validate()
+        .map_err(|_| LaunchpadReadinessError::InvalidProvenance)?;
+    if first.acquisition != EvidenceAcquisition::Live {
+        return Err(LaunchpadReadinessError::ReplayNotPromotionEligible);
+    }
+    let mut observed_snapshots = BTreeSet::new();
+    for window in windows {
+        let provenance = window
+            .provenance
+            .as_ref()
+            .ok_or(LaunchpadReadinessError::InvalidProvenance)?;
+        provenance
+            .validate()
+            .map_err(|_| LaunchpadReadinessError::InvalidProvenance)?;
+        if provenance.acquisition != EvidenceAcquisition::Live {
+            return Err(LaunchpadReadinessError::ReplayNotPromotionEligible);
+        }
+        // Fresh startup snapshots and per-window output files intentionally
+        // differ. The reviewed expected pins and exact executable tuple are
+        // the cross-window compatibility key.
+        if provenance.expected_pins_content_keccak256 != first.expected_pins_content_keccak256
+            || provenance.observer_paper_binary_keccak256 != first.observer_paper_binary_keccak256
+            || provenance.reconciler_binary_keccak256 != first.reconciler_binary_keccak256
+            || provenance.finalizer_paper_binary_keccak256 != first.finalizer_paper_binary_keccak256
+        {
+            return Err(LaunchpadReadinessError::MixedPromotionProvenance);
+        }
+        observed_snapshots.insert(provenance.observed_snapshot_content_keccak256);
+    }
+    Ok(Some(AggregatedReadinessProvenance {
+        schema_version: first.schema_version,
+        acquisition: first.acquisition,
+        expected_pins_content_keccak256: first.expected_pins_content_keccak256,
+        observer_paper_binary_keccak256: first.observer_paper_binary_keccak256,
+        reconciler_binary_keccak256: first.reconciler_binary_keccak256,
+        finalizer_paper_binary_keccak256: first.finalizer_paper_binary_keccak256,
+        observed_snapshot_content_keccak256: observed_snapshots.into_iter().collect(),
+    }))
 }
 
 fn evaluate_one(
     launchpad: LaunchpadId,
     windows: Vec<&LaunchpadReadinessWindow>,
+    provenance: Option<AggregatedReadinessProvenance>,
 ) -> Result<LaunchpadReadinessRecord, LaunchpadReadinessError> {
     let policy = LaunchpadReadinessPolicy::conservative();
     let complete_windows = windows.iter().filter(|window| window.complete).count();
@@ -309,6 +383,7 @@ fn evaluate_one(
         totals,
         supported_profile_envelopes: profile_readiness,
         failures,
+        provenance,
     })
 }
 
@@ -379,6 +454,21 @@ fn push_zero_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evidence_provenance::EVIDENCE_PROVENANCE_SCHEMA_VERSION;
+
+    fn provenance(index: u8) -> LaunchpadReadinessProvenance {
+        LaunchpadReadinessProvenance {
+            schema_version: EVIDENCE_PROVENANCE_SCHEMA_VERSION,
+            acquisition: EvidenceAcquisition::Live,
+            expected_pins_content_keccak256: B256::with_last_byte(1),
+            observed_snapshot_content_keccak256: B256::with_last_byte(10 + index),
+            observer_paper_binary_keccak256: B256::with_last_byte(2),
+            reconciler_binary_keccak256: B256::with_last_byte(3),
+            finalizer_paper_binary_keccak256: B256::with_last_byte(2),
+            observer_output_content_keccak256: B256::with_last_byte(20 + index),
+            reconciliation_output_content_keccak256: B256::with_last_byte(30 + index),
+        }
+    }
 
     fn window(launchpad: LaunchpadId, index: u8, quote_eligible: u64) -> LaunchpadReadinessWindow {
         let from = 1_000 + u64::from(index) * 100;
@@ -402,6 +492,7 @@ mod tests {
             direction_mismatches: 0,
             prediction_mismatches: 0,
             quote_mismatches: 0,
+            provenance: Some(provenance(index)),
         }
     }
 
@@ -555,6 +646,67 @@ mod tests {
             Err(LaunchpadReadinessError::UnknownProfileEnvelope(
                 "unreviewed_profile".into()
             ))
+        );
+    }
+
+    #[test]
+    fn missing_invalid_or_replay_provenance_is_rejected() {
+        let mut missing = window(LaunchpadId::Bow, 0, 100);
+        missing.provenance = None;
+        assert_eq!(
+            evaluate_launchpad_readiness(&[missing]),
+            Err(LaunchpadReadinessError::InvalidProvenance)
+        );
+
+        let mut invalid = window(LaunchpadId::Bow, 0, 100);
+        invalid
+            .provenance
+            .as_mut()
+            .unwrap()
+            .observer_paper_binary_keccak256 = B256::ZERO;
+        assert_eq!(
+            evaluate_launchpad_readiness(&[invalid]),
+            Err(LaunchpadReadinessError::InvalidProvenance)
+        );
+
+        let mut replay = window(LaunchpadId::Bow, 0, 100);
+        replay.provenance.as_mut().unwrap().acquisition = EvidenceAcquisition::Replay;
+        assert_eq!(
+            evaluate_launchpad_readiness(&[replay]),
+            Err(LaunchpadReadinessError::ReplayNotPromotionEligible)
+        );
+    }
+
+    #[test]
+    fn mixed_expected_pins_or_builds_are_rejected_but_fresh_snapshots_are_preserved() {
+        let first = window(LaunchpadId::Bow, 0, 50);
+        let mut second = window(LaunchpadId::Bow, 1, 50);
+        let records = evaluate_launchpad_readiness(&[first.clone(), second.clone()]).unwrap();
+        let aggregate = record(&records, LaunchpadId::Bow)
+            .provenance
+            .as_ref()
+            .unwrap();
+        assert_eq!(aggregate.observed_snapshot_content_keccak256.len(), 2);
+
+        second
+            .provenance
+            .as_mut()
+            .unwrap()
+            .expected_pins_content_keccak256 = B256::with_last_byte(9);
+        assert_eq!(
+            evaluate_launchpad_readiness(&[first.clone(), second.clone()]),
+            Err(LaunchpadReadinessError::MixedPromotionProvenance)
+        );
+
+        second.provenance = Some(provenance(1));
+        second
+            .provenance
+            .as_mut()
+            .unwrap()
+            .reconciler_binary_keccak256 = B256::with_last_byte(9);
+        assert_eq!(
+            evaluate_launchpad_readiness(&[first, second]),
+            Err(LaunchpadReadinessError::MixedPromotionProvenance)
         );
     }
 }

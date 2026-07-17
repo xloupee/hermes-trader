@@ -84,16 +84,27 @@ while IFS= read -r arg; do
   first_paper_args+=("$arg")
 done < "$tmp_dir/paper-1.args"
 input_dash=false
+paper_live=false
 for ((index = 0; index + 1 < ${#first_paper_args[@]}; index += 1)); do
   if [[ "${first_paper_args[index]}" == --input && "${first_paper_args[index + 1]}" == - ]]; then
     input_dash=true
     break
+  fi
+  if [[ "${first_paper_args[index]}" == --acquisition && "${first_paper_args[index + 1]}" == live ]]; then
+    paper_live=true
   fi
 done
 if [[ "$input_dash" != true ]]; then
   echo "paper observer did not receive --input -" >&2
   exit 1
 fi
+if [[ "$paper_live" != true ]]; then
+  echo "paper observer did not receive --acquisition live" >&2
+  exit 1
+fi
+
+cmp "$expected_pins" "$output_dir/expected-pins.input.json"
+cmp "$observed_snapshot" "$output_dir/observed-startup-snapshot.input.json"
 
 cmp "$output_dir/raw-feed.jsonl" "$FAKE_OBSERVER_BYTES"
 if [[ $(cat "$output_dir/raw-feed.jsonl") != $'{"frame":1}\n{"frame":2}' ]]; then
@@ -101,7 +112,7 @@ if [[ $(cat "$output_dir/raw-feed.jsonl") != $'{"frame":1}\n{"frame":2}' ]]; the
   exit 1
 fi
 
-for anchor in start-anchor.txt cutoff-anchor.txt; do
+for anchor in start-anchor.txt cutoff-anchor.txt expected-pins.input.json observed-startup-snapshot.input.json; do
   if [[ ! -s "$output_dir/$anchor" ]]; then
     echo "$anchor was not persisted after success" >&2
     exit 1
@@ -137,6 +148,26 @@ if [[ "$(arg_value --concurrency)" != 1 ]]; then
   echo "reconciliation did not default to concurrency 1" >&2
   exit 1
 fi
+if [[ "$(arg_value --acquisition)" != live ]]; then
+  echo "reconciliation did not receive --acquisition live" >&2
+  exit 1
+fi
+
+second_paper_args=()
+while IFS= read -r arg; do
+  second_paper_args+=("$arg")
+done < "$tmp_dir/paper-2.args"
+finalizer_live=false
+for ((index = 0; index + 1 < ${#second_paper_args[@]}; index += 1)); do
+  if [[ "${second_paper_args[index]}" == --acquisition && "${second_paper_args[index + 1]}" == live ]]; then
+    finalizer_live=true
+    break
+  fi
+done
+if [[ "$finalizer_live" != true ]]; then
+  echo "paper finalizer did not receive --acquisition live" >&2
+  exit 1
+fi
 read -r start_head start_hash < "$output_dir/start-anchor.txt"
 read -r cutoff_head cutoff_hash < "$output_dir/cutoff-anchor.txt"
 [[ "$(arg_value --ground-truth-start-head)" == "$start_head" ]]
@@ -152,6 +183,8 @@ evidence_paths=(
   launchpad-paper-finalized.jsonl
   start-anchor.txt
   cutoff-anchor.txt
+  expected-pins.input.json
+  observed-startup-snapshot.input.json
 )
 before=$tmp_dir/evidence-before.sha256
 after=$tmp_dir/evidence-after.sha256

@@ -59,7 +59,7 @@ The data path uses separately tracked producer, tee, and observer children:
 ```text
 hermes-feed probe --record private-mode-0600-raw-FIFO
   -> tee raw-feed.jsonl -> private-mode-0600-observer-FIFO
-  -> hermes-launchpad-paper --input - < private-mode-0600-observer-FIFO
+  -> hermes-launchpad-paper --acquisition live --input - < private-mode-0600-observer-FIFO
 ```
 
 Probe stdout contains metrics only. The wrapper requires the exact paper
@@ -74,6 +74,15 @@ The wrapper persists the exact start and cutoff number/hash pairs as
 mode-`0600` `start-anchor.txt` and `cutoff-anchor.txt` files after a successful
 run. These files are durable session evidence, are passed unchanged to the
 reconciler, and are never removed by normal FIFO cleanup.
+
+Before starting any child, the wrapper freezes the reviewed expected pins and
+fresh observed snapshot as mode-`0600` files inside the session directory. The
+observer, reconciler, and finalizer all hash and decode those exact bytes. The
+observer capability row binds the acquisition kind, both content hashes, and
+the exact observer executable hash. Reconciliation carries that authority
+forward with its own executable and observer-output hashes. Finalization rejects
+missing, duplicate, changed, or cross-phase provenance before emitting a
+readiness row.
 
 ## Independent truth boundary
 
@@ -98,9 +107,10 @@ paper finalizer:
 
 ```sh
 hermes-launchpad-reconcile \
+  --acquisition live \
   --input .runtime/paper-session/launchpad-paper.jsonl \
-  --expected-pins config/launchpad-expected-pins.production.json \
-  --observed-startup-snapshot .runtime/launchpad-observed-startup.json \
+  --expected-pins .runtime/paper-session/expected-pins.input.json \
+  --observed-startup-snapshot .runtime/paper-session/observed-startup-snapshot.input.json \
   --concurrency 1 \
   --ground-truth-start-head "$START_HEAD" \
   --ground-truth-start-hash "$START_HASH" \
@@ -108,6 +118,24 @@ hermes-launchpad-reconcile \
   --ground-truth-cutoff-hash "$CUTOFF_HASH" \
   > .runtime/paper-session/reconciliation-evidence.jsonl
 ```
+
+Finalize with both immutable phase outputs and the same acquisition label and
+startup-input bytes:
+
+```sh
+hermes-launchpad-paper \
+  --acquisition live \
+  --expected-pins .runtime/paper-session/expected-pins.input.json \
+  --observed-startup-snapshot .runtime/paper-session/observed-startup-snapshot.input.json \
+  --observer-output-input .runtime/paper-session/launchpad-paper.jsonl \
+  --reconciliation-input .runtime/paper-session/reconciliation-evidence.jsonl \
+  > .runtime/paper-session/launchpad-paper-finalized.jsonl
+```
+
+Use `--acquisition replay` from the first paper-observer phase onward when
+decoding saved raw-feed bytes. Relabeling only the finalizer cannot turn replay
+or old-build output into live evidence: the phase records and executable hashes
+must agree end to end.
 
 The command has no wallet, signer, keystore, transaction construction, or
 broadcast interface. Expected pins and the fresh observed snapshot must remain
@@ -230,7 +258,18 @@ Each input row binds one reconciled measurement window with these fields:
   "identity_mismatches": 0,
   "direction_mismatches": 0,
   "prediction_mismatches": 0,
-  "quote_mismatches": 0
+  "quote_mismatches": 0,
+  "provenance": {
+    "schema_version": 1,
+    "acquisition": "live",
+    "expected_pins_content_keccak256": "0x...",
+    "observed_snapshot_content_keccak256": "0x...",
+    "observer_paper_binary_keccak256": "0x...",
+    "reconciler_binary_keccak256": "0x...",
+    "finalizer_paper_binary_keccak256": "0x...",
+    "observer_output_content_keccak256": "0x...",
+    "reconciliation_output_content_keccak256": "0x..."
+  }
 }
 ```
 
@@ -240,6 +279,15 @@ complete, non-overlapping L2 ranges. Duplicate or overlapping ranges and
 incomplete windows cannot increase the sample or per-profile totals. Error
 counters are conservatively accumulated over every submitted row, so discarded
 or overlapping evidence cannot hide an error.
+
+Promotion aggregation accepts only `live` rows with the same exact observer,
+reconciler, and finalizer binary tuple and the same independently reviewed
+expected-pin content hash. Missing provenance, replay rows, and mixed build or
+expected-pin inputs fail closed. Fresh startup snapshots intentionally have
+different content hashes across sessions; each hash is retained in aggregate
+output after startup validation instead of forcing reuse of a stale snapshot.
+Existing pre-provenance readiness rows can still be decoded by the new schema
+but are explicitly ineligible for promotion and must not be backfilled by hand.
 
 `quote_eligible_confirmed_observations` counts independently revalidated quote
 records. Profile and envelope counters are derived from those same typed quote

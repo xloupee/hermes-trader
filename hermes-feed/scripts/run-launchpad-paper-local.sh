@@ -16,6 +16,7 @@ feed_bin=${HERMES_FEED_BIN:-./target/release/hermes-feed}
 paper_bin=${HERMES_LAUNCHPAD_PAPER_BIN:-./target/release/hermes-launchpad-paper}
 reconcile_bin=${HERMES_LAUNCHPAD_RECONCILE_BIN:-./target/release/hermes-launchpad-reconcile}
 head_bin=${HERMES_LAUNCHPAD_CHAIN_HEAD_BIN:-./target/release/hermes-launchpad-chain-head}
+reconcile_concurrency=${HERMES_RECONCILE_CONCURRENCY:-1}
 
 if [[ ! -f "$expected_pins" || ! -f "$observed_snapshot" ]]; then
   echo "expected pins and observed snapshot must be existing regular files" >&2
@@ -41,10 +42,12 @@ observer_output=$output_dir/launchpad-paper.jsonl
 probe_metrics=$output_dir/probe-metrics.jsonl
 reconciliation_output=$output_dir/reconciliation-evidence.jsonl
 finalized_output=$output_dir/launchpad-paper-finalized.jsonl
-cutoff_anchor=$output_dir/.cutoff-anchor
+start_anchor=$output_dir/start-anchor.txt
+cutoff_anchor=$output_dir/cutoff-anchor.txt
 
 for path in "$raw_fifo" "$observer_fifo" "$raw_feed" "$observer_output" \
-  "$probe_metrics" "$reconciliation_output" "$finalized_output" "$cutoff_anchor"; do
+  "$probe_metrics" "$reconciliation_output" "$finalized_output" "$start_anchor" \
+  "$cutoff_anchor"; do
   if [[ -e "$path" ]]; then
     echo "refusing to overwrite existing evidence path $path" >&2
     exit 73
@@ -67,7 +70,7 @@ cleanup() {
   for pid in "$sampler_pid" "$probe_pid" "$fifo_keeper_pid" "$tee_pid" "$paper_pid"; do
     if [[ -n "$pid" ]]; then wait "$pid" 2>/dev/null || true; fi
   done
-  rm -f "$raw_fifo" "$observer_fifo" "$cutoff_anchor"
+  rm -f "$raw_fifo" "$observer_fifo"
 }
 trap cleanup EXIT INT TERM HUP
 
@@ -125,6 +128,7 @@ done
 start_fields=$("$head_bin" --shell-fields)
 start_head=${start_fields%% *}
 start_hash=${start_fields#* }
+printf '%s\n' "$start_fields" > "$start_anchor"
 
 # Retain the latest anchor whose RPC response completed before the probe's
 # durable coverage-closed barrier. This excludes recorder drain and post-probe
@@ -181,6 +185,7 @@ paper_pid=
   --input "$observer_output" \
   --expected-pins "$expected_pins" \
   --observed-startup-snapshot "$observed_snapshot" \
+  --concurrency "$reconcile_concurrency" \
   --ground-truth-start-head "$start_head" \
   --ground-truth-start-hash "$start_hash" \
   --ground-truth-cutoff-head "$cutoff_head" \
@@ -195,4 +200,4 @@ paper_pid=
   > "$finalized_output"
 
 chmod 600 "$raw_feed" "$observer_output" "$probe_metrics" \
-  "$reconciliation_output" "$finalized_output"
+  "$reconciliation_output" "$finalized_output" "$start_anchor" "$cutoff_anchor"

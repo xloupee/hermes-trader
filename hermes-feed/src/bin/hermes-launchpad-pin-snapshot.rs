@@ -18,8 +18,8 @@ use hermes_feed::flap_identity::{
 };
 use hermes_feed::hood_receipt_quote::HoodIdentityRole;
 use hermes_feed::launchpad_adapters::{
-    CLANKER_FACTORY, CLANKER_LOCKER, DOPPLER_CREATE_EMITTER, KLIK_FACTORY, TRENCH_IMPLEMENTATION,
-    TRENCH_PROXY, V4_POOL_MANAGER,
+    CLANKER_DEPLOYER, CLANKER_FACTORY, CLANKER_LOCKER, DOPPLER_CREATE_EMITTER, KLIK_FACTORY,
+    TRENCH_IMPLEMENTATION, TRENCH_PROXY, V4_POOL_MANAGER,
 };
 use hermes_feed::paper_observer::{
     ObservedPinsDocumentRole, ObservedPinsProvenance, ObservedRuntimePin, PaperExpectedPins,
@@ -376,6 +376,7 @@ fn pin_requests(expected: Option<&PaperExpectedPins>) -> Result<Vec<PinRequest>>
         if let Some(configured) = expected.clanker_v4 {
             configured.expected_profile()?;
             requests.extend([
+                request(CLANKER_DEPLOYER, None),
                 request(CLANKER_STATIC_HOOK, None),
                 request(CLANKER_LOCKER, None),
                 request(CLANKER_DESCENDING_MEV_MODULE, None),
@@ -812,10 +813,112 @@ fn validate_bankr_proof_runtime_hashes(
 
 #[cfg(test)]
 mod tests {
-    use hermes_feed::BankrDopplerExpectedProfile;
+    use hermes_feed::{BankrDopplerExpectedProfile, ClankerV4ExpectedProfile};
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn production_clanker_snapshot_requests_the_pinned_deployer_library() {
+        let expected: PaperExpectedPins = serde_json::from_str(include_str!(
+            "../../config/launchpad-expected-pins.production.json"
+        ))
+        .unwrap();
+        let requests = pin_requests(Some(&expected)).unwrap();
+        assert_eq!(requests.len(), 37);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.address == CLANKER_DEPLOYER)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn snapshot_request_shape_with_clanker_deployer_reaches_startup_validation() {
+        let mut expected: PaperExpectedPins = serde_json::from_str(include_str!(
+            "../../tests/fixtures/launchpad-paper-expected-pins.synthetic.json"
+        ))
+        .unwrap();
+        let existing: PaperObservedStartupSnapshot = serde_json::from_str(include_str!(
+            "../../tests/fixtures/launchpad-paper-observed-startup.synthetic.json"
+        ))
+        .unwrap();
+        let profile = ClankerV4ExpectedProfile::production();
+        expected.clanker_v4 = Some(hermes_feed::paper_observer::ConfiguredClankerV4 {
+            factory_runtime_hash: profile.factory.runtime_code_hash,
+            deployer_runtime_hash: hermes_feed::launchpad_adapters::CLANKER_DEPLOYER_RUNTIME_HASH,
+            pool_manager_runtime_hash: profile.pool_manager.runtime_code_hash,
+            hook_runtime_hash: profile.hook.runtime_code_hash,
+            locker_runtime_hash: profile.locker.runtime_code_hash,
+            mev_module_runtime_hash: profile.mev_module.runtime_code_hash,
+            extension_runtime_hash: profile.extension.runtime_code_hash,
+            max_static_fee_ppm: profile.max_static_fee_ppm,
+            max_mev_fee_ppm: profile.max_mev_fee_ppm,
+            max_mev_seconds_to_decay: profile.max_mev_seconds_to_decay,
+            mev_delay_guard_seconds: profile.mev_delay_guard_seconds,
+            protocol_fee_share_percent: profile.protocol_fee_share_percent,
+        });
+
+        let requests = pin_requests(Some(&expected)).unwrap();
+        let runtime_hash = |address: Address| {
+            existing
+                .pins
+                .iter()
+                .find(|pin| pin.address == address)
+                .map(|pin| pin.runtime_hash)
+                .or_else(|| {
+                    [
+                        (
+                            CLANKER_DEPLOYER,
+                            hermes_feed::launchpad_adapters::CLANKER_DEPLOYER_RUNTIME_HASH,
+                        ),
+                        (
+                            profile.pool_manager.address,
+                            profile.pool_manager.runtime_code_hash,
+                        ),
+                        (profile.hook.address, profile.hook.runtime_code_hash),
+                        (profile.locker.address, profile.locker.runtime_code_hash),
+                        (
+                            profile.mev_module.address,
+                            profile.mev_module.runtime_code_hash,
+                        ),
+                        (
+                            profile.extension.address,
+                            profile.extension.runtime_code_hash,
+                        ),
+                    ]
+                    .into_iter()
+                    .find_map(|(candidate, hash)| (candidate == address).then_some(hash))
+                })
+                .unwrap_or_else(|| keccak256(address.as_slice()))
+        };
+        let pins = requests
+            .iter()
+            .map(|request| {
+                existing
+                    .pins
+                    .iter()
+                    .find(|pin| pin.address == request.address)
+                    .copied()
+                    .unwrap_or(ObservedRuntimePin {
+                        address: request.address,
+                        implementation: request.expected_implementation,
+                        runtime_hash: runtime_hash(request.address),
+                        code_bytes: Some(1),
+                    })
+            })
+            .collect();
+        let snapshot = PaperObservedStartupSnapshot { pins, ..existing };
+
+        assert!(snapshot.pins.iter().any(|pin| {
+            pin.address == CLANKER_DEPLOYER
+                && pin.runtime_hash
+                    == hermes_feed::launchpad_adapters::CLANKER_DEPLOYER_RUNTIME_HASH
+        }));
+        PaperLaunchpadObserver::from_startup_snapshots(expected, snapshot).unwrap();
+    }
 
     #[test]
     fn production_bankr_snapshot_requests_every_reviewed_dependency() {

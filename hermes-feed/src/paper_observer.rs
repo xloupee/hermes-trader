@@ -32,8 +32,9 @@ use crate::launchpad_adapter::{
     ActionKind, AdapterKind, AttributionSource, LaunchpadId, RouteKind, WrapperKind,
 };
 use crate::launchpad_adapters::{
-    CLANKER_FACTORY, CLANKER_LOCKER, DispatchEntry, ExecutionMode, ResearchStartupPins,
-    RuntimeCodePin, V4_POOL_MANAGER, V4AdapterSet, V4CandidateCall,
+    CLANKER_DEPLOYER, CLANKER_FACTORY, CLANKER_LOCKER, DispatchEntry, ExecutionMode,
+    ResearchStartupPins, RuntimeCodePin, V4_POOL_MANAGER, V4AdapterSet, V4CandidateCall,
+    preload_clanker_prediction_profile,
 };
 use crate::launchpad_registry::{
     BoundedCall, ContractPin, ContractRole, DispatchKey, LaunchpadSpec, ObservedContractPin,
@@ -114,6 +115,7 @@ pub struct PaperLaunchpadObservation {
     pub action: Option<ActionKind>,
     pub predicted_token: Option<Address>,
     pub predicted_pool: Option<Address>,
+    pub predicted_pool_id: Option<B256>,
     pub planning_mode: ExecutionMode,
     pub live_execution_enabled: bool,
     pub feed_sequence: Option<u64>,
@@ -325,6 +327,7 @@ impl ConfiguredPonsV3 {
 #[serde(deny_unknown_fields)]
 pub struct ConfiguredClankerV4 {
     pub factory_runtime_hash: B256,
+    pub deployer_runtime_hash: B256,
     pub pool_manager_runtime_hash: B256,
     pub hook_runtime_hash: B256,
     pub locker_runtime_hash: B256,
@@ -339,6 +342,11 @@ pub struct ConfiguredClankerV4 {
 
 impl ConfiguredClankerV4 {
     pub fn expected_profile(self) -> Result<ClankerV4ExpectedProfile, PaperObserverError> {
+        if self.deployer_runtime_hash != crate::launchpad_adapters::CLANKER_DEPLOYER_RUNTIME_HASH {
+            return Err(PaperObserverError::Startup(
+                "Clanker deployer library runtime pin drifted".into(),
+            ));
+        }
         let profile = ClankerV4ExpectedProfile {
             factory: V4CodePin {
                 address: CLANKER_FACTORY,
@@ -561,6 +569,8 @@ impl PaperFeedRuntime {
                 "paper plan policy contains zero or out-of-range bounds".into(),
             ));
         }
+        preload_clanker_prediction_profile()
+            .map_err(|error| PaperObserverError::Startup(error.to_string()))?;
         Ok(Self {
             decoder: FeedDecoder::new(Filter::default()),
             observer,
@@ -945,6 +955,8 @@ impl PaperLaunchpadObserver {
                 .map_err(|error| PaperObserverError::Startup(error.to_string()))
         });
         let smart_accounts = smart_accounts.transpose()?;
+        preload_clanker_prediction_profile()
+            .map_err(|error| PaperObserverError::Startup(error.to_string()))?;
         Ok(Self {
             registry,
             v3,
@@ -1210,12 +1222,19 @@ impl PaperLaunchpadObserver {
                         }
                     };
                     let mode = observed.planning_mode();
+                    let predicted_token = match &observed {
+                        crate::launchpad_adapters::LaunchObservation::OpaqueLaunch {
+                            predicted_market: Some(market),
+                            ..
+                        } => Some(market.token),
+                        _ => None,
+                    };
                     (
                         launchpad,
                         "discovery",
                         mode,
                         Some(ActionKind::Launch),
-                        None,
+                        predicted_token,
                         None,
                         serde_json::to_value(observed).expect("serializable V4 observation"),
                     )
@@ -1299,6 +1318,12 @@ impl PaperLaunchpadObserver {
                 }
                 _ => return Err(PaperObserverError::UnknownDispatch),
             };
+        let predicted_pool_id = detail
+            .pointer("/predicted_market/pool_id")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| PaperObserverError::Adapter(error.to_string()))?;
         Ok(PaperLaunchpadObservation {
             tx_hash,
             launchpad,
@@ -1310,6 +1335,7 @@ impl PaperLaunchpadObserver {
             action,
             predicted_token,
             predicted_pool,
+            predicted_pool_id,
             planning_mode,
             live_execution_enabled: false,
             feed_sequence: None,
@@ -1617,6 +1643,12 @@ fn paper_specs(
         {
             let profile = configured.expected_profile()?;
             pins.extend([
+                contract_pin(
+                    ContractRole::ProtocolDependency,
+                    CLANKER_DEPLOYER,
+                    None,
+                    configured.deployer_runtime_hash,
+                ),
                 contract_pin(
                     ContractRole::ProtocolDependency,
                     profile.pool_manager.address,
@@ -2631,6 +2663,7 @@ mod tests {
         let profile = ClankerV4ExpectedProfile::production();
         expected.clanker_v4 = Some(ConfiguredClankerV4 {
             factory_runtime_hash: profile.factory.runtime_code_hash,
+            deployer_runtime_hash: crate::launchpad_adapters::CLANKER_DEPLOYER_RUNTIME_HASH,
             pool_manager_runtime_hash: profile.pool_manager.runtime_code_hash,
             hook_runtime_hash: profile.hook.runtime_code_hash,
             locker_runtime_hash: profile.locker.runtime_code_hash,
@@ -2650,6 +2683,11 @@ mod tests {
             .is_err()
         );
         observed_snapshot.pins.extend([
+            observed(
+                CLANKER_DEPLOYER,
+                None,
+                crate::launchpad_adapters::CLANKER_DEPLOYER_RUNTIME_HASH,
+            ),
             observed(
                 profile.pool_manager.address,
                 None,
@@ -2688,6 +2726,87 @@ mod tests {
         assert!(
             PaperLaunchpadObserver::from_startup_snapshots(expected, observed_snapshot).is_err()
         );
+    }
+
+    #[test]
+    fn clanker_quiet1_observation_emits_token_and_v4_pool_id_prediction() {
+        #[derive(Deserialize)]
+        struct Proof {
+            tx_hash: B256,
+            signer: Address,
+            expected_token: Address,
+            expected_pool_id: B256,
+            calldata: Bytes,
+        }
+
+        let (mut expected, mut observed_snapshot) = startup();
+        let profile = ClankerV4ExpectedProfile::production();
+        expected.clanker_v4 = Some(ConfiguredClankerV4 {
+            factory_runtime_hash: profile.factory.runtime_code_hash,
+            deployer_runtime_hash: crate::launchpad_adapters::CLANKER_DEPLOYER_RUNTIME_HASH,
+            pool_manager_runtime_hash: profile.pool_manager.runtime_code_hash,
+            hook_runtime_hash: profile.hook.runtime_code_hash,
+            locker_runtime_hash: profile.locker.runtime_code_hash,
+            mev_module_runtime_hash: profile.mev_module.runtime_code_hash,
+            extension_runtime_hash: profile.extension.runtime_code_hash,
+            max_static_fee_ppm: profile.max_static_fee_ppm,
+            max_mev_fee_ppm: profile.max_mev_fee_ppm,
+            max_mev_seconds_to_decay: profile.max_mev_seconds_to_decay,
+            mev_delay_guard_seconds: profile.mev_delay_guard_seconds,
+            protocol_fee_share_percent: profile.protocol_fee_share_percent,
+        });
+        observed_snapshot.pins.extend([
+            observed(
+                CLANKER_DEPLOYER,
+                None,
+                crate::launchpad_adapters::CLANKER_DEPLOYER_RUNTIME_HASH,
+            ),
+            observed(
+                profile.pool_manager.address,
+                None,
+                profile.pool_manager.runtime_code_hash,
+            ),
+            observed(profile.hook.address, None, profile.hook.runtime_code_hash),
+            observed(
+                profile.locker.address,
+                None,
+                profile.locker.runtime_code_hash,
+            ),
+            observed(
+                profile.mev_module.address,
+                None,
+                profile.mev_module.runtime_code_hash,
+            ),
+            observed(
+                profile.extension.address,
+                None,
+                profile.extension.runtime_code_hash,
+            ),
+        ]);
+        let observer =
+            PaperLaunchpadObserver::from_startup_snapshots(expected, observed_snapshot).unwrap();
+        let proofs: Vec<Proof> = serde_json::from_str(include_str!(
+            "../tests/fixtures/clanker-charms-direct-deploys.json"
+        ))
+        .unwrap();
+        let proof = &proofs[0];
+        let observation = observer
+            .observe_call(
+                proof.tx_hash,
+                proof.signer,
+                proof.signer,
+                LeaderOrigin::DirectSigner,
+                WrapperKind::Direct,
+                CLANKER_FACTORY,
+                U256::ZERO,
+                &proof.calldata,
+            )
+            .unwrap();
+        assert_eq!(observation.predicted_token, Some(proof.expected_token));
+        assert_eq!(observation.predicted_pool, None);
+        assert_eq!(observation.predicted_pool_id, Some(proof.expected_pool_id));
+        assert_eq!(observation.planning_mode, ExecutionMode::ExecutionGated);
+        assert!(!observation.live_execution_enabled);
     }
 
     #[test]

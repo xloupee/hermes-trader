@@ -77,6 +77,7 @@
   "trench_implementation_runtime_hash": null,
   "clanker_v4": {
     "factory_runtime_hash": "0xf895112a2deed34ba2765d0147aff3494104a28293cc2f19af9275934088da33",
+    "deployer_runtime_hash": "0x90b7bf626c59dbc11e746825236f79693e2f3da80b2f551f59ab7b5030e5a3c4",
     "pool_manager_runtime_hash": "0xbd3881180b547f5fe817545743cfb4343e96b1bc6640dcd70c106b0066e95626",
     "hook_runtime_hash": "0x0883056c4856f8fe464ff49f9c1c028455459dad8ceddcc6d5159259fe51e07f",
     "locker_runtime_hash": "0x2175e20d41bc72ad6596b2fdd2c43c75e9d8ca10a706a1ca6c1a3d1526c336bc",

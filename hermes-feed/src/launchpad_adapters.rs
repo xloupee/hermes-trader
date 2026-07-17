@@ -6,21 +6,28 @@
 //! but candidate processing performs only immutable comparisons and pure ABI
 //! decoding.
 
-use alloy_primitives::{Address, B256, U256, keccak256};
-use alloy_sol_types::{SolCall, sol};
+use std::sync::LazyLock;
+
+use alloy_primitives::{Address, B256, U256, keccak256, uint};
+use alloy_sol_types::{SolCall, SolValue, sol};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::launchpad_adapter::{AttributionSource, LaunchpadId};
 use crate::robinhood::CHAIN_ID;
 use crate::uniswap_v4::{
-    FollowerV4Policy, V4Error, V4MarketSnapshot, V4PaperPlan, WarmV4Quote, build_follower_v4_plan,
+    DYNAMIC_FEE_FLAG, FollowerV4Policy, V4Error, V4MarketSnapshot, V4PaperPlan, V4PoolKey,
+    WarmV4Quote, build_follower_v4_plan,
 };
 
 pub const CLANKER_FACTORY: Address =
     alloy_primitives::address!("d3f2cc1731b7fd17f28798835c2e02f0a1839a94");
 pub const CLANKER_FACTORY_RUNTIME_HASH: B256 =
     alloy_primitives::b256!("f895112a2deed34ba2765d0147aff3494104a28293cc2f19af9275934088da33");
+pub const CLANKER_DEPLOYER: Address =
+    alloy_primitives::address!("fb2bae281d9f9d11ae3aed87bb717b058c9797e6");
+pub const CLANKER_DEPLOYER_RUNTIME_HASH: B256 =
+    alloy_primitives::b256!("90b7bf626c59dbc11e746825236f79693e2f3da80b2f551f59ab7b5030e5a3c4");
 pub const CLANKER_DEPLOY_SELECTOR: [u8; 4] = [0xdf, 0x40, 0x22, 0x4a];
 pub const CLANKER_TOKEN_CREATED_TOPIC: B256 =
     alloy_primitives::b256!("9299d1d1a88d8e1abdc591ae7a167a6bc63a8f17d695804e9091ee33aa89fb67");
@@ -32,6 +39,22 @@ pub const CLANKER_LOCKER: Address =
 // fail-closed.
 const CLANKER_CHARMS_CONTEXT_TRAILER_V1: &[u8; 29] =
     b"bc_peo3dkke\x0b\x00\x80\x21\x80\x21\x80\x21\x80\x21\x80\x21\x80\x21\x80\x21\x80\x21";
+const CLANKER_TOKEN_CREATION_CODE_LEN: usize = 16_310;
+const CLANKER_TOKEN_CREATION_CODE_HASH: B256 =
+    alloy_primitives::b256!("c3cf9289693d52fa53c127db0773c5eca16d8b29ab5c8b9aa9d3a72f39ad4815");
+const CLANKER_TOKEN_SUPPLY: U256 = uint!(100000000000000000000000000000_U256);
+
+static CLANKER_TOKEN_CREATION_CODE: LazyLock<Option<Box<[u8]>>> = LazyLock::new(|| {
+    let bytes = hex::decode(
+        include_str!("pins/clanker-token-creation-code.hex")
+            .trim()
+            .strip_prefix("0x")?,
+    )
+    .ok()?;
+    (bytes.len() == CLANKER_TOKEN_CREATION_CODE_LEN
+        && keccak256(&bytes) == CLANKER_TOKEN_CREATION_CODE_HASH)
+        .then(|| bytes.into_boxed_slice())
+});
 
 pub const V4_POOL_MANAGER: Address =
     alloy_primitives::address!("8366a39cc670b4001a1121b8f6a443a643e40951");
@@ -175,6 +198,7 @@ pub struct V4AdapterSet {
 
 impl V4AdapterSet {
     pub fn from_research(pins: ResearchStartupPins) -> Result<Self, V4AdapterError> {
+        preload_clanker_prediction_profile()?;
         let mut entries = vec![DispatchEntry {
             launchpad: LaunchpadId::Clanker,
             destination: RuntimeCodePin {
@@ -317,13 +341,14 @@ impl V4AdapterSet {
         }
         match entry.launchpad {
             LaunchpadId::Clanker => {
-                validate_clanker_deploy_calldata(candidate.input)?;
+                let predicted_market = predict_clanker_market(candidate.input)?;
                 Ok(LaunchObservation::OpaqueLaunch {
                     launchpad: LaunchpadId::Clanker,
                     leader: candidate.leader,
                     calldata_hash: keccak256(candidate.input),
                     value: candidate.value,
                     mode: entry.mode,
+                    predicted_market: Some(predicted_market),
                 })
             }
             LaunchpadId::BankrDoppler => {
@@ -334,6 +359,7 @@ impl V4AdapterSet {
                     calldata_hash: keccak256(candidate.input),
                     value: candidate.value,
                     mode: entry.mode,
+                    predicted_market: None,
                 })
             }
             LaunchpadId::KlikFinance => {
@@ -360,6 +386,7 @@ impl V4AdapterSet {
                     calldata_hash: keccak256(candidate.input),
                     value: candidate.value,
                     mode: ExecutionMode::DiscoveryOnly,
+                    predicted_market: None,
                 })
             }
             _ => Err(V4AdapterError::NoMatch),
@@ -378,6 +405,13 @@ pub struct V4CandidateCall<'a> {
     pub input: &'a [u8],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ClankerPredictedMarket {
+    pub token: Address,
+    pub pool_id: B256,
+    pub pool_key: V4PoolKey,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LaunchObservation {
@@ -387,6 +421,8 @@ pub enum LaunchObservation {
         calldata_hash: B256,
         value: U256,
         mode: ExecutionMode,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        predicted_market: Option<ClankerPredictedMarket>,
     },
     KlikLaunch {
         leader: Address,
@@ -558,7 +594,7 @@ fn validate_opaque_abi(input: &[u8], selector: [u8; 4]) -> Result<(), V4AdapterE
     Ok(())
 }
 
-fn validate_clanker_deploy_calldata(input: &[u8]) -> Result<(), V4AdapterError> {
+fn decode_clanker_deploy_calldata(input: &[u8]) -> Result<deployTokenCall, V4AdapterError> {
     if input.len() < 4
         || input.len() > MAX_DISCOVERY_CALLDATA
         || input[..4] != CLANKER_DEPLOY_SELECTOR
@@ -566,22 +602,103 @@ fn validate_clanker_deploy_calldata(input: &[u8]) -> Result<(), V4AdapterError> 
         return Err(V4AdapterError::MalformedCalldata);
     }
 
-    if canonical_clanker_deploy(input) {
-        return Ok(());
+    if let Some(call) = canonical_clanker_deploy(input) {
+        return Ok(call);
     }
 
     let Some(prefix) = input.strip_suffix(CLANKER_CHARMS_CONTEXT_TRAILER_V1) else {
         return Err(V4AdapterError::MalformedCalldata);
     };
-    if canonical_clanker_deploy(prefix) {
-        Ok(())
-    } else {
-        Err(V4AdapterError::MalformedCalldata)
-    }
+    canonical_clanker_deploy(prefix).ok_or(V4AdapterError::MalformedCalldata)
 }
 
-fn canonical_clanker_deploy(input: &[u8]) -> bool {
-    deployTokenCall::abi_decode(input).is_ok_and(|call| call.abi_encode().as_slice() == input)
+fn canonical_clanker_deploy(input: &[u8]) -> Option<deployTokenCall> {
+    deployTokenCall::abi_decode(input)
+        .ok()
+        .filter(|call| call.abi_encode().as_slice() == input)
+}
+
+fn clanker_token_creation_code() -> Result<&'static [u8], V4AdapterError> {
+    CLANKER_TOKEN_CREATION_CODE
+        .as_deref()
+        .ok_or(V4AdapterError::InvalidStartupPin)
+}
+
+/// Decode and authenticate the pinned creation template during startup so the
+/// candidate path performs no file I/O or first-use initialization.
+pub fn preload_clanker_prediction_profile() -> Result<(), V4AdapterError> {
+    clanker_token_creation_code().map(|_| ())
+}
+
+pub fn predict_clanker_market(input: &[u8]) -> Result<ClankerPredictedMarket, V4AdapterError> {
+    let call = decode_clanker_deploy_calldata(input)?;
+    predict_clanker_market_from_call(&call)
+}
+
+fn predict_clanker_market_from_call(
+    call: &deployTokenCall,
+) -> Result<ClankerPredictedMarket, V4AdapterError> {
+    let token_config = &call.config.tokenConfig;
+    if token_config.originatingChainId != U256::from(CHAIN_ID) {
+        return Err(V4AdapterError::WrongChain);
+    }
+    let constructor_args = (
+        token_config.name.as_str(),
+        token_config.symbol.as_str(),
+        CLANKER_TOKEN_SUPPLY,
+        token_config.tokenAdmin,
+        token_config.image.as_str(),
+        token_config.metadata.as_str(),
+        token_config.context.as_str(),
+        token_config.originatingChainId,
+    )
+        .abi_encode_params();
+    let creation_code = clanker_token_creation_code()?;
+    let mut init_code = Vec::with_capacity(creation_code.len() + constructor_args.len());
+    init_code.extend_from_slice(creation_code);
+    init_code.extend_from_slice(&constructor_args);
+
+    let mut encoded_salt = [0_u8; 64];
+    encoded_salt[12..32].copy_from_slice(token_config.tokenAdmin.as_slice());
+    encoded_salt[32..].copy_from_slice(token_config.salt.as_slice());
+    let create2_salt = keccak256(encoded_salt);
+    let mut preimage = [0_u8; 85];
+    preimage[0] = 0xff;
+    preimage[1..21].copy_from_slice(CLANKER_FACTORY.as_slice());
+    preimage[21..53].copy_from_slice(create2_salt.as_slice());
+    preimage[53..].copy_from_slice(keccak256(init_code).as_slice());
+    let token = Address::from_slice(&keccak256(preimage)[12..]);
+
+    let pool_config = &call.config.poolConfig;
+    let tick_spacing =
+        i32::try_from(pool_config.tickSpacing).map_err(|_| V4AdapterError::MalformedCalldata)?;
+    let pool_key = V4PoolKey::canonical(
+        token,
+        pool_config.pairedToken,
+        DYNAMIC_FEE_FLAG,
+        tick_spacing,
+        pool_config.hook,
+    )?;
+    Ok(ClankerPredictedMarket {
+        token,
+        pool_id: pool_key.pool_id(),
+        pool_key,
+    })
+}
+
+pub fn reconcile_clanker_predicted_market(
+    predicted: ClankerPredictedMarket,
+    receipt_token: Address,
+    receipt_pool_id: B256,
+) -> Result<ClankerPredictedMarket, V4AdapterError> {
+    if receipt_token == Address::ZERO
+        || receipt_pool_id == B256::ZERO
+        || receipt_token != predicted.token
+        || receipt_pool_id != predicted.pool_id
+    {
+        return Err(V4AdapterError::PredictionMismatch);
+    }
+    Ok(predicted)
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -596,6 +713,8 @@ pub enum V4AdapterError {
     Ambiguous,
     #[error("candidate calldata is malformed or non-canonical")]
     MalformedCalldata,
+    #[error("receipt token or pool id does not match the Clanker pre-receipt prediction")]
+    PredictionMismatch,
     #[error("attribution is not valid for this protocol")]
     InvalidAttribution,
     #[error("normalized observation does not match the pinned market")]
@@ -621,6 +740,8 @@ mod tests {
     struct ClankerCharmsDirectDeploy {
         tx_hash: B256,
         signer: Address,
+        expected_token: Address,
+        expected_pool_id: B256,
         calldata_len: usize,
         calldata: Bytes,
     }
@@ -754,6 +875,13 @@ mod tests {
         for proof in proofs {
             assert_ne!(proof.tx_hash, B256::ZERO);
             assert_eq!(proof.calldata.len(), proof.calldata_len);
+            let predicted = predict_clanker_market(&proof.calldata).unwrap();
+            assert_eq!(predicted.token, proof.expected_token, "{}", proof.tx_hash);
+            assert_eq!(
+                predicted.pool_id, proof.expected_pool_id,
+                "{}",
+                proof.tx_hash
+            );
             let mut call = candidate(
                 CLANKER_FACTORY,
                 CLANKER_FACTORY_RUNTIME_HASH,
@@ -767,8 +895,11 @@ mod tests {
                     launchpad: LaunchpadId::Clanker,
                     leader,
                     mode: ExecutionMode::ExecutionGated,
+                    predicted_market: Some(predicted),
                     ..
                 }) if leader == proof.signer
+                    && predicted.token == proof.expected_token
+                    && predicted.pool_id == proof.expected_pool_id
             ));
         }
     }
@@ -802,6 +933,68 @@ mod tests {
             assert_eq!(
                 registry.observe(&call),
                 Err(V4AdapterError::MalformedCalldata)
+            );
+        }
+    }
+
+    #[test]
+    fn clanker_prediction_binds_creator_salt_config_hook_pair_and_receipt() {
+        let proof = &clanker_charms_direct_deploys()[0];
+        let canonical = predict_clanker_market(&proof.calldata).unwrap();
+        assert_eq!(canonical.token, proof.expected_token);
+        assert_eq!(canonical.pool_id, proof.expected_pool_id);
+        assert_eq!(
+            reconcile_clanker_predicted_market(
+                canonical,
+                proof.expected_token,
+                proof.expected_pool_id,
+            ),
+            Ok(canonical)
+        );
+
+        let mut call = decode_clanker_deploy_calldata(&proof.calldata).unwrap();
+        call.config.tokenConfig.tokenAdmin = Address::with_last_byte(0xa1);
+        let changed_creator = predict_clanker_market_from_call(&call).unwrap();
+        assert_ne!(changed_creator.token, canonical.token);
+
+        let mut call = decode_clanker_deploy_calldata(&proof.calldata).unwrap();
+        call.config.tokenConfig.salt = B256::repeat_byte(0xa2);
+        let changed_salt = predict_clanker_market_from_call(&call).unwrap();
+        assert_ne!(changed_salt.token, canonical.token);
+
+        let mut call = decode_clanker_deploy_calldata(&proof.calldata).unwrap();
+        call.config.tokenConfig.context.push('!');
+        let changed_config = predict_clanker_market_from_call(&call).unwrap();
+        assert_ne!(changed_config.token, canonical.token);
+
+        let mut call = decode_clanker_deploy_calldata(&proof.calldata).unwrap();
+        call.config.tokenConfig.originatingChainId = U256::from(CHAIN_ID + 1);
+        assert_eq!(
+            predict_clanker_market_from_call(&call),
+            Err(V4AdapterError::WrongChain)
+        );
+
+        let mut call = decode_clanker_deploy_calldata(&proof.calldata).unwrap();
+        call.config.poolConfig.hook = Address::with_last_byte(0xa3);
+        let changed_hook = predict_clanker_market_from_call(&call).unwrap();
+        assert_eq!(changed_hook.token, canonical.token);
+        assert_ne!(changed_hook.pool_id, canonical.pool_id);
+
+        let mut call = decode_clanker_deploy_calldata(&proof.calldata).unwrap();
+        call.config.poolConfig.pairedToken = Address::with_last_byte(0xa4);
+        let changed_pair = predict_clanker_market_from_call(&call).unwrap();
+        assert_eq!(changed_pair.token, canonical.token);
+        assert_ne!(changed_pair.pool_id, canonical.pool_id);
+
+        for (forged_token, forged_pool) in [
+            (Address::with_last_byte(0xf1), canonical.pool_id),
+            (canonical.token, B256::repeat_byte(0xf2)),
+            (Address::ZERO, canonical.pool_id),
+            (canonical.token, B256::ZERO),
+        ] {
+            assert_eq!(
+                reconcile_clanker_predicted_market(canonical, forged_token, forged_pool),
+                Err(V4AdapterError::PredictionMismatch)
             );
         }
     }

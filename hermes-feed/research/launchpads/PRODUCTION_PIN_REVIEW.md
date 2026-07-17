@@ -41,6 +41,7 @@ snapshot must match before the observer starts.
 | Bankr leader | EIP-7702 designator | `0x4542cbf1da24ba964614e4f5585736e22884e23e97c0f0915de4f602585d2dd4` | Exact `ef0100 || d6cedd...75b28` designator from proof account. |
 | Bankr leader | delegated Kernel runtime | `0x6f6d6691dc11fda98d3102802f20e7e816ccc576c16c9279ee1a884a51d1935d` | Fixed-block delegated implementation code commitment. |
 | Clanker | factory `0xd3f2...9a94` | `0xf895112a2deed34ba2765d0147aff3494104a28293cc2f19af9275934088da33` | Existing protocol research plus fixed-block code commitment. |
+| Clanker | CREATE2 deployer library `0xfb2b...97e6` | `0x90b7bf626c59dbc11e746825236f79693e2f3da80b2f551f59ab7b5030e5a3c4` | Official `ClankerDeployer` source, linked factory `DELEGATECALL` target, and current verified runtime. Required for pre-receipt token prediction. |
 | Clanker | V4 PoolManager `0x8366...0951` | `0xbd3881180b547f5fe817545743cfb4343e96b1bc6640dcd70c106b0066e95626` | Canonical pool event emitter and fixed-block code commitment. |
 | Clanker | `ClankerHookStaticFeeV2` `0x48b8...e8cc` | `0x0883056c4856f8fe464ff49f9c1c028455459dad8ceddcc6d5159259fe51e07f` | Official `clanker-devco/v4-contracts` source at `b004c2e` plus fixed-block code commitment. |
 | Clanker | locker `0x290f...bc99` | `0x2175e20d41bc72ad6596b2fdd2c43c75e9d8ca10a706a1ca6c1a3d1526c336bc` | Launch receipt identity and fixed-block code commitment. |

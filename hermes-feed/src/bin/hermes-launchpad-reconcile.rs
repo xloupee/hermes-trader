@@ -38,7 +38,7 @@ use hermes_feed::{
     quote_hood_curve_receipt, quote_pons_launch_receipt, quote_v3_launch_receipt,
     verify_hood_graduation_receipt,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::{Instant, sleep};
 
@@ -109,6 +109,33 @@ struct ObservedCandidate {
     observer_claim: bool,
     ground_truth_event: bool,
     ground_truth_hits: Vec<GroundTruthHit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReconciliationRequest {
+    tx_hash: B256,
+    launchpad: LaunchpadId,
+    feed_sequence: u64,
+    l1_block_number: u64,
+    l1_timestamp: u64,
+    evidence_source: EvidenceSource,
+    initial_decision_dependency: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EvidenceSource {
+    IndependentReceiptAndProtocolEvents,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+struct ObservationIdentity {
+    tx_hash: B256,
+    launchpad: LaunchpadId,
+    feed_sequence: u64,
+    l1_block_number: u64,
+    l1_timestamp: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -354,6 +381,11 @@ fn read_observer_input(path: &Path) -> Result<ObserverInput> {
     let input = BufReader::new(
         File::open(path).with_context(|| format!("open observer JSONL {}", path.display()))?,
     );
+    read_observer_input_from_reader(input)
+        .with_context(|| format!("validate observer JSONL {}", path.display()))
+}
+
+fn read_observer_input_from_reader(input: impl BufRead) -> Result<ObserverInput> {
     let mut candidates = HashMap::new();
     for (index, line) in input.lines().enumerate() {
         let line = line.with_context(|| format!("read observer line {}", index + 1))?;
@@ -365,24 +397,62 @@ fn read_observer_input(path: &Path) -> Result<ObserverInput> {
         if value.get("record_type").and_then(Value::as_str) != Some("launchpad_paper_frame") {
             continue;
         }
-        let observations = value
-            .pointer("/report/observations")
-            .and_then(Value::as_array)
-            .context("launchpad paper frame has no observations array")?;
+        let observations: Vec<ObservationIdentity> = serde_json::from_value(
+            value
+                .pointer("/report/observations")
+                .cloned()
+                .context("launchpad paper frame has no observations array")?,
+        )
+        .with_context(|| format!("decode observations on observer line {}", index + 1))?;
+        let requests: Vec<ReconciliationRequest> = serde_json::from_value(
+            value
+                .pointer("/report/reconciliation_requests")
+                .cloned()
+                .context("launchpad paper frame has no reconciliation_requests array")?,
+        )
+        .with_context(|| {
+            format!(
+                "decode reconciliation requests on observer line {}",
+                index + 1
+            )
+        })?;
+        let mut observation_by_key = HashMap::new();
         for observation in observations {
+            let key = (observation.tx_hash, observation.launchpad);
+            if observation.feed_sequence == 0
+                || observation.l1_block_number == 0
+                || observation.l1_timestamp == 0
+            {
+                bail!("observer candidate {key:?} has incomplete feed provenance");
+            }
+            if observation_by_key.insert(key, observation).is_some() {
+                bail!("duplicate observer observation {key:?}");
+            }
+        }
+        let mut requested_keys = HashSet::new();
+        for request in requests {
+            let key = (request.tx_hash, request.launchpad);
+            if request.evidence_source != EvidenceSource::IndependentReceiptAndProtocolEvents {
+                bail!("reconciliation request {key:?} has an unsupported evidence source");
+            }
+            if request.initial_decision_dependency {
+                bail!("reconciliation request {key:?} is an initial decision dependency");
+            }
+            let observation = observation_by_key
+                .get(&key)
+                .with_context(|| format!("reconciliation request {key:?} has no observation"))?;
+            if request.feed_sequence != observation.feed_sequence
+                || request.l1_block_number != observation.l1_block_number
+                || request.l1_timestamp != observation.l1_timestamp
+            {
+                bail!("reconciliation request {key:?} feed provenance disagrees with observation");
+            }
+            if !requested_keys.insert(key) {
+                bail!("duplicate reconciliation request {key:?}");
+            }
             let candidate = ObservedCandidate {
-                tx_hash: serde_json::from_value(
-                    observation
-                        .get("tx_hash")
-                        .cloned()
-                        .context("observation has no tx_hash")?,
-                )?,
-                launchpad: serde_json::from_value(
-                    observation
-                        .get("launchpad")
-                        .cloned()
-                        .context("observation has no launchpad")?,
-                )?,
+                tx_hash: request.tx_hash,
+                launchpad: request.launchpad,
                 observer_claim: true,
                 ground_truth_event: false,
                 ground_truth_hits: Vec::new(),
@@ -391,6 +461,13 @@ fn read_observer_input(path: &Path) -> Result<ObserverInput> {
             if candidates.insert(key, candidate).is_some() {
                 bail!("duplicate observer candidate {key:?}");
             }
+        }
+        if requested_keys.len() != observation_by_key.len() {
+            let missing = observation_by_key
+                .keys()
+                .find(|key| !requested_keys.contains(key))
+                .expect("different set sizes imply a missing request");
+            bail!("observer observation {missing:?} has no reconciliation request");
         }
     }
     Ok(ObserverInput { candidates })
@@ -1019,9 +1096,12 @@ fn unix_now_ns() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use alloy_primitives::{Address, Bytes};
     use hermes_feed::{NoxaReceipt, RobinhoodTransaction};
     use serde::Deserialize;
+    use serde_json::json;
 
     use super::*;
 
@@ -1032,6 +1112,111 @@ mod tests {
             topics: vec![topic],
             data: Bytes::new(),
         }
+    }
+
+    fn observer_frame() -> Value {
+        json!({
+            "record_type": "launchpad_paper_frame",
+            "report": {
+                "observations": [{
+                    "tx_hash": B256::with_last_byte(1),
+                    "launchpad": "clanker",
+                    "feed_sequence": 42,
+                    "l1_block_number": 25_500_000,
+                    "l1_timestamp": 1_784_000_000,
+                    "action": "launch"
+                }],
+                "reconciliation_requests": [{
+                    "tx_hash": B256::with_last_byte(1),
+                    "launchpad": "clanker",
+                    "feed_sequence": 42,
+                    "l1_block_number": 25_500_000,
+                    "l1_timestamp": 1_784_000_000,
+                    "evidence_source": "independent_receipt_and_protocol_events",
+                    "initial_decision_dependency": false
+                }]
+            }
+        })
+    }
+
+    fn parse_observer_frame(value: Value) -> Result<ObserverInput> {
+        let mut bytes = serde_json::to_vec(&value)?;
+        bytes.push(b'\n');
+        read_observer_input_from_reader(Cursor::new(bytes))
+    }
+
+    #[test]
+    fn collector_is_driven_by_exact_async_reconciliation_requests() {
+        let input = parse_observer_frame(observer_frame()).unwrap();
+        let key = (B256::with_last_byte(1), LaunchpadId::Clanker);
+        let candidate = input.candidates.get(&key).unwrap();
+        assert!(candidate.observer_claim);
+        assert!(!candidate.ground_truth_event);
+
+        let mut missing = observer_frame();
+        *missing
+            .pointer_mut("/report/reconciliation_requests")
+            .unwrap() = json!([]);
+        assert!(
+            parse_observer_frame(missing)
+                .unwrap_err()
+                .to_string()
+                .contains("has no reconciliation request")
+        );
+
+        let mut mismatched = observer_frame();
+        *mismatched
+            .pointer_mut("/report/reconciliation_requests/0/feed_sequence")
+            .unwrap() = json!(43);
+        assert!(
+            parse_observer_frame(mismatched)
+                .unwrap_err()
+                .to_string()
+                .contains("feed provenance disagrees")
+        );
+    }
+
+    #[test]
+    fn collector_rejects_forged_or_decision_dependent_requests() {
+        let mut forged_source = observer_frame();
+        *forged_source
+            .pointer_mut("/report/reconciliation_requests/0/evidence_source")
+            .unwrap() = json!("observer_inference");
+        assert!(
+            parse_observer_frame(forged_source)
+                .unwrap_err()
+                .to_string()
+                .contains("decode reconciliation requests")
+        );
+
+        let mut decision_dependency = observer_frame();
+        *decision_dependency
+            .pointer_mut("/report/reconciliation_requests/0/initial_decision_dependency")
+            .unwrap() = json!(true);
+        assert!(
+            parse_observer_frame(decision_dependency)
+                .unwrap_err()
+                .to_string()
+                .contains("initial decision dependency")
+        );
+
+        let mut duplicate = observer_frame();
+        let request = duplicate
+            .pointer("/report/reconciliation_requests/0")
+            .unwrap()
+            .clone();
+        duplicate
+            .pointer_mut("/report/reconciliation_requests")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(request);
+        assert!(
+            parse_observer_frame(duplicate)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate reconciliation request")
+        );
     }
 
     #[test]
@@ -1118,6 +1303,48 @@ mod tests {
         let mut missing_log = receipt;
         missing_log.logs.clear();
         assert!(validate_ground_truth_receipt_binding(&candidate, &missing_log).is_err());
+    }
+
+    #[derive(Deserialize)]
+    struct ReceiptProofFixture {
+        receipt: NoxaReceipt,
+    }
+
+    #[test]
+    fn live_clanker_and_bankr_receipts_bind_independent_primary_event_hits() {
+        let proofs = [
+            (
+                LaunchpadId::Clanker,
+                include_str!("../../tests/fixtures/clanker-v4-live-proof.json"),
+            ),
+            (
+                LaunchpadId::BankrDoppler,
+                include_str!("../../tests/fixtures/bankr-doppler-live-proof.json"),
+            ),
+        ];
+        for (launchpad, json) in proofs {
+            let fixture: ReceiptProofFixture = serde_json::from_str(json).unwrap();
+            let event = fixture
+                .receipt
+                .logs
+                .iter()
+                .find(|log| launchpad_for_ground_truth_log(log) == Some(launchpad))
+                .expect("reviewed receipt contains exact primary protocol event")
+                .clone();
+            let candidate = ObservedCandidate {
+                tx_hash: fixture.receipt.transaction_hash,
+                launchpad,
+                observer_claim: true,
+                ground_truth_event: true,
+                ground_truth_hits: vec![GroundTruthHit {
+                    l2_block_number: fixture.receipt.l2_block_number,
+                    block_hash: fixture.receipt.block_hash,
+                    transaction_index: fixture.receipt.transaction_index,
+                    log: event,
+                }],
+            };
+            validate_ground_truth_receipt_binding(&candidate, &fixture.receipt).unwrap();
+        }
     }
 
     #[test]

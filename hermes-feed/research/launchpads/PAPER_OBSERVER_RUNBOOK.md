@@ -77,12 +77,41 @@ reconciler, and are never removed by normal FIFO cleanup.
 
 ## Independent truth boundary
 
+The collector is driven by the observer's explicit
+`report.reconciliation_requests` handoff, not by scraping detections as an
+implicit RPC work queue. Every request must name
+`independent_receipt_and_protocol_events`, remain outside the initial decision
+path, and match exactly one observation's transaction hash, launchpad, feed
+sequence, L1 block, and L1 timestamp. Missing, duplicate, orphaned, or
+provenance-mismatched requests abort collection before any evidence is scored.
+
 The reconciler scans the exact L2 interval `(start_head, cutoff_head]`. It waits
 for the configured confirmations and emits one
 `launchpad_ground_truth_window` manifest. Every primary log hit retains its
 block hash, transaction index, log index, emitter, and topic, and must match the
 canonical successful receipt. The start and cutoff hashes are re-read after
 collection to reject a reorg.
+
+For an already captured observer window, the same read-only collector can be
+run directly. Its stdout is the receipt/event and quote JSONL consumed by the
+paper finalizer:
+
+```sh
+hermes-launchpad-reconcile \
+  --input .runtime/paper-session/launchpad-paper.jsonl \
+  --expected-pins config/launchpad-expected-pins.production.json \
+  --observed-startup-snapshot .runtime/launchpad-observed-startup.json \
+  --concurrency 1 \
+  --ground-truth-start-head "$START_HEAD" \
+  --ground-truth-start-hash "$START_HASH" \
+  --ground-truth-cutoff-head "$CUTOFF_HEAD" \
+  --ground-truth-cutoff-hash "$CUTOFF_HASH" \
+  > .runtime/paper-session/reconciliation-evidence.jsonl
+```
+
+The command has no wallet, signer, keystore, transaction construction, or
+broadcast interface. Expected pins and the fresh observed snapshot must remain
+separate files.
 
 Reconciliation defaults to concurrency `1` for deterministic, low-pressure
 evidence collection. Set `HERMES_RECONCILE_CONCURRENCY` only for an explicitly

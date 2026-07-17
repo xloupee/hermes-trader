@@ -21,8 +21,8 @@ the fresh 39-pin startup snapshot
   `0xa58166d1ec7d9437f30acf7d4ac0aa552abe8b817db78cc05ba600d275f48542`;
 - complete canonical scan of blocks `11715615..=11718597`: 2,983 blocks,
   48 primary event logs, 47 unique protocol keys, and two confirmations;
-- 3,654 raw-feed rows, 3,655 observer rows, 122 V3-replay reconciliation
-  rows, and 21 finalized rows; and
+- 3,654 raw-feed rows, 3,655 final-code observer rows, 123 reconciliation
+  rows, and 22 finalized rows; and
 - every persisted artifact has mode 0600.
 
 Collection used the intended local topology: `hermes-feed probe` wrote the
@@ -30,16 +30,18 @@ raw stream to a private FIFO, `tee` persisted `raw-feed.jsonl` while forwarding
 the same bytes, and `hermes-launchpad-paper --input -` consumed stdin. Probe
 stdout was isolated in `probe-metrics.jsonl`, not mixed into the raw stream.
 
-The finalized V3 replay is the authoritative scored form of this window:
+The unified final-code replay is the authoritative scored form of this window:
 
-- `.runtime/paper-session-20260716-pins39-fresh1/reconciliation-evidence-v3replay.jsonl`
-- `.runtime/paper-session-20260716-pins39-fresh1/launchpad-paper-finalized-v3replay.jsonl`
+- `.runtime/paper-session-20260716-pins39-fresh1/launchpad-paper-finalcode-replay.jsonl`
+- `.runtime/paper-session-20260716-pins39-fresh1/reconciliation-evidence-finalcode-replay.jsonl`
+- `.runtime/paper-session-20260716-pins39-fresh1/launchpad-paper-finalized-finalcode-replay.jsonl`
 
-The replay corrected independent V3 quote reconstruction; it did not replace
-the observer stream. The latency fields still come from the original live
-observer records. Builds may have overlapped the fresh1 collection, however,
-so those latency percentiles are **potentially build-contaminated diagnostics**
-and are not promotion-grade warm-state latency evidence.
+The replay includes independent V3 quote reconstruction, strict Pons legacy
+eligibility, Hood `buyFor` detection and token prediction, and finalized exit
+plans. Its backlog-scale latency is invalid and excluded. The table below
+retains latency only from the original live observer records. Builds may have
+overlapped fresh1 collection, so those percentiles remain **potentially
+build-contaminated diagnostics**, not promotion-grade warm-state evidence.
 
 ## Fresh1 live score
 
@@ -54,7 +56,7 @@ absent; it is not silently converted into a mismatch.
 | Clanker | 0 | 0 | 0 | 0 (0 / 0) | - | no activity | no activity | no activity | no activity |
 | Bankr/Doppler | 7 | 7 | 0 | 0 (0 / 0) | 6.126 / 13.914 / 13.914 ms | token 7/7, pool ID 7/7; 0 missing/mismatch | 7/7; 0 mismatch | entry 7/7, exit 7/7; 0 mismatch | 7/7; 0 mismatch |
 | Pons | 37 | 37 | 0 | 0 (0 / 0) | 4.441 / 8.090 / 12.968 ms | 37 exact legacy/discovery-only; 0 identity eligible, 0 mismatch | 37/37; 0 mismatch | not eligible | not applicable 37 |
-| Hood | 2 | 1 | 0 | 1 (1 / 0) | 7.374 / 7.374 / 7.374 ms | token missing 1; 0 wrong values | 1/1; 0 mismatch | entry 1/1, exit 1/1; 0 mismatch | 1/1; 0 mismatch; 1 blocked truth |
+| Hood | 2 | 2 | 0 | 0 (0 / 0) | 7.374 / 7.374 / 7.374 ms on the one originally detected row | token 2/2; 0 missing/mismatch | 2/2; 0 mismatch | entry 2/2, exit 2/2; 0 mismatch | 2/2; 0 mismatch |
 
 Bankr emitted 16 observer claims: seven confirmations, seven reverted
 attempts, and two out-of-scope observations. Pons emitted 40 claims: 37
@@ -69,8 +71,8 @@ commit `cccd588` proved all 40 Pons rows (37 in range, three out of scope) are
 exact legacy/discovery-only records and corrected re-finalization to zero
 identity-eligible rows and zero identity mismatches. It still has
 `current_generation: 0` and zero quote-eligible confirmations, so this changes
-no readiness decision. Hood has one missing token prediction and one
-complete-coverage detector miss. Bow and Clanker had no fresh1 truth at all.
+no readiness decision. Final-code Hood replay closes the prior selector miss
+and token-prediction gap at 2/2. Bow and Clanker had no fresh1 truth at all.
 
 ## Fresh1 paper sizing, slippage, and exits
 
@@ -82,7 +84,7 @@ amounts are not reused.
 |---|---:|---:|---:|---:|---:|---:|
 | LaunchHood V3 | 1 | `729729.244852920426979991` tokens | `722431.952404391222710191` | `0.000980107152180750 WETH` | `0.000970306080658942 WETH` | 9,801 bps |
 | Bankr/Doppler | 7 | `904475.731970933213275501` or `904475.731970933213278599` tokens | `895430.974651223881142745` or `895430.974651223881145813` | `0.000009736782115644 WETH` | `0.000009639414294487 WETH` | 97 bps |
-| Hood | 1 | `388879.762303340027827257` tokens | `384990.964680306627548984` | `0.000980100000000000 WETH` | `0.000970299000000000 WETH` | 9,801 bps |
+| Hood | 2 | `388879.762303340027827257` or `372973.604689439708957393` tokens | `384990.964680306627548984` or `369243.868642545311867819` | `0.000980100000000000 WETH` | `0.000970299000000000 WETH` | 9,801 bps |
 
 Bow, Clanker, and Pons produced no finalized plan in fresh1. Bankr's 97 bps
 immediate round trip is evidence against promotion even though all seven
@@ -99,20 +101,20 @@ and cutoff block `11685271` hash
 **All quiet1 replay latency is excluded.** Replaying persisted frames measures
 replay wall time and backlog, not live source-receive-to-observation latency.
 
-The complete post-detector-fix reconciliation is in
-`.runtime/paper-session-20260716-quiet1-replay-fixed2`:
+The unified final-code reconciliation is in
+`.runtime/paper-session-20260716-quiet1-finalcode-replay`:
 
 | Launchpad | Truth | Confirmed | False positives | Missed | Out of scope / reverted | Independently matched quotes | Identity limitation in this artifact |
 |---|---:|---:|---:|---:|---:|---:|---|
 | Bow | 0 | 0 | 0 | 0 | 0 / 0 | 0 | no activity |
 | LaunchHood V3 | 3 | 3 | 0 | 0 | 0 / 0 | 3/3 | token 3/3 and pool 3/3 matched |
-| Clanker | 3 | 3 | 0 | 0 | 1 / 0 | 3/3 | token prediction missing 3; pool-ID scoring was not yet present |
-| Bankr/Doppler | 2 | 2 | 0 | 0 | 4 / 2 | 2/2 | token prediction missing 2; pool-ID scoring was not yet present |
-| Pons | 28 | 28 | 0 | 0 | 12 / 0 | 1/1 current-generation quote; 27 legacy not applicable | pre-fix artifact counts all 28 missing; corrected scope excludes 27 exact legacy rows, while the one current row remains identity-incomplete |
+| Clanker | 3 | 3 | 0 | 0 | 1 / 0 | 3/3 | token 3/3; no required identity mismatch |
+| Bankr/Doppler | 2 | 2 | 0 | 0 | 4 / 0 | 2/2 | token 2/2; no required identity mismatch |
+| Pons | 28 | 28 | 0 | 0 | 12 / 0 | 1/1 current-generation quote; 27 legacy not applicable | current row has one missing token and one missing pool; readiness identity mismatches 2 |
 | Hood | 0 | 0 | 0 | 0 | 0 / 0 | 0 | no activity |
 
 All eligible action, entry-direction, exit-direction, and independent quote
-checks in fixed2 matched. Its nine finalized plans consisted of three
+checks matched. Its nine finalized plans consisted of three
 LaunchHood, three Clanker, two Bankr, and one current-generation Pons plan.
 The fixed tiny-policy outcomes were:
 
@@ -123,16 +125,85 @@ The fixed tiny-policy outcomes were:
 | Bankr/Doppler | same two entry variants as fresh1 | same two minima as fresh1 | `0.000009736782115644 WETH` | `0.000009639414294487 WETH` | 97 bps |
 | Pons current generation | `663271.426017223774908828` | `656638.711757051537159739` | `0.000980106818839881 WETH` | `0.000970305750651482 WETH` | 9,801 bps |
 
-The later directory
-`.runtime/paper-session-20260716-quiet1-replay-identity` is a **partial identity
-replay, not a complete replacement score**. Its observer file contains three
-LaunchHood claims with three token and three pool predictions, 40 Pons claims,
-and 48 Flap discovery claims, but no Clanker or Bankr claims. Its finalized
-metrics consequently still report three Clanker and two Bankr detector misses.
-It proves the LaunchHood identity fields in that replay; it does not prove a
-single unified post-identity quiet1 run for Clanker or Bankr. Fresh1 separately
-proves Bankr token and V4 pool-ID prediction 7/7. Clanker had no truth in
-fresh1, so a unified Clanker post-identity live/replay sample remains missing.
+This replaces the older fixed2 and partial-identity artifacts as the quiet1
+score. It proves one unified final-code pass for LaunchHood, Clanker, Bankr,
+and Pons. It does not cure Pons current-generation identity: the one eligible
+row remains fail-closed because both token and pool predictions are absent.
+
+## Clean1 release-build live evidence
+
+The build-idle release window
+`.runtime/paper-session-20260716-finalcode-clean1` used the correct private-FIFO
+topology, stayed continuously connected, and anchored blocks
+`11737706..=11740690` (2,985 blocks):
+
+- start block `11737705`, hash
+  `0xb0e97810a729bf289f45e5fda30ecbb9d582c806d6fc76cf3b2df4392ea54dc5`;
+- cutoff block `11740690`, hash
+  `0x4e3eae93b4ea48413498f45cca591633c9e35ffb1994c0a9adabca7b83bebd7b`;
+- 3,657 raw rows and 3,658 observer rows; and
+- only `connected` and `coverage_closed` probe states, with no disconnect or
+  read error.
+
+The live binary rejected one successful Bankr launch because a proven
+45-byte token name canonically expanded `tokenFactoryData` from 928 to 960
+bytes. Commit `583611d` narrows admission to the two proven canonical ABI
+lengths and names of at most 64 bytes, while a real transaction fixture rejects
+65 bytes and noncanonical padding. The exact raw bytes and anchored receipts
+were then rescored in
+`.runtime/paper-session-20260716-finalcode-clean1-post-long-name-replay`.
+Replay latency is excluded; the latency column below is exclusively the
+original build-idle live timing.
+
+| Launchpad | Truth | Live confirmed | Post-fix confirmed | False positives | Post-fix missed | Live latency p50 / p95 / p99 | Quote result |
+|---|---:|---:|---:|---:|---:|---|---|
+| Bow | 0 | 0 | 0 | 0 | 0 | - | no activity |
+| LaunchHood V3 | 1 | 1 | 1 | 0 | 0 | 0.840 / 0.840 / 0.840 ms | 1/1 matched |
+| Clanker | 2 | 2 | 2 | 0 | 0 | 0.339 / 0.599 / 0.599 ms | 1/2 matched; one strict receipt-envelope quote blocked |
+| Bankr/Doppler | 4 | 3 | 4 | 0 | 0 | 0.534 / 1.806 / 1.806 ms for the three live confirmations; rejected row 3.274 ms | 4/4 matched after the bounded fix |
+| Pons | 24 | 24 | 24 | 0 | 0 | 0.354 / 2.406 / 3.360 ms | 24 legacy/not applicable |
+| Hood | 0 | 0 | 0 | 0 | 0 | - | no activity |
+
+The blocked Clanker row is not a known-profile quote failure. Transaction
+`0xf0961eb5b33df616d5abccd9ee61ee0a6eb28a6a3d1738b0a04c326750784f01`
+is a separate payable Tator-extension envelope: value `0.00809079 ETH`, an
+unpinned extension at `0xa27b1986e5c7e5371cb6507f87918fbd0302ff5a`, two liquidity positions,
+and an embedded pool swap. It is neither the supported extensionless
+single-position profile nor the pinned-extension five-position profile and
+must remain quote-blocked until its runtime, source semantics, layout, and
+terminal-state replay have independent multi-proof review.
+
+The post-fix replay has zero detector, coverage, identity, action, direction,
+prediction, or independent-quote mismatches. It emits six paper plans:
+LaunchHood one at 9,801 bps simulated immediate round trip, Clanker one at
+849 bps, and Bankr four at 97 bps. Every plan contains the full-position
+take-profit/stop-loss/max-hold exit policy and keeps both
+`execution_eligible: false` and `broadcast: false`.
+
+Clean1 is not claimed as a post-fix live zero-error window: its live binary
+predated `583611d`, and one Clanker truth row remains quote-blocked pending a
+separate envelope diagnosis. Its live timing is nevertheless the first
+release-build, build-idle latency sample.
+
+## Aggregate readiness decision
+
+The conservative evaluator accepts the three non-overlapping anchored windows
+as complete scoring inputs, but every launchpad remains not ready and every
+row retains `authorizes_canary: false` and `execution_eligible: false`:
+
+| Launchpad | Quote-eligible / 100 | Supported-envelope progress | Remaining hard errors |
+|---|---:|---|---|
+| Bow | 0 | payable 0/10; zero-buy 0/10 | none; no samples |
+| LaunchHood V3 | 5 | embedded buy 5/10 | none |
+| Clanker | 4 | extensionless 1/10; pinned extension 3/10 | none; Tator row excluded as unsupported |
+| Bankr/Doppler | 13 | V3 13/10; ERC-7579 13/10; V1 0/10; V2 0/10; direct 0/10 | none |
+| Pons | 1 | current generation 1/10 | two identity mismatches on the current row |
+| Hood | 2 | current curve 2/10 | none |
+
+The three-window count does not replace the operational live requirement:
+fresh1 may be build-contaminated, quiet1 is a replay, and clean1's live binary
+predated the long-name fix. A new post-`583611d` release-build live window is
+still required before any window can be called current-code promotion-grade.
 
 ## Artifact integrity
 
@@ -143,13 +214,20 @@ The key local files are bound by these SHA-256 digests:
 | fresh 39-pin startup snapshot | `939163c21386227ecb516bdef404fe2b3f483bac076338656593cf0f5d164fad` |
 | fresh1 raw feed | `fdbd58e36cf55cb222181b528322082529ccedf05b88d2e8567a11f2363b230c` |
 | fresh1 observer output | `f59884a592f6f955ab729b8ec2e8e3df06ef82bea83de9ffdc663185724e49a8` |
-| fresh1 V3-replay reconciliation | `099a953b9a9c8443da69bd16835de8015e3d1b879b61298b393be086139ba799` |
-| fresh1 V3-replay finalized output | `53980dc7f4f233bc33201d3710d009aa353b284d426b99577f83d47effb80060` |
-| quiet1 fixed2 observer output | `da374e8b618497c381ba53682d5d835fd4207884b3ac02600b76c9697a23c31e` |
-| quiet1 fixed2 reconciliation | `9ea0112d249abe723c98a9f382049c1f14f181d164cf4f4f75881de5e904bfa1` |
-| quiet1 fixed2 finalized output | `9d3404772346cc28316d7817977704fb649d2ee92872d7ec03f9f1b0c5da47d6` |
-| quiet1 partial identity observer output | `fee4bdff56fffd352f0ae566502ebb7aa92a289fb62b204d1a9cc1500c70a14e` |
-| quiet1 partial identity finalized output | `38523bd30a8d9d64640b95ea814420b594b4d9e842e34539e82d2436e47a410f` |
+| fresh1 final-code observer output | `7524757e59255d0575f6558af6d0abaf42fafc96048311789b4a5ecbecfb3659` |
+| fresh1 final-code reconciliation | `d8031e6e96d6898209fe38b6d2cd9df9b5a3274968c05d6b4a26844f0c4d05ae` |
+| fresh1 final-code finalized output | `e516e60e6a03e94c25568df87e94203a4ded1c9099db82dd719676655955275d` |
+| quiet1 final-code observer output | `3210e2382426c9f67066d472950217342124ea0f407a08ce97a6906ae5c4629d` |
+| quiet1 final-code reconciliation | `9d55a11479a9daac48c9f88e6fc95b78ba80b9a64b3852b320bd3c96c9f1e200` |
+| quiet1 final-code finalized output | `8518232a19825ba301b66fa3d54fd0fbc038bb03e58fb8b3e0ebc5c5f018c5f0` |
+| clean1 raw feed | `d6742cad3be3e839151b98b8aea6ecbd270d09fed20dc94ae7151ae280d6d5fc` |
+| clean1 live observer output | `ccc0630f11c66c0efe7463e808e2b900e38bcbdc12a5eced8ad40aa0657c52ab` |
+| clean1 live reconciliation | `0a04f013bcf89ed1691c0d892aea00e8b70cf3bb977b2efcc77f788782a465d6` |
+| clean1 live finalized output | `755640cc2456f1e426e4c544304f65723f4e9b7f6f183a660c508d7f70bbf923` |
+| clean1 post-fix observer replay | `c16e13253ccfbe8560fcdf28d257588fd8b5c6e7af1ac510618ec17b67888d6a` |
+| clean1 post-fix reconciliation | `b689dcdb5e8bc09e0864bd32b392267ebf2b6dfd69c3b73c873ef29a98bb3d1c` |
+| clean1 post-fix finalized output | `dbff28be3744e2121c5b8d8f24b89b6522dd5718e265d419316e7e3765bfa559` |
+| aggregate readiness decision | `0175ae2aa961d0750a2d64e18819ee17f65af086cf53d14bbdb75bba42104de2` |
 
 ## Remaining evidence gaps
 
@@ -159,18 +237,20 @@ complete non-overlapping windows, with zero false positives, detector misses,
 identity failures, direction failures, prediction failures, or quote failures.
 Current gaps include:
 
-1. Collect clean, build-idle warm-state windows; fresh1 latency must be
-   repeated before its percentiles can be used.
-2. Produce a unified post-identity Clanker replay/live score and observe both
+1. Collect a new clean, build-idle warm-state window on `583611d` or later;
+   then accumulate three promotion-grade live windows, not replay-only scores.
+2. Observe both Clanker
    `extensionless_single_position` and `pinned_extension_five_position` at
-   least ten times each.
-3. Expand Bankr beyond seven V3/ERC-7579 confirmations. V1, V2, direct Airlock,
-   and the remaining per-stratum thresholds are unproven in fresh1.
+   least ten times each. Keep the payable Tator-extension/two-position envelope
+   quote-blocked pending separate pin and semantic review.
+3. Expand Bankr beyond the observed V3/ERC-7579 confirmations. V1, V2, direct
+   Airlock, and the remaining per-stratum thresholds are still sparse or
+   absent.
 4. Keep the 37 fresh1 legacy Pons confirmations discovery-only; they are not a
    promotion profile. Collect current-generation observations with strict
    token/pool identity and quote validation instead.
-5. Fix and negatively test the Hood miss, then add pre-receipt token identity;
-   one confirmed quote cannot cover the current-curve profile.
+5. Expand Hood beyond two final-code confirmations; two quotes cannot cover
+   the current-curve profile or the 100-confirmation threshold.
 6. Gather Bow activity for both payable and zero-initial-buy profiles and
    obtain any fresh Clanker activity. Zero events are not evidence of recall.
 7. Keep Flap discovery-only until its direction, identity, sizing, slippage,

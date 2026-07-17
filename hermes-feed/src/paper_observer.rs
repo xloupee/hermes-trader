@@ -82,6 +82,7 @@ use crate::v3_launch_at_birth::{
 
 pub const FLAP_STANDARD_LAUNCH_SELECTOR: [u8; 4] = [0x2e, 0x2f, 0xdb, 0xd9];
 pub const FLAP_TAX_V3_LAUNCH_SELECTOR: [u8; 4] = [0x8c, 0xb5, 0x77, 0x2c];
+pub const FLAP_VAULT_LAUNCH_SELECTOR: [u8; 4] = [0x1b, 0x80, 0x62, 0x20];
 const MAX_OPAQUE_CALLDATA: usize = 128 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1500,6 +1501,13 @@ impl PaperLaunchpadObserver {
                         "malformed Flap launch envelope".into(),
                     ));
                 }
+                if destination == FLAP_VAULT_PORTAL_PROXY
+                    && !is_bounded_flap_vault_abi_envelope(input)
+                {
+                    return Err(PaperObserverError::Adapter(
+                        "malformed Flap VaultPortal launch envelope".into(),
+                    ));
+                }
                 (
                     LaunchpadId::Flap,
                     "launch_discovery",
@@ -1802,8 +1810,7 @@ fn paper_specs(
                 &[
                     (FLAP_PORTAL_PROXY, FLAP_STANDARD_LAUNCH_SELECTOR),
                     (FLAP_PORTAL_PROXY, FLAP_TAX_V3_LAUNCH_SELECTOR),
-                    (FLAP_VAULT_PORTAL_PROXY, FLAP_STANDARD_LAUNCH_SELECTOR),
-                    (FLAP_VAULT_PORTAL_PROXY, FLAP_TAX_V3_LAUNCH_SELECTOR),
+                    (FLAP_VAULT_PORTAL_PROXY, FLAP_VAULT_LAUNCH_SELECTOR),
                 ],
                 &direct,
             ),
@@ -2051,6 +2058,32 @@ fn paper_specs(
         ));
     }
     Ok(specs)
+}
+
+/// Validate only the ABI envelope proven for the source-unverified VaultPortal
+/// implementation: exact selector, one top-level dynamic argument at the
+/// canonical offset, whole ABI words, and a bounded non-empty payload. The
+/// tuple fields intentionally remain opaque and unavailable to prediction or
+/// quoting until the implementation semantics are independently verified.
+fn is_bounded_flap_vault_abi_envelope(input: &[u8]) -> bool {
+    const WORD: usize = 32;
+
+    if input.len() > MAX_OPAQUE_CALLDATA
+        || input.len() < 4 + 2 * WORD
+        || !(input.len() - 4).is_multiple_of(WORD)
+        || input.get(..4) != Some(FLAP_VAULT_LAUNCH_SELECTOR.as_slice())
+        || word_as_usize(&input[4..4 + WORD]) != Some(WORD)
+    {
+        return false;
+    }
+    input[4 + WORD..].iter().any(|byte| *byte != 0)
+}
+
+fn word_as_usize(word: &[u8]) -> Option<usize> {
+    if word.len() != 32 || word[..24].iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    usize::try_from(u64::from_be_bytes(word[24..].try_into().ok()?)).ok()
 }
 
 fn spec(
@@ -2869,6 +2902,87 @@ mod tests {
     fn observer() -> PaperLaunchpadObserver {
         let (expected, observed) = startup();
         PaperLaunchpadObserver::from_startup_snapshots(expected, observed).unwrap()
+    }
+
+    #[test]
+    fn real_flap_direct_and_vault_launches_remain_strict_discovery_only() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/flap-anchored-live-proofs.json"
+        ))
+        .unwrap();
+        let observer = observer();
+
+        for proof in fixture["proofs"].as_array().unwrap() {
+            let transaction = &proof["transaction"];
+            let input = hex::decode(
+                transaction["input"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("0x")
+                    .unwrap(),
+            )
+            .unwrap();
+            let tx_hash: B256 = transaction["hash"].as_str().unwrap().parse().unwrap();
+            let signer: Address = transaction["from"].as_str().unwrap().parse().unwrap();
+            let destination: Address = transaction["to"].as_str().unwrap().parse().unwrap();
+            let value: U256 = transaction["value"].as_str().unwrap().parse().unwrap();
+            let observation = observer
+                .observe_call(
+                    tx_hash,
+                    signer,
+                    signer,
+                    LeaderOrigin::DirectSigner,
+                    WrapperKind::Direct,
+                    destination,
+                    value,
+                    &input,
+                )
+                .unwrap();
+
+            assert_eq!(observation.tx_hash, tx_hash);
+            assert_eq!(observation.leader, signer);
+            assert_eq!(observation.outer_signer, signer);
+            assert_eq!(observation.leader_origin, LeaderOrigin::DirectSigner);
+            assert_eq!(observation.planning_mode, ExecutionMode::DiscoveryOnly);
+            assert_eq!(observation.action, Some(ActionKind::Launch));
+            assert_eq!(observation.predicted_token, None);
+            assert_eq!(observation.predicted_pool, None);
+            assert_eq!(observation.predicted_pool_id, None);
+            assert!(!observation.live_execution_enabled);
+
+            if proof["kind"] == "vault" {
+                assert_eq!(destination, FLAP_VAULT_PORTAL_PROXY);
+                assert_eq!(&input[..4], FLAP_VAULT_LAUNCH_SELECTOR);
+                let mut trailing_junk = input.clone();
+                trailing_junk.push(0);
+                assert!(
+                    observer
+                        .observe_call(
+                            tx_hash,
+                            signer,
+                            signer,
+                            LeaderOrigin::DirectSigner,
+                            WrapperKind::Direct,
+                            destination,
+                            value,
+                            &trailing_junk,
+                        )
+                        .is_err()
+                );
+            }
+        }
+
+        assert!(observer.might_observe(FLAP_VAULT_PORTAL_PROXY, &FLAP_VAULT_LAUNCH_SELECTOR));
+        assert!(!observer.might_observe(FLAP_VAULT_PORTAL_PROXY, &FLAP_STANDARD_LAUNCH_SELECTOR));
+        assert!(!observer.might_observe(FLAP_VAULT_PORTAL_PROXY, &FLAP_TAX_V3_LAUNCH_SELECTOR));
+        let capability = observer
+            .capabilities()
+            .into_iter()
+            .find(|capability| capability.launchpad == LaunchpadId::Flap)
+            .unwrap();
+        assert!(capability.discovery_enabled);
+        assert!(!capability.paper_plan_supported);
+        assert!(!capability.live_execution_enabled);
     }
 
     fn bankr_v4_observer() -> PaperLaunchpadObserver {

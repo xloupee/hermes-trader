@@ -13,7 +13,8 @@ use hermes_feed::evidence_provenance::{
     current_executable_keccak256, maybe_print_self_digest, read_bytes_with_keccak,
     read_json_with_keccak, verify_expected_self_keccak256,
 };
-use hermes_feed::flap_abi::{decode_flap_token_bought, decode_flap_token_created};
+use hermes_feed::flap_abi::{FLAP_TOKEN_CREATED_TOPIC, decode_flap_token_created};
+use hermes_feed::flap_identity::FLAP_PORTAL_PROXY;
 use hermes_feed::launchpad_adapter::{ActionKind, LaunchpadId, WrapperKind};
 use hermes_feed::launchpad_adapters::{
     CLANKER_FACTORY, CLANKER_TOKEN_CREATED_TOPIC, DOPPLER_CREATE_EMITTER, DOPPLER_CREATE_TOPIC,
@@ -682,6 +683,7 @@ async fn augment_with_ground_truth(
         PONS_CURRENT_FACTORY,
         PONS_LEGACY_FACTORY,
         HOOD_FACTORY,
+        FLAP_PORTAL_PROXY,
     ];
     let topics = [
         keccak256(BOW_LAUNCHED_SIGNATURE.as_bytes()),
@@ -692,6 +694,7 @@ async fn augment_with_ground_truth(
         PONS_TOKEN_LAUNCHED_TOPIC,
         keccak256(HOOD_TOKEN_CREATED_SIGNATURE.as_bytes()),
         keccak256(HOOD_TRADE_SIGNATURE.as_bytes()),
+        FLAP_TOKEN_CREATED_TOPIC,
     ];
     let logs = if from_l2_block <= scan.cutoff_head {
         rpc.protocol_event_logs(&addresses, &topics, from_l2_block, scan.cutoff_head)
@@ -1600,6 +1603,13 @@ fn topic_address(log: &ReceiptLog, index: usize) -> Option<alloy_primitives::Add
 }
 
 fn protocol_event_match(launchpad: LaunchpadId, logs: &[ReceiptLog]) -> bool {
+    if launchpad == LaunchpadId::Flap {
+        return logs
+            .iter()
+            .filter(|log| decode_flap_token_created(CHAIN_ID, log).is_some())
+            .count()
+            == 1;
+    }
     logs.iter().any(|log| match launchpad {
         LaunchpadId::Noxa => {
             matches!(
@@ -1629,10 +1639,7 @@ fn protocol_event_match(launchpad: LaunchpadId, logs: &[ReceiptLog]) -> bool {
             matches!(log.address, PONS_CURRENT_FACTORY | PONS_LEGACY_FACTORY)
                 && log.topics.first() == Some(&PONS_TOKEN_LAUNCHED_TOPIC)
         }
-        LaunchpadId::Flap => {
-            decode_flap_token_created(CHAIN_ID, log).is_some()
-                || decode_flap_token_bought(CHAIN_ID, log).is_some()
-        }
+        LaunchpadId::Flap => false,
         LaunchpadId::HoodFun => {
             exact_topic(
                 log,
@@ -1669,6 +1676,8 @@ mod tests {
     use alloy_primitives::{Address, Bytes};
     use hermes_feed::bankr_receipt_quote::BANKR_CREATE_SELECTOR;
     use hermes_feed::feed::BroadcastMessage;
+    use hermes_feed::flap_abi::{FLAP_TOKEN_BOUGHT_TOPIC, FLAP_TOKEN_SOLD_TOPIC};
+    use hermes_feed::flap_identity::FLAP_VAULT_PORTAL_PROXY;
     use hermes_feed::paper_observer::{
         ConfiguredBankrDopplerV4, ConfiguredCallPin, ConfiguredSmartAccount,
         ConfiguredSmartAccounts, ObservedRuntimePin, PaperFeedRuntime,
@@ -3571,6 +3580,150 @@ mod tests {
             launchpad_for_ground_truth_log(&log(PONS_CURRENT_FACTORY, CLANKER_TOKEN_CREATED_TOPIC)),
             None
         );
+    }
+
+    fn rpc_flap_log(value: &serde_json::Value) -> ReceiptLog {
+        ReceiptLog {
+            address: value["address"].as_str().unwrap().parse().unwrap(),
+            log_index: u64::from_str_radix(
+                value["logIndex"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("0x")
+                    .unwrap(),
+                16,
+            )
+            .unwrap(),
+            topics: value["topics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|topic| topic.as_str().unwrap().parse().unwrap())
+                .collect(),
+            data: Bytes::from(
+                hex::decode(value["data"].as_str().unwrap().strip_prefix("0x").unwrap()).unwrap(),
+            ),
+        }
+    }
+
+    #[test]
+    fn real_flap_proofs_require_portal_created_and_reject_trade_or_vault_lookalikes() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/flap-anchored-live-proofs.json"
+        ))
+        .unwrap();
+
+        for proof in fixture["proofs"].as_array().unwrap() {
+            let transaction = &proof["transaction"];
+            let receipt = &proof["receipt"];
+            let tx_hash: B256 = transaction["hash"].as_str().unwrap().parse().unwrap();
+            let signer: Address = transaction["from"].as_str().unwrap().parse().unwrap();
+            let destination: Address = transaction["to"].as_str().unwrap().parse().unwrap();
+            let logs = receipt["logs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(rpc_flap_log)
+                .collect::<Vec<_>>();
+            let created = logs
+                .iter()
+                .find(|log| log.topics.first() == Some(&FLAP_TOKEN_CREATED_TOPIC))
+                .unwrap();
+            let bought = logs
+                .iter()
+                .find(|log| log.topics.first() == Some(&FLAP_TOKEN_BOUGHT_TOPIC))
+                .unwrap();
+
+            assert_eq!(created.address, FLAP_PORTAL_PROXY);
+            assert_eq!(
+                launchpad_for_ground_truth_log(created),
+                Some(LaunchpadId::Flap)
+            );
+            assert!(protocol_event_match(LaunchpadId::Flap, &logs));
+            let duplicate_created = [created.clone(), created.clone()];
+            assert!(!protocol_event_match(LaunchpadId::Flap, &duplicate_created));
+            assert_eq!(launchpad_for_ground_truth_log(bought), None);
+            assert!(!protocol_event_match(
+                LaunchpadId::Flap,
+                std::slice::from_ref(bought)
+            ));
+
+            let decoded = decode_flap_token_created(CHAIN_ID, created).unwrap();
+            if proof["kind"] == "vault" {
+                assert_eq!(destination, FLAP_VAULT_PORTAL_PROXY);
+                assert_eq!(decoded.creator, FLAP_VAULT_PORTAL_PROXY);
+                assert_ne!(signer, decoded.creator);
+            } else {
+                assert_eq!(destination, FLAP_PORTAL_PROXY);
+                assert_eq!(decoded.creator, signer);
+            }
+
+            let mut vault_lookalike = created.clone();
+            vault_lookalike.address = FLAP_VAULT_PORTAL_PROXY;
+            assert_eq!(launchpad_for_ground_truth_log(&vault_lookalike), None);
+            assert!(!protocol_event_match(
+                LaunchpadId::Flap,
+                std::slice::from_ref(&vault_lookalike)
+            ));
+
+            let sold = ReceiptLog {
+                address: FLAP_PORTAL_PROXY,
+                topics: vec![FLAP_TOKEN_SOLD_TOPIC],
+                data: bought.data.clone(),
+                log_index: bought.log_index,
+            };
+            assert_eq!(launchpad_for_ground_truth_log(&sold), None);
+            assert!(!protocol_event_match(
+                LaunchpadId::Flap,
+                std::slice::from_ref(&sold)
+            ));
+
+            let l2_block_number = u64::from_str_radix(
+                receipt["blockNumber"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("0x")
+                    .unwrap(),
+                16,
+            )
+            .unwrap();
+            let transaction_index = u64::from_str_radix(
+                receipt["transactionIndex"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("0x")
+                    .unwrap(),
+                16,
+            )
+            .unwrap();
+            let block_hash: B256 = receipt["blockHash"].as_str().unwrap().parse().unwrap();
+            let candidate = ObservedCandidate {
+                tx_hash,
+                launchpad: LaunchpadId::Flap,
+                observer_claim: true,
+                ground_truth_event: true,
+                ground_truth_hits: vec![GroundTruthHit {
+                    l2_block_number,
+                    block_hash,
+                    transaction_index,
+                    log: created.clone(),
+                }],
+                wrapper: WrapperKind::Direct,
+                wrapper_provenance: None,
+            };
+            let canonical_receipt = NoxaReceipt {
+                transaction_hash: tx_hash,
+                block_hash,
+                status: true,
+                l2_block_number,
+                l1_block_number: None,
+                transaction_index,
+                gas_used: None,
+                effective_gas_price: None,
+                logs,
+            };
+            validate_ground_truth_receipt_binding(&candidate, &canonical_receipt).unwrap();
+        }
     }
 
     #[test]

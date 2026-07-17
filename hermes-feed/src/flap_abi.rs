@@ -30,7 +30,21 @@ sol! {
         uint256 fee,
         uint256 circulatingSupply
     );
+
+    event TokenSold(
+        uint256 id,
+        address token,
+        address seller,
+        uint256 amount,
+        uint256 quoteAmount,
+        uint256 fee,
+        uint256 circulatingSupply
+    );
 }
+
+pub const FLAP_TOKEN_CREATED_TOPIC: B256 = TokenCreated::SIGNATURE_HASH;
+pub const FLAP_TOKEN_BOUGHT_TOPIC: B256 = TokenBought::SIGNATURE_HASH;
+pub const FLAP_TOKEN_SOLD_TOPIC: B256 = TokenSold::SIGNATURE_HASH;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct FlapTokenCreated {
@@ -116,7 +130,12 @@ pub fn decode_flap_token_created(chain_id: u64, log: &ReceiptLog) -> Option<Flap
     if chain_id != CHAIN_ID {
         return None;
     }
-    let source = source_variant(log.address)?;
+    // TokenCreated is canonical launch evidence only when emitted by Portal.
+    // VaultPortal is a caller in the reviewed vault route and must never be
+    // allowed to self-attest a launch with a lookalike event.
+    if log.address != FLAP_PORTAL_PROXY {
+        return None;
+    }
     let decoded =
         TokenCreated::decode_raw_log_validate(log.topics.iter().copied(), &log.data).ok()?;
     if decoded.encode_data().as_slice() != log.data.as_ref() {
@@ -126,7 +145,7 @@ pub fn decode_flap_token_created(chain_id: u64, log: &ReceiptLog) -> Option<Flap
         return None;
     }
     Some(FlapTokenCreated {
-        source,
+        source: FlapPortalVariant::Portal,
         id: decoded.id,
         creator: decoded.creator,
         nonce: decoded.nonce,
@@ -208,14 +227,14 @@ mod tests {
     }
 
     #[test]
-    fn observes_positive_portal_and_vault_portal_fixtures_separately() {
+    fn observes_only_portal_token_created_and_keeps_vault_buys_separate() {
         let portal = decode_flap_token_created(CHAIN_ID, &created_log(FLAP_PORTAL_PROXY)).unwrap();
         assert_eq!(portal.source, FlapPortalVariant::Portal);
         assert_eq!(portal.symbol, "FLAP");
 
-        let vault =
-            decode_flap_token_created(CHAIN_ID, &created_log(FLAP_VAULT_PORTAL_PROXY)).unwrap();
-        assert_eq!(vault.source, FlapPortalVariant::VaultPortal);
+        assert!(
+            decode_flap_token_created(CHAIN_ID, &created_log(FLAP_VAULT_PORTAL_PROXY)).is_none()
+        );
 
         let buy = decode_flap_token_bought(CHAIN_ID, &bought_log(FLAP_PORTAL_PROXY)).unwrap();
         assert_eq!(buy.raw_quote_amount, U256::from(10));

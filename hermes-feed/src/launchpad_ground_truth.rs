@@ -1,5 +1,6 @@
 use alloy_primitives::keccak256;
 
+use crate::flap_abi::{FLAP_TOKEN_CREATED_TOPIC, decode_flap_token_created};
 use crate::launchpad_adapter::LaunchpadId;
 use crate::launchpad_adapters::{
     CLANKER_FACTORY, CLANKER_TOKEN_CREATED_TOPIC, DOPPLER_CREATE_EMITTER, DOPPLER_CREATE_TOPIC,
@@ -42,6 +43,11 @@ pub fn launchpad_for_ground_truth_log(log: &ReceiptLog) -> Option<LaunchpadId> {
         }
         (PONS_CURRENT_FACTORY, PONS_TOKEN_LAUNCHED_TOPIC)
         | (PONS_LEGACY_FACTORY, PONS_TOKEN_LAUNCHED_TOPIC) => Some(LaunchpadId::Pons),
+        (crate::flap_identity::FLAP_PORTAL_PROXY, FLAP_TOKEN_CREATED_TOPIC)
+            if decode_flap_token_created(crate::robinhood::CHAIN_ID, log).is_some() =>
+        {
+            Some(LaunchpadId::Flap)
+        }
         (HOOD_FACTORY, topic)
             if topic == keccak256(HOOD_TOKEN_CREATED_SIGNATURE.as_bytes())
                 || topic == keccak256(HOOD_TRADE_SIGNATURE.as_bytes()) =>

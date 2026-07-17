@@ -35,8 +35,8 @@ use hermes_feed::tier2_curve::HOOD_FACTORY;
 use hermes_feed::{
     BankrDopplerExpectedProfile, BankrDopplerQuotePolicy, BankrDopplerReceiptPaperQuote,
     ClankerQuotePolicy, ClankerReceiptPaperQuote, ClankerV4ExpectedProfile, HoodExpectedProfile,
-    HoodMigrationEvidence, HoodQuotePolicy, HoodReceiptPaperQuote, NoxaRpcClient, PonsQuoteError,
-    PonsQuotePolicy, PonsReceiptPaperQuote, V3ReceiptPaperQuote, V3ReceiptQuotePolicy,
+    HoodMigrationEvidence, HoodQuotePolicy, HoodReceiptPaperQuote, NoxaRpcClient, PonsQuotePolicy,
+    PonsReceiptPaperQuote, V3ReceiptPaperQuote, V3ReceiptQuotePolicy,
     quote_bankr_doppler_launch_receipt_at_receipt_block, quote_clanker_launch_receipt,
     quote_hood_curve_receipt, quote_pons_launch_receipt, quote_v3_launch_receipt,
     verify_hood_graduation_receipt,
@@ -977,50 +977,68 @@ fn strict_pons_reconciliation(
     expected_profile: hermes_feed::PonsExpectedProfile,
     policy: V3ReceiptQuotePolicy,
 ) -> PonsReconciliationOutcome {
-    let generation = match transaction.to {
-        Some(PONS_CURRENT_FACTORY) => Some(hermes_feed::PonsGeneration::Current),
-        Some(PONS_LEGACY_FACTORY) => Some(hermes_feed::PonsGeneration::Legacy),
-        _ => None,
-    };
-    match quote_current_pons(transaction, receipt, expected_profile, policy) {
-        Ok(Some(quote)) => PonsReconciliationOutcome {
-            generation,
-            quote: Some(quote),
-            blocker: None,
-        },
-        Ok(None) => PonsReconciliationOutcome {
+    let generation = pons_receipt_generation(receipt);
+    match generation {
+        Some(hermes_feed::PonsGeneration::Current) => {
+            match quote_pons_launch_receipt(
+                transaction,
+                receipt,
+                expected_profile,
+                PonsQuotePolicy {
+                    amount_in: policy.amount_in,
+                    max_amount_in: policy.max_amount_in,
+                    slippage_bps: policy.slippage_bps,
+                },
+            ) {
+                Ok(quote) => PonsReconciliationOutcome {
+                    generation,
+                    quote: Some(quote),
+                    blocker: None,
+                },
+                Err(error) => PonsReconciliationOutcome {
+                    generation,
+                    quote: None,
+                    blocker: Some(format!("pons_quote_error:{error}")),
+                },
+            }
+        }
+        Some(hermes_feed::PonsGeneration::Legacy) => PonsReconciliationOutcome {
             generation,
             quote: None,
             blocker: Some(PONS_LEGACY_DISCOVERY_BLOCKER.into()),
         },
-        Err(error) => PonsReconciliationOutcome {
+        None => PonsReconciliationOutcome {
             generation,
             quote: None,
-            blocker: Some(format!("pons_quote_error:{error}")),
+            blocker: Some("pons_receipt_factory_generation_missing_or_ambiguous".into()),
         },
     }
 }
 
-fn quote_current_pons(
-    transaction: &hermes_feed::RobinhoodTransaction,
+/// Derive the Pons generation from independently collected receipt evidence,
+/// not from the outer transaction destination. Current launches may be hidden
+/// in an unreviewed wrapper or delegated-account batch; those must remain quote
+/// blocked, but they are still current-generation detector misses rather than
+/// legacy discovery traffic.
+fn pons_receipt_generation(
     receipt: &hermes_feed::NoxaReceipt,
-    expected_profile: hermes_feed::PonsExpectedProfile,
-    policy: V3ReceiptQuotePolicy,
-) -> std::result::Result<Option<PonsReceiptPaperQuote>, PonsQuoteError> {
-    if transaction.to != Some(PONS_CURRENT_FACTORY) {
-        return Ok(None);
+) -> Option<hermes_feed::PonsGeneration> {
+    let mut generation = None;
+    for log in &receipt.logs {
+        if pons_launch_event_identity(log).is_none() {
+            continue;
+        }
+        let observed = match log.address {
+            PONS_CURRENT_FACTORY => hermes_feed::PonsGeneration::Current,
+            PONS_LEGACY_FACTORY => hermes_feed::PonsGeneration::Legacy,
+            _ => continue,
+        };
+        if generation.is_some_and(|existing| existing != observed) {
+            return None;
+        }
+        generation = Some(observed);
     }
-    quote_pons_launch_receipt(
-        transaction,
-        receipt,
-        expected_profile,
-        PonsQuotePolicy {
-            amount_in: policy.amount_in,
-            max_amount_in: policy.max_amount_in,
-            slippage_bps: policy.slippage_bps,
-        },
-    )
-    .map(Some)
+    generation
 }
 
 fn hood_token_from_receipt(logs: &[ReceiptLog]) -> Option<alloy_primitives::Address> {
@@ -1513,17 +1531,96 @@ mod tests {
         assert!(!quote.execution_eligible);
         assert!(!quote.broadcast);
 
-        let mut legacy = fixture.transaction;
+        let mut legacy = fixture.transaction.clone();
         legacy.to = Some(PONS_LEGACY_FACTORY);
+        let mut legacy_receipt = fixture.receipt.clone();
+        for log in &mut legacy_receipt.logs {
+            if log.address == PONS_CURRENT_FACTORY {
+                log.address = PONS_LEGACY_FACTORY;
+            }
+        }
         let legacy = strict_pons_reconciliation(
             &legacy,
-            &fixture.receipt,
+            &legacy_receipt,
             hermes_feed::PonsExpectedProfile::production(),
             policy,
         );
         assert_eq!(legacy.generation, Some(hermes_feed::PonsGeneration::Legacy));
         assert!(legacy.quote.is_none());
         assert!(legacy.blocker.unwrap().contains("discovery_only"));
+    }
+
+    #[test]
+    fn wrapped_current_pons_launch_is_classified_from_receipt_but_quote_blocked() {
+        let fixture: PonsLiveFixture = serde_json::from_str(include_str!(
+            "../../tests/fixtures/pons-current-live-proof.json"
+        ))
+        .unwrap();
+        let policy = V3ReceiptQuotePolicy {
+            amount_in: U256::from(1_000_000_000_000_000_u64),
+            max_amount_in: U256::from(10_000_000_000_000_000_u64),
+            slippage_bps: 100,
+        };
+        let mut wrapped = fixture.transaction;
+        wrapped.to = Some(wrapped.from);
+        wrapped.value = U256::ZERO;
+        wrapped.input = alloy_primitives::Bytes::from_static(&[0x3f, 0x70, 0x7e, 0x6b]);
+
+        let outcome = strict_pons_reconciliation(
+            &wrapped,
+            &fixture.receipt,
+            hermes_feed::PonsExpectedProfile::production(),
+            policy,
+        );
+
+        assert_eq!(
+            outcome.generation,
+            Some(hermes_feed::PonsGeneration::Current)
+        );
+        assert!(outcome.quote.is_none());
+        assert!(
+            outcome
+                .blocker
+                .unwrap()
+                .contains("transaction, receipt, or paper policy envelope is invalid")
+        );
+    }
+
+    #[test]
+    fn mixed_pons_factory_events_leave_generation_ambiguous_and_fail_closed() {
+        let fixture: PonsLiveFixture = serde_json::from_str(include_str!(
+            "../../tests/fixtures/pons-current-live-proof.json"
+        ))
+        .unwrap();
+        let policy = V3ReceiptQuotePolicy {
+            amount_in: U256::from(1_000_000_000_000_000_u64),
+            max_amount_in: U256::from(10_000_000_000_000_000_u64),
+            slippage_bps: 100,
+        };
+        let mut mixed_receipt = fixture.receipt;
+        let mut second_launch = mixed_receipt
+            .logs
+            .iter()
+            .find(|log| pons_launch_event_identity(log).is_some())
+            .unwrap()
+            .clone();
+        second_launch.address = PONS_LEGACY_FACTORY;
+        second_launch.log_index = mixed_receipt.logs.last().unwrap().log_index + 1;
+        mixed_receipt.logs.push(second_launch);
+
+        let outcome = strict_pons_reconciliation(
+            &fixture.transaction,
+            &mixed_receipt,
+            hermes_feed::PonsExpectedProfile::production(),
+            policy,
+        );
+
+        assert_eq!(outcome.generation, None);
+        assert!(outcome.quote.is_none());
+        assert_eq!(
+            outcome.blocker.as_deref(),
+            Some("pons_receipt_factory_generation_missing_or_ambiguous")
+        );
     }
 
     #[test]

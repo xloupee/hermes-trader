@@ -1148,6 +1148,28 @@ mod tests {
     }
 
     #[derive(Deserialize)]
+    struct TatorNegativeFixture {
+        transaction: RobinhoodTransaction,
+        block: RobinhoodBlock,
+        receipt: NoxaReceipt,
+        evidence: TatorNegativeEvidence,
+    }
+
+    #[derive(Deserialize)]
+    struct TatorNegativeEvidence {
+        source: String,
+        calldata_bytes: usize,
+        calldata_hash: B256,
+        transaction_value_wei: U256,
+        extension: Address,
+        extension_runtime_bytes: usize,
+        extension_runtime_hash: B256,
+        position_log_indices: Vec<u64>,
+        embedded_swap_log_index: u64,
+        embedded_swap_topic: B256,
+    }
+
+    #[derive(Deserialize)]
     struct SwapDifferentialFixture {
         transaction: RobinhoodTransaction,
         block: RobinhoodBlock,
@@ -1175,6 +1197,13 @@ mod tests {
     fn extensionless_live_fixture() -> LiveFixture {
         serde_json::from_str(include_str!(
             "../tests/fixtures/clanker-v4-extensionless-live-proof.json"
+        ))
+        .unwrap()
+    }
+
+    fn tator_negative_fixture() -> TatorNegativeFixture {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/clanker-v4-tator-payable-negative.json"
         ))
         .unwrap()
     }
@@ -1412,6 +1441,122 @@ mod tests {
         assert_eq!(quote.state_version.terminal_log_index, 39);
         assert!(!quote.execution_eligible);
         assert!(!quote.broadcast);
+    }
+
+    #[test]
+    fn payable_tator_two_position_embedded_swap_envelope_stays_quote_blocked() {
+        let fixture = tator_negative_fixture();
+        let profile = ClankerV4ExpectedProfile::production();
+        let expected_tx_hash = alloy_primitives::b256!(
+            "f0961eb5b33df616d5abccd9ee61ee0a6eb28a6a3d1738b0a04c326750784f01"
+        );
+        let expected_tator_extension =
+            alloy_primitives::address!("a27b1986e5c7e5371cb6507f87918fbd0302ff5a");
+        let expected_tator_runtime_hash = alloy_primitives::b256!(
+            "251860fb620cf1e38a1a95ec1a0875dd0ccfe8f6737dd445e2c0a303c3f9997f"
+        );
+
+        assert_eq!(fixture.transaction.hash, expected_tx_hash);
+        assert_eq!(fixture.receipt.transaction_hash, expected_tx_hash);
+        assert_eq!(
+            fixture.transaction.value,
+            fixture.evidence.transaction_value_wei
+        );
+        assert_eq!(
+            fixture.transaction.value,
+            U256::from(8_090_790_000_000_000_u64)
+        );
+        assert_eq!(fixture.transaction.to, Some(CLANKER_FACTORY));
+        assert_eq!(
+            fixture.transaction.input.get(..4),
+            Some(CLANKER_DEPLOY_SELECTOR.as_slice())
+        );
+        assert!(fixture.receipt.status);
+        assert_eq!(fixture.transaction.l2_block_number, Some(11_738_596));
+        assert_eq!(fixture.receipt.l2_block_number, 11_738_596);
+        assert_eq!(fixture.block.l2_block_number, 11_738_596);
+        assert_eq!(fixture.block.l1_block_number, 25_549_229);
+        assert_eq!(fixture.block.timestamp, 1_784_253_086);
+        assert_eq!(fixture.transaction.transaction_index, Some(9));
+        assert_eq!(fixture.receipt.transaction_index, 9);
+        assert_eq!(fixture.receipt.block_hash, fixture.block.hash);
+        assert_eq!(
+            fixture.evidence.source,
+            "public_rpc_exact_envelope_projection_at_confirmed_block"
+        );
+        assert_eq!(fixture.evidence.calldata_bytes, 2_980);
+        assert_eq!(
+            fixture.evidence.calldata_hash,
+            alloy_primitives::b256!(
+                "aaad3356c249b1ae849c912015c97bc52b06d2bfc2361e47dc6ea09ec73caed1"
+            )
+        );
+
+        let launch = exact_launch_identity(&fixture.receipt.logs).unwrap();
+        assert_eq!(launch.extension, Some(expected_tator_extension));
+        assert_eq!(fixture.evidence.extension, expected_tator_extension);
+        assert_eq!(fixture.evidence.extension_runtime_bytes, 6_775);
+        assert_eq!(
+            fixture.evidence.extension_runtime_hash,
+            expected_tator_runtime_hash
+        );
+        assert_eq!(fixture.evidence.position_log_indices, [56, 67]);
+        assert_eq!(fixture.evidence.embedded_swap_log_index, 70);
+        assert_eq!(
+            fixture.evidence.embedded_swap_topic,
+            alloy_primitives::b256!(
+                "40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f"
+            )
+        );
+        assert_ne!(expected_tator_extension, profile.extension.address);
+        assert_ne!(
+            expected_tator_runtime_hash,
+            profile.extension.runtime_code_hash
+        );
+
+        // Every other receipt/transaction/block envelope binding is exact, so the
+        // real payable value is the first fail-closed rejection.
+        assert!(matches!(
+            quote_clanker_launch_receipt(
+                &fixture.transaction,
+                &fixture.receipt,
+                &fixture.block,
+                profile,
+                policy(),
+            ),
+            Err(ClankerQuoteError::InvalidEnvelope)
+        ));
+
+        // Even if value were zero, the unreviewed Tator extension cannot enter
+        // either supported production liquidity profile.
+        let mut zero_value_transaction = fixture.transaction.clone();
+        zero_value_transaction.value = U256::ZERO;
+        assert!(matches!(
+            quote_clanker_launch_receipt(
+                &zero_value_transaction,
+                &fixture.receipt,
+                &fixture.block,
+                profile,
+                policy(),
+            ),
+            Err(ClankerQuoteError::MarketIdentity)
+        ));
+
+        let mut unreviewed_profile = profile;
+        unreviewed_profile.extension = CodePin {
+            address: expected_tator_extension,
+            runtime_code_hash: expected_tator_runtime_hash,
+        };
+        assert!(matches!(
+            quote_clanker_launch_receipt(
+                &zero_value_transaction,
+                &fixture.receipt,
+                &fixture.block,
+                unreviewed_profile,
+                policy(),
+            ),
+            Err(ClankerQuoteError::InvalidExpectedProfile)
+        ));
     }
 
     #[test]

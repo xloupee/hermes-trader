@@ -51,7 +51,7 @@ The data path uses separately tracked producer, tee, and observer children:
 ```text
 hermes-feed probe --record private-mode-0600-raw-FIFO
   -> tee raw-feed.jsonl -> private-mode-0600-observer-FIFO
-  -> hermes-launchpad-paper --input observer-FIFO
+  -> hermes-launchpad-paper --input - < private-mode-0600-observer-FIFO
 ```
 
 Probe stdout contains metrics only. The wrapper requires the exact paper
@@ -62,6 +62,11 @@ session with any connect/read/disconnect error, waits for recorder and FIFO
 drain, and checks the tee and observer exit statuses independently before
 starting receipt/event work. Existing evidence paths are never overwritten.
 
+The wrapper persists the exact start and cutoff number/hash pairs as
+mode-`0600` `start-anchor.txt` and `cutoff-anchor.txt` files after a successful
+run. These files are durable session evidence, are passed unchanged to the
+reconciler, and are never removed by normal FIFO cleanup.
+
 ## Independent truth boundary
 
 The reconciler scans the exact L2 interval `(start_head, cutoff_head]`. It waits
@@ -70,6 +75,11 @@ for the configured confirmations and emits one
 block hash, transaction index, log index, emitter, and topic, and must match the
 canonical successful receipt. The start and cutoff hashes are re-read after
 collection to reject a reorg.
+
+Reconciliation defaults to concurrency `1` for deterministic, low-pressure
+evidence collection. Set `HERMES_RECONCILE_CONCURRENCY` only for an explicitly
+reviewed local run; the wrapper always forwards the selected value with
+`--concurrency`.
 
 Primary launch anchors are exact emitter/topic pairs for Bow, LaunchHood V3,
 Clanker, Bankr/Doppler Airlock, current and legacy Pons, and Hood. Shared pool,

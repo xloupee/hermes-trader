@@ -49,10 +49,12 @@ use hermes_feed::{
     BankrDopplerExpectedProfile, BankrDopplerQuotePolicy, BankrDopplerReceiptPaperQuote,
     ClankerQuotePolicy, ClankerReceiptPaperQuote, ClankerV4ExpectedProfile,
     Eip7702SelfBatchExpectedPins, Eip7702SelfBatchProvenance, HoodExpectedProfile,
-    HoodMigrationEvidence, HoodQuotePolicy, HoodReceiptPaperQuote, NoxaRpcClient, PonsQuotePolicy,
-    PonsReceiptPaperQuote, V3ReceiptPaperQuote, V3ReceiptQuotePolicy, quote_clanker_launch_receipt,
-    quote_hood_curve_receipt, quote_pons_eip7702_provenance_receipt, quote_pons_launch_receipt,
-    quote_v3_launch_receipt, verify_hood_graduation_receipt,
+    HoodIdentityRole, HoodMigratedV3PaperQuote, HoodMigrationEvidence, HoodQuotePolicy,
+    HoodReceiptPaperQuote, NoxaRpcClient, PonsQuotePolicy, PonsReceiptPaperQuote,
+    V3ReceiptPaperQuote, V3ReceiptQuotePolicy, quote_clanker_launch_receipt,
+    quote_hood_curve_receipt, quote_hood_migrated_v3_receipt,
+    quote_pons_eip7702_provenance_receipt, quote_pons_launch_receipt, quote_v3_launch_receipt,
+    validate_hood_migrated_v3_pool_snapshot, verify_hood_graduation_receipt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -249,6 +251,8 @@ struct ReconciliationEvidence {
     record_type: &'static str,
     tx_hash: B256,
     launchpad: LaunchpadId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope_token: Option<alloy_primitives::Address>,
     receipt_status: bool,
     protocol_event_match: bool,
     observer_claim: bool,
@@ -289,6 +293,7 @@ struct ReconciledCandidate {
     pons_quote: Option<PonsReceiptPaperQuote>,
     hood_quote: Option<HoodReceiptPaperQuote>,
     hood_migration: Option<HoodMigrationEvidence>,
+    hood_migrated_quote: Option<HoodMigratedV3PaperQuote>,
 }
 
 #[derive(Clone)]
@@ -433,7 +438,7 @@ async fn main() -> Result<()> {
         let rpc = rpc.clone();
         let profiles = profiles.clone();
         async move {
-            reconcile_candidate(
+            reconcile_candidates(
                 &rpc,
                 candidate,
                 timeout,
@@ -447,31 +452,35 @@ async fn main() -> Result<()> {
     .buffer_unordered(args.concurrency);
 
     while let Some(result) = reconciled.next().await {
-        let result = result?;
-        println!("{}", serde_json::to_string(&result.evidence)?);
-        if let Some(quote) = result.v3_quote {
-            println!("{}", serde_json::to_string(&quote)?);
-        }
-        if let Some(quote) = result.clanker_quote {
-            println!("{}", serde_json::to_string(&quote)?);
-        }
-        if let Some(quote) = result.bankr_quote {
-            println!("{}", serde_json::to_string(&quote)?);
-        }
-        if let Some(observation) = result.stonks_observation {
-            println!("{}", serde_json::to_string(&observation)?);
-        }
-        if let Some(quote) = result.stonks_quote {
-            println!("{}", serde_json::to_string(&quote)?);
-        }
-        if let Some(quote) = result.pons_quote {
-            println!("{}", serde_json::to_string(&quote)?);
-        }
-        if let Some(quote) = result.hood_quote {
-            println!("{}", serde_json::to_string(&quote)?);
-        }
-        if let Some(migration) = result.hood_migration {
-            println!("{}", serde_json::to_string(&migration)?);
+        for result in result? {
+            println!("{}", serde_json::to_string(&result.evidence)?);
+            if let Some(quote) = result.v3_quote {
+                println!("{}", serde_json::to_string(&quote)?);
+            }
+            if let Some(quote) = result.clanker_quote {
+                println!("{}", serde_json::to_string(&quote)?);
+            }
+            if let Some(quote) = result.bankr_quote {
+                println!("{}", serde_json::to_string(&quote)?);
+            }
+            if let Some(observation) = result.stonks_observation {
+                println!("{}", serde_json::to_string(&observation)?);
+            }
+            if let Some(quote) = result.stonks_quote {
+                println!("{}", serde_json::to_string(&quote)?);
+            }
+            if let Some(quote) = result.pons_quote {
+                println!("{}", serde_json::to_string(&quote)?);
+            }
+            if let Some(quote) = result.hood_quote {
+                println!("{}", serde_json::to_string(&quote)?);
+            }
+            if let Some(migration) = result.hood_migration {
+                println!("{}", serde_json::to_string(&migration)?);
+            }
+            if let Some(quote) = result.hood_migrated_quote {
+                println!("{}", serde_json::to_string(&quote)?);
+            }
         }
     }
     Ok(())
@@ -743,7 +752,24 @@ async fn augment_with_ground_truth(
         .candidates
         .values()
         .filter(|candidate| candidate.ground_truth_event)
-        .count();
+        .try_fold(0_usize, |count, candidate| {
+            let scopes = if candidate.launchpad == LaunchpadId::HoodFun {
+                let tokens = candidate
+                    .ground_truth_hits
+                    .iter()
+                    .map(|hit| {
+                        topic_address(&hit.log, 1)
+                            .context("Hood ground-truth hit has malformed token topic")
+                    })
+                    .collect::<Result<HashSet<_>>>()?;
+                tokens.len()
+            } else {
+                1
+            };
+            count
+                .checked_add(scopes)
+                .context("ground-truth scoped key count overflow")
+        })?;
     Ok((
         input.candidates,
         Some(GroundTruthWindow {
@@ -788,14 +814,14 @@ fn retained_ground_truth_event_logs(
         .sum()
 }
 
-async fn reconcile_candidate(
+async fn reconcile_candidates(
     rpc: &NoxaRpcClient,
     candidate: ObservedCandidate,
     timeout: Duration,
     poll_interval: Duration,
     quote_policy: V3ReceiptQuotePolicy,
     profiles: ReconcileProfiles,
-) -> Result<ReconciledCandidate> {
+) -> Result<Vec<ReconciledCandidate>> {
     let reconciliation_started_unix_ns = unix_now_ns();
     let deadline = Instant::now() + timeout;
     loop {
@@ -824,6 +850,7 @@ async fn reconcile_candidate(
             let mut pons_quote = None;
             let mut hood_quote = None;
             let mut hood_migration = None;
+            let mut hood_migrated_quote = None;
             let mut pons_generation = None;
             let mut protocol_blocker = None;
             let mut truth_action = None;
@@ -831,6 +858,7 @@ async fn reconcile_candidate(
             let mut truth_pool = None;
             let mut truth_pool_id = None;
             let mut quote_status = QuoteStatus::NotApplicable;
+            let mut scope_token = None;
             if receipt.status
                 && matches!(
                     candidate.launchpad,
@@ -1020,8 +1048,22 @@ async fn reconcile_candidate(
                     .await?
                     .with_context(|| format!("missing transaction {}", candidate.tx_hash))?;
                 let block = rpc.block_by_number(receipt.l2_block_number).await?;
+                let hood_tokens = hood_tokens_from_receipt(&receipt.logs);
+                if hood_tokens.len() > 1 {
+                    return reconcile_hood_batch(
+                        rpc,
+                        &candidate,
+                        (&transaction, &receipt, &block),
+                        &hood_tokens,
+                        &profiles.hood,
+                        reconciliation_started_unix_ns,
+                    )
+                    .await;
+                }
                 match hood_token_from_receipt(&receipt.logs) {
                     Some(token) => {
+                        scope_token = Some(token);
+                        truth_token = Some(token);
                         let snapshot = rpc
                             .hood_market_snapshot_at(HOOD_FACTORY, token, receipt.l2_block_number)
                             .await?;
@@ -1057,10 +1099,31 @@ async fn reconcile_candidate(
                                     truth_action = Some(ActionKind::Buy);
                                     truth_token = Some(evidence.token);
                                     truth_pool = Some(evidence.pool);
-                                    quote_status = QuoteStatus::Blocked;
-                                    protocol_blocker = Some(
-                                        "hood_migration_terminal_boundary_unreconciled_v3_quote_unavailable".into(),
-                                    );
+                                    scope_token = Some(evidence.token);
+                                    if !hood_pool_snapshot_matches(rpc, &evidence, &profiles.hood)
+                                        .await?
+                                    {
+                                        quote_status = QuoteStatus::Blocked;
+                                        protocol_blocker = Some(
+                                            "hood_migrated_v3_fixed_block_pool_state_mismatch"
+                                                .into(),
+                                        );
+                                    } else {
+                                        match quote_hood_migrated_v3_receipt(
+                                            &evidence,
+                                            &profiles.hood,
+                                        ) {
+                                            Ok(quote) => {
+                                                quote_status = QuoteStatus::Available;
+                                                hood_migrated_quote = Some(quote);
+                                            }
+                                            Err(error) => {
+                                                quote_status = QuoteStatus::Blocked;
+                                                protocol_blocker =
+                                                    Some(format!("hood_migrated_v3_quote:{error}"));
+                                            }
+                                        }
+                                    }
                                     hood_migration = Some(evidence);
                                 }
                                 Err(error) => {
@@ -1086,6 +1149,7 @@ async fn reconcile_candidate(
                                     protocol_match = true;
                                     truth_action = Some(quote.observed.action);
                                     truth_token = Some(quote.token);
+                                    scope_token = Some(quote.token);
                                     quote_status = QuoteStatus::Available;
                                     hood_quote = Some(quote);
                                 }
@@ -1102,11 +1166,12 @@ async fn reconcile_candidate(
                     }
                 }
             }
-            return Ok(ReconciledCandidate {
+            return Ok(vec![ReconciledCandidate {
                 evidence: ReconciliationEvidence {
                     record_type: "launchpad_reconciliation_evidence",
                     tx_hash: candidate.tx_hash,
                     launchpad: candidate.launchpad,
+                    scope_token,
                     receipt_status: receipt.status,
                     protocol_event_match: protocol_match,
                     observer_claim: candidate.observer_claim,
@@ -1133,41 +1198,81 @@ async fn reconcile_candidate(
                 pons_quote,
                 hood_quote,
                 hood_migration,
-            });
+                hood_migrated_quote,
+            }]);
         }
         if Instant::now() >= deadline {
-            return Ok(ReconciledCandidate {
-                evidence: ReconciliationEvidence {
-                    record_type: "launchpad_reconciliation_evidence",
-                    tx_hash: candidate.tx_hash,
-                    launchpad: candidate.launchpad,
-                    receipt_status: false,
-                    protocol_event_match: false,
-                    observer_claim: candidate.observer_claim,
-                    ground_truth_event: candidate.ground_truth_event,
-                    ground_truth_hits: candidate.ground_truth_hits.clone(),
-                    action: None,
-                    token: None,
-                    pool: None,
-                    pool_id: None,
-                    quote_status: QuoteStatus::Blocked,
-                    l2_block_number: None,
-                    block_hash: None,
-                    transaction_index: None,
-                    reconciliation_started_unix_ns,
-                    reconciliation_completed_unix_ns: unix_now_ns(),
-                    pons_generation: None,
-                    protocol_blocker: Some("receipt_timeout".into()),
-                },
-                v3_quote: None,
-                clanker_quote: None,
-                bankr_quote: None,
-                stonks_observation: None,
-                stonks_quote: None,
-                pons_quote: None,
-                hood_quote: None,
-                hood_migration: None,
-            });
+            let scopes = if candidate.launchpad == LaunchpadId::HoodFun {
+                let mut tokens = candidate
+                    .ground_truth_hits
+                    .iter()
+                    .filter_map(|hit| topic_address(&hit.log, 1))
+                    .collect::<Vec<_>>();
+                tokens.sort_unstable();
+                tokens.dedup();
+                if tokens.is_empty() {
+                    vec![None]
+                } else {
+                    tokens.into_iter().map(Some).collect()
+                }
+            } else {
+                vec![None]
+            };
+            return Ok(scopes
+                .into_iter()
+                .map(|scope_token| {
+                    let hits = candidate
+                        .ground_truth_hits
+                        .iter()
+                        .filter(|hit| {
+                            scope_token
+                                .is_none_or(|token| topic_address(&hit.log, 1) == Some(token))
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let action = hits
+                        .iter()
+                        .any(|hit| {
+                            hit.log.topics.first()
+                                == Some(&keccak256(HOOD_TOKEN_CREATED_SIGNATURE.as_bytes()))
+                        })
+                        .then_some(ActionKind::Launch);
+                    ReconciledCandidate {
+                        evidence: ReconciliationEvidence {
+                            record_type: "launchpad_reconciliation_evidence",
+                            tx_hash: candidate.tx_hash,
+                            launchpad: candidate.launchpad,
+                            scope_token,
+                            receipt_status: false,
+                            protocol_event_match: false,
+                            observer_claim: candidate.observer_claim,
+                            ground_truth_event: !hits.is_empty(),
+                            ground_truth_hits: hits,
+                            action,
+                            token: scope_token,
+                            pool: None,
+                            pool_id: None,
+                            quote_status: QuoteStatus::Blocked,
+                            l2_block_number: None,
+                            block_hash: None,
+                            transaction_index: None,
+                            reconciliation_started_unix_ns,
+                            reconciliation_completed_unix_ns: unix_now_ns(),
+                            pons_generation: None,
+                            protocol_blocker: Some("receipt_timeout".into()),
+                        },
+                        v3_quote: None,
+                        clanker_quote: None,
+                        bankr_quote: None,
+                        stonks_observation: None,
+                        stonks_quote: None,
+                        pons_quote: None,
+                        hood_quote: None,
+                        hood_migration: None,
+                        hood_migrated_quote: None,
+                    }
+                })
+                .collect());
         }
         sleep(poll_interval).await;
     }
@@ -1293,19 +1398,195 @@ fn pons_receipt_generation(
     generation
 }
 
+#[cfg(test)]
+async fn reconcile_candidate(
+    rpc: &NoxaRpcClient,
+    candidate: ObservedCandidate,
+    timeout: Duration,
+    poll_interval: Duration,
+    quote_policy: V3ReceiptQuotePolicy,
+    profiles: ReconcileProfiles,
+) -> Result<ReconciledCandidate> {
+    let mut records = reconcile_candidates(
+        rpc,
+        candidate,
+        timeout,
+        poll_interval,
+        quote_policy,
+        profiles,
+    )
+    .await?;
+    if records.len() != 1 {
+        bail!(
+            "single-record test helper received {} scoped records",
+            records.len()
+        );
+    }
+    Ok(records.pop().expect("length checked"))
+}
+
+async fn reconcile_hood_batch(
+    rpc: &NoxaRpcClient,
+    candidate: &ObservedCandidate,
+    receipt_context: (
+        &hermes_feed::RobinhoodTransaction,
+        &hermes_feed::NoxaReceipt,
+        &hermes_feed::RobinhoodBlock,
+    ),
+    tokens: &[alloy_primitives::Address],
+    profile: &HoodExpectedProfile,
+    reconciliation_started_unix_ns: u64,
+) -> Result<Vec<ReconciledCandidate>> {
+    let (transaction, receipt, block) = receipt_context;
+    let predecessor = receipt
+        .l2_block_number
+        .checked_sub(1)
+        .context("Hood migration batch block has no predecessor")?;
+    let mut results = Vec::with_capacity(tokens.len());
+    for token in tokens.iter().copied() {
+        let snapshot = rpc
+            .hood_market_snapshot_at(HOOD_FACTORY, token, receipt.l2_block_number)
+            .await?;
+        let pre = rpc
+            .hood_market_snapshot_at(HOOD_FACTORY, token, predecessor)
+            .await?;
+        let outcome =
+            verify_hood_graduation_receipt(transaction, receipt, block, &pre, &snapshot, profile);
+        let hits = candidate
+            .ground_truth_hits
+            .iter()
+            .filter(|hit| topic_address(&hit.log, 1) == Some(token))
+            .cloned()
+            .collect::<Vec<_>>();
+        let ground_truth_event = !hits.is_empty();
+        let (protocol_event_match, pool, quote_status, protocol_blocker, migration, quote) =
+            match outcome {
+                Ok(evidence) if hood_pool_snapshot_matches(rpc, &evidence, profile).await? => {
+                    match quote_hood_migrated_v3_receipt(&evidence, profile) {
+                        Ok(quote) => (
+                            true,
+                            Some(evidence.pool),
+                            QuoteStatus::Available,
+                            None,
+                            Some(evidence),
+                            Some(quote),
+                        ),
+                        Err(error) => (
+                            true,
+                            Some(evidence.pool),
+                            QuoteStatus::Blocked,
+                            Some(format!("hood_migrated_v3_quote:{error}")),
+                            Some(evidence),
+                            None,
+                        ),
+                    }
+                }
+                Ok(evidence) => (
+                    true,
+                    Some(evidence.pool),
+                    QuoteStatus::Blocked,
+                    Some("hood_migrated_v3_fixed_block_pool_state_mismatch".into()),
+                    Some(evidence),
+                    None,
+                ),
+                Err(error) => (
+                    false,
+                    None,
+                    QuoteStatus::Blocked,
+                    Some(format!("hood_migration_strict_receipt:{error}")),
+                    None,
+                    None,
+                ),
+            };
+        results.push(ReconciledCandidate {
+            evidence: ReconciliationEvidence {
+                record_type: "launchpad_reconciliation_evidence",
+                tx_hash: candidate.tx_hash,
+                launchpad: LaunchpadId::HoodFun,
+                scope_token: Some(token),
+                receipt_status: receipt.status,
+                protocol_event_match,
+                observer_claim: candidate.observer_claim,
+                ground_truth_event,
+                ground_truth_hits: hits,
+                action: protocol_event_match.then_some(ActionKind::Buy),
+                token: Some(token),
+                pool,
+                pool_id: None,
+                quote_status,
+                l2_block_number: Some(receipt.l2_block_number),
+                block_hash: Some(receipt.block_hash),
+                transaction_index: Some(receipt.transaction_index),
+                reconciliation_started_unix_ns,
+                reconciliation_completed_unix_ns: unix_now_ns(),
+                pons_generation: None,
+                protocol_blocker,
+            },
+            v3_quote: None,
+            clanker_quote: None,
+            bankr_quote: None,
+            stonks_observation: None,
+            stonks_quote: None,
+            pons_quote: None,
+            hood_quote: None,
+            hood_migration: migration,
+            hood_migrated_quote: quote,
+        });
+    }
+    let stable_block = rpc.block_by_number(receipt.l2_block_number).await?;
+    if stable_block.hash != block.hash {
+        bail!("Hood migration batch block reorged during fixed-block snapshots");
+    }
+    Ok(results)
+}
+
+async fn hood_pool_snapshot_matches(
+    rpc: &NoxaRpcClient,
+    evidence: &HoodMigrationEvidence,
+    profile: &HoodExpectedProfile,
+) -> Result<bool> {
+    let factory = profile
+        .identity(HoodIdentityRole::V3Factory)
+        .context("Hood profile has no V3 factory identity")?
+        .address;
+    let weth = profile
+        .identity(HoodIdentityRole::Weth)
+        .context("Hood profile has no WETH identity")?
+        .address;
+    let snapshot = rpc
+        .hood_v3_pool_snapshot_at(
+            factory,
+            evidence.pool,
+            weth.min(evidence.token),
+            weth.max(evidence.token),
+            profile.v3_fee,
+            evidence.l2_block_number,
+        )
+        .await?;
+    Ok(validate_hood_migrated_v3_pool_snapshot(
+        evidence, &snapshot, profile,
+    ))
+}
+
 fn hood_token_from_receipt(logs: &[ReceiptLog]) -> Option<alloy_primitives::Address> {
+    let tokens = hood_tokens_from_receipt(logs);
+    (tokens.len() == 1).then(|| tokens[0])
+}
+
+fn hood_tokens_from_receipt(logs: &[ReceiptLog]) -> Vec<alloy_primitives::Address> {
     let created = keccak256(HOOD_TOKEN_CREATED_SIGNATURE.as_bytes());
     let trade = keccak256(HOOD_TRADE_SIGNATURE.as_bytes());
-    let tokens = logs
+    let mut tokens = logs
         .iter()
         .filter(|log| {
             log.address == HOOD_FACTORY
                 && matches!(log.topics.first(), Some(topic) if *topic == created || *topic == trade)
         })
-        .map(|log| topic_address(log, 1))
-        .collect::<Option<Vec<_>>>()?;
-    let first = *tokens.first()?;
-    tokens.iter().all(|token| *token == first).then_some(first)
+        .filter_map(|log| topic_address(log, 1))
+        .collect::<Vec<_>>();
+    tokens.sort_unstable();
+    tokens.dedup();
+    tokens
 }
 
 fn topic_address(log: &ReceiptLog, index: usize) -> Option<alloy_primitives::Address> {
@@ -3597,5 +3878,135 @@ mod tests {
         let mut lookalike = fixture.receipt.logs;
         lookalike[0].address = Address::with_last_byte(0xee);
         assert_eq!(hood_token_from_receipt(&lookalike), None);
+    }
+
+    #[derive(Deserialize)]
+    struct HoodBatchScopeFixture {
+        chain_id: u64,
+        factory: alloy_primitives::Address,
+        batches: Vec<HoodBatchFixture>,
+    }
+
+    #[derive(Deserialize)]
+    struct HoodBatchFixture {
+        transaction_hash: B256,
+        migrations: Vec<HoodBatchMigrationFixture>,
+    }
+
+    #[derive(Deserialize)]
+    struct HoodBatchMigrationFixture {
+        log_index: u64,
+        token: alloy_primitives::Address,
+        pool: alloy_primitives::Address,
+    }
+
+    #[test]
+    fn exact_five_and_two_migration_receipts_expand_to_distinct_token_scopes() {
+        let fixture: HoodBatchScopeFixture = serde_json::from_str(include_str!(
+            "../../tests/fixtures/hood-migrated-batch-scopes-live-proof.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture.chain_id, CHAIN_ID);
+        assert_eq!(fixture.factory, HOOD_FACTORY);
+        assert_eq!(fixture.batches.len(), 2);
+        for (batch, expected_count) in fixture.batches.iter().zip([5_usize, 2]) {
+            assert_ne!(batch.transaction_hash, B256::ZERO);
+            let logs = batch
+                .migrations
+                .iter()
+                .map(|migration| ReceiptLog {
+                    address: HOOD_FACTORY,
+                    log_index: migration.log_index,
+                    topics: vec![
+                        keccak256(HOOD_TRADE_SIGNATURE.as_bytes()),
+                        B256::left_padding_from(migration.token.as_slice()),
+                    ],
+                    data: alloy_primitives::Bytes::new(),
+                })
+                .collect::<Vec<_>>();
+            let scopes = hood_tokens_from_receipt(&logs);
+            assert_eq!(scopes.len(), expected_count);
+            assert_eq!(
+                scopes.iter().copied().collect::<HashSet<_>>().len(),
+                expected_count
+            );
+            assert_eq!(
+                batch
+                    .migrations
+                    .iter()
+                    .map(|migration| migration.pool)
+                    .collect::<HashSet<_>>()
+                    .len(),
+                expected_count
+            );
+            assert_eq!(hood_token_from_receipt(&logs), None);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit public read-only proof for exact historical Hood migration batches"]
+    async fn exact_historical_hood_batches_fan_out_to_distinct_quotes() {
+        let fixture: HoodBatchScopeFixture = serde_json::from_str(include_str!(
+            "../../tests/fixtures/hood-migrated-batch-scopes-live-proof.json"
+        ))
+        .unwrap();
+        let rpc = NoxaRpcClient::with_url(hermes_feed::robinhood::PUBLIC_RPC_URL).unwrap();
+        for ((batch, expected_count), expected_available) in
+            fixture.batches.iter().zip([5_usize, 2]).zip([3_usize, 2])
+        {
+            let receipt = rpc.receipt(batch.transaction_hash).await.unwrap().unwrap();
+            let hits = receipt
+                .logs
+                .iter()
+                .filter(|log| launchpad_for_ground_truth_log(log) == Some(LaunchpadId::HoodFun))
+                .cloned()
+                .map(|log| GroundTruthHit {
+                    l2_block_number: receipt.l2_block_number,
+                    block_hash: receipt.block_hash,
+                    transaction_index: receipt.transaction_index,
+                    log,
+                })
+                .collect::<Vec<_>>();
+            let records = reconcile_candidates(
+                &rpc,
+                ObservedCandidate {
+                    tx_hash: batch.transaction_hash,
+                    launchpad: LaunchpadId::HoodFun,
+                    observer_claim: true,
+                    ground_truth_event: true,
+                    ground_truth_hits: hits,
+                    wrapper: WrapperKind::Direct,
+                    wrapper_provenance: None,
+                },
+                Duration::from_secs(10),
+                Duration::from_millis(10),
+                bankr_quote_policy(),
+                bankr_reconcile_profiles(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(records.len(), expected_count);
+            assert_eq!(
+                records
+                    .iter()
+                    .filter_map(|record| record.evidence.scope_token)
+                    .collect::<HashSet<_>>()
+                    .len(),
+                expected_count
+            );
+            let blockers = records
+                .iter()
+                .map(|record| record.evidence.protocol_blocker.clone())
+                .collect::<Vec<_>>();
+            let available = records
+                .iter()
+                .filter(|record| {
+                    record.evidence.quote_status == QuoteStatus::Available
+                        && record.hood_migration.is_some()
+                        && record.hood_migrated_quote.is_some()
+                })
+                .count();
+            assert_eq!(available, expected_available, "{blockers:?}");
+        }
     }
 }

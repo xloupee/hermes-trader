@@ -1,0 +1,28 @@
+{
+  "chain_id": 4663,
+  "event_topic": "0x57aa04076c8e8e00f17b6f082eb7c65ec1aa90f07da036638ccfcb07dcae6cc8",
+  "factory": "0x5fcc1df0dc020cf454e742e9a8ae2554c37a452c",
+  "batches": [
+    {
+      "transaction_hash": "0xb44053ba23f3ad57ad40f7aff0eb035cdee00837fa8df9596561672770687504",
+      "l2_block_number": 10555993,
+      "receipt_log_count": 120,
+      "migrations": [
+        {"log_index": 26, "token": "0xa9cb25ad4d5aeb60cf2969b393cfb106320c600d", "pool": "0x859cd17c11d1324ad182f0bee1cf88b1a559ce52"},
+        {"log_index": 50, "token": "0x48340b69eee8eba8648b741253198cc6c1bf600d", "pool": "0xb1316377c742dab8710080ae9bfdbad0fdd9da87"},
+        {"log_index": 74, "token": "0x8844e7734f476d80ac85ff70c6247966d80d600d", "pool": "0x0ea524bf1a318e57810c8506309bb7f3f1bead0d"},
+        {"log_index": 98, "token": "0x0b960b7d4a6909466f867127cdc34fb96521600d", "pool": "0x0a282dc753178d76a9045ca9eddafc79e7656762"},
+        {"log_index": 122, "token": "0x964d13adf3847f34a3056a233bae5fcadfeb600d", "pool": "0xdc3637c427ef51a51b09a47777eeb02e0367d9e2"}
+      ]
+    },
+    {
+      "transaction_hash": "0x6f2eda661b50e42e14b9c9303d29675f82ab6276208c89c3151bc45f89922ced",
+      "l2_block_number": 10563712,
+      "receipt_log_count": 48,
+      "migrations": [
+        {"log_index": 31, "token": "0x52d2fc999629733677eae8efc2d3cd1bcffe600d", "pool": "0x18d2bbf1d35888aa15626e09c2467c7d8db05229"},
+        {"log_index": 55, "token": "0xe10cf5ad32b6eea9b2ed5cf7a0f5c9c44fe2600d", "pool": "0x9cccea9331aaa7fdb45cd5280bb0c7bafb6f2bb3"}
+      ]
+    }
+  ]
+}

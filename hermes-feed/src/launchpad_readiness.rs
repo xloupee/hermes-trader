@@ -176,7 +176,7 @@ pub fn supported_profile_envelopes(launchpad: LaunchpadId) -> Option<&'static [&
             "erc7579",
         ]),
         LaunchpadId::Pons => Some(&["current_generation"]),
-        LaunchpadId::HoodFun => Some(&["current_curve"]),
+        LaunchpadId::HoodFun => Some(&["current_curve", "migrated_v3_boundary"]),
         _ => None,
     }
 }

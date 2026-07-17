@@ -71,6 +71,8 @@ struct Counts {
 #[derive(Debug, Serialize)]
 struct PlanSizing {
     tx_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope_token: Option<String>,
     amount_in: U256,
     expected_output: U256,
     min_receive: U256,
@@ -534,11 +536,16 @@ fn collect_plans(
         }
         let launchpad = parse_launchpad(&value, "launchpad")?;
         let tx_hash = string_field(&value, "tx_hash")?.to_owned();
+        let scope_token = value
+            .get("scope_token")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
         let amount_in = u256_field(&value, "amount_in")?;
         let expected = u256_field(&value, "expected_output")?;
         let minimum = u256_field(&value, "min_receive")?;
         entries.entry(launchpad).or_default().push(plan_sizing(
             tx_hash.clone(),
+            scope_token.clone(),
             amount_in,
             expected,
             minimum,
@@ -547,6 +554,7 @@ fn collect_plans(
         let exit_minimum = u256_field(&value, "exit_min_receive")?;
         exits.entry(launchpad).or_default().push(plan_sizing(
             tx_hash,
+            scope_token,
             expected,
             exit_expected,
             exit_minimum,
@@ -559,7 +567,13 @@ fn collect_plans(
     Ok(())
 }
 
-fn plan_sizing(tx_hash: String, amount: U256, expected: U256, minimum: U256) -> Result<PlanSizing> {
+fn plan_sizing(
+    tx_hash: String,
+    scope_token: Option<String>,
+    amount: U256,
+    expected: U256,
+    minimum: U256,
+) -> Result<PlanSizing> {
     let haircut = expected
         .checked_sub(minimum)
         .context("minimum receive exceeds expected output")?;
@@ -573,6 +587,7 @@ fn plan_sizing(tx_hash: String, amount: U256, expected: U256, minimum: U256) -> 
     };
     Ok(PlanSizing {
         tx_hash,
+        scope_token,
         amount_in: amount,
         expected_output: expected,
         min_receive: minimum,
@@ -709,13 +724,27 @@ mod tests {
     fn plan_aggregation_is_checked_and_preserves_slippage() {
         let plan = plan_sizing(
             "0x01".into(),
+            Some("0x0000000000000000000000000000000000000001".into()),
             U256::from(100),
             U256::from(90),
             U256::from(81),
         )
         .unwrap();
         assert_eq!(plan.slippage_bps, U256::from(1_000));
-        assert!(plan_sizing("0x02".into(), U256::ZERO, U256::from(1), U256::from(2)).is_err());
+        assert_eq!(
+            plan.scope_token.as_deref(),
+            Some("0x0000000000000000000000000000000000000001")
+        );
+        assert!(
+            plan_sizing(
+                "0x02".into(),
+                None,
+                U256::ZERO,
+                U256::from(1),
+                U256::from(2)
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -88,11 +88,14 @@ pub use eip7702_self_batch::{
     validate_pons_eip7702_reconciliation,
 };
 pub use hood_receipt_quote::{
-    HOOD_GRADUATED_TOPIC, HOOD_MIGRATED_TOPIC, HOOD_TOKEN_CREATED_TOPIC, HOOD_TRADE_TOPIC,
-    HoodExpectedProfile, HoodIdentityRole, HoodMigrationEvidence, HoodMigrationLogOrderEvidence,
+    HOOD_GRADUATED_TOPIC, HOOD_MIGRATED_PAPER_ENTRY_WEI, HOOD_MIGRATED_PAPER_MAX_ENTRY_WEI,
+    HOOD_MIGRATED_PAPER_SLIPPAGE_BPS, HOOD_MIGRATED_TOPIC, HOOD_TOKEN_CREATED_TOPIC,
+    HOOD_TRADE_TOPIC, HoodExpectedProfile, HoodIdentityRole, HoodMigratedV3PaperLeg,
+    HoodMigratedV3PaperQuote, HoodMigrationEvidence, HoodMigrationLogOrderEvidence,
     HoodPaperEntryQuote, HoodPaperExitQuote, HoodQuoteError, HoodQuotePolicy,
     HoodReceiptPaperQuote, HoodRuntimeIdentity, HoodSemanticProfile, HoodStateVersion,
-    quote_hood_curve_receipt, validate_hood_migration_boundary_evidence,
+    quote_hood_curve_receipt, quote_hood_migrated_v3_receipt,
+    validate_hood_migrated_v3_pool_snapshot, validate_hood_migration_boundary_evidence,
     verify_hood_graduation_receipt,
 };
 pub use hot_path::{
@@ -132,9 +135,9 @@ pub use noxa_predict::{
 };
 pub use noxa_rpc::{
     ActiveNoxaLaunchRecord, ActiveNoxaTokenSnapshot, FactoryStatus, HoodConfigSnapshot,
-    HoodCurveStateSnapshot, HoodMarketSnapshot, HoodProtocolSnapshot, NoxaReceipt, NoxaRpcClient,
-    ObservedLaunchLog, ObservedPoolSwapLog, RobinhoodBlock, RobinhoodTransaction,
-    RpcMetricsSnapshot, TokenRestrictionSnapshot, V3PoolSnapshot,
+    HoodCurveStateSnapshot, HoodMarketSnapshot, HoodProtocolSnapshot, HoodV3PoolSnapshot,
+    NoxaReceipt, NoxaRpcClient, ObservedLaunchLog, ObservedPoolSwapLog, RobinhoodBlock,
+    RobinhoodTransaction, RpcMetricsSnapshot, TokenRestrictionSnapshot, V3PoolSnapshot,
 };
 pub use noxa_trade::{
     ApprovalTransactionPlan, PreparedRawTransaction, TradePlanError, TradeTransactionPlan,

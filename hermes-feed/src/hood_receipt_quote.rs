@@ -12,16 +12,21 @@ use thiserror::Error;
 
 use crate::launchpad_adapter::{ActionKind, LaunchpadId};
 use crate::noxa_abi::ReceiptLog;
-use crate::noxa_rpc::{HoodMarketSnapshot, NoxaReceipt, RobinhoodBlock, RobinhoodTransaction};
+use crate::noxa_rpc::{
+    HoodMarketSnapshot, HoodV3PoolSnapshot, NoxaReceipt, RobinhoodBlock, RobinhoodTransaction,
+};
 use crate::robinhood::CHAIN_ID;
 use crate::tier2_curve::{
     CurveAdapterError, CurveFormula, CurveState, HOOD_BUY_FOR_SELECTOR, HOOD_BUY_SELECTOR,
     HOOD_CREATE_SELECTOR, HOOD_FACTORY, HOOD_SELL_SELECTOR, HoodCurveBuyQuote, HoodCurveSellQuote,
     quote_hood_curve_buy, quote_hood_curve_sell,
 };
-use crate::v3_pool::V3PoolState;
+use crate::v3_pool::{V3PoolState, V3Quote};
 
 const BPS: u16 = 10_000;
+pub const HOOD_MIGRATED_PAPER_ENTRY_WEI: u64 = 1_000_000_000_000_000;
+pub const HOOD_MIGRATED_PAPER_MAX_ENTRY_WEI: u64 = 10_000_000_000_000_000;
+pub const HOOD_MIGRATED_PAPER_SLIPPAGE_BPS: u16 = 100;
 const TRANSFER_TOPIC: B256 =
     alloy_primitives::b256!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
 
@@ -477,12 +482,15 @@ pub struct HoodMigrationEvidence {
     pub leader: Address,
     pub trader: Address,
     pub l2_block_number: u64,
+    pub block_hash: B256,
+    pub transaction_index: u64,
     pub token_id: U256,
     pub raised_eth: U256,
     pub declared_eth_liquidity: U256,
     pub declared_token_liquidity: U256,
     pub actual_eth_liquidity: U256,
     pub actual_token_liquidity: U256,
+    pub position_liquidity: U256,
     pub declared_and_actual_liquidity_match: bool,
     pub pool_initialize_sqrt_price_x96: U256,
     pub pool_initialize_tick: i32,
@@ -505,6 +513,210 @@ pub struct HoodMigrationEvidence {
     pub execution_eligible: bool,
     pub execution_blocker: String,
     pub broadcast: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct HoodMigratedV3PaperLeg {
+    pub amount_in: U256,
+    pub expected_output: U256,
+    pub min_receive: U256,
+    pub slippage_bps: u16,
+    pub state_after: V3Quote,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct HoodMigratedV3PaperQuote {
+    pub record_type: String,
+    pub tx_hash: B256,
+    pub launchpad: LaunchpadId,
+    pub token: Address,
+    pub pool: Address,
+    pub leader: Address,
+    pub l2_block_number: u64,
+    pub block_hash: B256,
+    pub transaction_index: u64,
+    pub quote_source: String,
+    pub sizing_source: String,
+    pub receipt_end_sqrt_price_x96: U256,
+    pub receipt_end_tick: i32,
+    pub receipt_end_liquidity: U256,
+    pub position_liquidity: U256,
+    pub tick_lower: i32,
+    pub tick_upper: i32,
+    pub migration: HoodMigrationEvidence,
+    pub entry: HoodMigratedV3PaperLeg,
+    pub full_position_exit: HoodMigratedV3PaperLeg,
+    pub simulated_round_trip_return_bps: U256,
+    pub execution_eligible: bool,
+    pub execution_blocker: String,
+    pub broadcast: bool,
+}
+
+/// Derive a fixed-size, receipt-confirmed Hood migrated-market paper entry and
+/// state-chained full exit. The terminal receipt may sit above the full-range
+/// position with zero active liquidity: WETH is token0, so a buy traverses the
+/// empty range down to the initialized upper tick before consuming input.
+pub fn quote_hood_migrated_v3_receipt(
+    evidence: &HoodMigrationEvidence,
+    profile: &HoodExpectedProfile,
+) -> Result<HoodMigratedV3PaperQuote, HoodQuoteError> {
+    profile.validate()?;
+    if !validate_hood_migration_boundary_evidence(evidence, profile)
+        || evidence.actual_eth_liquidity == U256::ZERO
+        || evidence.actual_token_liquidity == U256::ZERO
+    {
+        return Err(HoodQuoteError::MigrationMismatch);
+    }
+    let weth = profile
+        .identity(HoodIdentityRole::Weth)
+        .ok_or(HoodQuoteError::ProfileMismatch)?
+        .address;
+    if weth >= evidence.token {
+        return Err(HoodQuoteError::MigrationMismatch);
+    }
+    let position_liquidity = u128::try_from(evidence.position_liquidity)
+        .ok()
+        .filter(|amount| *amount != 0)
+        .ok_or(HoodQuoteError::MigrationMismatch)?;
+    let mut receipt_end = V3PoolState::new(
+        evidence.pool,
+        weth,
+        evidence.token,
+        profile.v3_fee,
+        profile.v3_tick_spacing,
+        evidence.receipt_end_sqrt_price_x96,
+        evidence.receipt_end_tick,
+        u128::try_from(evidence.receipt_end_liquidity)
+            .map_err(|_| HoodQuoteError::MigrationMismatch)?,
+    )
+    .map_err(|_| HoodQuoteError::MigrationMismatch)?;
+    receipt_end
+        .add_position(
+            profile.full_range_tick_lower,
+            profile.full_range_tick_upper,
+            position_liquidity,
+        )
+        .map_err(|_| HoodQuoteError::MigrationMismatch)?;
+    let amount_in = U256::from(HOOD_MIGRATED_PAPER_ENTRY_WEI);
+    if amount_in > U256::from(HOOD_MIGRATED_PAPER_MAX_ENTRY_WEI) {
+        return Err(HoodQuoteError::InvalidEnvelope);
+    }
+    let entry = receipt_end
+        .quote_exact_input(weth, amount_in, None)
+        .map_err(|_| HoodQuoteError::IncompleteQuote)?;
+    if entry.amount_in_consumed != amount_in
+        || entry.amount_out == U256::ZERO
+        || entry.initialized_ticks_crossed == 0
+        || entry.liquidity_after != position_liquidity
+    {
+        return Err(HoodQuoteError::IncompleteQuote);
+    }
+    let mut post_entry = V3PoolState::new(
+        evidence.pool,
+        weth,
+        evidence.token,
+        profile.v3_fee,
+        profile.v3_tick_spacing,
+        evidence.receipt_end_sqrt_price_x96,
+        evidence.receipt_end_tick,
+        0,
+    )
+    .map_err(|_| HoodQuoteError::MigrationMismatch)?;
+    post_entry
+        .add_position(
+            profile.full_range_tick_lower,
+            profile.full_range_tick_upper,
+            position_liquidity,
+        )
+        .map_err(|_| HoodQuoteError::MigrationMismatch)?;
+    post_entry
+        .set_observation(
+            entry.sqrt_price_x96_after,
+            entry.tick_after,
+            entry.liquidity_after,
+        )
+        .map_err(|_| HoodQuoteError::MigrationMismatch)?;
+    let exit = post_entry
+        .quote_exact_input(evidence.token, entry.amount_out, None)
+        .map_err(|_| HoodQuoteError::IncompleteQuote)?;
+    if exit.amount_in_consumed != entry.amount_out || exit.amount_out == U256::ZERO {
+        return Err(HoodQuoteError::IncompleteQuote);
+    }
+    let apply_slippage = |amount: U256| {
+        amount
+            .checked_mul(U256::from(BPS - HOOD_MIGRATED_PAPER_SLIPPAGE_BPS))
+            .and_then(|value| value.checked_div(U256::from(BPS)))
+            .ok_or(HoodQuoteError::IncompleteQuote)
+    };
+    let round_trip = exit
+        .amount_out
+        .checked_mul(U256::from(BPS))
+        .and_then(|value| value.checked_div(amount_in))
+        .ok_or(HoodQuoteError::IncompleteQuote)?;
+    Ok(HoodMigratedV3PaperQuote {
+        record_type: "launchpad_hood_migrated_v3_paper_quote".into(),
+        tx_hash: evidence.tx_hash,
+        launchpad: LaunchpadId::HoodFun,
+        token: evidence.token,
+        pool: evidence.pool,
+        leader: evidence.leader,
+        l2_block_number: evidence.l2_block_number,
+        block_hash: evidence.block_hash,
+        transaction_index: evidence.transaction_index,
+        quote_source: "confirmed_receipt_end_hood_migrated_v3_state".into(),
+        sizing_source: "fixed_0_001_weth_policy_capped_at_0_01_weth".into(),
+        receipt_end_sqrt_price_x96: evidence.receipt_end_sqrt_price_x96,
+        receipt_end_tick: evidence.receipt_end_tick,
+        receipt_end_liquidity: evidence.receipt_end_liquidity,
+        position_liquidity: U256::from(position_liquidity),
+        tick_lower: profile.full_range_tick_lower,
+        tick_upper: profile.full_range_tick_upper,
+        migration: evidence.clone(),
+        entry: HoodMigratedV3PaperLeg {
+            amount_in,
+            expected_output: entry.amount_out,
+            min_receive: apply_slippage(entry.amount_out)?,
+            slippage_bps: HOOD_MIGRATED_PAPER_SLIPPAGE_BPS,
+            state_after: entry,
+        },
+        full_position_exit: HoodMigratedV3PaperLeg {
+            amount_in: exit.amount_in_requested,
+            expected_output: exit.amount_out,
+            min_receive: apply_slippage(exit.amount_out)?,
+            slippage_bps: HOOD_MIGRATED_PAPER_SLIPPAGE_BPS,
+            state_after: exit,
+        },
+        simulated_round_trip_return_bps: round_trip,
+        execution_eligible: false,
+        execution_blocker: "paper_only_no_signer_or_broadcast_capability".into(),
+        broadcast: false,
+    })
+}
+
+pub fn validate_hood_migrated_v3_pool_snapshot(
+    evidence: &HoodMigrationEvidence,
+    snapshot: &HoodV3PoolSnapshot,
+    profile: &HoodExpectedProfile,
+) -> bool {
+    if profile.validate().is_err() {
+        return false;
+    }
+    let Some(weth) = profile
+        .identity(HoodIdentityRole::Weth)
+        .map(|identity| identity.address)
+    else {
+        return false;
+    };
+    snapshot.pool == evidence.pool
+        && snapshot.factory_pool == evidence.pool
+        && snapshot.token0 == weth.min(evidence.token)
+        && snapshot.token1 == weth.max(evidence.token)
+        && snapshot.fee == profile.v3_fee
+        && snapshot.tick_spacing == profile.v3_tick_spacing
+        && snapshot.sqrt_price_x96 == evidence.receipt_end_sqrt_price_x96
+        && snapshot.tick == evidence.receipt_end_tick
+        && U256::from(snapshot.liquidity) == evidence.receipt_end_liquidity
+        && snapshot.code_bytes != 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -564,7 +776,8 @@ pub fn validate_hood_migration_boundary_evidence(
         return false;
     };
     let order = evidence.log_order.ordered_indices();
-    evidence.reconstructed_boundary_sqrt_price_x96 == expected_boundary_sqrt_price_x96
+    evidence.block_hash != B256::ZERO
+        && evidence.reconstructed_boundary_sqrt_price_x96 == expected_boundary_sqrt_price_x96
         && evidence.reconstructed_boundary_tick == profile.full_range_tick_upper
         && evidence.reconstructed_boundary_liquidity == U256::ZERO
         && evidence.receipt_end_liquidity == U256::ZERO
@@ -783,21 +996,18 @@ pub fn verify_hood_graduation_receipt(
         .ok_or(HoodQuoteError::MigrationMismatch)?
         .address;
 
-    let pool_created_log = exact_migration_log(
-        &receipt.logs,
-        v3_factory,
-        events::PoolCreated::SIGNATURE_HASH,
-    )?;
-    let pool_created = events::PoolCreated::decode_raw_log_validate(
-        pool_created_log.topics.iter().copied(),
-        &pool_created_log.data,
-    )
-    .map_err(|_| HoodQuoteError::MigrationMismatch)?;
     let (token0, token1) = if weth < pre.token {
         (weth, pre.token)
     } else {
         (pre.token, weth)
     };
+    let pool_created_log =
+        exact_pool_created_log(&receipt.logs, v3_factory, token0, token1, profile.v3_fee)?;
+    let pool_created = events::PoolCreated::decode_raw_log_validate(
+        pool_created_log.topics.iter().copied(),
+        &pool_created_log.data,
+    )
+    .map_err(|_| HoodQuoteError::MigrationMismatch)?;
     let expected_pool = crate::noxa_predict::predict_v3_pool_address(
         v3_factory,
         token0,
@@ -824,22 +1034,29 @@ pub fn verify_hood_graduation_receipt(
     let initialize_tick =
         i32::try_from(initialize.tick).map_err(|_| HoodQuoteError::MigrationMismatch)?;
 
-    let trade_log = exact_migration_log(&receipt.logs, HOOD_FACTORY, HOOD_TRADE_TOPIC)?;
-    let trade = exact_trade(&receipt.logs)?.ok_or(HoodQuoteError::MigrationMismatch)?;
-    let graduated_log = exact_migration_log(&receipt.logs, HOOD_FACTORY, HOOD_GRADUATED_TOPIC)?;
+    let trade_log =
+        exact_token_migration_log(&receipt.logs, HOOD_FACTORY, HOOD_TRADE_TOPIC, pre.token)?;
+    let trade = exact_trade_for_token(&receipt.logs, pre.token)?;
+    let graduated_log =
+        exact_token_migration_log(&receipt.logs, HOOD_FACTORY, HOOD_GRADUATED_TOPIC, pre.token)?;
     let graduated = events::Graduated::decode_raw_log_validate(
         graduated_log.topics.iter().copied(),
         &graduated_log.data,
     )
     .map_err(|_| HoodQuoteError::MigrationMismatch)?;
-    let v3_migrated_log =
-        exact_migration_log(&receipt.logs, migrator, events::V3Migrated::SIGNATURE_HASH)?;
+    let v3_migrated_log = exact_token_migration_log(
+        &receipt.logs,
+        migrator,
+        events::V3Migrated::SIGNATURE_HASH,
+        pre.token,
+    )?;
     let v3_migrated = events::V3Migrated::decode_raw_log_validate(
         v3_migrated_log.topics.iter().copied(),
         &v3_migrated_log.data,
     )
     .map_err(|_| HoodQuoteError::MigrationMismatch)?;
-    let migrated_log = exact_migration_log(&receipt.logs, HOOD_FACTORY, HOOD_MIGRATED_TOPIC)?;
+    let migrated_log =
+        exact_token_migration_log(&receipt.logs, HOOD_FACTORY, HOOD_MIGRATED_TOPIC, pre.token)?;
     let migrated = events::Migrated::decode_raw_log_validate(
         migrated_log.topics.iter().copied(),
         &migrated_log.data,
@@ -917,17 +1134,25 @@ pub fn verify_hood_graduation_receipt(
     {
         return Err(HoodQuoteError::MigrationMismatch);
     }
-    let increase_log = exact_migration_log(
+    let increase_log = exact_u256_topic_migration_log(
         &receipt.logs,
         position_manager,
         events::IncreaseLiquidity::SIGNATURE_HASH,
+        1,
+        v3_migrated.tokenId,
     )?;
     let increase = events::IncreaseLiquidity::decode_raw_log_validate(
         increase_log.topics.iter().copied(),
         &increase_log.data,
     )
     .map_err(|_| HoodQuoteError::MigrationMismatch)?;
-    let locked_log = exact_migration_log(&receipt.logs, locker, events::Locked::SIGNATURE_HASH)?;
+    let locked_log = exact_u256_topic_migration_log(
+        &receipt.logs,
+        locker,
+        events::Locked::SIGNATURE_HASH,
+        1,
+        v3_migrated.tokenId,
+    )?;
     let locked = events::Locked::decode_raw_log_validate(
         locked_log.topics.iter().copied(),
         &locked_log.data,
@@ -1096,12 +1321,15 @@ pub fn verify_hood_graduation_receipt(
         leader: transaction.from,
         trader: trade.trader,
         l2_block_number: receipt.l2_block_number,
+        block_hash: receipt.block_hash,
+        transaction_index: receipt.transaction_index,
         token_id: v3_migrated.tokenId,
         raised_eth,
         declared_eth_liquidity: expected_eth_liquidity,
         declared_token_liquidity: post.token_lp_supply,
         actual_eth_liquidity,
         actual_token_liquidity,
+        position_liquidity: U256::from(mint.amount),
         declared_and_actual_liquidity_match,
         pool_initialize_sqrt_price_x96: U256::from(initialize.sqrtPriceX96),
         pool_initialize_tick: initialize_tick,
@@ -1177,6 +1405,103 @@ fn exact_migration_log(
         return Err(HoodQuoteError::MigrationMismatch);
     }
     Ok(log)
+}
+
+fn exact_token_migration_log(
+    logs: &[ReceiptLog],
+    address: Address,
+    topic: B256,
+    token: Address,
+) -> Result<&ReceiptLog, HoodQuoteError> {
+    let mut matching = logs.iter().filter(|log| {
+        log.address == address
+            && log.topics.first() == Some(&topic)
+            && topic_address(log, 1) == Some(token)
+    });
+    let log = matching.next().ok_or(HoodQuoteError::MigrationMismatch)?;
+    if matching.next().is_some() {
+        return Err(HoodQuoteError::MigrationMismatch);
+    }
+    Ok(log)
+}
+
+fn exact_u256_topic_migration_log(
+    logs: &[ReceiptLog],
+    address: Address,
+    topic: B256,
+    topic_index: usize,
+    value: U256,
+) -> Result<&ReceiptLog, HoodQuoteError> {
+    let expected = B256::from(value.to_be_bytes::<32>());
+    let mut matching = logs.iter().filter(|log| {
+        log.address == address
+            && log.topics.first() == Some(&topic)
+            && log.topics.get(topic_index) == Some(&expected)
+    });
+    let log = matching.next().ok_or(HoodQuoteError::MigrationMismatch)?;
+    if matching.next().is_some() {
+        return Err(HoodQuoteError::MigrationMismatch);
+    }
+    Ok(log)
+}
+
+fn exact_pool_created_log(
+    logs: &[ReceiptLog],
+    factory: Address,
+    token0: Address,
+    token1: Address,
+    fee: u32,
+) -> Result<&ReceiptLog, HoodQuoteError> {
+    let matching = logs
+        .iter()
+        .filter(|log| {
+            if log.address != factory
+                || log.topics.first() != Some(&events::PoolCreated::SIGNATURE_HASH)
+            {
+                return false;
+            }
+            events::PoolCreated::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+                .is_ok_and(|event| {
+                    event.token0 == token0
+                        && event.token1 == token1
+                        && u32::try_from(event.fee).ok() == Some(fee)
+                })
+        })
+        .collect::<Vec<_>>();
+    match matching.as_slice() {
+        [log] => Ok(log),
+        _ => Err(HoodQuoteError::MigrationMismatch),
+    }
+}
+
+fn exact_trade_for_token(
+    logs: &[ReceiptLog],
+    token: Address,
+) -> Result<TradeEvidence, HoodQuoteError> {
+    let matching = logs
+        .iter()
+        .filter(|log| {
+            log.address == HOOD_FACTORY
+                && log.topics.first() == Some(&HOOD_TRADE_TOPIC)
+                && topic_address(log, 1) == Some(token)
+        })
+        .collect::<Vec<_>>();
+    let [log] = matching.as_slice() else {
+        return Err(HoodQuoteError::MigrationMismatch);
+    };
+    let event = events::Trade::decode_raw_log_validate(log.topics.iter().copied(), &log.data)
+        .map_err(|_| HoodQuoteError::MigrationMismatch)?;
+    Ok(TradeEvidence {
+        token: event.token,
+        trader: event.trader,
+        is_buy: event.isBuy,
+        eth_amount: event.ethAmount,
+        token_amount: event.tokenAmount,
+        fee: event.fee,
+        virtual_eth_after: event.virtualEthAfter,
+        virtual_tokens_after: event.virtualTokensAfter,
+        log_index: log.log_index,
+    })
 }
 
 fn validate_envelope(
@@ -2179,6 +2504,57 @@ mod tests {
         assert!(evidence.terminal_zero_liquidity_boundary_observed);
         assert!(!evidence.declared_and_actual_liquidity_match);
         assert!(!evidence.v3_quote_available);
+        assert_eq!(evidence.position_liquidity, U256::from(7_914_437_u64));
+        let quote =
+            quote_hood_migrated_v3_receipt(&evidence, &HoodExpectedProfile::production()).unwrap();
+        assert_eq!(
+            quote.entry.amount_in,
+            U256::from(HOOD_MIGRATED_PAPER_ENTRY_WEI)
+        );
+        assert_eq!(
+            quote.entry.expected_output,
+            U256::from_str_radix("145465512933016462542115172", 10).unwrap()
+        );
+        assert_eq!(
+            quote.entry.min_receive,
+            U256::from_str_radix("144010857803686297916694020", 10).unwrap()
+        );
+        assert_eq!(quote.entry.state_after.initialized_ticks_crossed, 1);
+        assert_eq!(
+            quote.full_position_exit.expected_output,
+            U256::from(989_999_999_999_957_u64)
+        );
+        assert_eq!(
+            quote.full_position_exit.min_receive,
+            U256::from(980_099_999_999_957_u64)
+        );
+        assert_eq!(quote.simulated_round_trip_return_bps, U256::from(9_899_u64));
+        let mut pool_snapshot = HoodV3PoolSnapshot {
+            pool: evidence.pool,
+            factory_pool: evidence.pool,
+            token0: HoodExpectedProfile::production()
+                .identity(HoodIdentityRole::Weth)
+                .unwrap()
+                .address,
+            token1: evidence.token,
+            fee: 10_000,
+            tick_spacing: 200,
+            sqrt_price_x96: evidence.receipt_end_sqrt_price_x96,
+            tick: evidence.receipt_end_tick,
+            liquidity: 0,
+            code_bytes: 22_142,
+        };
+        assert!(validate_hood_migrated_v3_pool_snapshot(
+            &evidence,
+            &pool_snapshot,
+            &HoodExpectedProfile::production(),
+        ));
+        pool_snapshot.factory_pool = Address::with_last_byte(1);
+        assert!(!validate_hood_migrated_v3_pool_snapshot(
+            &evidence,
+            &pool_snapshot,
+            &HoodExpectedProfile::production(),
+        ));
         assert!(!evidence.execution_eligible);
         assert!(!evidence.broadcast);
     }
@@ -2233,6 +2609,119 @@ mod tests {
         assert!(!validate_hood_migration_boundary_evidence(
             &boundary_not_crossed,
             &profile
+        ));
+    }
+
+    #[test]
+    fn migrated_v3_quote_rejects_receipt_and_position_tampering() {
+        let value = fixture(include_str!(
+            "../tests/fixtures/hood-graduation-migration-live-proof.json"
+        ));
+        let profile = HoodExpectedProfile::production();
+        let evidence = verify_hood_graduation_receipt(
+            &value.transaction,
+            &value.receipt,
+            &value.block,
+            &value.pre_snapshot(),
+            &value.snapshot(),
+            &profile,
+        )
+        .unwrap();
+
+        let mut zero_position = evidence.clone();
+        zero_position.position_liquidity = U256::ZERO;
+        assert!(matches!(
+            quote_hood_migrated_v3_receipt(&zero_position, &profile),
+            Err(HoodQuoteError::MigrationMismatch)
+        ));
+
+        let mut wrong_terminal_tick = evidence.clone();
+        wrong_terminal_tick.receipt_end_tick = wrong_terminal_tick.reconstructed_boundary_tick;
+        assert!(matches!(
+            quote_hood_migrated_v3_receipt(&wrong_terminal_tick, &profile),
+            Err(HoodQuoteError::MigrationMismatch)
+        ));
+
+        let mut nonzero_terminal_liquidity = evidence.clone();
+        nonzero_terminal_liquidity.receipt_end_liquidity = U256::from(1_u8);
+        assert!(matches!(
+            quote_hood_migrated_v3_receipt(&nonzero_terminal_liquidity, &profile),
+            Err(HoodQuoteError::MigrationMismatch)
+        ));
+
+        let mut unavailable_liquidity = evidence;
+        unavailable_liquidity.position_liquidity = U256::from(u128::MAX) + U256::from(1_u8);
+        assert!(matches!(
+            quote_hood_migrated_v3_receipt(&unavailable_liquidity, &profile),
+            Err(HoodQuoteError::MigrationMismatch)
+        ));
+    }
+
+    #[test]
+    fn graduation_verification_is_token_scoped_inside_batched_receipts() {
+        let value = fixture(include_str!(
+            "../tests/fixtures/hood-graduation-migration-live-proof.json"
+        ));
+        let target_topics = [
+            HOOD_TRADE_TOPIC,
+            HOOD_GRADUATED_TOPIC,
+            events::V3Migrated::SIGNATURE_HASH,
+            HOOD_MIGRATED_TOPIC,
+        ];
+        let other_token = alloy_primitives::address!("96cd468583e361794b62d5aa4c79b2b4cac2600d");
+        let other_topic = B256::left_padding_from(other_token.as_slice());
+        let mut batched = value.receipt.clone();
+        let mut extra = batched
+            .logs
+            .iter()
+            .filter(|log| {
+                log.topics
+                    .first()
+                    .is_some_and(|topic| target_topics.contains(topic))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let next_log_index = batched.logs.last().unwrap().log_index + 1;
+        for (offset, log) in extra.iter_mut().enumerate() {
+            log.log_index = next_log_index + u64::try_from(offset).unwrap();
+            log.topics[1] = other_topic;
+        }
+        batched.logs.extend(extra);
+        assert!(
+            verify_hood_graduation_receipt(
+                &value.transaction,
+                &batched,
+                &value.block,
+                &value.pre_snapshot(),
+                &value.snapshot(),
+                &HoodExpectedProfile::production(),
+            )
+            .is_ok()
+        );
+
+        let duplicate = batched
+            .logs
+            .iter()
+            .find(|log| {
+                log.topics.first() == Some(&HOOD_MIGRATED_TOPIC)
+                    && topic_address(log, 1) == Some(value.snapshot().token)
+            })
+            .unwrap()
+            .clone();
+        batched.logs.push(ReceiptLog {
+            log_index: batched.logs.last().unwrap().log_index + 1,
+            ..duplicate
+        });
+        assert!(matches!(
+            verify_hood_graduation_receipt(
+                &value.transaction,
+                &batched,
+                &value.block,
+                &value.pre_snapshot(),
+                &value.snapshot(),
+                &HoodExpectedProfile::production(),
+            ),
+            Err(HoodQuoteError::MigrationMismatch)
         ));
     }
 

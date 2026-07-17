@@ -25,12 +25,12 @@ use hermes_feed::pons::PONS_LEGACY_DISCOVERY_BLOCKER;
 use hermes_feed::{
     BankrCreateProfileVersion, BankrDopplerExpectedProfile, BankrDopplerReceiptPaperQuote,
     BankrEnvelopeKind, ClankerLiquidityProfile, ClankerQuotePolicy, ClankerReceiptPaperQuote,
-    ClankerV4ExpectedProfile, HoodExpectedProfile, HoodMigrationEvidence, HoodReceiptPaperQuote,
-    PonsReceiptPaperQuote, StonksV3ObservationEvidence, StonksV3ReceiptPaperQuote,
-    V3ReceiptPaperQuote, bankr_hook_fee_ppm, quote_hood_curve_buy, quote_hood_curve_sell,
-    stonks_v3_observation_proof_keccak256, validate_clanker_quote_replay,
-    validate_hood_migration_boundary_evidence, validate_stonks_v3_quote_replay,
-    validate_v3_quote_replay,
+    ClankerV4ExpectedProfile, HoodExpectedProfile, HoodMigratedV3PaperQuote, HoodMigrationEvidence,
+    HoodReceiptPaperQuote, PonsReceiptPaperQuote, StonksV3ObservationEvidence,
+    StonksV3ReceiptPaperQuote, V3ReceiptPaperQuote, bankr_hook_fee_ppm, quote_hood_curve_buy,
+    quote_hood_curve_sell, quote_hood_migrated_v3_receipt, stonks_v3_observation_proof_keccak256,
+    validate_clanker_quote_replay, validate_hood_migration_boundary_evidence,
+    validate_stonks_v3_quote_replay, validate_v3_quote_replay,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -106,6 +106,8 @@ struct ReconciliationEvidence {
     record_type: String,
     tx_hash: B256,
     launchpad: LaunchpadId,
+    #[serde(default)]
+    scope_token: Option<Address>,
     receipt_status: bool,
     protocol_event_match: bool,
     #[serde(default)]
@@ -210,9 +212,35 @@ struct PromotionValidation {
     exit_direction_matches: bool,
 }
 
+type EvidenceKey = (B256, LaunchpadId, Option<Address>);
+
+fn evidence_key(record: &ReconciliationEvidence) -> EvidenceKey {
+    (record.tx_hash, record.launchpad, record.scope_token)
+}
+
+fn quote_evidence_key(tx_hash: B256, launchpad: LaunchpadId, token: Address) -> EvidenceKey {
+    (
+        tx_hash,
+        launchpad,
+        (launchpad == LaunchpadId::HoodFun).then_some(token),
+    )
+}
+
+fn base_evidence_key(key: EvidenceKey) -> (B256, LaunchpadId) {
+    (key.0, key.1)
+}
+
+fn indexed_topic_address(log: &hermes_feed::noxa_abi::ReceiptLog, index: usize) -> Option<Address> {
+    let topic = log.topics.get(index)?;
+    if topic.as_slice()[..12].iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    Some(Address::from_slice(&topic.as_slice()[12..]))
+}
+
 #[derive(Debug, Default)]
 struct PromotionValidations {
-    by_key: HashMap<(B256, LaunchpadId), PromotionValidation>,
+    by_key: HashMap<EvidenceKey, PromotionValidation>,
 }
 
 fn readiness_windows(
@@ -264,7 +292,11 @@ fn readiness_windows(
     };
 
     for quote in &records.v3_quotes {
-        if !is_validated((quote.tx_hash, quote.launchpad)) {
+        if !is_validated(quote_evidence_key(
+            quote.tx_hash,
+            quote.launchpad,
+            quote.market.token,
+        )) {
             continue;
         }
         match quote.launchpad {
@@ -279,7 +311,11 @@ fn readiness_windows(
         }
     }
     for quote in &records.clanker_quotes {
-        if !is_validated((quote.tx_hash, quote.launchpad)) {
+        if !is_validated(quote_evidence_key(
+            quote.tx_hash,
+            quote.launchpad,
+            quote.market.token,
+        )) {
             continue;
         }
         let profile = match quote.market.liquidity_profile {
@@ -291,7 +327,11 @@ fn readiness_windows(
         increment(LaunchpadId::Clanker, profile)?;
     }
     for quote in &records.bankr_quotes {
-        if !is_validated((quote.tx_hash, quote.launchpad)) {
+        if !is_validated(quote_evidence_key(
+            quote.tx_hash,
+            quote.launchpad,
+            quote.market.token,
+        )) {
             continue;
         }
         let curve = match quote.market.create_profile_version {
@@ -311,13 +351,32 @@ fn readiness_windows(
         increment(LaunchpadId::BankrDoppler, envelope)?;
     }
     for quote in &records.pons_quotes {
-        if is_validated((quote.tx_hash, quote.launchpad)) {
+        if is_validated(quote_evidence_key(
+            quote.tx_hash,
+            quote.launchpad,
+            quote.market.token,
+        )) {
             increment(LaunchpadId::Pons, "current_generation")?;
         }
     }
     for quote in &records.hood_quotes {
-        if is_validated((quote.tx_hash, quote.launchpad)) {
+        if quote.observed.action == ActionKind::Launch
+            && is_validated(quote_evidence_key(
+                quote.tx_hash,
+                quote.launchpad,
+                quote.token,
+            ))
+        {
             increment(LaunchpadId::HoodFun, "current_curve")?;
+        }
+    }
+    for quote in &records.hood_migrated_quotes {
+        if is_validated(quote_evidence_key(
+            quote.tx_hash,
+            quote.launchpad,
+            quote.token,
+        )) {
+            increment(LaunchpadId::HoodFun, "migrated_v3_boundary")?;
         }
     }
 
@@ -399,7 +458,7 @@ fn readiness_windows(
 }
 
 impl PromotionValidations {
-    fn record(&mut self, key: (B256, LaunchpadId), validation: PromotionValidation) {
+    fn record(&mut self, key: EvidenceKey, validation: PromotionValidation) {
         self.by_key
             .entry(key)
             .and_modify(|existing| *existing = PromotionValidation::default())
@@ -465,6 +524,7 @@ struct ReconciliationRecords {
     pons_quotes: Vec<PonsReceiptPaperQuote>,
     hood_quotes: Vec<HoodReceiptPaperQuote>,
     hood_migrations: Vec<HoodMigrationEvidence>,
+    hood_migrated_quotes: Vec<HoodMigratedV3PaperQuote>,
     ground_truth_window: Option<GroundTruthWindow>,
     provenance: Option<ReconciliationEvidenceProvenance>,
     source_content_keccak256: B256,
@@ -529,7 +589,7 @@ struct QuoteIdentityVersion {
 
 #[derive(Debug)]
 struct ConfirmedGroundTruth {
-    by_key: HashMap<(B256, LaunchpadId), GroundTruthQuoteBinding>,
+    by_key: HashMap<EvidenceKey, GroundTruthQuoteBinding>,
 }
 
 impl ConfirmedGroundTruth {
@@ -564,7 +624,7 @@ impl ConfirmedGroundTruth {
             if !record.protocol_event_match {
                 continue;
             }
-            let key = (record.tx_hash, record.launchpad);
+            let key = evidence_key(record);
             if record.quote_status == QuoteStatus::Available && record.protocol_blocker.is_some() {
                 anyhow::bail!("available quote authority has a protocol blocker for {key:?}");
             }
@@ -600,15 +660,17 @@ impl ConfirmedGroundTruth {
         key: (B256, LaunchpadId),
         quote: QuoteIdentityVersion,
     ) -> Option<bool> {
-        self.by_key.get(&key).map(|binding| {
-            binding.quote_status == QuoteStatus::Available
-                && binding.action == Some(quote.action)
-                && binding.token == Some(quote.token)
-                && binding.pool == quote.pool
-                && binding.l2_block_number == quote.l2_block_number
-                && binding.block_hash == quote.block_hash
-                && binding.transaction_index == quote.transaction_index
-        })
+        self.by_key
+            .get(&quote_evidence_key(key.0, key.1, quote.token))
+            .map(|binding| {
+                binding.quote_status == QuoteStatus::Available
+                    && binding.action == Some(quote.action)
+                    && binding.token == Some(quote.token)
+                    && binding.pool == quote.pool
+                    && binding.l2_block_number == quote.l2_block_number
+                    && binding.block_hash == quote.block_hash
+                    && binding.transaction_index == quote.transaction_index
+            })
     }
 }
 
@@ -617,6 +679,8 @@ struct FinalizedV3PaperPlan {
     record_type: &'static str,
     tx_hash: B256,
     launchpad: LaunchpadId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope_token: Option<Address>,
     feed_sequence: u64,
     status: &'static str,
     amount_in: U256,
@@ -730,10 +794,10 @@ fn promotion_validations(
 ) -> PromotionValidations {
     let mut validations = PromotionValidations::default();
     let sequence_for = |key| HashMap::from([(key, 1_u64)]);
-    let expected_token = |key| {
+    let expected_token = |key: (B256, LaunchpadId), token| {
         ground_truth
             .by_key
-            .get(&key)
+            .get(&quote_evidence_key(key.0, key.1, token))
             .filter(|binding| binding.quote_status == QuoteStatus::Available)
             .and_then(|binding| binding.token)
     };
@@ -747,9 +811,9 @@ fn promotion_validations(
             policy,
         )
         .is_ok_and(|plans| plans.len() == 1);
-        let token = expected_token(key);
+        let token = expected_token(key, quote.market.token);
         validations.record(
-            key,
+            quote_evidence_key(key.0, key.1, quote.market.token),
             PromotionValidation {
                 quote_matches,
                 entry_direction_matches: token.is_some_and(|token| {
@@ -764,6 +828,31 @@ fn promotion_validations(
             },
         );
     }
+    for quote in &records.hood_migrated_quotes {
+        let key = (quote.tx_hash, quote.launchpad);
+        let quote_matches = finalized_hood_migrated_plans(
+            &sequence_for(key),
+            ground_truth,
+            vec![quote.clone()],
+            &records.hood_migrations,
+            policy,
+            hood_profile,
+        )
+        .is_ok_and(|plans| plans.len() == 1);
+        validations.record(
+            quote_evidence_key(key.0, key.1, quote.token),
+            PromotionValidation {
+                quote_matches,
+                entry_direction_matches: quote.entry.state_after.token_in
+                    == hermes_feed::robinhood::WETH
+                    && quote.entry.state_after.token_out == quote.token,
+                exit_direction_matches: quote.full_position_exit.state_after.token_in
+                    == quote.token
+                    && quote.full_position_exit.state_after.token_out
+                        == hermes_feed::robinhood::WETH,
+            },
+        );
+    }
     for quote in &records.clanker_quotes {
         let key = (quote.tx_hash, quote.launchpad);
         let quote_matches = finalized_clanker_plans(
@@ -773,9 +862,9 @@ fn promotion_validations(
             policy,
         )
         .is_ok_and(|plans| plans.len() == 1);
-        let token = expected_token(key);
+        let token = expected_token(key, quote.market.token);
         validations.record(
-            key,
+            quote_evidence_key(key.0, key.1, quote.market.token),
             PromotionValidation {
                 quote_matches,
                 entry_direction_matches: token.is_some_and(|token| {
@@ -799,9 +888,9 @@ fn promotion_validations(
             policy,
         )
         .is_ok_and(|plans| plans.len() == 1);
-        let token = expected_token(key);
+        let token = expected_token(key, quote.market.token);
         validations.record(
-            key,
+            quote_evidence_key(key.0, key.1, quote.market.token),
             PromotionValidation {
                 quote_matches,
                 entry_direction_matches: token.is_some_and(|token| {
@@ -827,9 +916,9 @@ fn promotion_validations(
             policy,
         )
         .is_ok_and(|plans| plans.len() == 1);
-        let token = expected_token(key);
+        let token = expected_token(key, quote.market.token);
         validations.record(
-            key,
+            quote_evidence_key(key.0, key.1, quote.market.token),
             PromotionValidation {
                 quote_matches,
                 entry_direction_matches: token.is_some_and(|token| {
@@ -854,9 +943,9 @@ fn promotion_validations(
             pons_profile,
         )
         .is_ok_and(|plans| plans.len() == 1);
-        let token = expected_token(key);
+        let token = expected_token(key, quote.market.token);
         validations.record(
-            key,
+            quote_evidence_key(key.0, key.1, quote.market.token),
             PromotionValidation {
                 quote_matches,
                 entry_direction_matches: token.is_some_and(|token| {
@@ -882,7 +971,7 @@ fn promotion_validations(
         )
         .is_ok_and(|plans| plans.len() == 1);
         validations.record(
-            key,
+            quote_evidence_key(key.0, key.1, quote.token),
             PromotionValidation {
                 quote_matches,
                 // Hood's typed entry and exit records have no caller-provided token
@@ -1043,6 +1132,16 @@ fn main() -> Result<()> {
             &observed_candidates.feed_sequences,
             &ground_truth,
             records.hood_quotes,
+            plan_policy,
+            &hood_profile,
+        )? {
+            println!("{}", serde_json::to_string(&plan)?);
+        }
+        for plan in finalized_hood_migrated_plans(
+            &observed_candidates.feed_sequences,
+            &ground_truth,
+            records.hood_migrated_quotes,
+            &records.hood_migrations,
             plan_policy,
             &hood_profile,
         )? {
@@ -1217,6 +1316,16 @@ fn main() -> Result<()> {
             &observed_candidates.feed_sequences,
             &ground_truth,
             records.hood_quotes,
+            plan_policy,
+            &hood_profile,
+        )? {
+            println!("{}", serde_json::to_string(&plan)?);
+        }
+        for plan in finalized_hood_migrated_plans(
+            &observed_candidates.feed_sequences,
+            &ground_truth,
+            records.hood_migrated_quotes,
+            &records.hood_migrations,
             plan_policy,
             &hood_profile,
         )? {
@@ -1505,6 +1614,15 @@ fn read_reconciliation_records(path: &Path) -> Result<ReconciliationRecords> {
                             )
                         })?)
                 }
+                Some("launchpad_hood_migrated_v3_paper_quote") => records
+                    .hood_migrated_quotes
+                    .push(serde_json::from_value(value).with_context(|| {
+                        format!(
+                            "decode Hood migrated V3 quote line {} from {}",
+                            index + 1,
+                            path.display()
+                        )
+                    })?),
                 Some("launchpad_reconciliation_evidence") => {
                     records
                         .evidence
@@ -1523,6 +1641,22 @@ fn read_reconciliation_records(path: &Path) -> Result<ReconciliationRecords> {
             }
         }
     }
+    let mut hood_counts = HashMap::<(B256, LaunchpadId), usize>::new();
+    for record in &records.evidence {
+        if record.launchpad == LaunchpadId::HoodFun {
+            *hood_counts
+                .entry((record.tx_hash, record.launchpad))
+                .or_default() += 1;
+        }
+    }
+    for record in &mut records.evidence {
+        if record.launchpad == LaunchpadId::HoodFun && record.scope_token.is_none() {
+            if hood_counts.get(&(record.tx_hash, record.launchpad)) != Some(&1) {
+                anyhow::bail!("ambiguous legacy Hood evidence has no token scope");
+            }
+            record.scope_token = record.token;
+        }
+    }
     Ok(records)
 }
 
@@ -1536,17 +1670,25 @@ fn validate_hood_migration_records(
         .context("invalid production Hood profile for migration evidence")?;
     let evidence = evidence
         .iter()
-        .map(|record| ((record.tx_hash, record.launchpad), record))
+        .map(|record| (evidence_key(record), record))
         .collect::<HashMap<_, _>>();
     let mut seen = HashMap::new();
     for migration in migrations {
-        let key = (migration.tx_hash, migration.launchpad);
+        let key = quote_evidence_key(migration.tx_hash, migration.launchpad, migration.token);
         let confirmed = evidence.get(&key).is_some_and(|record| {
             record.receipt_status
                 && record.protocol_event_match
-                && record.quote_status == QuoteStatus::Blocked
-                && record.protocol_blocker.as_deref()
-                    == Some("hood_migration_terminal_boundary_unreconciled_v3_quote_unavailable")
+                && record.token == Some(migration.token)
+                && record.pool == Some(migration.pool)
+                && record.l2_block_number == Some(migration.l2_block_number)
+                && record.block_hash == Some(migration.block_hash)
+                && record.transaction_index == Some(migration.transaction_index)
+                && (record.quote_status == QuoteStatus::Available
+                    || (record.quote_status == QuoteStatus::Blocked
+                        && record.protocol_blocker.as_deref()
+                            == Some(
+                                "hood_migration_terminal_boundary_unreconciled_v3_quote_unavailable",
+                            )))
         });
         let expected_blocker = if migration.declared_and_actual_liquidity_match {
             "terminal_zero_liquidity_boundary_unreconciled_quote_blocked"
@@ -1569,6 +1711,7 @@ fn validate_hood_migration_records(
             || migration.declared_token_liquidity == U256::ZERO
             || migration.actual_eth_liquidity == U256::ZERO
             || migration.actual_token_liquidity == U256::ZERO
+            || migration.position_liquidity == U256::ZERO
             || migration.pool_initialize_sqrt_price_x96 == U256::ZERO
             || migration.receipt_end_sqrt_price_x96 == U256::ZERO
             || migration.receipt_end_swap_input == U256::ZERO
@@ -1590,13 +1733,17 @@ fn validate_hood_migration_records(
     }
     for record in evidence.values().filter(|record| {
         record.launchpad == LaunchpadId::HoodFun
-            && record.protocol_blocker.as_deref()
-                == Some("hood_migration_terminal_boundary_unreconciled_v3_quote_unavailable")
+            && record.pool.is_some()
+            && (record.quote_status == QuoteStatus::Available
+                || record.protocol_blocker.as_deref()
+                    == Some("hood_migration_terminal_boundary_unreconciled_v3_quote_unavailable"))
     }) {
-        let key = (record.tx_hash, record.launchpad);
+        let key = evidence_key(record);
         if migrations
             .iter()
-            .filter(|migration| (migration.tx_hash, migration.launchpad) == key)
+            .filter(|migration| {
+                quote_evidence_key(migration.tx_hash, migration.launchpad, migration.token) == key
+            })
             .count()
             != 1
         {
@@ -1673,6 +1820,7 @@ fn finalized_v3_plans(
             record_type: "launchpad_paper_finalized_plan",
             tx_hash: quote.tx_hash,
             launchpad: quote.launchpad,
+            scope_token: None,
             feed_sequence,
             status: "quoted_restriction_gated",
             amount_in: quote.entry.amount_in,
@@ -1783,6 +1931,7 @@ fn finalized_stonks_plans(
             record_type: "launchpad_paper_finalized_plan",
             tx_hash: quote.tx_hash,
             launchpad: LaunchpadId::StonksV3,
+            scope_token: None,
             feed_sequence,
             status: "quoted_receipt_confirmed_prediction_unavailable",
             amount_in: quote.entry.amount_in,
@@ -1877,6 +2026,7 @@ fn finalized_clanker_plans(
             record_type: "launchpad_paper_finalized_plan",
             tx_hash: quote.tx_hash,
             launchpad: quote.launchpad,
+            scope_token: None,
             feed_sequence,
             status: "quoted_execution_gated",
             amount_in: quote.entry.amount_in,
@@ -2012,6 +2162,7 @@ fn finalized_bankr_plans(
             record_type: "launchpad_paper_finalized_plan",
             tx_hash: quote.tx_hash,
             launchpad: quote.launchpad,
+            scope_token: None,
             feed_sequence,
             status: "quoted_execution_gated",
             amount_in: quote.entry.amount_in,
@@ -2094,6 +2245,7 @@ fn finalized_pons_plans(
             record_type: "launchpad_paper_finalized_plan",
             tx_hash: quote.tx_hash,
             launchpad: quote.launchpad,
+            scope_token: None,
             feed_sequence,
             status: "quoted_execution_gated",
             amount_in: quote.entry.amount_in,
@@ -2179,6 +2331,7 @@ fn finalized_hood_plans(
             record_type: "launchpad_paper_finalized_plan",
             tx_hash: quote.tx_hash,
             launchpad: quote.launchpad,
+            scope_token: Some(quote.token),
             feed_sequence,
             status: "quoted_execution_gated",
             amount_in: quote.entry.amount_in_requested,
@@ -2288,6 +2441,101 @@ fn hood_quote_arithmetic_is_consistent(
         && quote.full_position_exit.min_receive == slippage(exit.amount_out).unwrap_or_default()
         && quote.full_position_exit.state_after == exit.state_after
         && Some(quote.simulated_round_trip_return_bps) == round_trip
+}
+
+fn finalized_hood_migrated_plans(
+    observed_sequences: &HashMap<(B256, LaunchpadId), u64>,
+    ground_truth: &ConfirmedGroundTruth,
+    quotes: Vec<HoodMigratedV3PaperQuote>,
+    validated_migrations: &[HoodMigrationEvidence],
+    policy: PaperPlanPolicy,
+    expected_profile: &HoodExpectedProfile,
+) -> Result<Vec<FinalizedV3PaperPlan>> {
+    expected_profile.validate()?;
+    let mut seen = HashMap::new();
+    let mut plans = Vec::new();
+    for quote in quotes {
+        let key = (quote.tx_hash, quote.launchpad);
+        if seen.insert((quote.tx_hash, quote.token), ()).is_some() {
+            anyhow::bail!(
+                "duplicate Hood migrated V3 quote for tx/token {:?}",
+                (quote.tx_hash, quote.token)
+            );
+        }
+        let Some(feed_sequence) = observed_sequences.get(&key).copied() else {
+            continue;
+        };
+        let confirmed = ground_truth
+            .by_key
+            .get(&quote_evidence_key(key.0, key.1, quote.token))
+            .is_some_and(|binding| {
+                binding.quote_status == QuoteStatus::Available
+                    && binding.action == Some(ActionKind::Buy)
+                    && binding.token == Some(quote.token)
+                    && binding.pool == Some(quote.pool)
+                    && binding.l2_block_number == quote.l2_block_number
+                    && binding.block_hash == quote.block_hash
+                    && binding.transaction_index == quote.transaction_index
+            });
+        let replay = quote_hood_migrated_v3_receipt(&quote.migration, expected_profile);
+        let migration_is_validated = validated_migrations
+            .iter()
+            .any(|migration| migration == &quote.migration);
+        if !confirmed
+            || !migration_is_validated
+            || quote.record_type != "launchpad_hood_migrated_v3_paper_quote"
+            || quote.launchpad != LaunchpadId::HoodFun
+            || quote.entry.amount_in > policy.max_input_wei
+            || quote.entry.slippage_bps != policy.slippage_bps
+            || quote.full_position_exit.slippage_bps != policy.slippage_bps
+            || quote.full_position_exit.amount_in != quote.entry.expected_output
+            || quote.execution_eligible
+            || quote.broadcast
+            || !replay.is_ok_and(|replayed| replayed == quote)
+        {
+            anyhow::bail!(
+                "unsafe or inconsistent Hood migrated V3 quote for {:?}",
+                (quote.tx_hash, quote.token)
+            );
+        }
+        let exit_plan = finalized_exit_plan(
+            quote.entry.amount_in,
+            quote.full_position_exit.expected_output,
+            quote.full_position_exit.min_receive,
+            policy,
+        )?;
+        plans.push(FinalizedV3PaperPlan {
+            record_type: "launchpad_paper_finalized_plan",
+            tx_hash: quote.tx_hash,
+            launchpad: quote.launchpad,
+            scope_token: Some(quote.token),
+            feed_sequence,
+            status: "quoted_execution_gated",
+            amount_in: quote.entry.amount_in,
+            expected_output: quote.entry.expected_output,
+            min_receive: quote.entry.min_receive,
+            quote_source: quote.quote_source,
+            quote_state_version: json!({
+                "chain_id": hermes_feed::robinhood::CHAIN_ID,
+                "l2_block_number": quote.l2_block_number,
+                "block_hash": quote.block_hash,
+                "transaction_index": quote.transaction_index,
+                "receipt_end_sqrt_price_x96": quote.receipt_end_sqrt_price_x96,
+                "receipt_end_tick": quote.receipt_end_tick,
+                "receipt_end_liquidity": quote.receipt_end_liquidity,
+            }),
+            exit_full_position: true,
+            exit_expected_output: quote.full_position_exit.expected_output,
+            exit_min_receive: quote.full_position_exit.min_receive,
+            exit_plan,
+            simulated_round_trip_return_bps: quote.simulated_round_trip_return_bps,
+            leader_amounts_reused: false,
+            execution_eligible: false,
+            execution_blocker: quote.execution_blocker,
+            broadcast: false,
+        });
+    }
+    Ok(plans)
 }
 
 fn pons_quote_arithmetic_is_consistent(
@@ -2965,12 +3213,18 @@ fn validate_ground_truth_window(
     let mut truth_keys = 0_usize;
     let mut truth_logs = 0_usize;
     for record in evidence {
-        let key = (record.tx_hash, record.launchpad);
+        let key = evidence_key(record);
         if record.record_type != "launchpad_reconciliation_evidence" {
             anyhow::bail!("invalid reconciliation evidence type for {key:?}");
         }
         if !keys.insert(key) {
             anyhow::bail!("duplicate reconciliation evidence for {key:?}");
+        }
+        if (record.launchpad == LaunchpadId::HoodFun
+            && (record.scope_token.is_none() || record.scope_token != record.token))
+            || (record.launchpad != LaunchpadId::HoodFun && record.scope_token.is_some())
+        {
+            anyhow::bail!("invalid reconciliation evidence scope for {key:?}");
         }
         if record.ground_truth_event == record.ground_truth_hits.is_empty() {
             anyhow::bail!("ground-truth flag and exact log hits disagree for {key:?}");
@@ -2998,6 +3252,8 @@ fn validate_ground_truth_window(
                 || hit.log.address == Address::ZERO
                 || hit.log.topics.is_empty()
                 || launchpad_for_ground_truth_log(&hit.log) != Some(record.launchpad)
+                || (record.launchpad == LaunchpadId::HoodFun
+                    && indexed_topic_address(&hit.log, 1) != record.scope_token)
             {
                 anyhow::bail!("ground-truth log identity disagrees with receipt for {key:?}");
             }
@@ -3030,7 +3286,7 @@ fn reconciliation_metrics(
     validate_ground_truth_window(window, evidence)?;
     let indexed = evidence
         .iter()
-        .map(|record| ((record.tx_hash, record.launchpad), record))
+        .map(|record| (evidence_key(record), record))
         .collect::<HashMap<_, _>>();
     for key in observed.claims.keys() {
         if !observed.feed_transactions.contains_key(&key.0) {
@@ -3061,32 +3317,57 @@ fn reconciliation_metrics(
     for launchpad in LAUNCHPADS {
         let truth = indexed
             .iter()
-            .filter(|((_, id), record)| *id == launchpad && record.ground_truth_event)
+            .filter(|((_, id, _), record)| {
+                *id == launchpad
+                    && record.ground_truth_event
+                    && (record.launchpad != LaunchpadId::HoodFun
+                        || record.action == Some(ActionKind::Launch)
+                        || record.pool.is_some())
+            })
             .map(|(key, record)| (*key, *record))
             .collect::<HashMap<_, _>>();
+        let truth_by_base = truth.values().fold(
+            HashMap::<(B256, LaunchpadId), Vec<&ReconciliationEvidence>>::new(),
+            |mut grouped, record| {
+                grouped
+                    .entry((record.tx_hash, record.launchpad))
+                    .or_default()
+                    .push(*record);
+                grouped
+            },
+        );
         let claims = observed
             .claims
             .iter()
             .filter(|((_, id), _)| *id == launchpad)
             .map(|(key, claim)| (*key, *claim))
             .collect::<HashMap<_, _>>();
-        let confirmed_keys = truth
+        let confirmed_keys = truth_by_base
             .keys()
             .filter(|key| claims.contains_key(key))
             .copied()
             .collect::<Vec<_>>();
-        let missed_keys = truth
+        let missed_keys = truth_by_base
             .keys()
             .filter(|key| !claims.contains_key(key))
             .copied()
             .collect::<Vec<_>>();
+        let confirmed_scopes = truth
+            .keys()
+            .filter(|key| claims.contains_key(&base_evidence_key(**key)))
+            .count();
 
         let mut false_positives = 0_usize;
         let mut reverted_attempts = 0_usize;
         let mut out_of_scope = 0_usize;
         let mut unreconciled = 0_usize;
-        for key in claims.keys().filter(|key| !truth.contains_key(key)) {
-            match indexed.get(key) {
+        for key in claims.keys().filter(|key| !truth_by_base.contains_key(key)) {
+            let records_for_base = indexed
+                .iter()
+                .filter(|(scoped, _)| base_evidence_key(**scoped) == *key)
+                .map(|(_, record)| *record)
+                .collect::<Vec<_>>();
+            match records_for_base.first().copied() {
                 None => unreconciled += 1,
                 Some(record) => match record.l2_block_number {
                     None => unreconciled += 1,
@@ -3117,7 +3398,8 @@ fn reconciliation_metrics(
         let mut pool_id_mismatches = 0_usize;
         for key in &confirmed_keys {
             let claim = claims[key];
-            let record = truth[key];
+            let records = &truth_by_base[key];
+            let record = records[0];
             compare_prediction(
                 claim.action,
                 record.action,
@@ -3126,7 +3408,7 @@ fn reconciliation_metrics(
                 &mut action_matches,
                 &mut action_mismatches,
             );
-            if identity_prediction_applicable(record) {
+            if records.len() == 1 && identity_prediction_applicable(record) {
                 compare_prediction(
                     claim.predicted_token,
                     record.token,
@@ -3156,9 +3438,17 @@ fn reconciliation_metrics(
 
         let quote_eligible_keys = truth
             .iter()
-            .filter(|(_, record)| record.quote_status == QuoteStatus::Available)
+            .filter(|(key, record)| {
+                record.quote_status == QuoteStatus::Available
+                    && claims.contains_key(&base_evidence_key(**key))
+            })
             .map(|(key, _)| *key)
             .collect::<Vec<_>>();
+        if quote_eligible_keys.len() > confirmed_scopes {
+            anyhow::bail!(
+                "quote-eligible scoped evidence exceeds confirmed observations for {launchpad:?}"
+            );
+        }
         let mut quote_missing = 0_usize;
         let mut quote_matches = 0_usize;
         let mut quote_mismatches = 0_usize;
@@ -3199,8 +3489,9 @@ fn reconciliation_metrics(
             .iter()
             .filter_map(|key| observed.observer_latency_ns.get(key).copied())
             .collect::<Vec<_>>();
-        let mut reconciliation_durations = truth
+        let mut reconciliation_durations = truth_by_base
             .values()
+            .filter_map(|records| records.first().copied())
             .filter_map(|record| {
                 record
                     .reconciliation_completed_unix_ns
@@ -3214,15 +3505,17 @@ fn reconciliation_metrics(
             launchpad,
             coverage_from_l2_block: window.from_l2_block,
             coverage_to_l2_block: window.to_l2_block,
-            raw_ground_truth_transactions: truth.len(),
-            quote_admitted_ground_truth_transactions: truth
+            raw_ground_truth_transactions: truth_by_base.len(),
+            quote_admitted_ground_truth_transactions: truth_by_base
                 .values()
-                .filter(|record| {
-                    record.protocol_event_match && record.quote_status == QuoteStatus::Available
+                .filter(|records| {
+                    records.iter().any(|record| {
+                        record.protocol_event_match && record.quote_status == QuoteStatus::Available
+                    })
                 })
                 .count(),
             observer_claims: claims.len(),
-            confirmed_observations: confirmed_keys.len(),
+            confirmed_observations: confirmed_scopes,
             false_positives,
             reverted_attempts,
             missed_transactions: missed_keys.len(),
@@ -3391,7 +3684,7 @@ mod tests {
     ) -> ConfirmedGroundTruth {
         ConfirmedGroundTruth {
             by_key: HashMap::from([(
-                key,
+                quote_evidence_key(key.0, key.1, token),
                 GroundTruthQuoteBinding {
                     l2_block_number,
                     block_hash,
@@ -3433,6 +3726,7 @@ mod tests {
             record_type: "launchpad_reconciliation_evidence".into(),
             tx_hash: key.0,
             launchpad: key.1,
+            scope_token: (key.1 == LaunchpadId::HoodFun).then_some(Address::with_last_byte(1)),
             receipt_status: true,
             protocol_event_match,
             observer_claim,
@@ -3453,19 +3747,27 @@ mod tests {
                             other => panic!("no ground-truth test log for {other:?}"),
                         },
                         log_index: 0,
-                        topics: vec![match key.1 {
-                            LaunchpadId::Bow => keccak256(BOW_LAUNCHED_SIGNATURE.as_bytes()),
-                            LaunchpadId::LaunchHoodV3 => {
-                                keccak256(LAUNCHHOOD_TOKEN_LAUNCHED_SIGNATURE.as_bytes())
+                        topics: {
+                            let mut topics = vec![match key.1 {
+                                LaunchpadId::Bow => keccak256(BOW_LAUNCHED_SIGNATURE.as_bytes()),
+                                LaunchpadId::LaunchHoodV3 => {
+                                    keccak256(LAUNCHHOOD_TOKEN_LAUNCHED_SIGNATURE.as_bytes())
+                                }
+                                LaunchpadId::Clanker => CLANKER_TOKEN_CREATED_TOPIC,
+                                LaunchpadId::BankrDoppler => DOPPLER_CREATE_TOPIC,
+                                LaunchpadId::Pons => PONS_TOKEN_LAUNCHED_TOPIC,
+                                LaunchpadId::HoodFun => {
+                                    keccak256(HOOD_TOKEN_CREATED_SIGNATURE.as_bytes())
+                                }
+                                other => panic!("no ground-truth test topic for {other:?}"),
+                            }];
+                            if key.1 == LaunchpadId::HoodFun {
+                                topics.push(B256::left_padding_from(
+                                    Address::with_last_byte(1).as_slice(),
+                                ));
                             }
-                            LaunchpadId::Clanker => CLANKER_TOKEN_CREATED_TOPIC,
-                            LaunchpadId::BankrDoppler => DOPPLER_CREATE_TOPIC,
-                            LaunchpadId::Pons => PONS_TOKEN_LAUNCHED_TOPIC,
-                            LaunchpadId::HoodFun => {
-                                keccak256(HOOD_TOKEN_CREATED_SIGNATURE.as_bytes())
-                            }
-                            other => panic!("no ground-truth test topic for {other:?}"),
-                        }],
+                            topics
+                        },
                         data: alloy_primitives::Bytes::new(),
                     },
                 }]
@@ -3562,7 +3864,7 @@ mod tests {
 
         let promotion = PromotionValidations {
             by_key: HashMap::from([(
-                confirmed_key,
+                (confirmed_key.0, confirmed_key.1, None),
                 PromotionValidation {
                     quote_matches: true,
                     entry_direction_matches: true,
@@ -3604,10 +3906,10 @@ mod tests {
         assert_eq!(hood.missed_transactions, 1);
         assert_eq!(hood.detector_misses, 1);
         assert_eq!(hood.feed_coverage_misses, 0);
-        assert_eq!(hood.independent_quote_validation_eligible, 1);
-        assert_eq!(hood.independent_quote_validation_missing, 1);
-        assert_eq!(hood.entry_direction_missing, 1);
-        assert_eq!(hood.exit_direction_missing, 1);
+        assert_eq!(hood.independent_quote_validation_eligible, 0);
+        assert_eq!(hood.independent_quote_validation_missing, 0);
+        assert_eq!(hood.entry_direction_missing, 0);
+        assert_eq!(hood.exit_direction_missing, 0);
         let bankr = metrics
             .iter()
             .find(|row| row.launchpad == LaunchpadId::BankrDoppler)
@@ -3615,6 +3917,172 @@ mod tests {
         assert_eq!(bankr.missed_transactions, 1);
         assert_eq!(bankr.detector_misses, 0);
         assert_eq!(bankr.feed_coverage_misses, 1);
+    }
+
+    #[test]
+    fn hood_launch_readiness_excludes_same_token_buy_and_sell_actions() {
+        let launch = alloy_primitives::b256!(
+            "7716f67eb541384eea0c03a138ed0ca99be657aa677de98e88182d6e6bbe18b4"
+        );
+        let buy = alloy_primitives::b256!(
+            "bb99a533c5a6f7a30b0bc381a578ed55e7c3d401b362a0ad053a78633728937a"
+        );
+        let sell = alloy_primitives::b256!(
+            "a3e991fe9151157fd4aa617efe33b1416dddc5794b62046b1b04c929c86b52b7"
+        );
+        let token = alloy_primitives::address!("b6c501d5e0f09cca24dcfd08f3617db8738a600d");
+        let mut evidence = [
+            evidence_row(
+                (launch, LaunchpadId::HoodFun),
+                true,
+                true,
+                true,
+                QuoteStatus::Available,
+            ),
+            evidence_row(
+                (buy, LaunchpadId::HoodFun),
+                false,
+                true,
+                true,
+                QuoteStatus::Available,
+            ),
+            evidence_row(
+                (sell, LaunchpadId::HoodFun),
+                false,
+                true,
+                true,
+                QuoteStatus::Available,
+            ),
+        ];
+        for (record, action) in
+            evidence
+                .iter_mut()
+                .zip([ActionKind::Launch, ActionKind::Buy, ActionKind::Sell])
+        {
+            record.action = Some(action);
+            record.token = Some(token);
+            record.scope_token = Some(token);
+            record.pool = None;
+            record.ground_truth_hits[0].log.topics[1] = B256::left_padding_from(token.as_slice());
+        }
+        let observed = ObservedOutputCandidates {
+            feed_transactions: HashMap::from([(launch, 1), (buy, 2), (sell, 3)]),
+            claims: HashMap::from([(
+                (launch, LaunchpadId::HoodFun),
+                ObserverClaim {
+                    action: Some(ActionKind::Launch),
+                    predicted_token: Some(token),
+                    predicted_pool: None,
+                    predicted_pool_id: None,
+                },
+            )]),
+            observer_latency_ns: HashMap::from([((launch, LaunchpadId::HoodFun), 10)]),
+            ..ObservedOutputCandidates::default()
+        };
+        let promotion = PromotionValidations {
+            by_key: [launch, buy, sell]
+                .into_iter()
+                .map(|tx_hash| {
+                    (
+                        quote_evidence_key(tx_hash, LaunchpadId::HoodFun, token),
+                        PromotionValidation {
+                            quote_matches: true,
+                            entry_direction_matches: true,
+                            exit_direction_matches: true,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let metrics =
+            reconciliation_metrics(&observed, &evidence, Some(&complete_window(3)), &promotion)
+                .unwrap();
+        let hood = metrics
+            .iter()
+            .find(|row| row.launchpad == LaunchpadId::HoodFun)
+            .unwrap();
+        assert_eq!(hood.raw_ground_truth_transactions, 1);
+        assert_eq!(hood.confirmed_observations, 1);
+        assert_eq!(hood.detector_misses, 0);
+        assert_eq!(hood.feed_coverage_misses, 0);
+        assert_eq!(hood.independent_quote_validation_eligible, 1);
+
+        let mut launch_quote = hood_quote_fixture();
+        launch_quote.tx_hash = launch;
+        launch_quote.token = token;
+        launch_quote.observed.action = ActionKind::Launch;
+        let mut buy_quote = launch_quote.clone();
+        buy_quote.tx_hash = buy;
+        buy_quote.observed.action = ActionKind::Buy;
+        let mut sell_quote = launch_quote.clone();
+        sell_quote.tx_hash = sell;
+        sell_quote.observed.action = ActionKind::Sell;
+        let records = ReconciliationRecords {
+            evidence: evidence.to_vec(),
+            hood_quotes: vec![launch_quote, buy_quote, sell_quote],
+            ground_truth_window: Some(complete_window(3)),
+            ..ReconciliationRecords::default()
+        };
+        let windows =
+            readiness_windows(&records, &metrics, &promotion, &readiness_provenance()).unwrap();
+        let hood_window = windows
+            .iter()
+            .find(|window| window.launchpad == LaunchpadId::HoodFun)
+            .unwrap();
+        assert_eq!(hood_window.quote_eligible_confirmed_observations, 1);
+        assert_eq!(
+            hood_window.profile_envelope_observations["current_curve"],
+            1
+        );
+    }
+
+    #[test]
+    fn scoped_hood_evidence_accepts_distinct_tokens_and_rejects_ambiguity() {
+        let tx_hash = alloy_primitives::b256!(
+            "6f2eda661b50e42e14b9c9303d29675f82ab6276208c89c3151bc45f89922ced"
+        );
+        let tokens = [
+            alloy_primitives::address!("52d2fc999629733677eae8efc2d3cd1bcffe600d"),
+            alloy_primitives::address!("e10cf5ad32b6eea9b2ed5cf7a0f5c9c44fe2600d"),
+        ];
+        let mut evidence = tokens
+            .into_iter()
+            .map(|token| {
+                let mut record = evidence_row(
+                    (tx_hash, LaunchpadId::HoodFun),
+                    true,
+                    true,
+                    true,
+                    QuoteStatus::Available,
+                );
+                record.scope_token = Some(token);
+                record.token = Some(token);
+                record.ground_truth_hits[0].log.topics[1] =
+                    B256::left_padding_from(token.as_slice());
+                record
+            })
+            .collect::<Vec<_>>();
+        assert!(validate_ground_truth_window(&complete_window(2), &evidence).is_ok());
+
+        evidence[1].scope_token = evidence[0].scope_token;
+        evidence[1].token = evidence[0].token;
+        evidence[1].ground_truth_hits[0].log.topics[1] =
+            evidence[0].ground_truth_hits[0].log.topics[1];
+        assert!(validate_ground_truth_window(&complete_window(2), &evidence).is_err());
+
+        let mut missing_scope = evidence[0].clone();
+        missing_scope.scope_token = None;
+        assert!(validate_ground_truth_window(&complete_window(1), &[missing_scope]).is_err());
+
+        let mut cross_protocol = evidence_row(
+            (B256::with_last_byte(7), LaunchpadId::Bow),
+            true,
+            true,
+            true,
+            QuoteStatus::Available,
+        );
+        cross_protocol.scope_token = Some(tokens[0]);
+        assert!(validate_ground_truth_window(&complete_window(1), &[cross_protocol]).is_err());
     }
 
     #[test]
@@ -5205,7 +5673,7 @@ mod tests {
             hermes_feed::PonsExpectedProfile::production(),
             &HoodExpectedProfile::production(),
         )
-        .by_key[&key]
+        .by_key[&(key.0, key.1, None)]
     }
 
     #[test]
@@ -5733,12 +6201,15 @@ mod tests {
             "leader": Address::with_last_byte(3),
             "trader": Address::with_last_byte(4),
             "l2_block_number": 10,
+            "block_hash": B256::with_last_byte(10),
+            "transaction_index": 1,
             "token_id": "1",
             "raised_eth": "2",
             "declared_eth_liquidity": "3",
             "declared_token_liquidity": "4",
             "actual_eth_liquidity": "5",
             "actual_token_liquidity": "6",
+            "position_liquidity": "7914437",
             "declared_and_actual_liquidity_match": false,
             "pool_initialize_sqrt_price_x96": "7",
             "pool_initialize_tick": -1,
@@ -5812,5 +6283,181 @@ mod tests {
         let log_order = &mut forged[0].log_order;
         std::mem::swap(&mut log_order.v3_migrated, &mut log_order.migrated);
         assert!(validate_hood_migration_records(&records.evidence, &forged).is_err());
+    }
+
+    #[test]
+    fn receipt_confirmed_hood_migrated_quote_finalizes_with_bounded_exit_rules() {
+        let profile = HoodExpectedProfile::production();
+        let evidence = HoodMigrationEvidence {
+            record_type: "launchpad_hood_migration_evidence".into(),
+            tx_hash: alloy_primitives::b256!(
+                "946fea5c130104cf0743512ebf879036725c2396761c04398037cf875917f645"
+            ),
+            launchpad: LaunchpadId::HoodFun,
+            token: alloy_primitives::address!("86cd468583e361794b62d5aa4c79b2b4cac2600d"),
+            pool: alloy_primitives::address!("b0f85a8494bad99dad3c7a1d4ccf0be8f108fd42"),
+            leader: alloy_primitives::address!("bf3ad0f61966f403740a1512590aa9d8dae76ba3"),
+            trader: alloy_primitives::address!("bf3ad0f61966f403740a1512590aa9d8dae76ba3"),
+            l2_block_number: 11_426_764,
+            block_hash: B256::with_last_byte(9),
+            transaction_index: 1,
+            token_id: U256::from(171_798_u64),
+            raised_eth: U256::from(6_464_395_915_315_942_030_u64),
+            declared_eth_liquidity: U256::from(6_270_463_768_115_942_030_u64),
+            declared_token_liquidity: U256::from_str_radix("200000000000000000000000000", 10)
+                .unwrap(),
+            actual_eth_liquidity: U256::from(6_270_463_008_449_067_013_u64),
+            actual_token_liquidity: U256::from(1_u8),
+            position_liquidity: U256::from(7_914_437_u64),
+            declared_and_actual_liquidity_match: false,
+            pool_initialize_sqrt_price_x96: U256::from(1_u8),
+            pool_initialize_tick: -887_272,
+            reconstructed_boundary_sqrt_price_x96:
+                uniswap_v3_math::tick_math::get_sqrt_ratio_at_tick(887_200).unwrap(),
+            reconstructed_boundary_tick: 887_200,
+            reconstructed_boundary_liquidity: U256::ZERO,
+            receipt_end_sqrt_price_x96: U256::from_str_radix(
+                "1461446703485210103287273052203988822378723970341",
+                10,
+            )
+            .unwrap(),
+            receipt_end_tick: 887_271,
+            receipt_end_liquidity: U256::ZERO,
+            receipt_end_swap_log_index: 17,
+            receipt_end_swap_input: U256::from(1_u8),
+            receipt_end_swap_output: U256::from(1_u8),
+            log_order: hermes_feed::HoodMigrationLogOrderEvidence {
+                pool_created: 1,
+                initialize: 2,
+                trade: 3,
+                graduated: 4,
+                curve_transfer: 5,
+                lp_transfer: 6,
+                weth_mint: 7,
+                funding0: 8,
+                funding1: 9,
+                mint: 10,
+                nft_mint: 11,
+                increase_liquidity: 12,
+                nft_lock: 13,
+                locked: 14,
+                v3_migrated: 15,
+                migrated: 16,
+                swap: 17,
+            },
+            swap_amounts_reconstructed: true,
+            terminal_zero_liquidity_boundary_observed: true,
+            expected_profile_validated: true,
+            receipt_topology_verified: true,
+            pool_state_reconciled: false,
+            v3_quote_available: false,
+            execution_eligible: false,
+            execution_blocker:
+                "declared_actual_liquidity_mismatch_and_terminal_boundary_unreconciled".into(),
+            broadcast: false,
+        };
+        let quote = quote_hood_migrated_v3_receipt(&evidence, &profile).unwrap();
+        let key = (quote.tx_hash, quote.launchpad);
+        let ground_truth = quote_authority(
+            key,
+            ActionKind::Buy,
+            quote.token,
+            Some(quote.pool),
+            quote.l2_block_number,
+            B256::with_last_byte(9),
+            1,
+        );
+        let policy = PaperPlanPolicy::default();
+        let plans = finalized_hood_migrated_plans(
+            &HashMap::from([(key, 81)]),
+            &ground_truth,
+            vec![quote.clone()],
+            std::slice::from_ref(&evidence),
+            policy,
+            &profile,
+        )
+        .unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].feed_sequence, 81);
+        assert_eq!(plans[0].exit_plan.take_profit_bps, 2_000);
+        assert_eq!(plans[0].exit_plan.stop_loss_bps, 1_000);
+        assert_eq!(plans[0].exit_plan.max_hold_seconds, 300);
+        assert!(!plans[0].execution_eligible);
+        assert!(!plans[0].broadcast);
+
+        let batch_tx = alloy_primitives::b256!(
+            "6f2eda661b50e42e14b9c9303d29675f82ab6276208c89c3151bc45f89922ced"
+        );
+        let batch_block_hash = B256::with_last_byte(0x42);
+        let batch_scopes = [
+            (
+                alloy_primitives::address!("52d2fc999629733677eae8efc2d3cd1bcffe600d"),
+                alloy_primitives::address!("18d2bbf1d35888aa15626e09c2467c7d8db05229"),
+            ),
+            (
+                alloy_primitives::address!("e10cf5ad32b6eea9b2ed5cf7a0f5c9c44fe2600d"),
+                alloy_primitives::address!("9cccea9331aaa7fdb45cd5280bb0c7bafb6f2bb3"),
+            ),
+        ];
+        let mut batch_migrations = Vec::new();
+        let mut batch_quotes = Vec::new();
+        let mut bindings = HashMap::new();
+        for (token, pool) in batch_scopes {
+            let mut migration = evidence.clone();
+            migration.tx_hash = batch_tx;
+            migration.token = token;
+            migration.pool = pool;
+            migration.l2_block_number = 10_563_712;
+            migration.block_hash = batch_block_hash;
+            migration.transaction_index = 1;
+            let quote = quote_hood_migrated_v3_receipt(&migration, &profile).unwrap();
+            bindings.insert(
+                quote_evidence_key(batch_tx, LaunchpadId::HoodFun, token),
+                GroundTruthQuoteBinding {
+                    l2_block_number: migration.l2_block_number,
+                    block_hash: migration.block_hash,
+                    transaction_index: migration.transaction_index,
+                    action: Some(ActionKind::Buy),
+                    token: Some(token),
+                    pool: Some(pool),
+                    quote_status: QuoteStatus::Available,
+                },
+            );
+            batch_migrations.push(migration);
+            batch_quotes.push(quote);
+        }
+        let batch_plans = finalized_hood_migrated_plans(
+            &HashMap::from([((batch_tx, LaunchpadId::HoodFun), 82)]),
+            &ConfirmedGroundTruth { by_key: bindings },
+            batch_quotes,
+            &batch_migrations,
+            policy,
+            &profile,
+        )
+        .unwrap();
+        assert_eq!(batch_plans.len(), 2);
+        assert!(batch_plans.iter().all(|plan| plan.feed_sequence == 82));
+        assert_eq!(
+            batch_plans
+                .iter()
+                .filter_map(|plan| plan.scope_token)
+                .collect::<HashSet<_>>()
+                .len(),
+            2
+        );
+
+        let mut forged = quote;
+        forged.position_liquidity += U256::from(1_u8);
+        assert!(
+            finalized_hood_migrated_plans(
+                &HashMap::from([(key, 81)]),
+                &ground_truth,
+                vec![forged],
+                std::slice::from_ref(&evidence),
+                policy,
+                &profile,
+            )
+            .is_err()
+        );
     }
 }

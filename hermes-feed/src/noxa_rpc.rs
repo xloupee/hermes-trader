@@ -52,6 +52,10 @@ sol! {
     interface IActiveNoxaFactoryView {
         function getLaunchedToken(address token) external view returns (ActiveLaunchedToken memory);
     }
+
+    interface IV3FactoryView {
+        function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address);
+    }
 }
 
 const LAUNCH_ENABLED_SELECTOR: &str = "0x236a4afb";
@@ -203,6 +207,20 @@ pub struct V3PoolSnapshot {
     pub token1: Address,
     pub fee: u32,
     pub liquidity: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct HoodV3PoolSnapshot {
+    pub pool: Address,
+    pub factory_pool: Address,
+    pub token0: Address,
+    pub token1: Address,
+    pub fee: u32,
+    pub tick_spacing: i32,
+    pub sqrt_price_x96: U256,
+    pub tick: i32,
+    pub liquidity: u128,
+    pub code_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -478,6 +496,48 @@ impl NoxaRpcClient {
     ) -> Result<V3PoolSnapshot> {
         self.v3_pool_snapshot_at_tag(pool, &hex_u64(l2_block_number))
             .await
+    }
+
+    pub async fn hood_v3_pool_snapshot_at(
+        &self,
+        factory: Address,
+        pool: Address,
+        token0: Address,
+        token1: Address,
+        fee: u32,
+        l2_block_number: u64,
+    ) -> Result<HoodV3PoolSnapshot> {
+        const TICK_SPACING: [u8; 4] = [0xd0, 0xc9, 0x3a, 0x7c];
+        const SLOT0: [u8; 4] = [0x38, 0x50, 0xc7, 0xbd];
+        let block_tag = hex_u64(l2_block_number);
+        let get_pool = IV3FactoryView::getPoolCall {
+            tokenA: token0,
+            tokenB: token1,
+            fee: alloy_primitives::aliases::U24::from(fee),
+        }
+        .abi_encode();
+        let (base, tick_spacing, slot0, factory_pool, code) = tokio::try_join!(
+            self.v3_pool_snapshot_at_tag(pool, &block_tag),
+            self.eth_call_data(pool, &TICK_SPACING, &block_tag),
+            self.eth_call_data(pool, &SLOT0, &block_tag),
+            self.eth_call_data(factory, &get_pool, &block_tag),
+            self.code_at_block(pool, &block_tag),
+        )?;
+        if slot0.len() < 64 {
+            bail!("V3 slot0 response is truncated");
+        }
+        Ok(HoodV3PoolSnapshot {
+            pool,
+            factory_pool: parse_address_word(&factory_pool)?,
+            token0: base.token0,
+            token1: base.token1,
+            fee: base.fee,
+            tick_spacing: parse_i24_word(&tick_spacing)?,
+            sqrt_price_x96: parse_u256_bytes(&slot0[..32])?,
+            tick: parse_i24_word(&slot0[32..64])?,
+            liquidity: base.liquidity,
+            code_bytes: code.len(),
+        })
     }
 
     /// Hydrate the exact Hood curve and semantic configuration at a confirmed
@@ -1333,6 +1393,19 @@ fn parse_u32_word(value: &[u8]) -> Result<u32> {
     u32::try_from(value).context("ABI word does not fit u32")
 }
 
+fn parse_i24_word(value: &[u8]) -> Result<i32> {
+    if value.len() != 32 {
+        bail!("signed int24 response is not one ABI word");
+    }
+    let negative = value[29] & 0x80 != 0;
+    let expected_prefix = if negative { 0xff } else { 0x00 };
+    if value[..29].iter().any(|byte| *byte != expected_prefix) {
+        bail!("signed int24 response is not canonically extended");
+    }
+    let raw = (i32::from(value[29]) << 16) | (i32::from(value[30]) << 8) | i32::from(value[31]);
+    Ok(if negative { raw - (1 << 24) } else { raw })
+}
+
 fn fixed_words(value: &[u8], count: usize, label: &str) -> Result<Vec<U256>> {
     let expected = count
         .checked_mul(32)
@@ -1400,6 +1473,20 @@ mod tests {
     use alloy_primitives::{address, b256};
 
     use super::*;
+
+    #[test]
+    fn signed_int24_words_require_canonical_extension() {
+        let mut positive = [0_u8; 32];
+        positive[29..].copy_from_slice(&[0x0d, 0x89, 0x03]);
+        assert_eq!(parse_i24_word(&positive).unwrap(), 887_043);
+
+        let mut negative = [0xff_u8; 32];
+        negative[29..].copy_from_slice(&[0xf2, 0x76, 0xfd]);
+        assert_eq!(parse_i24_word(&negative).unwrap(), -887_043);
+
+        positive[0] = 1;
+        assert!(parse_i24_word(&positive).is_err());
+    }
 
     #[test]
     fn parses_robinhood_l1_block_field() {

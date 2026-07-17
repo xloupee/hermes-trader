@@ -2526,6 +2526,18 @@ mod tests {
         .unwrap()
     }
 
+    fn bankr_v5_reverse_raw_frames() -> Vec<StonksV3RawRecord> {
+        #[derive(Deserialize)]
+        struct Fixture {
+            frames: Vec<StonksV3RawRecord>,
+        }
+        serde_json::from_str::<Fixture>(include_str!(
+            "../tests/fixtures/bankr-doppler-v5-reverse-raw-frames.json"
+        ))
+        .unwrap()
+        .frames
+    }
+
     fn startup() -> (PaperExpectedPins, PaperObservedStartupSnapshot) {
         let expected = PaperExpectedPins {
             schema_version: 4,
@@ -3255,6 +3267,70 @@ mod tests {
             1
         );
         assert!(report.trade_plans.iter().all(|plan| !plan.broadcast));
+    }
+
+    #[test]
+    fn exact_raw_nitro_bankr_v5_reverse_frames_emit_three_strict_async_requests() {
+        let frames = bankr_v5_reverse_raw_frames();
+        assert_eq!(frames.len(), 3);
+        let expected = [
+            (
+                alloy_primitives::b256!(
+                    "f05362bfc3dd65c67116b1630e8872e80380d2f6f7561455f4bbea9b2dcb391a"
+                ),
+                alloy_primitives::address!("08659aef179de34ba122c170af932ebe0d209ba3"),
+                alloy_primitives::b256!(
+                    "0ccdb9dc3ca3c2e9a5d3420ef8d6335544588e904f91372e86361acc8351cc42"
+                ),
+            ),
+            (
+                alloy_primitives::b256!(
+                    "7c3641c37918052cf50e323ab99d99cd539ddd96c5c8f13511cc23db4ea8cd18"
+                ),
+                alloy_primitives::address!("0b20298a0807b5cb4e29a59a09f754dfcbebdba3"),
+                alloy_primitives::b256!(
+                    "18f2576d8f3002f0997d8cabe0a7964b442f0ea5c20c440ab84d13cdb81e2879"
+                ),
+            ),
+            (
+                alloy_primitives::b256!(
+                    "81a8eb424f298df231b6d7e5acf8fafb7816742b80bd2b9b71caf8292b1c8bfc"
+                ),
+                alloy_primitives::address!("0b7c35adcc52ca404dc471811c9878f1ca858ba3"),
+                alloy_primitives::b256!(
+                    "2bb56a0a01ce1a2c462bfbf24a73c0ddfccb9304ab31ade33ad601e49ca91fd9"
+                ),
+            ),
+        ];
+        for (frame, (tx_hash, token, pool_id)) in frames.iter().zip(expected) {
+            let mut runtime = PaperFeedRuntime::new(bankr_v4_observer());
+            let broadcast: BroadcastMessage = serde_json::from_str(&frame.payload).unwrap();
+            let report = runtime
+                .decode_received_at(&broadcast, frame.received_unix_ns)
+                .unwrap();
+            assert!(report.rejections.is_empty());
+            let observation = report
+                .observations
+                .iter()
+                .find(|row| row.tx_hash == tx_hash)
+                .unwrap();
+            assert_eq!(observation.launchpad, LaunchpadId::BankrDoppler);
+            assert_eq!(observation.wrapper, WrapperKind::Erc4337);
+            assert_eq!(observation.leader_origin, LeaderOrigin::Erc4337Sender);
+            assert_eq!(observation.predicted_token, Some(token));
+            assert!(token < WETH);
+            assert_eq!(observation.predicted_pool_id, Some(pool_id));
+            assert!(!observation.live_execution_enabled);
+            assert_eq!(
+                report
+                    .reconciliation_requests
+                    .iter()
+                    .filter(|row| row.tx_hash == tx_hash)
+                    .count(),
+                1
+            );
+            assert!(report.trade_plans.iter().all(|plan| !plan.broadcast));
+        }
     }
 
     #[test]

@@ -2870,6 +2870,110 @@ mod tests {
         assert!(blocked.bankr_quote.is_none());
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn bankr_v5_reverse_three_raw_frames_cross_concrete_rpc_reconcile_and_quote() {
+        let raw: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v5-reverse-raw-frames.json"
+        ))
+        .unwrap();
+        let proofs: BankrV4ProofSet = serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v5-reverse-three-live-proofs.json"
+        ))
+        .unwrap();
+        let mut runtime_fixture: BankrV4RuntimeFixture = serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v5-concrete-reconciler-runtime-code.json"
+        ))
+        .unwrap();
+        runtime_fixture.verified_l2_blocks = proofs
+            .launches
+            .iter()
+            .map(|proof| BankrV4RuntimeBlock {
+                l2_block_number: proof.receipt.l2_block_number,
+                block_tag: format!("0x{:x}", proof.receipt.l2_block_number),
+                transaction_hash: proof.transaction.hash,
+            })
+            .collect();
+        assert_bankr_runtime_fixture(&runtime_fixture, 3);
+        let expected = [
+            (
+                alloy_primitives::b256!(
+                    "f05362bfc3dd65c67116b1630e8872e80380d2f6f7561455f4bbea9b2dcb391a"
+                ),
+                alloy_primitives::address!("45a52b682617bfe091138b8aa9926a608c692143"),
+            ),
+            (
+                alloy_primitives::b256!(
+                    "7c3641c37918052cf50e323ab99d99cd539ddd96c5c8f13511cc23db4ea8cd18"
+                ),
+                alloy_primitives::address!("06b7e0519639f9322930d47992464aa7c4784c86"),
+            ),
+            (
+                alloy_primitives::b256!(
+                    "81a8eb424f298df231b6d7e5acf8fafb7816742b80bd2b9b71caf8292b1c8bfc"
+                ),
+                alloy_primitives::address!("be73c058ed90983187d3e39fced6fe379210408b"),
+            ),
+        ];
+        let frames = raw["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 3);
+        for (raw_frame, (tx_hash, leader)) in frames.iter().zip(expected) {
+            let frame = BankrV4RawFrame {
+                window: "window-a".into(),
+                line: 0,
+                tx_hash,
+                envelope: "erc7579".into(),
+                source_path: "exact-campaign-raw-feed.jsonl".into(),
+                payload_sha256: String::new(),
+                received_unix_ns: raw_frame["received_unix_ns"].as_u64().unwrap(),
+                payload: raw_frame["payload"].as_str().unwrap().into(),
+            };
+            let proof = proofs
+                .launches
+                .iter()
+                .find(|proof| proof.transaction.hash == tx_hash)
+                .unwrap();
+            assert_eq!(proof.envelope, "erc7579");
+            let candidate = exact_bankr_candidate(&frame);
+            assert_eq!(candidate.wrapper, WrapperKind::Erc4337);
+            let steps = bankr_rpc_steps(proof, leader, &runtime_fixture, None);
+            let expected_requests = steps.len();
+            let (rpc, server) = spawn_exact_rpc_server(steps).await;
+            let reconciled = reconcile_candidate(
+                &rpc,
+                candidate,
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+                bankr_quote_policy(),
+                bankr_reconcile_profiles(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), server)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                expected_requests
+            );
+            assert_eq!(reconciled.evidence.quote_status, QuoteStatus::Available);
+            let quote = reconciled.bankr_quote.unwrap();
+            assert_eq!(
+                quote.market.create_profile_version,
+                hermes_feed::BankrCreateProfileVersion::CurveTicksV5
+            );
+            assert_eq!(
+                quote.market.envelope,
+                hermes_feed::BankrEnvelopeKind::Erc7579
+            );
+            assert!(quote.market.token < hermes_feed::robinhood::WETH);
+            assert_eq!(quote.market.initialize_tick, -229_200);
+            assert!(quote.entry.expected_output > U256::ZERO);
+            assert!(quote.full_position_exit.expected_output > U256::ZERO);
+            assert!(!quote.execution_eligible);
+            assert!(!quote.broadcast);
+        }
+    }
+
     #[test]
     fn collector_deserializes_direct_and_exact_eip7702_requests_and_rejects_malformed_provenance() {
         let direct = parse_observer_frame(observer_frame()).unwrap();

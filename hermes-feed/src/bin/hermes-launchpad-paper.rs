@@ -2561,11 +2561,6 @@ fn bankr_quote_arithmetic_is_consistent(
         return false;
     };
     if quote.market.create_profile_version == BankrCreateProfileVersion::CurveTicksV5
-        && quote.market.token < profile.weth.address
-    {
-        return false;
-    }
-    if quote.market.create_profile_version == BankrCreateProfileVersion::CurveTicksV5
         && quote.market.envelope != BankrEnvelopeKind::Erc7579
     {
         return false;
@@ -2578,7 +2573,7 @@ fn bankr_quote_arithmetic_is_consistent(
         | (BankrCreateProfileVersion::CurveTicksV2, true) => -229_600,
         (BankrCreateProfileVersion::CurveTicksV3, true) => -229_400,
         (BankrCreateProfileVersion::CurveTicksV4, true) => -229_400,
-        (BankrCreateProfileVersion::CurveTicksV5, true) => return false,
+        (BankrCreateProfileVersion::CurveTicksV5, true) => -229_200,
         (BankrCreateProfileVersion::CurveTicksV1, false) => 229_800,
         (BankrCreateProfileVersion::CurveTicksV2, false) => 229_600,
         (BankrCreateProfileVersion::CurveTicksV3, false) => 229_400,
@@ -2602,7 +2597,10 @@ fn bankr_quote_arithmetic_is_consistent(
             (-229_400, -119_200, B256::ZERO),
             (-119_200, 887_200, B256::with_last_byte(1)),
         ],
-        (BankrCreateProfileVersion::CurveTicksV5, true) => return false,
+        (BankrCreateProfileVersion::CurveTicksV5, true) => [
+            (-229_200, -119_200, B256::ZERO),
+            (-119_200, 887_200, B256::with_last_byte(1)),
+        ],
         (BankrCreateProfileVersion::CurveTicksV1, false) => [
             (119_800, 229_800, B256::ZERO),
             (-887_200, 119_800, B256::with_last_byte(1)),
@@ -2624,17 +2622,24 @@ fn bankr_quote_arithmetic_is_consistent(
             (-887_200, 119_200, B256::with_last_byte(1)),
         ],
     };
-    let expected_reverse_v4_liquidity = (quote.market.create_profile_version
-        == BankrCreateProfileVersion::CurveTicksV4
-        && quote.market.token < profile.weth.address)
-        .then(|| {
-            [
-                U256::from_str_radix("badf8a38e438d69a45c2", 16)
-                    .expect("reviewed reverse V4 primary liquidity is valid"),
-                U256::from_str_radix("1d082240a370451eb5ea2", 16)
-                    .expect("reviewed reverse V4 secondary liquidity is valid"),
-            ]
-        });
+    let expected_reverse_liquidity = match (
+        quote.market.create_profile_version,
+        quote.market.token < profile.weth.address,
+    ) {
+        (BankrCreateProfileVersion::CurveTicksV4, true) => Some([
+            U256::from_str_radix("badf8a38e438d69a45c2", 16)
+                .expect("reviewed reverse V4 primary liquidity is valid"),
+            U256::from_str_radix("1d082240a370451eb5ea2", 16)
+                .expect("reviewed reverse V4 secondary liquidity is valid"),
+        ]),
+        (BankrCreateProfileVersion::CurveTicksV5, true) => Some([
+            U256::from_str_radix("bcc248d856f01dd554c5", 16)
+                .expect("reviewed reverse V5 primary liquidity is valid"),
+            U256::from_str_radix("1d082240a370451eb5ea2", 16)
+                .expect("reviewed reverse V5 secondary liquidity is valid"),
+        ]),
+        _ => None,
+    };
     let Ok(expected_initialize_sqrt_price_x96) = get_sqrt_ratio_at_tick(expected_initialize_tick)
     else {
         return false;
@@ -2719,7 +2724,7 @@ fn bankr_quote_arithmetic_is_consistent(
             || position.tick_upper != expected.1
             || position.salt != expected.2
             || position.liquidity == U256::ZERO
-            || expected_reverse_v4_liquidity
+            || expected_reverse_liquidity
                 .is_some_and(|liquidity| position.liquidity != liquidity[index])
             || position.log_index <= quote.market.initialize_log_index
             || (index > 0 && position.log_index <= quote.market.positions[index - 1].log_index)
@@ -4684,6 +4689,13 @@ mod tests {
         .unwrap()
     }
 
+    fn bankr_v5_reverse_quote_fixture() -> BankrDopplerReceiptPaperQuote {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v5-reverse-paper-quote.json"
+        ))
+        .unwrap()
+    }
+
     fn pons_quote_fixture() -> PonsReceiptPaperQuote {
         pons_quote_from_fixture(include_str!(
             "../../tests/fixtures/pons-current-live-proof.json"
@@ -5310,6 +5322,24 @@ mod tests {
         assert!(v5_plans[0].exit_expected_output > U256::ZERO);
         assert!(!v5_plans[0].execution_eligible);
         assert!(!v5_plans[0].broadcast);
+
+        let v5_reverse_quote = bankr_v5_reverse_quote_fixture();
+        assert_eq!(
+            v5_reverse_quote.market.create_profile_version,
+            BankrCreateProfileVersion::CurveTicksV5
+        );
+        assert_eq!(v5_reverse_quote.market.envelope, BankrEnvelopeKind::Erc7579);
+        assert!(
+            v5_reverse_quote.market.token < BankrDopplerExpectedProfile::production().weth.address
+        );
+        assert_eq!(v5_reverse_quote.market.initialize_tick, -229_200);
+        let v5_reverse_plans = finalize_bankr_quote(v5_reverse_quote).unwrap();
+        assert_eq!(v5_reverse_plans.len(), 1);
+        assert_eq!(v5_reverse_plans[0].status, "quoted_execution_gated");
+        assert!(v5_reverse_plans[0].expected_output > U256::ZERO);
+        assert!(v5_reverse_plans[0].exit_expected_output > U256::ZERO);
+        assert!(!v5_reverse_plans[0].execution_eligible);
+        assert!(!v5_reverse_plans[0].broadcast);
     }
 
     #[test]
@@ -5412,6 +5442,26 @@ mod tests {
         let mut reverse_output = bankr_v4_reverse_quote_fixture();
         reverse_output.entry.expected_output += U256::from(1_u8);
         assert!(finalize_bankr_quote(reverse_output).is_err());
+
+        let mut reverse_v5_range = bankr_v5_reverse_quote_fixture();
+        reverse_v5_range.market.positions[0].tick_lower += 1;
+        assert!(finalize_bankr_quote(reverse_v5_range).is_err());
+
+        let mut reverse_v5_liquidity = bankr_v5_reverse_quote_fixture();
+        reverse_v5_liquidity.market.positions[0].liquidity += U256::from(1_u8);
+        assert!(finalize_bankr_quote(reverse_v5_liquidity).is_err());
+
+        let mut reverse_v5_pin = bankr_v5_reverse_quote_fixture();
+        reverse_v5_pin.market.delegation_runtime_hash = B256::with_last_byte(0xee);
+        assert!(finalize_bankr_quote(reverse_v5_pin).is_err());
+
+        let mut reverse_v5_direct = bankr_v5_reverse_quote_fixture();
+        reverse_v5_direct.market.envelope = BankrEnvelopeKind::DirectAirlock;
+        reverse_v5_direct.market.outer_bundler = None;
+        reverse_v5_direct.market.user_operation_log_index = None;
+        reverse_v5_direct.state_version.terminal_log_index =
+            reverse_v5_direct.market.launch_log_index;
+        assert!(finalize_bankr_quote(reverse_v5_direct).is_err());
 
         let mut reverse_pin = bankr_v4_reverse_quote_fixture();
         reverse_pin.market.delegation_runtime_hash = B256::with_last_byte(0xee);

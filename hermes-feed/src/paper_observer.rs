@@ -2512,6 +2512,13 @@ mod tests {
         .unwrap()
     }
 
+    fn bankr_v4_reverse_raw_frames() -> BankrV4RawFrameFixture {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/bankr-doppler-v4-reverse-raw-frames.json"
+        ))
+        .unwrap()
+    }
+
     fn bankr_v5_raw_frames() -> BankrV4RawFrameFixture {
         serde_json::from_str(include_str!(
             "../tests/fixtures/bankr-doppler-v5-fresh-raw-frame.json"
@@ -3122,6 +3129,79 @@ mod tests {
                 }
                 other => panic!("unexpected fixture envelope {other}"),
             }
+        }
+    }
+
+    #[test]
+    fn exact_raw_nitro_bankr_v4_reverse_frames_emit_strict_paper_only_requests() {
+        let frames = bankr_v4_reverse_raw_frames();
+        assert_eq!(frames.frames.len(), 2);
+        let expected = [
+            (
+                "post-stonks-a",
+                3195,
+                1_784_290_095_796_786_000,
+                "168b5c615be31bd2ab3224cfa385c677a413e275d6496acbec20a34e8abb4965",
+                alloy_primitives::address!("0106e926a9ccaedce5f87c859beaf89a56e96ba3"),
+                alloy_primitives::b256!(
+                    "1d40b4a7fb7768a884ea86f285e00cb9fd5ca3d282680984875888c6e5b81720"
+                ),
+            ),
+            (
+                "post-stonks-b",
+                2794,
+                1_784_290_343_752_758_000,
+                "c2fdbc19c231eea8cd1d9d83d0006ffc0cdc62a01585d6be8125ede3aa0d087e",
+                alloy_primitives::address!("022df6568187016fde9651cb8b5bc4aedcf80ba3"),
+                alloy_primitives::b256!(
+                    "a3a17284bba4c29e85ace5fe502177d3c8db97a45b5069e2b1ba467418047832"
+                ),
+            ),
+        ];
+        for (frame, (window, line, received, digest, token, pool_id)) in
+            frames.frames.iter().zip(expected)
+        {
+            assert_eq!(frame.window, window);
+            assert_eq!(frame.line, line);
+            assert_eq!(frame.envelope, "erc7579");
+            assert_eq!(frame.received_unix_ns, received);
+            assert!(
+                frame
+                    .source_path
+                    .ends_with(&format!("/{window}/raw-feed.jsonl"))
+            );
+            let mut payload_line = frame.payload.as_bytes().to_vec();
+            payload_line.push(b'\n');
+            assert_eq!(frame.payload_sha256, digest);
+            assert_eq!(hex::encode(Sha256::digest(&payload_line)), digest);
+
+            let mut runtime = PaperFeedRuntime::new(bankr_v4_observer());
+            let broadcast: BroadcastMessage = serde_json::from_str(&frame.payload).unwrap();
+            let report = runtime
+                .decode_received_at(&broadcast, frame.received_unix_ns)
+                .unwrap();
+            assert!(report.rejections.is_empty());
+            let observation = report
+                .observations
+                .iter()
+                .find(|row| row.tx_hash == frame.tx_hash)
+                .unwrap();
+            assert_eq!(observation.launchpad, LaunchpadId::BankrDoppler);
+            assert_eq!(observation.wrapper, WrapperKind::Erc4337);
+            assert_eq!(observation.leader_origin, LeaderOrigin::Erc4337Sender);
+            assert_eq!(observation.predicted_token, Some(token));
+            assert!(token < WETH);
+            assert_eq!(observation.predicted_pool_id, Some(pool_id));
+            assert!(!observation.live_execution_enabled);
+            assert_eq!(
+                report
+                    .reconciliation_requests
+                    .iter()
+                    .filter(|row| row.tx_hash == frame.tx_hash)
+                    .count(),
+                1
+            );
+            assert!(report.trade_plans.iter().all(|plan| !plan.broadcast));
         }
     }
 

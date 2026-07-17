@@ -2453,7 +2453,7 @@ mod tests {
         ))
         .unwrap();
         let runtime_fixture = bankr_v4_runtime_fixture();
-        assert_bankr_runtime_fixture(&runtime_fixture, 2);
+        assert_bankr_runtime_fixture(&runtime_fixture, 4);
         assert_eq!(frames.frames.len(), 2);
         assert!(
             frames
@@ -2621,6 +2621,141 @@ mod tests {
         assert!(rejected.pons_quote.is_none());
         assert!(rejected.hood_quote.is_none());
         assert!(rejected.hood_migration.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bankr_v4_reverse_raw_frames_cross_concrete_rpc_reconcile_and_quote_both_proofs() {
+        let frames: BankrV4RawFrames = serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v4-reverse-raw-frames.json"
+        ))
+        .unwrap();
+        let proofs: BankrV4ProofSet = serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v4-reverse-live-proofs.json"
+        ))
+        .unwrap();
+        let runtime_fixture = bankr_v4_runtime_fixture();
+        assert_bankr_runtime_fixture(&runtime_fixture, 4);
+        assert_eq!(frames.frames.len(), 2);
+        assert_eq!(proofs.launches.len(), 2);
+        assert_eq!(capabilities_record()["candidate_time_rpc"], false);
+        assert_eq!(capabilities_record()["signing"], false);
+        assert_eq!(capabilities_record()["broadcast"], false);
+
+        for frame in &frames.frames {
+            assert_eq!(frame.envelope, "erc7579");
+            let proof = proofs
+                .launches
+                .iter()
+                .find(|proof| proof.transaction.hash == frame.tx_hash)
+                .unwrap();
+            assert_eq!(proof.envelope, "erc7579");
+            let runtime_block = runtime_fixture
+                .verified_l2_blocks
+                .iter()
+                .find(|block| block.transaction_hash == frame.tx_hash)
+                .unwrap();
+            assert_eq!(runtime_block.l2_block_number, proof.receipt.l2_block_number);
+            assert_eq!(
+                runtime_block.block_tag,
+                format!("0x{:x}", proof.receipt.l2_block_number)
+            );
+            let expected_quote: BankrDopplerReceiptPaperQuote =
+                serde_json::from_str(if frame.window == "post-stonks-a" {
+                    include_str!("../../tests/fixtures/bankr-doppler-v4-reverse-paper-quote.json")
+                } else {
+                    include_str!("../../tests/fixtures/bankr-doppler-v4-reverse-paper-quote-b.json")
+                })
+                .unwrap();
+            assert_eq!(expected_quote.tx_hash, frame.tx_hash);
+            assert!(expected_quote.market.token < hermes_feed::robinhood::WETH);
+            assert_eq!(expected_quote.market.initialize_tick, -229_400);
+            assert_eq!(
+                expected_quote.entry.amount_in,
+                U256::from(1_000_000_000_000_000_u64)
+            );
+            assert_eq!(
+                expected_quote.full_position_exit.amount_in,
+                expected_quote.entry.expected_output
+            );
+            assert_eq!(expected_quote.entry.slippage_bps, 100);
+
+            let steps =
+                bankr_rpc_steps(proof, expected_quote.market.leader, &runtime_fixture, None);
+            let expected_requests = steps.len();
+            let (rpc, server) = spawn_exact_rpc_server(steps).await;
+            let reconciled = reconcile_candidate(
+                &rpc,
+                exact_bankr_candidate(frame),
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+                bankr_quote_policy(),
+                bankr_reconcile_profiles(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), server)
+                    .await
+                    .expect("reverse concrete RPC transcript was not fully consumed")
+                    .unwrap(),
+                expected_requests
+            );
+            assert_eq!(reconciled.evidence.quote_status, QuoteStatus::Available);
+            assert_eq!(reconciled.evidence.action, Some(ActionKind::Launch));
+            assert_eq!(reconciled.evidence.token, Some(expected_quote.market.token));
+            assert_eq!(
+                reconciled.evidence.pool_id,
+                Some(expected_quote.market.pool_id)
+            );
+            assert_eq!(reconciled.bankr_quote.as_ref(), Some(&expected_quote));
+            assert!(
+                reconciled
+                    .bankr_quote
+                    .as_ref()
+                    .is_some_and(|quote| { !quote.execution_eligible && !quote.broadcast })
+            );
+        }
+
+        let frame = &frames.frames[0];
+        let proof = proofs
+            .launches
+            .iter()
+            .find(|proof| proof.transaction.hash == frame.tx_hash)
+            .unwrap();
+        let expected_quote: BankrDopplerReceiptPaperQuote = serde_json::from_str(include_str!(
+            "../../tests/fixtures/bankr-doppler-v4-reverse-paper-quote.json"
+        ))
+        .unwrap();
+        let steps = bankr_rpc_steps(
+            proof,
+            expected_quote.market.leader,
+            &runtime_fixture,
+            Some("pool_manager"),
+        );
+        let (rpc, server) = spawn_exact_rpc_server(steps).await;
+        let rejected = reconcile_candidate(
+            &rpc,
+            exact_bankr_candidate(frame),
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+            bankr_quote_policy(),
+            bankr_reconcile_profiles(),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("reverse drift transcript was not consumed")
+            .unwrap();
+        assert_eq!(rejected.evidence.quote_status, QuoteStatus::Blocked);
+        assert!(rejected.bankr_quote.is_none());
+        assert!(
+            rejected
+                .evidence
+                .protocol_blocker
+                .as_deref()
+                .is_some_and(|reason| { reason.contains("receipt-block dependency") })
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

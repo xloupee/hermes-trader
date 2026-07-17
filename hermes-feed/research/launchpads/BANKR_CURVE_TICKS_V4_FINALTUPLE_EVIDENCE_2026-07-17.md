@@ -1,5 +1,10 @@
 # Bankr CurveTicksV4 final-tuple evidence (2026-07-17)
 
+> Supplemental status: this document remains the historical forward-orientation
+> proof. The later independently bounded reverse-orientation profile is covered
+> by `BANKR_CURVE_TICKS_V4_REVERSE_EVIDENCE_2026-07-17.md`; its admission does
+> not retroactively broaden the 16 transactions documented below.
+
 ## Scope and conclusion
 
 This is a paper-only admission profile derived from the completed final-tuple

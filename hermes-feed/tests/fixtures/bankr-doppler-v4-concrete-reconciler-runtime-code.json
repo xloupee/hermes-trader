@@ -13,6 +13,16 @@
       "l2_block_number": 11926027,
       "block_tag": "0xb5fa0b",
       "transaction_hash": "0x5fac8d13713912a64bb8ae17563e79d0c162e89a3eb8f5d12b3324d3c9b7558e"
+    },
+    {
+      "l2_block_number": 12107164,
+      "block_tag": "0xb8bd9c",
+      "transaction_hash": "0xccf350bfed931d136f9fbf5bc20fe49eb1404a5912aae2684549e32be68e4567"
+    },
+    {
+      "l2_block_number": 12109627,
+      "block_tag": "0xb8c73b",
+      "transaction_hash": "0x88eaff5b44775c8ccda07bae4ca7548cf448093013d6c7326fac3c0c8d4b2c49"
     }
   ],
   "runtimes": [

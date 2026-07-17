@@ -1547,87 +1547,6 @@ fn percentile(values: &[u128], percentile: usize) -> u128 {
     values[index]
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{
-        Recorder, SourceComparison, U256, apply_clock_offset, finish_recorder, mpsc,
-        parse_clock_offsets, parse_selectors, parse_u256, percentile, pick_winner,
-    };
-
-    #[test]
-    fn percentile_uses_nearest_rank() {
-        let values = [0, 0, 100];
-        assert_eq!(percentile(&values, 50), 0);
-        assert_eq!(percentile(&values, 95), 100);
-        assert_eq!(percentile(&values, 99), 100);
-    }
-
-    #[test]
-    fn winner_requires_sample_floor_and_healthy_feed() {
-        let healthy = SourceComparison {
-            source: "healthy".into(),
-            clock_offset_ns: 0,
-            eligible: true,
-            samples: 10,
-            wins: 8,
-            gaps: 0,
-            missing: 0,
-            duplicates_or_reordered: 0,
-            lag_ns_p50: 0,
-            lag_ns_p95: 10,
-            lag_ns_p99: 20,
-            lag_ns_max: 30,
-        };
-        let mut faster_but_gapped = healthy.clone();
-        faster_but_gapped.source = "gapped".into();
-        faster_but_gapped.eligible = false;
-        faster_but_gapped.gaps = 1;
-        faster_but_gapped.missing = 2;
-        faster_but_gapped.lag_ns_p95 = 0;
-
-        assert_eq!(
-            pick_winner(&[healthy.clone(), faster_but_gapped.clone()], 9, 10),
-            None
-        );
-        assert_eq!(
-            pick_winner(&[healthy, faster_but_gapped], 10, 10).as_deref(),
-            Some("healthy")
-        );
-    }
-
-    #[test]
-    fn parses_exact_four_byte_selectors() {
-        let parsed = parse_selectors(vec!["0x38ed1739".into()]).unwrap();
-        assert!(parsed.contains(&[0x38, 0xed, 0x17, 0x39]));
-        assert!(parse_selectors(vec!["0x1234".into()]).is_err());
-        assert!(parse_selectors(vec!["0xzzzzzzzz".into()]).is_err());
-    }
-
-    #[test]
-    fn clock_offsets_are_parsed_and_applied() {
-        let offsets = parse_clock_offsets(&["fra=-200".into()]).unwrap();
-        assert_eq!(offsets["fra"], -200);
-        assert_eq!(apply_clock_offset(1_000, -200), 1_200);
-        assert_eq!(apply_clock_offset(1_000, 200), 800);
-    }
-
-    #[test]
-    fn parses_decimal_and_hex_u256() {
-        assert_eq!(parse_u256("16").unwrap(), U256::from(16));
-        assert_eq!(parse_u256("0x10").unwrap(), U256::from(16));
-    }
-
-    #[tokio::test]
-    async fn recorder_task_failure_is_propagated() {
-        let (sender, _receiver) = mpsc::channel(1);
-        let recorder = Recorder {
-            sender,
-            task: tokio::spawn(async { anyhow::bail!("synthetic recorder failure") }),
-        };
-        assert!(finish_recorder(Some(recorder)).await.is_err());
-    }
-}
-
 struct Recorder {
     sender: mpsc::Sender<RecordedFrame>,
     task: tokio::task::JoinHandle<Result<()>>,
@@ -1731,4 +1650,85 @@ fn monotonic_raw_ns() -> u64 {
 
 fn elapsed_ns(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Recorder, SourceComparison, U256, apply_clock_offset, finish_recorder, mpsc,
+        parse_clock_offsets, parse_selectors, parse_u256, percentile, pick_winner,
+    };
+
+    #[test]
+    fn percentile_uses_nearest_rank() {
+        let values = [0, 0, 100];
+        assert_eq!(percentile(&values, 50), 0);
+        assert_eq!(percentile(&values, 95), 100);
+        assert_eq!(percentile(&values, 99), 100);
+    }
+
+    #[test]
+    fn winner_requires_sample_floor_and_healthy_feed() {
+        let healthy = SourceComparison {
+            source: "healthy".into(),
+            clock_offset_ns: 0,
+            eligible: true,
+            samples: 10,
+            wins: 8,
+            gaps: 0,
+            missing: 0,
+            duplicates_or_reordered: 0,
+            lag_ns_p50: 0,
+            lag_ns_p95: 10,
+            lag_ns_p99: 20,
+            lag_ns_max: 30,
+        };
+        let mut faster_but_gapped = healthy.clone();
+        faster_but_gapped.source = "gapped".into();
+        faster_but_gapped.eligible = false;
+        faster_but_gapped.gaps = 1;
+        faster_but_gapped.missing = 2;
+        faster_but_gapped.lag_ns_p95 = 0;
+
+        assert_eq!(
+            pick_winner(&[healthy.clone(), faster_but_gapped.clone()], 9, 10),
+            None
+        );
+        assert_eq!(
+            pick_winner(&[healthy, faster_but_gapped], 10, 10).as_deref(),
+            Some("healthy")
+        );
+    }
+
+    #[test]
+    fn parses_exact_four_byte_selectors() {
+        let parsed = parse_selectors(vec!["0x38ed1739".into()]).unwrap();
+        assert!(parsed.contains(&[0x38, 0xed, 0x17, 0x39]));
+        assert!(parse_selectors(vec!["0x1234".into()]).is_err());
+        assert!(parse_selectors(vec!["0xzzzzzzzz".into()]).is_err());
+    }
+
+    #[test]
+    fn clock_offsets_are_parsed_and_applied() {
+        let offsets = parse_clock_offsets(&["fra=-200".into()]).unwrap();
+        assert_eq!(offsets["fra"], -200);
+        assert_eq!(apply_clock_offset(1_000, -200), 1_200);
+        assert_eq!(apply_clock_offset(1_000, 200), 800);
+    }
+
+    #[test]
+    fn parses_decimal_and_hex_u256() {
+        assert_eq!(parse_u256("16").unwrap(), U256::from(16));
+        assert_eq!(parse_u256("0x10").unwrap(), U256::from(16));
+    }
+
+    #[tokio::test]
+    async fn recorder_task_failure_is_propagated() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let recorder = Recorder {
+            sender,
+            task: tokio::spawn(async { anyhow::bail!("synthetic recorder failure") }),
+        };
+        assert!(finish_recorder(Some(recorder)).await.is_err());
+    }
 }

@@ -1,0 +1,247 @@
+{
+  "record_type": "hermes_launchpad_paper_campaign_evidence",
+  "schema_version": 1,
+  "evidence_date_utc": "2026-07-17",
+  "git_commit": "19fe23af9b0a8283dfed6943aa8c4ed53ccb09d4",
+  "network": {
+    "name": "Robinhood Chain mainnet",
+    "chain_id": 4663
+  },
+  "artifact_root": "/Users/kennethjiang/.codex/worktrees/c20e/hermes-trader 2/hermes-feed/.runtime/paper-campaign-bankr-v4-19fe23a-20260717T085018Z",
+  "campaign": {
+    "acquisition": "live",
+    "mode": "paper_only",
+    "window_duration_seconds": 300,
+    "accepted_window_count": 3,
+    "excluded_partial_window_count": 0,
+    "complete_non_overlapping_windows": true,
+    "topology": "hermes-feed probe --record mode-0600 FIFO -> tee raw-feed.jsonl -> mode-0600 observer FIFO -> hermes-launchpad-paper --input -",
+    "probe_stdout_role": "metrics_only",
+    "pins_validated_in_every_window": true,
+    "chain_id_validated_in_every_window": true,
+    "no_partial_fifo_or_symlink_artifacts_after_completion": true
+  },
+  "provenance": {
+    "expected_pins_content_keccak256": "0x3a192547af7a76a47d5de1b8102da0dc0bb77b7047a53c855b7d264aefa1a34c",
+    "campaign_lock_content_keccak256": "0x2235dd0d9323d51249f5104c22dcb6e5f7aa26d5fb17b56f58a628839d9eaa7e",
+    "authoritative_readiness_content_keccak256": "0xaedd41260c786d488d386a10b0843e479a6615745ba2d6b36543e2d2bec6f4e0",
+    "launchpad_evidence_report_content_keccak256": "0x1f123cefa9d91019319ee43eca721f76fa1d9b428601b2a0e8d96637d02ca8a7",
+    "executables": {
+      "hermes_feed_keccak256": "0xd383c3410183a8b632079031b9bcaadea71f4c59bba8d610cfb24de84afb33e5",
+      "paper_keccak256": "0xe558e925d9f4926f2804b6e6834a6b437427edb122737dc8417376b6b1ea0fbc",
+      "reconciler_keccak256": "0x534e1192782983d8def097318bf9c98b856f52ccbf0d5302eb112ae9f745a7b8",
+      "chain_head_keccak256": "0x319fbb7cf811925040c5607f321d407d2b2fa4845e9c5a8f2638352b31d02d93",
+      "readiness_keccak256": "0x062736569de776a557fe7e96c91082081af1c1aeb3053b289304de4c9ea0d4bc",
+      "evidence_report_keccak256": "0xd525be3d39326a46349a608634f370976809d1687268c6bd51e3f5d0976cdf99",
+      "pin_snapshot_keccak256": "0xb6dadd7761e21d8b12f171674908d7d74825be2e807dc12d7d222b311267502f",
+      "local_runner_keccak256": "0xb065b10aa70b8caaa586298346ac06d11f27871dd6c35e0e6f3249e876356fa3",
+      "outer_campaign_runner_current_source_keccak256": "0x11c708fbb10e0f9d77659517762d035c4e1d32d271e5fde8ed275b582b24a7c1"
+    },
+    "authoritative_outputs_reproduced_byte_for_byte": true
+  },
+  "windows": [
+    {
+      "name": "window-a",
+      "snapshot": {
+        "l2_block_number": 11989209,
+        "l2_block_hash": "0x13b5369d198fa5383f94e562ae33303f54ae41995c592b6a79129c487745a5d4",
+        "l1_block_number": 25551322,
+        "block_timestamp": 1784278236,
+        "pin_count": 41,
+        "expected_validation_passed": true,
+        "snapshot_report_keccak256": "0x850c37db1f47fb5098e11325051c1d1229700aba2bc449f6179ead649fcbc73f"
+      },
+      "start_boundary": {
+        "l2_block_number": 11989287,
+        "l2_block_hash": "0x3cb3820eed4e69d85f7d09d0e3f696337e1be5c5d946d43d3e15c1a4facebc53"
+      },
+      "coverage": {
+        "from_l2_block": 11989288,
+        "to_l2_block": 11992259,
+        "cutoff_l2_block_hash": "0xc83ecd6a50619e4b8cb87c1ae1b9588b6e611167568bf22c96ce78a9dbf6f349"
+      },
+      "manifest_keccak256": "0x92fe468244a2c7ea81342d064a22532df4d28437020e2d685cac2a4529d50b60",
+      "artifact_keccak256": {
+        "raw_feed": "0xc12a1f8519720ae57c2c55e5398a5f459c70b95961fcf5aa523dd66e992795c0",
+        "probe_metrics": "0xde90dc6c4ec5194941aa0f8067ff4f5267f2c8238a080ea34aa3ed48f9a1d815",
+        "observer": "0x869d85db2c5fdc2702253f929878dcdbe1b0c18e358bbf546f3b1793ed55eb8a",
+        "reconciliation": "0x27055ee5d79ef251494d8614fed3e1fa56b0986db30ab9a93d1c9001d084135a",
+        "finalized": "0x4938aaf4309f54dabc99ba2bc7f1b6d0d45ffb0baa1227dbb99c44fde89f0ea5"
+      }
+    },
+    {
+      "name": "window-b",
+      "snapshot": {
+        "l2_block_number": 11992443,
+        "l2_block_hash": "0x9d885eca5ecea1545c855406c866efdfaf7207d5263c9c37d54593e93ea4d853",
+        "l1_block_number": 25551348,
+        "block_timestamp": 1784278561,
+        "pin_count": 41,
+        "expected_validation_passed": true,
+        "snapshot_report_keccak256": "0x7dd68f27022f2b4cac8de1d6a645a95110e59fce2b774d3562ac50c180464c91"
+      },
+      "start_boundary": {
+        "l2_block_number": 11992510,
+        "l2_block_hash": "0xff9d6e88897e9a1b27749637243528634fa396c58845950875c80bd278a40d06"
+      },
+      "coverage": {
+        "from_l2_block": 11992511,
+        "to_l2_block": 11995483,
+        "cutoff_l2_block_hash": "0x77ac3ef4093eb4ff58a98dc4de0f96ee30f47e592a58a5757221ffbc3b60410c"
+      },
+      "manifest_keccak256": "0xfacd3330de8fdb18be1c7424780368979bf69ab54224d2d706ad84a570b83a2c",
+      "artifact_keccak256": {
+        "raw_feed": "0xd719f6df4f33e2d5cd68368afa9f8c234e9d602cc2ebd9f963b24c72d7d3bf99",
+        "probe_metrics": "0x05edfe4be662266a15e8117acafba1c7c9ee3bba78e7705f20cdd6e760219633",
+        "observer": "0x0ffee6b798e65f33e97c3aeafc8bc531ca7fbe7d1710ce27eee754022e6f864b",
+        "reconciliation": "0x6b729b61ffd28af787d3c59ef481bcd3b48cd04c8a4f0757ddfe0ad206830a35",
+        "finalized": "0xb234772ef28ed28fb743ae7190314a0f7e6d68c1b82be641e82ebbafea7d99de"
+      }
+    },
+    {
+      "name": "window-c",
+      "snapshot": {
+        "l2_block_number": 11995632,
+        "l2_block_hash": "0x4ef31b56346c3e2740d0c43c0a73ee1c91e86d019b27557e04ed184c40de87a5",
+        "l1_block_number": 25551376,
+        "block_timestamp": 1784278882,
+        "pin_count": 41,
+        "expected_validation_passed": true,
+        "snapshot_report_keccak256": "0x26128542bfad91abc9255cd863aecb3d59bd386a4ea487232b040ff2df1feb2d"
+      },
+      "start_boundary": {
+        "l2_block_number": 11995705,
+        "l2_block_hash": "0x97fbfc0712b36b32fb9c0119ce1d4040319a08d1d2a765cb5fc322a06cd5ef2d"
+      },
+      "coverage": {
+        "from_l2_block": 11995706,
+        "to_l2_block": 11998678,
+        "cutoff_l2_block_hash": "0xbf430d617fc15a8a5e26cb8a6c7fb119398a1c5c306c64804efbd74916a6248e"
+      },
+      "manifest_keccak256": "0xe506c8cbcab005569014ed0461d37fe222a1e8dbc223578e832b0df4b5323300",
+      "artifact_keccak256": {
+        "raw_feed": "0x2416852f739cab786bbf5930544dd7d552f8909b59b68b02025774e03d1241bf",
+        "probe_metrics": "0x6a475126933caa025c1763caa4b47d04e230cc45ff02b5facbd91b3df1d985b6",
+        "observer": "0xb48ef4dedacbe498c071856b4d7f5e45a3786fe36fa893949d5bd2f96f03b87d",
+        "reconciliation": "0x69b514e887a50730596c9043984d5a44969bf4d44dfa2b8abfdc2dce5e5f99f6",
+        "finalized": "0x577f520e1ae9c3787d7eeddd9ed58b121634773a3386fb0cac15700af0e2ec36"
+      }
+    }
+  ],
+  "launchpads": [
+    {
+      "launchpad": "bow",
+      "confirmed": 0,
+      "eligible": 0,
+      "latency_ns": {"p50": null, "p95": null, "p99": null, "sample_count": 0},
+      "errors": {"false_positives": 0, "detector_misses": 0, "coverage_misses": 0, "identity_mismatches": 0, "direction_mismatches": 0, "prediction_mismatches": 0, "quote_mismatches": 0},
+      "entry_plan_count": 0,
+      "exit_plan_count": 0,
+      "profile_observations": {"payable_initial_buy": 0, "zero_initial_buy": 0},
+      "paper_evidence_ready": false,
+      "authorizes_canary": false,
+      "execution_eligible": false
+    },
+    {
+      "launchpad": "launch_hood_v3",
+      "confirmed": 7,
+      "eligible": 7,
+      "latency_ns": {"p50": 323000, "p95": 1317000, "p99": 1317000, "sample_count": 7},
+      "errors": {"false_positives": 0, "detector_misses": 0, "coverage_misses": 0, "identity_mismatches": 0, "direction_mismatches": 0, "prediction_mismatches": 0, "quote_mismatches": 0},
+      "entry_plan_count": 7,
+      "exit_plan_count": 7,
+      "profile_observations": {"embedded_initial_buy": 7},
+      "simulated_round_trip_return_bps": "0x2649",
+      "paper_evidence_ready": false,
+      "authorizes_canary": false,
+      "execution_eligible": false
+    },
+    {
+      "launchpad": "clanker",
+      "confirmed": 4,
+      "eligible": 4,
+      "latency_ns": {"p50": 459000, "p95": 607000, "p99": 607000, "sample_count": 4},
+      "errors": {"false_positives": 0, "detector_misses": 0, "coverage_misses": 0, "identity_mismatches": 0, "direction_mismatches": 0, "prediction_mismatches": 0, "quote_mismatches": 0},
+      "entry_plan_count": 4,
+      "exit_plan_count": 4,
+      "profile_observations": {"extensionless_single_position": 2, "pinned_extension_five_position": 2},
+      "simulated_round_trip_return_bps": "0x351",
+      "paper_evidence_ready": false,
+      "authorizes_canary": false,
+      "execution_eligible": false
+    },
+    {
+      "launchpad": "bankr_doppler",
+      "confirmed": 0,
+      "eligible": 0,
+      "latency_ns": {"p50": null, "p95": null, "p99": null, "sample_count": 0},
+      "errors": {"false_positives": 0, "detector_misses": 6, "coverage_misses": 0, "identity_mismatches": 0, "direction_mismatches": 0, "prediction_mismatches": 0, "quote_mismatches": 0},
+      "entry_plan_count": 0,
+      "exit_plan_count": 0,
+      "profile_observations": {"curve_ticks_v1": 0, "curve_ticks_v2": 0, "curve_ticks_v3": 0, "curve_ticks_v4": 0, "direct_airlock": 0, "erc7579": 0},
+      "paper_evidence_ready": false,
+      "authorizes_canary": false,
+      "execution_eligible": false
+    },
+    {
+      "launchpad": "pons",
+      "confirmed": 49,
+      "eligible": 1,
+      "latency_ns": {"p50": 357000, "p95": 904000, "p99": 1277000, "sample_count": 49},
+      "errors": {"false_positives": 0, "detector_misses": 0, "coverage_misses": 0, "identity_mismatches": 2, "direction_mismatches": 0, "prediction_mismatches": 0, "quote_mismatches": 0},
+      "entry_plan_count": 1,
+      "exit_plan_count": 1,
+      "profile_observations": {"current_generation": 1},
+      "simulated_round_trip_return_bps": "0x2649",
+      "paper_evidence_ready": false,
+      "authorizes_canary": false,
+      "execution_eligible": false
+    },
+    {
+      "launchpad": "hood_fun",
+      "confirmed": 0,
+      "eligible": 0,
+      "latency_ns": {"p50": null, "p95": null, "p99": null, "sample_count": 0},
+      "errors": {"false_positives": 0, "detector_misses": 0, "coverage_misses": 0, "identity_mismatches": 0, "direction_mismatches": 0, "prediction_mismatches": 0, "quote_mismatches": 0},
+      "entry_plan_count": 0,
+      "exit_plan_count": 0,
+      "profile_observations": {"current_curve": 0},
+      "paper_evidence_ready": false,
+      "authorizes_canary": false,
+      "execution_eligible": false
+    }
+  ],
+  "bankr_detector_misses": [
+    {"window": "window-a", "l2_block_number": 11991651, "tx_hash": "0x4c910a52338472b365dadec2dd0bd24443f189396674750d74e93226e8e36fd6", "blocker": "bankr_strict_quote:Airlock create calldata is malformed or not the reviewed standard profile"},
+    {"window": "window-b", "l2_block_number": 11994560, "tx_hash": "0xd1641af3d4bfc5edb4efc118d0e3de7370c3d7385c5be74d138e2317485a582b", "blocker": "bankr_strict_quote:Airlock create calldata is malformed or not the reviewed standard profile"},
+    {"window": "window-c", "l2_block_number": 11996139, "tx_hash": "0xd513a87cc85a141ef88fb3ca7a0ce618223930a2585ff7ca9d0400ff2a2eee9f", "blocker": "bankr_strict_quote:Airlock create calldata is malformed or not the reviewed standard profile"},
+    {"window": "window-c", "l2_block_number": 11996520, "tx_hash": "0x0ac9b544c6f5e345bbfc4697eca18f185592f4fb935583829160995cf919e9d6", "blocker": "bankr_strict_quote:Airlock create calldata is malformed or not the reviewed standard profile"},
+    {"window": "window-c", "l2_block_number": 11995775, "tx_hash": "0xc62d71574bc598c026a8f44d4aacac2a599fb61edbb41a117d0ed19e2e1c8a51", "blocker": "bankr_strict_quote:Airlock create calldata is malformed or not the reviewed standard profile"},
+    {"window": "window-c", "l2_block_number": 11998586, "tx_hash": "0x227b398f6f2e4d61ba30c4d32a163d359dae1e073f4fcbbd94c1641117526ebc", "blocker": "bankr_strict_quote:Airlock create calldata is malformed or not the reviewed standard profile"}
+  ],
+  "pons_identity_gate": {
+    "aggregate_identity_mismatch_field_count": 2,
+    "affected_transaction_count": 1,
+    "tx_hash": "0xf40cc1543052e78c2c2fbb2dd6561dd14905ffc3bae0266e397d7c3ce6a36583",
+    "missing_prediction_fields": ["token", "pool"],
+    "transaction_level_false_positive": false,
+    "fail_closed_readiness_gate_remains": true
+  },
+  "interpretation": {
+    "bankr_misses_are_outside_current_strict_profiles": true,
+    "bankr_misses_authorize_profile_broadening": false,
+    "bankr_misses_authorize_fallback_dispatch": false,
+    "paper_quotes_are_independent_plans_not_transactions": true,
+    "simulated_round_trip_is_not_realized_profit_or_loss": true
+  },
+  "safety": {
+    "wallet_access": false,
+    "keys_or_keystore": false,
+    "signing": false,
+    "broadcasting": false,
+    "execution": false,
+    "canary": false,
+    "deployment": false,
+    "server_or_droplet_work": false
+  }
+}

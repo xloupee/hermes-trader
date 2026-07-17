@@ -58,19 +58,19 @@ classification latency on confirmed rows. It does not include the separate
 independent receipt/event reconciliation RPC duration. Round-trip values are
 simulated quote-asset return basis points.
 
-| Launchpad | Confirmed / eligible | p50 / p95 / p99 | Entry / exit | FP / misses | Round trip p50 |
-|---|---:|---:|---:|---:|---:|
-| Bow | 0 / 0 | n/a | 0 / 0 | 0 / 1 | n/a |
-| LaunchHood V3 | 6 / 6 | 0.366 / 0.552 / 0.552 ms | 6 / 6 | 0 / 0 | 9,801 bps |
-| Clanker | 41 / 41 | 0.435 / 1.001 / 1.122 ms | 41 / 41 | 0 / 0 | 849 bps |
-| Bankr/Doppler | 28 / 28 | 0.371 / 0.932 / 1.268 ms | 28 / 28 | 0 / 0 | 97 bps |
-| Pons | 151 / 0 | 0.317 / 0.703 / 0.946 ms | 0 / 0 | 0 / 0 | n/a |
-| Hood | 0 / 0 | n/a | 0 / 0 | 0 / 0 | n/a |
-| Flap | 152 / 0 | 0.303 / 0.767 / 0.975 ms | 0 / 0 | 0 / 3 | n/a |
+| Launchpad | Confirmed / eligible | p50 / p95 / p99 | Entry / exit | Entry / exit slip. | FP / miss / ID / dir / pred / quote | Round trip p50 |
+|---|---:|---:|---:|---:|---:|---:|
+| Bow | 0 / 0 | n/a | 0 / 0 | n/a | 0 / 1 / 0 / 0 / 0 / 0 | n/a |
+| LaunchHood V3 | 6 / 6 | 0.366 / 0.552 / 0.552 ms | 6 / 6 | 100 / 100 bps | 0 / 0 / 0 / 0 / 0 / 0 | 9,801 bps |
+| Clanker | 41 / 41 | 0.435 / 1.001 / 1.122 ms | 41 / 41 | 100 / 100 bps | 0 / 0 / 0 / 0 / 0 / 0 | 849 bps |
+| Bankr/Doppler | 28 / 28 | 0.371 / 0.932 / 1.268 ms | 28 / 28 | 100 / 100 bps | 0 / 0 / 0 / 0 / 0 / 0 | 97 bps |
+| Pons | 151 / 0 | 0.317 / 0.703 / 0.946 ms | 0 / 0 | n/a | 0 / 0 / 0 / 0 / 0 / 0 | n/a |
+| Hood | 0 / 0 | n/a | 0 / 0 | n/a | 0 / 0 / 0 / 0 / 0 / 0 | n/a |
+| Flap | 152 / 0 | 0.303 / 0.767 / 0.975 ms | 0 / 0 | n/a | 0 / 3 / 0 / 0 / 0 / 0 | n/a |
 
-All identity, direction, prediction, and quote mismatch counts are zero. Every
-eligible observation has an independent entry and full-position exit plan;
-every plan has `broadcast=false` and remains execution-gated.
+Coverage misses are zero for every launchpad. Every eligible observation has
+an independent 100 bps-slippage entry and full-position exit plan; every plan
+has `broadcast=false` and remains execution-gated.
 
 ### Bankr/Doppler
 

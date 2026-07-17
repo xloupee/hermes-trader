@@ -242,6 +242,7 @@ pub const BANKR_CREATE_SELECTOR: [u8; 4] = abi::createCall::SELECTOR;
 pub enum BankrCreateProfileVersion {
     CurveTicksV1,
     CurveTicksV2,
+    CurveTicksV3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1146,6 +1147,10 @@ fn validate_create_calldata(
         && curve(&init.curves[1], -119_400, 887_200, expected_secondary_share)
     {
         BankrCreateProfileVersion::CurveTicksV2
+    } else if curve(&init.curves[0], -229_400, -119_400, expected_primary_share)
+        && curve(&init.curves[1], -119_400, 887_200, expected_secondary_share)
+    {
+        BankrCreateProfileVersion::CurveTicksV3
     } else {
         return Err(BankrQuoteError::CreateCalldata);
     };
@@ -1375,8 +1380,10 @@ fn validate_receipt(
     let expected_initialize_tick = match (decoded.profile_version, token < WETH) {
         (BankrCreateProfileVersion::CurveTicksV1, true)
         | (BankrCreateProfileVersion::CurveTicksV2, true) => -229_600,
+        (BankrCreateProfileVersion::CurveTicksV3, true) => -229_400,
         (BankrCreateProfileVersion::CurveTicksV1, false) => 229_800,
         (BankrCreateProfileVersion::CurveTicksV2, false) => 229_600,
+        (BankrCreateProfileVersion::CurveTicksV3, false) => 229_400,
     };
     let expected_sqrt_price_x96 = get_sqrt_ratio_at_tick(expected_initialize_tick)
         .map_err(|_| BankrQuoteError::InitializeIdentity)?;
@@ -1399,8 +1406,13 @@ fn validate_receipt(
         return Err(BankrQuoteError::LiquiditySequence);
     }
     let expected_ranges = match (decoded.profile_version, token < WETH) {
-        (_, true) => [
+        (BankrCreateProfileVersion::CurveTicksV1, true)
+        | (BankrCreateProfileVersion::CurveTicksV2, true) => [
             (-229_600, -119_400, B256::ZERO),
+            (-119_400, 887_200, B256::with_last_byte(1)),
+        ],
+        (BankrCreateProfileVersion::CurveTicksV3, true) => [
+            (-229_400, -119_400, B256::ZERO),
             (-119_400, 887_200, B256::with_last_byte(1)),
         ],
         (BankrCreateProfileVersion::CurveTicksV1, false) => [
@@ -1409,6 +1421,10 @@ fn validate_receipt(
         ],
         (BankrCreateProfileVersion::CurveTicksV2, false) => [
             (119_400, 229_600, B256::ZERO),
+            (-887_200, 119_400, B256::with_last_byte(1)),
+        ],
+        (BankrCreateProfileVersion::CurveTicksV3, false) => [
+            (119_400, 229_400, B256::ZERO),
             (-887_200, 119_400, B256::with_last_byte(1)),
         ],
     };
@@ -1622,6 +1638,8 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
+    use alloy_primitives::Bytes;
+
     use super::*;
 
     #[derive(Deserialize)]
@@ -1758,6 +1776,41 @@ mod tests {
 
     fn production_fixture(contents: &str) -> ProductionLiveFixture {
         serde_json::from_str(contents).unwrap()
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct CurveTicksV3Proof {
+        tx_hash: B256,
+        transaction_type: String,
+        outer_bundler: Address,
+        outer_input: Bytes,
+        entry_point: Address,
+        handle_ops_selector: String,
+        user_operation_sender: Address,
+        account_call_selector: String,
+        mode: B256,
+        target: Address,
+        value: String,
+        create_calldata: Bytes,
+        account_designator: Bytes,
+        account_designator_hash: B256,
+        delegation_implementation: Address,
+        delegation_runtime_hash: B256,
+        modify_liquidity_logs: Vec<CurveTicksV3LiquidityLog>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct CurveTicksV3LiquidityLog {
+        pool_id: B256,
+        sender: Address,
+        data: Bytes,
+    }
+
+    fn curve_ticks_v3_proofs() -> Vec<CurveTicksV3Proof> {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/bankr-doppler-v3-quiet1-proof.json"
+        ))
+        .unwrap()
     }
 
     fn kernel_runtime() -> Vec<u8> {
@@ -2190,6 +2243,143 @@ mod tests {
         assert!(!validate_bankr_create_calldata_for_observation(
             &call.abi_encode()
         ));
+    }
+
+    #[test]
+    fn quiet_window_curve_ticks_v3_transactions_and_receipts_are_exact_proofs() {
+        let profile = BankrDopplerExpectedProfile::production();
+        let proofs = curve_ticks_v3_proofs();
+        assert_eq!(proofs.len(), 2);
+        assert_eq!(
+            proofs
+                .iter()
+                .map(|proof| proof.transaction_type.as_str())
+                .collect::<Vec<_>>(),
+            ["0x2", "0x4"]
+        );
+        let kernel = kernel_runtime();
+        let expected_position_ranges = [
+            [(-229_400, -119_400), (-119_400, 887_200)],
+            [(119_400, 229_400), (-887_200, 119_400)],
+        ];
+
+        for (proof, expected_ranges) in proofs.iter().zip(expected_position_ranges) {
+            assert_ne!(proof.tx_hash, B256::ZERO);
+            assert_eq!(proof.entry_point, profile.entry_point.address);
+            assert_eq!(proof.handle_ops_selector, "0x765e827f");
+            assert_ne!(proof.user_operation_sender, Address::ZERO);
+            assert_eq!(proof.account_call_selector, "0xe9ae5c53");
+            assert_eq!(proof.mode, B256::ZERO);
+            assert_eq!(proof.target, profile.airlock.address);
+            assert_eq!(proof.value, "0x0");
+            assert_eq!(
+                keccak256(&proof.account_designator),
+                proof.account_designator_hash
+            );
+            assert_eq!(
+                proof.account_designator_hash,
+                profile.smart_account.account.runtime_code_hash
+            );
+            assert_eq!(
+                proof.delegation_implementation,
+                profile
+                    .smart_account
+                    .delegation_implementation
+                    .unwrap()
+                    .address
+            );
+            let mut expected_designator = vec![0xef, 0x01, 0x00];
+            expected_designator.extend_from_slice(proof.delegation_implementation.as_slice());
+            assert_eq!(proof.account_designator.as_ref(), expected_designator);
+            assert_eq!(keccak256(&kernel), proof.delegation_runtime_hash);
+            assert_eq!(
+                Some(proof.delegation_runtime_hash),
+                profile
+                    .smart_account
+                    .delegation_implementation
+                    .map(|pin| pin.runtime_code_hash)
+            );
+
+            let discovered = crate::smart_account::discover_entry_point_v07_erc7579(
+                crate::smart_account::EntryPointCall {
+                    chain_id: CHAIN_ID,
+                    destination: profile.entry_point,
+                    outer_bundler: proof.outer_bundler,
+                    calldata: &proof.outer_input,
+                },
+                profile.entry_point,
+                crate::smart_account::ContractPin {
+                    address: profile.airlock.address,
+                    runtime_code_hash: profile.airlock.runtime_code_hash,
+                },
+            )
+            .unwrap();
+            assert_eq!(discovered.leader, proof.user_operation_sender);
+            assert_eq!(discovered.outer_bundler, proof.outer_bundler);
+            assert_eq!(discovered.target, profile.airlock.address);
+            assert_eq!(discovered.value, U256::ZERO);
+            assert_eq!(discovered.calldata, proof.create_calldata);
+
+            let call = abi::createCall::abi_decode(&proof.create_calldata).unwrap();
+            assert_eq!(call.abi_encode().as_slice(), proof.create_calldata.as_ref());
+            let decoded = validate_create_calldata(&call, profile).unwrap();
+            assert_eq!(
+                decoded.profile_version,
+                BankrCreateProfileVersion::CurveTicksV3
+            );
+            assert!(validate_bankr_create_calldata_for_observation(
+                &proof.create_calldata
+            ));
+
+            let observed_ranges = proof
+                .modify_liquidity_logs
+                .iter()
+                .map(|log| {
+                    let event = abi::ModifyLiquidity::decode_raw_log_validate(
+                        [
+                            abi::ModifyLiquidity::SIGNATURE_HASH,
+                            log.pool_id,
+                            B256::left_padding_from(log.sender.as_slice()),
+                        ],
+                        &log.data,
+                    )
+                    .unwrap();
+                    (
+                        i32::try_from(event.tickLower).unwrap(),
+                        i32::try_from(event.tickUpper).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(observed_ranges, expected_ranges);
+        }
+    }
+
+    #[test]
+    fn curve_ticks_v3_closest_neighbors_remain_rejected() {
+        let proof = curve_ticks_v3_proofs().remove(0);
+        let call = abi::createCall::abi_decode(&proof.create_calldata).unwrap();
+        let canonical_init =
+            abi::DopplerInitData::abi_decode(&call.createData.poolInitializerData).unwrap();
+
+        for mutate in [
+            |init: &mut abi::DopplerInitData| {
+                init.curves[0].tickLower = (-229_200_i32).try_into().unwrap();
+            },
+            |init: &mut abi::DopplerInitData| {
+                init.curves[0].tickUpper = (-119_200_i32).try_into().unwrap();
+            },
+            |init: &mut abi::DopplerInitData| {
+                init.curves[1].tickLower = (-119_200_i32).try_into().unwrap();
+            },
+        ] {
+            let mut mutated = call.clone();
+            let mut init = canonical_init.clone();
+            mutate(&mut init);
+            mutated.createData.poolInitializerData = init.abi_encode().into();
+            assert!(!validate_bankr_create_calldata_for_observation(
+                &mutated.abi_encode()
+            ));
+        }
     }
 
     #[test]

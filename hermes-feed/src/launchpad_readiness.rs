@@ -146,6 +146,7 @@ pub fn supported_profile_envelopes(launchpad: LaunchpadId) -> Option<&'static [&
         LaunchpadId::BankrDoppler => Some(&[
             "curve_ticks_v1",
             "curve_ticks_v2",
+            "curve_ticks_v3",
             "direct_airlock",
             "erc7579",
         ]),

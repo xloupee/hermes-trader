@@ -261,6 +261,7 @@ fn readiness_windows(
         let curve = match quote.market.create_profile_version {
             BankrCreateProfileVersion::CurveTicksV1 => "curve_ticks_v1",
             BankrCreateProfileVersion::CurveTicksV2 => "curve_ticks_v2",
+            BankrCreateProfileVersion::CurveTicksV3 => "curve_ticks_v3",
         };
         let envelope = match quote.market.envelope {
             BankrEnvelopeKind::DirectAirlock => "direct_airlock",
@@ -2087,15 +2088,22 @@ fn bankr_quote_arithmetic_is_consistent(
     ) {
         (BankrCreateProfileVersion::CurveTicksV1, true)
         | (BankrCreateProfileVersion::CurveTicksV2, true) => -229_600,
+        (BankrCreateProfileVersion::CurveTicksV3, true) => -229_400,
         (BankrCreateProfileVersion::CurveTicksV1, false) => 229_800,
         (BankrCreateProfileVersion::CurveTicksV2, false) => 229_600,
+        (BankrCreateProfileVersion::CurveTicksV3, false) => 229_400,
     };
     let expected_position_ranges = match (
         quote.market.create_profile_version,
         quote.market.token < profile.weth.address,
     ) {
-        (_, true) => [
+        (BankrCreateProfileVersion::CurveTicksV1, true)
+        | (BankrCreateProfileVersion::CurveTicksV2, true) => [
             (-229_600, -119_400, B256::ZERO),
+            (-119_400, 887_200, B256::with_last_byte(1)),
+        ],
+        (BankrCreateProfileVersion::CurveTicksV3, true) => [
+            (-229_400, -119_400, B256::ZERO),
             (-119_400, 887_200, B256::with_last_byte(1)),
         ],
         (BankrCreateProfileVersion::CurveTicksV1, false) => [
@@ -2104,6 +2112,10 @@ fn bankr_quote_arithmetic_is_consistent(
         ],
         (BankrCreateProfileVersion::CurveTicksV2, false) => [
             (119_400, 229_600, B256::ZERO),
+            (-887_200, 119_400, B256::with_last_byte(1)),
+        ],
+        (BankrCreateProfileVersion::CurveTicksV3, false) => [
+            (119_400, 229_400, B256::ZERO),
             (-887_200, 119_400, B256::with_last_byte(1)),
         ],
     };
@@ -3188,6 +3200,7 @@ mod tests {
         let curve = match quote.market.create_profile_version {
             BankrCreateProfileVersion::CurveTicksV1 => "curve_ticks_v1",
             BankrCreateProfileVersion::CurveTicksV2 => "curve_ticks_v2",
+            BankrCreateProfileVersion::CurveTicksV3 => "curve_ticks_v3",
         };
         let envelope = match quote.market.envelope {
             BankrEnvelopeKind::DirectAirlock => "direct_airlock",

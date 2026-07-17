@@ -27,6 +27,12 @@ pub const CLANKER_TOKEN_CREATED_TOPIC: B256 =
 pub const CLANKER_LOCKER: Address =
     alloy_primitives::address!("290f735f63824bb5836cde24a35f5103a5b5bc99");
 
+// Exact append-only context observed on the three reconciled `charms` direct
+// launches. Its semantics are not assumed; accepting any other trailer remains
+// fail-closed.
+const CLANKER_CHARMS_CONTEXT_TRAILER_V1: &[u8; 29] =
+    b"bc_peo3dkke\x0b\x00\x80\x21\x80\x21\x80\x21\x80\x21\x80\x21\x80\x21\x80\x21\x80\x21";
+
 pub const V4_POOL_MANAGER: Address =
     alloy_primitives::address!("8366a39cc670b4001a1121b8f6a443a643e40951");
 
@@ -53,6 +59,58 @@ const MAX_DISCOVERY_CALLDATA: usize = 128 * 1024;
 const MAX_OBSERVED_ROUTE_BYTES: usize = 32 * 1024;
 
 sol! {
+    struct ClankerTokenConfig {
+        address tokenAdmin;
+        string name;
+        string symbol;
+        bytes32 salt;
+        string image;
+        string metadata;
+        string context;
+        uint256 originatingChainId;
+    }
+
+    struct ClankerPoolConfig {
+        address hook;
+        address pairedToken;
+        int24 tickIfToken0IsClanker;
+        int24 tickSpacing;
+        bytes poolData;
+    }
+
+    struct ClankerLockerConfig {
+        address locker;
+        address[] rewardAdmins;
+        address[] rewardRecipients;
+        uint16[] rewardBps;
+        int24[] tickLower;
+        int24[] tickUpper;
+        uint16[] positionBps;
+        bytes lockerData;
+    }
+
+    struct ClankerMevModuleConfig {
+        address mevModule;
+        bytes mevModuleData;
+    }
+
+    struct ClankerExtensionConfig {
+        address extension;
+        uint256 extensionSupply;
+        uint16 extensionBps;
+        bytes extensionData;
+    }
+
+    struct ClankerDeploymentConfig {
+        ClankerTokenConfig tokenConfig;
+        ClankerPoolConfig poolConfig;
+        ClankerLockerConfig lockerConfig;
+        ClankerMevModuleConfig mevModuleConfig;
+        ClankerExtensionConfig[] extensionConfigs;
+    }
+
+    function deployToken(ClankerDeploymentConfig config) external;
+
     function deployCoin(
         string name,
         string symbol,
@@ -259,7 +317,7 @@ impl V4AdapterSet {
         }
         match entry.launchpad {
             LaunchpadId::Clanker => {
-                validate_opaque_abi(candidate.input, CLANKER_DEPLOY_SELECTOR)?;
+                validate_clanker_deploy_calldata(candidate.input)?;
                 Ok(LaunchObservation::OpaqueLaunch {
                     launchpad: LaunchpadId::Clanker,
                     leader: candidate.leader,
@@ -500,6 +558,32 @@ fn validate_opaque_abi(input: &[u8], selector: [u8; 4]) -> Result<(), V4AdapterE
     Ok(())
 }
 
+fn validate_clanker_deploy_calldata(input: &[u8]) -> Result<(), V4AdapterError> {
+    if input.len() < 4
+        || input.len() > MAX_DISCOVERY_CALLDATA
+        || input[..4] != CLANKER_DEPLOY_SELECTOR
+    {
+        return Err(V4AdapterError::MalformedCalldata);
+    }
+
+    if canonical_clanker_deploy(input) {
+        return Ok(());
+    }
+
+    let Some(prefix) = input.strip_suffix(CLANKER_CHARMS_CONTEXT_TRAILER_V1) else {
+        return Err(V4AdapterError::MalformedCalldata);
+    };
+    if canonical_clanker_deploy(prefix) {
+        Ok(())
+    } else {
+        Err(V4AdapterError::MalformedCalldata)
+    }
+}
+
+fn canonical_clanker_deploy(input: &[u8]) -> bool {
+    deployTokenCall::abi_decode(input).is_ok_and(|call| call.abi_encode().as_slice() == input)
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum V4AdapterError {
     #[error("startup runtime or implementation pin is invalid")]
@@ -524,7 +608,7 @@ pub enum V4AdapterError {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::address;
+    use alloy_primitives::{Bytes, address};
 
     use super::*;
     use crate::robinhood::WETH;
@@ -532,6 +616,21 @@ mod tests {
 
     const TOKEN: Address = address!("6bbbb3be7424a911d5d131e272639512c1c12b07");
     const HOOK: Address = address!("0000000000000000000000000000000000000042");
+
+    #[derive(Deserialize)]
+    struct ClankerCharmsDirectDeploy {
+        tx_hash: B256,
+        signer: Address,
+        calldata_len: usize,
+        calldata: Bytes,
+    }
+
+    fn clanker_charms_direct_deploys() -> Vec<ClankerCharmsDirectDeploy> {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/clanker-charms-direct-deploys.json"
+        ))
+        .unwrap()
+    }
 
     fn hash(byte: u8) -> B256 {
         B256::repeat_byte(byte)
@@ -616,7 +715,11 @@ mod tests {
     #[test]
     fn observes_exact_clanker_and_rejects_lookalikes() {
         let registry = research_registry();
-        let input = [CLANKER_DEPLOY_SELECTOR.as_slice(), &[0_u8; 32]].concat();
+        let input = clanker_charms_direct_deploys()[0]
+            .calldata
+            .strip_suffix(CLANKER_CHARMS_CONTEXT_TRAILER_V1)
+            .unwrap()
+            .to_vec();
         let exact = candidate(CLANKER_FACTORY, CLANKER_FACTORY_RUNTIME_HASH, None, &input);
         assert!(matches!(
             registry.observe(&exact),
@@ -639,6 +742,68 @@ mod tests {
         );
         let wrong_hash = candidate(CLANKER_FACTORY, hash(1), None, &input);
         assert_eq!(registry.observe(&wrong_hash), Err(V4AdapterError::NoMatch));
+    }
+
+    #[test]
+    fn observes_three_reconciled_clanker_charms_direct_deploys() {
+        let registry = research_registry();
+        let proofs = clanker_charms_direct_deploys();
+        assert_eq!(deployTokenCall::SELECTOR, CLANKER_DEPLOY_SELECTOR);
+        assert_eq!(proofs.len(), 3);
+
+        for proof in proofs {
+            assert_ne!(proof.tx_hash, B256::ZERO);
+            assert_eq!(proof.calldata.len(), proof.calldata_len);
+            let mut call = candidate(
+                CLANKER_FACTORY,
+                CLANKER_FACTORY_RUNTIME_HASH,
+                None,
+                &proof.calldata,
+            );
+            call.leader = proof.signer;
+            assert!(matches!(
+                registry.observe(&call),
+                Ok(LaunchObservation::OpaqueLaunch {
+                    launchpad: LaunchpadId::Clanker,
+                    leader,
+                    mode: ExecutionMode::ExecutionGated,
+                    ..
+                }) if leader == proof.signer
+            ));
+        }
+    }
+
+    #[test]
+    fn clanker_charms_trailer_is_exact_and_prefix_must_be_canonical() {
+        let registry = research_registry();
+        let proof = &clanker_charms_direct_deploys()[0];
+
+        let mut changed_trailer = proof.calldata.to_vec();
+        *changed_trailer.last_mut().unwrap() ^= 1;
+        let mut truncated_trailer = proof.calldata.to_vec();
+        truncated_trailer.pop();
+        let mut appended_byte = proof.calldata.to_vec();
+        appended_byte.push(0);
+        let mut changed_prefix = proof.calldata.to_vec();
+        changed_prefix[4 + 31] = 0x21;
+
+        for malformed in [
+            changed_trailer,
+            truncated_trailer,
+            appended_byte,
+            changed_prefix,
+        ] {
+            let call = candidate(
+                CLANKER_FACTORY,
+                CLANKER_FACTORY_RUNTIME_HASH,
+                None,
+                &malformed,
+            );
+            assert_eq!(
+                registry.observe(&call),
+                Err(V4AdapterError::MalformedCalldata)
+            );
+        }
     }
 
     #[test]

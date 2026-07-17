@@ -174,6 +174,18 @@ Blocked, unsupported, migration-only, out-of-range, or missed transactions
 produce evidence and metrics but never a finalized plan. Final plans remain
 `execution_eligible: false` and `broadcast: false`.
 
+Each finalized plan preserves the independently rederived immediate
+full-position exit quote in the existing `exit_expected_output` and
+`exit_min_receive` fields. That quote simulates an exit immediately after the
+paper entry at the reconciled state; it is not evidence that a later policy
+trigger fired. The additive `exit_plan` object separately records the configured
+take-profit, stop-loss, and maximum-hold policy, including WETH-denominated
+thresholds derived from the independent entry size. Its trigger source is a
+future independent warm full-position quote, its static-finalization status is
+not evaluated, and it always remains non-executable/non-broadcast. Zero,
+out-of-range, overflowing, or entry-size-collapsed trigger policies fail plan
+finalization closed.
+
 ## Meaningful-sample readiness gate
 
 Readiness is a separate evidence aggregation step. It does not enable a wallet,

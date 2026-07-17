@@ -542,11 +542,98 @@ struct FinalizedV3PaperPlan {
     exit_full_position: bool,
     exit_expected_output: U256,
     exit_min_receive: U256,
+    exit_plan: FinalizedPaperExitPlan,
     simulated_round_trip_return_bps: U256,
     leader_amounts_reused: bool,
     execution_eligible: bool,
     execution_blocker: String,
     broadcast: bool,
+}
+
+/// Trigger policy is separate from the immediate round-trip quote. The latter
+/// proves that a full-position exit can be independently quoted at the
+/// reconciled state; it does not claim that a future price or time trigger was
+/// observed.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct FinalizedPaperExitPlan {
+    strategy: &'static str,
+    quote_asset: Address,
+    full_position: bool,
+    take_profit_bps: u16,
+    take_profit_quote_asset_threshold: U256,
+    take_profit_condition: &'static str,
+    stop_loss_bps: u16,
+    stop_loss_quote_asset_threshold: U256,
+    stop_loss_condition: &'static str,
+    max_hold_seconds: u64,
+    max_hold_condition: &'static str,
+    trigger_quote_source: &'static str,
+    trigger_evaluation_status: &'static str,
+    immediate_exit_quote_timing: &'static str,
+    execution_eligible: bool,
+    broadcast: bool,
+}
+
+fn finalized_exit_plan(
+    entry_amount: U256,
+    immediate_exit_expected_output: U256,
+    immediate_exit_min_receive: U256,
+    policy: PaperPlanPolicy,
+) -> Result<FinalizedPaperExitPlan> {
+    const BPS_DENOMINATOR: u64 = 10_000;
+    if entry_amount == U256::ZERO
+        || immediate_exit_expected_output == U256::ZERO
+        || immediate_exit_min_receive == U256::ZERO
+        || immediate_exit_min_receive > immediate_exit_expected_output
+        || policy.take_profit_bps == 0
+        || policy.stop_loss_bps == 0
+        || u64::from(policy.stop_loss_bps) >= BPS_DENOMINATOR
+        || policy.max_hold_seconds == 0
+    {
+        anyhow::bail!("paper exit policy contains zero or out-of-range bounds");
+    }
+    let denominator = U256::from(BPS_DENOMINATOR);
+    let take_profit_numerator = entry_amount
+        .checked_mul(U256::from(
+            BPS_DENOMINATOR + u64::from(policy.take_profit_bps),
+        ))
+        .context("take-profit threshold overflow")?;
+    let mut take_profit_threshold = take_profit_numerator / denominator;
+    if take_profit_numerator % denominator != U256::ZERO {
+        take_profit_threshold = take_profit_threshold
+            .checked_add(U256::from(1_u8))
+            .context("take-profit threshold overflow")?;
+    }
+    let stop_loss_threshold = entry_amount
+        .checked_mul(U256::from(
+            BPS_DENOMINATOR - u64::from(policy.stop_loss_bps),
+        ))
+        .context("stop-loss threshold overflow")?
+        / denominator;
+    if take_profit_threshold <= entry_amount
+        || stop_loss_threshold == U256::ZERO
+        || stop_loss_threshold >= entry_amount
+    {
+        anyhow::bail!("paper exit thresholds collapse at the configured entry size");
+    }
+    Ok(FinalizedPaperExitPlan {
+        strategy: "full_position_take_profit_stop_loss_or_max_hold",
+        quote_asset: hermes_feed::robinhood::WETH,
+        full_position: true,
+        take_profit_bps: policy.take_profit_bps,
+        take_profit_quote_asset_threshold: take_profit_threshold,
+        take_profit_condition: "full_position_expected_output_gte_threshold",
+        stop_loss_bps: policy.stop_loss_bps,
+        stop_loss_quote_asset_threshold: stop_loss_threshold,
+        stop_loss_condition: "full_position_expected_output_lte_threshold",
+        max_hold_seconds: policy.max_hold_seconds,
+        max_hold_condition: "elapsed_seconds_gte_max_hold",
+        trigger_quote_source: "future_independent_warm_full_position_quote",
+        trigger_evaluation_status: "not_evaluated_at_static_receipt_finalization",
+        immediate_exit_quote_timing: "same_reconciled_state_after_simulated_entry",
+        execution_eligible: false,
+        broadcast: false,
+    })
 }
 
 fn promotion_validations(
@@ -1356,6 +1443,12 @@ fn finalized_v3_plans(
         {
             anyhow::bail!("unsafe or inconsistent V3 quote evidence for {key:?}");
         }
+        let exit_plan = finalized_exit_plan(
+            quote.entry.amount_in,
+            quote.full_position_exit.expected_output,
+            quote.full_position_exit.min_receive,
+            policy,
+        )?;
         plans.push(FinalizedV3PaperPlan {
             record_type: "launchpad_paper_finalized_plan",
             tx_hash: quote.tx_hash,
@@ -1370,6 +1463,7 @@ fn finalized_v3_plans(
             exit_full_position: true,
             exit_expected_output: quote.full_position_exit.expected_output,
             exit_min_receive: quote.full_position_exit.min_receive,
+            exit_plan,
             simulated_round_trip_return_bps: quote.simulated_round_trip_return_bps,
             leader_amounts_reused: false,
             execution_eligible: false,
@@ -1443,6 +1537,12 @@ fn finalized_clanker_plans(
         {
             anyhow::bail!("unsafe or inconsistent Clanker V4 quote evidence for {key:?}");
         }
+        let exit_plan = finalized_exit_plan(
+            quote.entry.amount_in,
+            quote.full_position_exit.expected_output,
+            quote.full_position_exit.min_receive,
+            policy,
+        )?;
         plans.push(FinalizedV3PaperPlan {
             record_type: "launchpad_paper_finalized_plan",
             tx_hash: quote.tx_hash,
@@ -1457,6 +1557,7 @@ fn finalized_clanker_plans(
             exit_full_position: true,
             exit_expected_output: quote.full_position_exit.expected_output,
             exit_min_receive: quote.full_position_exit.min_receive,
+            exit_plan,
             simulated_round_trip_return_bps: quote.simulated_round_trip_return_bps,
             leader_amounts_reused: false,
             execution_eligible: false,
@@ -1571,6 +1672,12 @@ fn finalized_bankr_plans(
         {
             anyhow::bail!("unsafe or inconsistent Bankr/Doppler V4 quote evidence for {key:?}");
         }
+        let exit_plan = finalized_exit_plan(
+            quote.entry.amount_in,
+            quote.full_position_exit.expected_output,
+            quote.full_position_exit.min_receive,
+            policy,
+        )?;
         plans.push(FinalizedV3PaperPlan {
             record_type: "launchpad_paper_finalized_plan",
             tx_hash: quote.tx_hash,
@@ -1585,6 +1692,7 @@ fn finalized_bankr_plans(
             exit_full_position: true,
             exit_expected_output: quote.full_position_exit.expected_output,
             exit_min_receive: quote.full_position_exit.min_receive,
+            exit_plan,
             simulated_round_trip_return_bps: quote.simulated_round_trip_return_bps,
             leader_amounts_reused: false,
             execution_eligible: false,
@@ -1646,6 +1754,12 @@ fn finalized_pons_plans(
         {
             anyhow::bail!("unsafe or inconsistent Pons V3 quote evidence for {key:?}");
         }
+        let exit_plan = finalized_exit_plan(
+            quote.entry.amount_in,
+            quote.full_position_exit.expected_output,
+            quote.full_position_exit.min_receive,
+            policy,
+        )?;
         plans.push(FinalizedV3PaperPlan {
             record_type: "launchpad_paper_finalized_plan",
             tx_hash: quote.tx_hash,
@@ -1660,6 +1774,7 @@ fn finalized_pons_plans(
             exit_full_position: true,
             exit_expected_output: quote.full_position_exit.expected_output,
             exit_min_receive: quote.full_position_exit.min_receive,
+            exit_plan,
             simulated_round_trip_return_bps: quote.simulated_round_trip_return_bps,
             leader_amounts_reused: false,
             execution_eligible: false,
@@ -1724,6 +1839,12 @@ fn finalized_hood_plans(
         {
             anyhow::bail!("unsafe or inconsistent Hood curve quote evidence for {key:?}");
         }
+        let exit_plan = finalized_exit_plan(
+            quote.entry.amount_in_requested,
+            quote.full_position_exit.expected_output,
+            quote.full_position_exit.min_receive,
+            policy,
+        )?;
         plans.push(FinalizedV3PaperPlan {
             record_type: "launchpad_paper_finalized_plan",
             tx_hash: quote.tx_hash,
@@ -1738,6 +1859,7 @@ fn finalized_hood_plans(
             exit_full_position: true,
             exit_expected_output: quote.full_position_exit.expected_output,
             exit_min_receive: quote.full_position_exit.min_receive,
+            exit_plan,
             simulated_round_trip_return_bps: quote.simulated_round_trip_return_bps,
             leader_amounts_reused: false,
             execution_eligible: false,
@@ -3804,7 +3926,9 @@ mod tests {
             PaperPlanPolicy {
                 max_input_wei: U256::from(1_000),
                 slippage_bps: 100,
-                ..PaperPlanPolicy::default()
+                take_profit_bps: 2_500,
+                stop_loss_bps: 750,
+                max_hold_seconds: 42,
             },
         )
         .unwrap();
@@ -3812,9 +3936,88 @@ mod tests {
         assert_eq!(plans[0].expected_output, expected_output);
         assert_eq!(plans[0].min_receive, expected_min_receive);
         assert_eq!(plans[0].exit_expected_output, expected_exit_output);
+        assert_eq!(plans[0].exit_plan.take_profit_bps, 2_500);
+        assert_eq!(
+            plans[0].exit_plan.take_profit_quote_asset_threshold,
+            U256::from(1_250)
+        );
+        assert_eq!(plans[0].exit_plan.stop_loss_bps, 750);
+        assert_eq!(
+            plans[0].exit_plan.stop_loss_quote_asset_threshold,
+            U256::from(925)
+        );
+        assert_eq!(plans[0].exit_plan.max_hold_seconds, 42);
+        assert_eq!(
+            plans[0].exit_plan.trigger_evaluation_status,
+            "not_evaluated_at_static_receipt_finalization"
+        );
+        assert!(!plans[0].exit_plan.execution_eligible);
+        assert!(!plans[0].exit_plan.broadcast);
+        let serialized = serde_json::to_value(&plans[0]).unwrap();
+        assert_eq!(serialized["exit_full_position"], true);
+        assert_eq!(
+            serialized["exit_plan"]["strategy"],
+            "full_position_take_profit_stop_loss_or_max_hold"
+        );
         assert!(!plans[0].execution_eligible);
         assert!(!plans[0].broadcast);
         assert!(!plans[0].leader_amounts_reused);
+    }
+
+    #[test]
+    fn finalized_exit_policy_rejects_missing_or_collapsed_trigger_bounds() {
+        let valid = PaperPlanPolicy {
+            max_input_wei: U256::from(1_000_u64),
+            slippage_bps: 100,
+            take_profit_bps: 1,
+            stop_loss_bps: 1,
+            max_hold_seconds: 1,
+        };
+        let plan = finalized_exit_plan(
+            U256::from(10_001_u64),
+            U256::from(9_000_u64),
+            U256::from(8_900_u64),
+            valid,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.take_profit_quote_asset_threshold,
+            U256::from(10_003_u64)
+        );
+        assert_eq!(plan.stop_loss_quote_asset_threshold, U256::from(9_999_u64));
+
+        for invalid in [
+            PaperPlanPolicy {
+                take_profit_bps: 0,
+                ..valid
+            },
+            PaperPlanPolicy {
+                stop_loss_bps: 0,
+                ..valid
+            },
+            PaperPlanPolicy {
+                stop_loss_bps: 10_000,
+                ..valid
+            },
+            PaperPlanPolicy {
+                max_hold_seconds: 0,
+                ..valid
+            },
+        ] {
+            assert!(
+                finalized_exit_plan(
+                    U256::from(10_001_u64),
+                    U256::from(9_000_u64),
+                    U256::from(8_900_u64),
+                    invalid,
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            finalized_exit_plan(U256::from(1_u8), U256::from(1_u8), U256::from(1_u8), valid)
+                .is_err()
+        );
     }
 
     #[test]
@@ -3895,6 +4098,9 @@ mod tests {
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].status, "quoted_execution_gated");
         assert_eq!(plans[0].feed_sequence, 77);
+        assert_eq!(plans[0].exit_plan.take_profit_bps, 2_000);
+        assert_eq!(plans[0].exit_plan.stop_loss_bps, 1_000);
+        assert_eq!(plans[0].exit_plan.max_hold_seconds, 300);
         assert!(!plans[0].execution_eligible);
         assert!(!plans[0].broadcast);
     }
@@ -4028,6 +4234,9 @@ mod tests {
         assert_eq!(plans[0].launchpad, LaunchpadId::BankrDoppler);
         assert_eq!(plans[0].status, "quoted_execution_gated");
         assert_eq!(plans[0].feed_sequence, 88);
+        assert_eq!(plans[0].exit_plan.take_profit_bps, 2_000);
+        assert_eq!(plans[0].exit_plan.stop_loss_bps, 1_000);
+        assert_eq!(plans[0].exit_plan.max_hold_seconds, 300);
         assert!(plans[0].expected_output > U256::ZERO);
         assert!(plans[0].min_receive > U256::ZERO);
         assert!(!plans[0].execution_eligible);
@@ -4041,6 +4250,9 @@ mod tests {
         assert_eq!(plans[0].launchpad, LaunchpadId::Pons);
         assert_eq!(plans[0].status, "quoted_execution_gated");
         assert_eq!(plans[0].feed_sequence, 99);
+        assert_eq!(plans[0].exit_plan.take_profit_bps, 2_000);
+        assert_eq!(plans[0].exit_plan.stop_loss_bps, 1_000);
+        assert_eq!(plans[0].exit_plan.max_hold_seconds, 300);
         assert!(plans[0].expected_output > U256::ZERO);
         assert!(plans[0].exit_expected_output > U256::ZERO);
         assert!(!plans[0].execution_eligible);
@@ -4246,6 +4458,9 @@ mod tests {
         assert_eq!(plans[0].launchpad, LaunchpadId::HoodFun);
         assert!(plans[0].expected_output > U256::ZERO);
         assert!(plans[0].exit_expected_output > U256::ZERO);
+        assert_eq!(plans[0].exit_plan.take_profit_bps, 2_000);
+        assert_eq!(plans[0].exit_plan.stop_loss_bps, 1_000);
+        assert_eq!(plans[0].exit_plan.max_hold_seconds, 300);
         assert!(!plans[0].execution_eligible);
         assert!(!plans[0].broadcast);
     }

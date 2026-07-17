@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "checked_at_utc_date": "2026-07-13",
+  "requirements": {
+    "published_testnet_canary_fix": {
+      "status": "complete",
+      "remote_commit": "55efd778dc0e215fe632f269d4019a2553b3aa80",
+      "successful_testnet_transaction": "0x698ad5d12af408b54cff9aa13d51b11b8facc48dbe915f402ba0f8b241207b55"
+    },
+    "feed_driven_single_boundary_submission": {
+      "status": "implemented_and_tested",
+      "polling_attempts_on_hot_path": 0,
+      "release_boundary": "launch_l1_block_plus_one",
+      "duplicate_release_prevented": true
+    },
+    "receipt_free_executable_runtime": {
+      "status": "implemented_and_historically_proven",
+      "historical_prediction_exact": true,
+      "stratified_historical_samples_selected": 120,
+      "stratified_historical_samples_exact": 107,
+      "stratified_historical_samples_unavailable_state": 13,
+      "stratified_historical_verification_failures": 0,
+      "historical_events_scanned": 60142,
+      "receipt_on_decision_path": false,
+      "release_prediction_and_quote_ns": 71600
+    },
+    "secure_server_signing": {
+      "implementation": "complete",
+      "user_run_provisioning_instructions": "SECURE_SIGNING.md",
+      "worktree_env_files_present": false,
+      "worktree_key_shaped_assignments_present": false,
+      "worktree_keystore_json_present": false,
+      "server_keystore_provisioned_by_user": false,
+      "private_key_accessed_by_codex": false
+    },
+    "testnet_swap_contracts": {
+      "status": "unavailable",
+      "official_testnet_weth": false,
+      "official_testnet_router": false,
+      "official_testnet_noxa_factory": false,
+      "swap_broadcast": false
+    },
+    "automated_paper_mode": {
+      "status": "complete",
+      "predicted_entry_boundary_and_reconciliation_exact": true,
+      "entry_exit_accounting_scenario_passed": true,
+      "live_release_feed_seconds": 60,
+      "live_feed_gaps": 0,
+      "live_feed_missing": 0,
+      "live_feed_duplicates_or_reordered": 0
+    },
+    "tiny_live_canaries": {
+      "testnet_self_transfer": "complete",
+      "testnet_swap": "waiting_for_contracts_and_liquidity",
+      "mainnet_swap": "not_approved_or_run"
+    },
+    "noxa_launch_path": {
+      "status": "waiting",
+      "launch_enabled": false,
+      "checked_l1_block": 25522492,
+      "checked_l2_block": 8520968,
+      "signed_broadcast_fail_closed_while_disabled": true
+    }
+  },
+  "worktree": {
+    "new_runtime_changes_committed": false,
+    "new_runtime_changes_pushed": false,
+    "reason": "explicit commit and push approval has not been given for this uncommitted runtime batch"
+  }
+}

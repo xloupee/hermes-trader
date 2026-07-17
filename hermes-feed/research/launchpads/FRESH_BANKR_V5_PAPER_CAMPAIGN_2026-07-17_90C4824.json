@@ -1,0 +1,192 @@
+{
+  "record_type": "hermes_launchpad_paper_campaign_evidence",
+  "schema_version": 1,
+  "evidence_date_utc": "2026-07-17",
+  "git_commit": "90c4824bec5dc987259ce4f81858940e247fa81c",
+  "network": {
+    "name": "Robinhood Chain mainnet",
+    "chain_id": 4663
+  },
+  "artifact_root": "/Users/kennethjiang/.codex/worktrees/hermes-bankr-v5-fresh-campaign/hermes-feed/.runtime/paper-campaign-bankr-v5-90c4824-20260717T095215Z",
+  "campaign": {
+    "acquisition": "live",
+    "mode": "paper_only",
+    "window_duration_seconds": 300,
+    "accepted_window_count": 3,
+    "excluded_partial_window_count": 0,
+    "complete_non_overlapping_windows": true,
+    "coverage_ranges": [
+      [12026077, 12029051],
+      [12029423, 12032398],
+      [12032770, 12035749]
+    ],
+    "topology": "hermes-feed probe --record mode-0600 FIFO -> tee raw-feed.jsonl -> mode-0600 observer FIFO -> hermes-launchpad-paper --input -",
+    "probe_stdout_role": "metrics_only",
+    "pins_validated_in_every_window": true,
+    "chain_id_validated_in_every_window": true,
+    "no_partial_fifo_or_symlink_artifacts_after_completion": true
+  },
+  "provenance": {
+    "expected_pins_content_keccak256": "0x3a192547af7a76a47d5de1b8102da0dc0bb77b7047a53c855b7d264aefa1a34c",
+    "campaign_lock_content_keccak256": "0xaa14ae71e8dd8c7ce248f557d769682dddcbc02cf1372cfeaee2d4b931a41783",
+    "authoritative_readiness_content_keccak256": "0xc6c1e044fc7b578176053de5700f89efc162c6157159228e2bbbb5ebc50462de",
+    "launchpad_evidence_report_content_keccak256": "0x2d8f0163f96cb8452c8f32dd97d53a2de8ac1429630911f21459eb2ea52bed18",
+    "executables": {
+      "hermes_feed_keccak256": "0xc62a2c74a345490b69f77c6f7f214bd4f68dce913003dd8d7ec56a2aa2610fbc",
+      "paper_keccak256": "0x3a2f0b23b8bc09aa09a897043271860e8c9efcbb322ed02530a1aa9c43cbe0f5",
+      "reconciler_keccak256": "0xd0d5fad2cae56341a985d8b0025a4ca34028ebc9647ec5b184388afeb5674efe",
+      "chain_head_keccak256": "0x99fd000e1a263541e7263d865d9b6ed1888f9268af30ea5f56b65f3ea14708b9",
+      "readiness_keccak256": "0xcb91abd9211b859f0f80c5aa0d73c9ce7d473800d82778e901b0428252e2b493",
+      "evidence_report_keccak256": "0x811632709612570d6823d0a68fb9b099114c8111d2785ccfa69572b8b157a84a",
+      "pin_snapshot_keccak256": "0x6374470fa2e8a5fbc651e86d0fd3f84a4dfe1ab11c1a1c42d9cfe6ae07de6516",
+      "local_runner_keccak256": "0xb065b10aa70b8caaa586298346ac06d11f27871dd6c35e0e6f3249e876356fa3",
+      "outer_campaign_runner_current_source_keccak256": "0x11c708fbb10e0f9d77659517762d035c4e1d32d271e5fde8ed275b582b24a7c1"
+    },
+    "authoritative_readiness_reproduced_byte_for_byte": true,
+    "launchpad_evidence_report_reproduced_byte_for_byte": true
+  },
+  "windows": [
+    {
+      "name": "window-a",
+      "snapshot": {
+        "l2_block_number": 12026003,
+        "l2_block_hash": "0x6a4a04533e754671db3a8a0e810a1b313631b164d25e7d8e6cd4cb310db742ea",
+        "l1_block_number": 25551628,
+        "block_timestamp": 1784281934,
+        "pin_count": 41,
+        "expected_validation_passed": true,
+        "rpc_metrics": {"logical_requests": 77, "http_attempts": 77, "retries": 0, "rate_limited": 0, "server_errors": 0, "transport_errors": 0},
+        "snapshot_report_keccak256": "0xcbdc93612ace76e8d44c0a94aba04e1d165ff016fd6e6d3d4536d285c6ff5c55"
+      },
+      "start_boundary": {"l2_block_number": 12026076, "l2_block_hash": "0x20273e4a9257b58a603b964fd4343d8c0de8a0dc58b0589fe3671109fd4b0322"},
+      "coverage": {"from_l2_block": 12026077, "to_l2_block": 12029051, "cutoff_l2_block_hash": "0xddaffc19c2dfe160f223c7612d1147c834555972195ee27382e871ce1d8d1207"},
+      "continuity": {"first_sequence": 12024910, "last_sequence": 12029063, "reconnects": 0, "gaps": 0, "missing": 0, "duplicates_or_reordered": 0},
+      "manifest_keccak256": "0x29bcc9395d7a7b7ef441c84b61f8d1a94bf18e8fb01d80c44bdd861a4ceac76b",
+      "artifact_keccak256": {
+        "raw_feed": "0x74be1e1c53fc27cb24a6f57a921655e8d632d4486468b9fde909f7969442b31e",
+        "probe_metrics": "0xb77f9dfdd97abc667ffd7d2a08541abb6524ba78ad90ddf7685661d5f9f05164",
+        "observer": "0x301c930cf7639b29766c5ff889d79723efdf59373235d172f0d037e95a7635b1",
+        "reconciliation": "0xd5d13037d6ad8b824e4f02b55ec0e9aa9232e413f9a03ecf2950f93d6149beb0",
+        "finalized": "0x3cf65a7cb3810a8f28034c00b9caf3cf59b46d1136f8f832708ae014e609ce24",
+        "start_anchor": "0xd5816e517e75470cce7f53416d5b29d36e4b3fb547161add8cf800389ec6815b",
+        "cutoff_anchor": "0x1e5c795f0da755450d4a2645c70ee0c707e0310931c8493ef2fb91648864de55",
+        "observed_snapshot_input": "0x8dc333bfc09cd3cb192c4b515141e98037bfdd96ecf25d98e52c764ace700e53"
+      }
+    },
+    {
+      "name": "window-b",
+      "snapshot": {
+        "l2_block_number": 12029350,
+        "l2_block_hash": "0x28580c1078b43abc142359c0f6aaa424c7bd98c4a21786a30c190b1337b03fc9",
+        "l1_block_number": 25551655,
+        "block_timestamp": 1784282270,
+        "pin_count": 41,
+        "expected_validation_passed": true,
+        "rpc_metrics": {"logical_requests": 77, "http_attempts": 77, "retries": 0, "rate_limited": 0, "server_errors": 0, "transport_errors": 0},
+        "snapshot_report_keccak256": "0xafcaac0ec3716892b2ffd21c9d267fe1fe055b66186123f83a3dd493ddef36c6"
+      },
+      "start_boundary": {"l2_block_number": 12029422, "l2_block_hash": "0x0c64e939834b7169329ab5c5d14cd08fb1407e6ee4930954878949cbf1633112"},
+      "coverage": {"from_l2_block": 12029423, "to_l2_block": 12032398, "cutoff_l2_block_hash": "0x8f73f575a1a371c37d38facdb3aee6a6f42d1c5cb2289fab81d0853b2c6dfaf3"},
+      "continuity": {"first_sequence": 12027930, "last_sequence": 12032408, "reconnects": 0, "gaps": 0, "missing": 0, "duplicates_or_reordered": 0},
+      "manifest_keccak256": "0x1d92845ef529e780d934003295b999a447157ea791db309c4de686cdf4b4f530",
+      "artifact_keccak256": {
+        "raw_feed": "0xe767f3904588244d9d6c68288f5fb9145b87ef32e6a6a7cba8fc69297fb62266",
+        "probe_metrics": "0x8b3d26411180190d42331d076f679a946583897590023b9df8e2558541f31034",
+        "observer": "0x1bf24e75ae7ce983a6071be4367293530b7abc447c38ea21585681d7b7103e15",
+        "reconciliation": "0x1dc06bf815d5103ea600b256e6c96a88b41078749ab4c49593b005f51cccf7a7",
+        "finalized": "0x2c7083bdb516440e1be6fb3bf56678cb220f1e21cdfeb90b3ca045ff834aa5c5",
+        "start_anchor": "0x8dd9854c70e764f84cfe84ec62b5566b612b7ea7968da0815d1eb261e6dae0cd",
+        "cutoff_anchor": "0x62dd501521f908ca4b75ae6c752f3d76243be0cbb39d7baf359b78f5ec1d0480",
+        "observed_snapshot_input": "0xaa266bbc135b8734c735a89044c35b262aec85b814e0050d4f487eeeb2ecd68d"
+      }
+    },
+    {
+      "name": "window-c",
+      "snapshot": {
+        "l2_block_number": 12032702,
+        "l2_block_hash": "0xe3edadc3a4c7542b81d84a27d2457dde52050876c0be384bd27a776b904cb4d8",
+        "l1_block_number": 25551684,
+        "block_timestamp": 1784282607,
+        "pin_count": 41,
+        "expected_validation_passed": true,
+        "rpc_metrics": {"logical_requests": 77, "http_attempts": 77, "retries": 0, "rate_limited": 0, "server_errors": 0, "transport_errors": 0},
+        "snapshot_report_keccak256": "0xe33b69e721ff4ce62230a74110bb10a4f3dfd4c93e7c9b88a911e1f304045bc9"
+      },
+      "start_boundary": {"l2_block_number": 12032769, "l2_block_hash": "0x59601774763f3173eb8c5568c6b1702d4b9bf3eed37f519515627ba7cdfcdb35"},
+      "coverage": {"from_l2_block": 12032770, "to_l2_block": 12035749, "cutoff_l2_block_hash": "0x6fb47f6920d8dd129d09a59a04b0012f7a543b39ecb8712acb96056e5175e9cd"},
+      "continuity": {"first_sequence": 12031615, "last_sequence": 12035760, "reconnects": 0, "gaps": 0, "missing": 0, "duplicates_or_reordered": 0},
+      "manifest_keccak256": "0x66a39a94a17587061ae6a94cac485d1fe909e2c1107ee26a57bf7b3a27a44370",
+      "artifact_keccak256": {
+        "raw_feed": "0x6355bbc91580d5e710f803442da236bc341803ed690287d2c09c2304be3c7be0",
+        "probe_metrics": "0xfeecc17c7af40c31a864a6544a5bf1015ea4a220eaad0e673eeaaef7b1b378fd",
+        "observer": "0xd0304d414a74d00ee9fdd94a2ce3bfcf83ea3c7a0cbcacb0d7e6966d4a2f735d",
+        "reconciliation": "0xe3bbf57f6d6ac9979ab72097c7e48211c7552f3f9e1a507c7d95f9b70c7aa8ab",
+        "finalized": "0x45b503eaa2139a9e762ceb857f63f774565821295ef8079fadb8f4152f1c4ac4",
+        "start_anchor": "0x3491a18b471662e58274aa307671544a26d405b369b58cbd8af46f1e673ef495",
+        "cutoff_anchor": "0xf8f5c2cd96f250c6c841de8c4a02d7a9deec2fba510df2e57f59d33f08ca6f99",
+        "observed_snapshot_input": "0xbd1e944a627936f346310c8142dfa7060fa720e7a71f46dbf2d6dd11f72e3c78"
+      }
+    }
+  ],
+  "launchpads": [
+    {"launchpad":"bow","confirmed":2,"eligible":2,"latency_ns":{"p50":477000,"p95":663000,"p99":663000,"sample_count":2},"errors":{"false_positives":0,"detector_misses":0,"coverage_misses":0,"identity_mismatches":0,"direction_mismatches":0,"prediction_mismatches":0,"quote_mismatches":0},"entry_plan_count":2,"exit_plan_count":2,"profile_observations":{"zero_initial_buy":1,"payable_initial_buy":1},"simulated_round_trip_return_bps":"0x2649","paper_evidence_ready":false,"authorizes_canary":false,"execution_eligible":false},
+    {"launchpad":"launch_hood_v3","confirmed":8,"eligible":8,"latency_ns":{"p50":336000,"p95":648000,"p99":648000,"sample_count":8},"errors":{"false_positives":0,"detector_misses":0,"coverage_misses":0,"identity_mismatches":0,"direction_mismatches":0,"prediction_mismatches":0,"quote_mismatches":0},"entry_plan_count":8,"exit_plan_count":8,"profile_observations":{"embedded_initial_buy":8},"simulated_round_trip_return_bps":"0x2649","paper_evidence_ready":false,"authorizes_canary":false,"execution_eligible":false},
+    {"launchpad":"clanker","confirmed":9,"eligible":9,"latency_ns":{"p50":347000,"p95":876000,"p99":876000,"sample_count":9},"errors":{"false_positives":0,"detector_misses":0,"coverage_misses":0,"identity_mismatches":0,"direction_mismatches":0,"prediction_mismatches":0,"quote_mismatches":0},"entry_plan_count":9,"exit_plan_count":9,"profile_observations":{"extensionless_single_position":0,"pinned_extension_five_position":9},"simulated_round_trip_return_bps":"0x351","paper_evidence_ready":false,"authorizes_canary":false,"execution_eligible":false},
+    {"launchpad":"bankr_doppler","confirmed":4,"eligible":4,"latency_ns":{"p50":545000,"p95":645000,"p99":645000,"sample_count":4},"errors":{"false_positives":0,"detector_misses":1,"coverage_misses":0,"identity_mismatches":0,"direction_mismatches":0,"prediction_mismatches":0,"quote_mismatches":0},"entry_plan_count":4,"exit_plan_count":4,"profile_observations":{"curve_ticks_v1":0,"curve_ticks_v2":0,"curve_ticks_v3":0,"curve_ticks_v4":2,"curve_ticks_v5":2,"direct_airlock":0,"erc7579":4},"simulated_round_trip_return_bps":"0x61","paper_evidence_ready":false,"authorizes_canary":false,"execution_eligible":false},
+    {"launchpad":"pons","confirmed":42,"eligible":3,"latency_ns":{"p50":333000,"p95":512000,"p99":625000,"sample_count":42},"errors":{"false_positives":0,"detector_misses":0,"coverage_misses":0,"identity_mismatches":6,"direction_mismatches":0,"prediction_mismatches":0,"quote_mismatches":0},"entry_plan_count":3,"exit_plan_count":3,"profile_observations":{"current_generation":3},"simulated_round_trip_return_bps":"0x2649","paper_evidence_ready":false,"authorizes_canary":false,"execution_eligible":false},
+    {"launchpad":"hood_fun","confirmed":1,"eligible":1,"latency_ns":{"p50":334000,"p95":334000,"p99":334000,"sample_count":1},"errors":{"false_positives":0,"detector_misses":0,"coverage_misses":0,"identity_mismatches":0,"direction_mismatches":0,"prediction_mismatches":0,"quote_mismatches":0},"entry_plan_count":1,"exit_plan_count":1,"profile_observations":{"current_curve":1},"simulated_round_trip_return_bps":"0x2649","paper_evidence_ready":false,"authorizes_canary":false,"execution_eligible":false}
+  ],
+  "bankr_quotes": [
+    {"window":"window-a","tx_hash":"0xc5d8068c27a4afe7335f5bf31cbf764a8b561670a50b88e6b3e234f8bec20cfd","l2_block_number":12028564,"profile":"curve_ticks_v5","envelope":"erc7579"},
+    {"window":"window-b","tx_hash":"0x58ac1df3ffda18323bd83fc792f4437e21c83024edbf771a5851425ae2fe7b7f","l2_block_number":12032244,"profile":"curve_ticks_v4","envelope":"erc7579"},
+    {"window":"window-b","tx_hash":"0x47ff0dd828b457e592cae6d257667fb45c7e9c6d4deb2e51eb9573d028227ffd","l2_block_number":12029696,"profile":"curve_ticks_v5","envelope":"erc7579"},
+    {"window":"window-c","tx_hash":"0xc81eaccbf690b7cbd92da46af3b43efb2d8849e78f9603a79c122b1f4bf6421c","l2_block_number":12034155,"profile":"curve_ticks_v4","envelope":"erc7579"}
+  ],
+  "bankr_detector_miss": {
+    "window": "window-c",
+    "tx_hash": "0xd53c3d8d8c76fd5f367d3d229a45e1aef65c0cdb712d94421f311f97fe6dd563",
+    "l2_block_number": 12033710,
+    "transaction_index": 2,
+    "raw_feed_present": true,
+    "receipt_status": true,
+    "airlock_ground_truth_event": true,
+    "top_level_from": "0x426e36b803520760a792d74a7fa092b0c85c4d9a",
+    "top_level_target": "0x2a71f10b41ff0882c7be2a5c0644722314976b42",
+    "top_level_selector": "0x376d6552",
+    "top_level_value": "0x0",
+    "blocker": "bankr_strict_quote:receipt-block Bankr account identity proof failed: transaction is neither exact EntryPoint nor direct Airlock envelope",
+    "authorizes_profile_broadening": false
+  },
+  "pons_identity_gate": {
+    "aggregate_identity_mismatch_field_count": 6,
+    "affected_transaction_count": 3,
+    "transactions": [
+      {"window":"window-b","tx_hash":"0x603805cc5b1ffc04f410ba9481764c2d2eb7e1f568f66bac9b15c6949f78578b","missing_prediction_fields":["token","pool"]},
+      {"window":"window-b","tx_hash":"0xcd92a3cce53c0e1d24a80f829799bd912feda584175c70da8d0c908ffa564d47","missing_prediction_fields":["token","pool"]},
+      {"window":"window-c","tx_hash":"0x6893ff469f43ea30c9b5ced4b5c4ad45d8a9135bc8b2c737a6d88253cdc04e2c","missing_prediction_fields":["token","pool"]}
+    ],
+    "transaction_level_false_positives": 0,
+    "direction_mismatches": 0,
+    "prediction_mismatches": 0,
+    "quote_mismatches": 0,
+    "fail_closed_readiness_gate_remains": true
+  },
+  "interpretation": {
+    "fresh_bankr_v5_quotes_detected_and_independently_validated": 2,
+    "historical_six_v5_proof_transactions_are_outside_these_fresh_ranges": true,
+    "new_bankr_miss_requires_separate_bounded_wrapper_and_account_proof": true,
+    "new_bankr_miss_authorizes_v5_broadening": false,
+    "paper_quotes_are_independent_plans_not_transactions": true,
+    "simulated_round_trip_is_not_realized_profit_or_loss": true
+  },
+  "safety": {
+    "wallet_access": false,
+    "keys_or_keystore": false,
+    "signing": false,
+    "broadcasting": false,
+    "execution": false,
+    "canary": false,
+    "deployment": false,
+    "server_or_droplet_work": false
+  }
+}

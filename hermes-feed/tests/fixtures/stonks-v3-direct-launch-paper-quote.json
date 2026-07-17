@@ -1,0 +1,226 @@
+{
+  "record_type": "launchpad_stonks_v3_paper_quote",
+  "tx_hash": "0xd53c3d8d8c76fd5f367d3d229a45e1aef65c0cdb712d94421f311f97fe6dd563",
+  "launchpad": "stonks_v3",
+  "profile": "stonks_v3_direct_weth_receipt_confirmed",
+  "l2_block_number": 12033710,
+  "state_version": {
+    "chain_id": 4663,
+    "block_hash": "0x0957a6b65e883afd4d75be2bf30f0f1c31fea1b0be62bda17e46547d9a724334",
+    "l2_block_number": 12033710,
+    "transaction_index": 2,
+    "terminal_log_index": 29
+  },
+  "quote_source": "confirmed_receipt_end_stonks_v3_exact_eleven_position_state",
+  "sizing_source": "independent_fixed_tiny_weth_policy_not_launcher_size",
+  "max_amount_in": "0x2386f26fc10000",
+  "candidate_time_prediction_available": false,
+  "observation_proof_keccak256": "0x4377d77d8c4ef261209dc23a354282369629e61a689d9ac7078197ec7afb042b",
+  "market": {
+    "leader": "0x426e36b803520760a792d74a7fa092b0c85c4d9a",
+    "creator": "0x426e36b803520760a792d74a7fa092b0c85c4d9a",
+    "launcher": "0x2a71f10b41ff0882c7be2a5c0644722314976b42",
+    "token": "0x01c1f35f9463c39ea9169334a64c0ed3a340ac85",
+    "token_runtime_hash": "0x131bbac7a12834d4d9b2b0e2befce43e604f69cca4176b302bf45bf4b6ddde9f",
+    "mirror": "0x076e84f5fe694d927e56ce431c7a6e5dc2322d79",
+    "mirror_runtime_hash": "0x0197437020014194be4cea1ca69c726b0eb25cfa13c44cf87563c253e3c821f9",
+    "pool": "0xdb229bb27473c07bd91bccba38ef55e5503c8288",
+    "quote_asset": "0x0bd7d308f8e1639fab988df18a8011f41eacad73",
+    "fee_ppm": 10000,
+    "tick_spacing": 200,
+    "initialize_sqrt_price_x96": "0x363db22b79374d1d73fc0",
+    "initialize_tick": -197400,
+    "receipt_end_sqrt_price_x96": "0x363db22b79374d1d73fc0",
+    "receipt_end_tick": -197400,
+    "receipt_end_liquidity": "0xd337e874824d30601b",
+    "position_count": 11,
+    "positions": [
+      {
+        "tick_lower": -197400,
+        "tick_upper": -144400,
+        "liquidity": "0xd337e874824d30601b",
+        "amount0": "0x39e7139a8c08fa05ffa098",
+        "amount1": "0x0",
+        "log_index": 9
+      },
+      {
+        "tick_lower": -192200,
+        "tick_upper": -144400,
+        "liquidity": "0x118424301cff58bb532",
+        "amount0": "0x39e7139a8c08fa05ffc48a",
+        "amount1": "0x0",
+        "log_index": 11
+      },
+      {
+        "tick_lower": -186800,
+        "tick_upper": -144400,
+        "liquidity": "0x17af97258b0fee064fa",
+        "amount0": "0x39e7139a8c08fa05ffb76a",
+        "amount1": "0x0",
+        "log_index": 13
+      },
+      {
+        "tick_lower": -181600,
+        "tick_upper": -144400,
+        "liquidity": "0x2003ed986823d4bda3e",
+        "amount0": "0x39e7139a8c08fa05ffd0e1",
+        "amount1": "0x0",
+        "log_index": 15
+      },
+      {
+        "tick_lower": -176200,
+        "tick_upper": -144400,
+        "liquidity": "0x2c7b0740803463e02d7",
+        "amount0": "0x39e7139a8c08fa05fffe3f",
+        "amount1": "0x0",
+        "log_index": 17
+      },
+      {
+        "tick_lower": -171000,
+        "tick_upper": -144400,
+        "liquidity": "0x3e6fd04fea88778a0bd",
+        "amount0": "0x39e7139a8c08fa05fffbb6",
+        "amount1": "0x0",
+        "log_index": 19
+      },
+      {
+        "tick_lower": -165600,
+        "tick_upper": -144400,
+        "liquidity": "0x5c0c6f336d2fca0c3d8",
+        "amount0": "0x39e7139a8c08fa05fff225",
+        "amount1": "0x0",
+        "log_index": 21
+      },
+      {
+        "tick_lower": -160400,
+        "tick_upper": -144400,
+        "liquidity": "0x8dae6c9e8dc828fb75e",
+        "amount0": "0x39e7139a8c08fa05fff1d3",
+        "amount1": "0x0",
+        "log_index": 23
+      },
+      {
+        "tick_lower": -155000,
+        "tick_upper": -144400,
+        "liquidity": "0xf86dc0a0b2f82f1b7f5",
+        "amount0": "0x39e7139a8c08fa05fffc68",
+        "amount1": "0x0",
+        "log_index": 25
+      },
+      {
+        "tick_lower": -149800,
+        "tick_upper": -144400,
+        "liquidity": "0x2302c2d226824a4a3729",
+        "amount0": "0x39e7139a8c08fa05fffc72",
+        "amount1": "0x0",
+        "log_index": 27
+      },
+      {
+        "tick_lower": -144400,
+        "tick_upper": 887200,
+        "liquidity": "0x2124c86ddee4d4e72e1a",
+        "amount0": "0xb0da228552db01b892506f",
+        "amount1": "0x0",
+        "log_index": 29
+      }
+    ],
+    "dependency_pins": {
+      "wrapper": "direct",
+      "runtime_pins": [
+        {
+          "address": "0x2a71f10b41ff0882c7be2a5c0644722314976b42",
+          "runtime_hash": "0xe6722f6abe49f622885917d215788103bbe472a57b5866e521cc301b77f23f44"
+        },
+        {
+          "address": "0xeb7c034704ef8dcd2d32324c1545f62fb4ad0862",
+          "runtime_hash": "0x86b37100cbe9841771c452a592985b4e921254b127a380246073b84ec953f7f8"
+        },
+        {
+          "address": "0xede0b5fae363232c396724fa962250fa197cc5a1",
+          "runtime_hash": "0x0da9f4b26917e40240417a28b24840d5096c631a7ac2584fb530fc28ad20e4be"
+        },
+        {
+          "address": "0x37a9fa204a4d3a429fded7e3469ab076c854bc9d",
+          "runtime_hash": "0x9c5b2ac53dead80b31d431a6c986082daf404dce3ac829a62c000ee68b9138e9"
+        },
+        {
+          "address": "0xde8886a0019ea060b8378ee37b8a23b8117f29a3",
+          "runtime_hash": "0xcb2f44d32c3efcec55c36bfa6f165ae29777daedaba304da7ba64d40746bc841"
+        },
+        {
+          "address": "0x85f37f74ef2478a770318bc810177a9835911ad7",
+          "runtime_hash": "0x306dda9c8ef29935e569bb402c1626e8ef2048acd6b52a06bc3417bb4752c43f"
+        },
+        {
+          "address": "0xba2f330edb16cd8056f5988d8ce19bbc63475a0e",
+          "runtime_hash": "0x7bf5115543e8e0769ceabe4da9b8e23547c9e95c1cce15d24d96f164406129e3"
+        },
+        {
+          "address": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+          "runtime_hash": "0x864cc9ad53b338b82da1f7cab85ab0b3d5c8861acb422b6fec63cf36234f36a6"
+        },
+        {
+          "address": "0x68184c449e1a8f34fa18d289737129fd27b66f8f",
+          "runtime_hash": "0x3a551ac5c744af57e68a1d1431ac403c0f516ffd7d224a75746aee11fc4f3baf"
+        },
+        {
+          "address": "0xcfa0388f5ddf905fdc08c45c716c15dc10a14c6f",
+          "runtime_hash": "0xe616a4f66608354a45be3af2f82e909a1e000f4360eeb909defd830ee43c554b"
+        },
+        {
+          "address": "0x0bd7d308f8e1639fab988df18a8011f41eacad73",
+          "runtime_hash": "0x5706be52f64875fee65a2cec0d80e47a23d8793cbe85d214b48445e2d05f5353"
+        },
+        {
+          "address": "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
+          "runtime_hash": "0xec72b1abd1f2faee020cfea9c646bd8994f9fb389054f6e574f103a895091739"
+        }
+      ],
+      "pool_init_code_hash": "0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54"
+    }
+  },
+  "entry": {
+    "amount_in": "0x38d7ea4c68000",
+    "expected_output": "0x4df6af20a04e32bb7276",
+    "min_receive": "0x4d2f18e56b809dbeb150",
+    "pool_fee_ppm": 10000,
+    "slippage_bps": 100,
+    "state_after": {
+      "token_in": "0x0bd7d308f8e1639fab988df18a8011f41eacad73",
+      "token_out": "0x01c1f35f9463c39ea9169334a64c0ed3a340ac85",
+      "amount_in_requested": "0x38d7ea4c68000",
+      "amount_in_consumed": "0x38d7ea4c68000",
+      "amount_out": "0x4df6af20a04e32bb7276",
+      "sqrt_price_x96_after": "0x3681e6f2997a01b1c711d",
+      "tick_after": -197302,
+      "liquidity_after": "0xd337e874824d30601b",
+      "initialized_ticks_crossed": 0,
+      "steps": 1
+    }
+  },
+  "full_position_exit": {
+    "amount_in": "0x4df6af20a04e32bb7276",
+    "expected_output": "0x37b7077f59f6e",
+    "min_receive": "0x372866247a583",
+    "pool_fee_ppm": 10000,
+    "slippage_bps": 100,
+    "state_after": {
+      "token_in": "0x01c1f35f9463c39ea9169334a64c0ed3a340ac85",
+      "token_out": "0x0bd7d308f8e1639fab988df18a8011f41eacad73",
+      "amount_in_requested": "0x4df6af20a04e32bb7276",
+      "amount_in_consumed": "0x4df6af20a04e32bb7276",
+      "amount_out": "0x37b7077f59f6e",
+      "sqrt_price_x96_after": "0x363e5feebfc6419474937",
+      "tick_after": -197400,
+      "liquidity_after": "0xd337e874824d30601b",
+      "initialized_ticks_crossed": 0,
+      "steps": 1
+    }
+  },
+  "simulated_round_trip_return_bps": "0x2649",
+  "paper_evidence_ready": false,
+  "authorizes_canary": false,
+  "execution_eligible": false,
+  "execution_blocker": "receipt_confirmed_paper_only_candidate_time_prediction_and_promotion_gates_unavailable",
+  "broadcast": false
+}

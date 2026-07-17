@@ -1,0 +1,207 @@
+{
+  "record_type": "post_stonks_fresh_paper_campaign_evidence",
+  "schema_version": 1,
+  "source_commit": "38fc684a67d648f7118ed3bdcf038422d866496a",
+  "source_parent": "e5ca09dc6c008cfd0decbe6ddbefba762bd67e26",
+  "branch": "codex/post-stonks-fresh-campaign",
+  "provenance_boundary": {
+    "source_checkout_observation": "the campaign operator recorded a clean checkout at source_commit before building",
+    "source_commit_is_runtime_artifact_bound": false,
+    "campaign_runner_is_runtime_artifact_bound": false,
+    "runtime_bound_components": ["expected pins", "seven executable tuple", "pin snapshot binary", "evidence report binary", "local FIFO runner"],
+    "supplemental_checkout_hashes_are_runtime_proof": false
+  },
+  "runtime_root": "/Users/kennethjiang/.codex/worktrees/hermes-post-stonks-campaign/hermes-feed/.runtime/post-stonks-38fc684/campaign-20260717T120432Z",
+  "safety": {
+    "paper_only": true,
+    "public_read_only_rpc_wss_only": true,
+    "wallet_access": false,
+    "keys_loaded": false,
+    "signing": false,
+    "broadcast": false,
+    "execution": false,
+    "canary": false,
+    "deployment": false,
+    "server_access": false
+  },
+  "expected_pins": {
+    "source": "config/launchpad-expected-pins.production.json",
+    "sha256": "36e632865b3fef00217fe5cb454f1fb7272025e81a8d25c3369eee0d4c1b8820",
+    "content_keccak256": "0x3a192547af7a76a47d5de1b8102da0dc0bb77b7047a53c855b7d264aefa1a34c",
+    "pin_count": 41,
+    "observed_hashes_promoted_to_expected": false
+  },
+  "immutable_tuple": {
+    "build_root": "/Users/kennethjiang/.codex/worktrees/hermes-post-stonks-campaign/hermes-feed/.runtime/post-stonks-38fc684/target/release",
+    "executables": {
+      "hermes-feed": {"sha256":"df7c2d5705d1ad405fa218d14f770b2c6a6c73bcaf394d43fb47a3c80298d6bb","keccak256":"0x2871ad950426a5818033697af4c8698d0182594224bb37913afe7a7f3c5ac301"},
+      "hermes-launchpad-paper": {"sha256":"46aa63d169537efe03204f349ed6c5dc847dc2b04fb88cea4df9c00225c46ffb","keccak256":"0x6b1f240acd37f1765ba823886e3b2aa87e458d27c4b20ab39901dd6fc6fe621f"},
+      "hermes-launchpad-reconcile": {"sha256":"1aea23e228718271c2bd6c09d286e926f66385753649165596183090d7c3b01b","keccak256":"0xd984d00ef76f85d54265cd5a323bda893e3d1632a57de41b90b17dde014892d4"},
+      "hermes-launchpad-chain-head": {"sha256":"0c274fd0cdf30dbb99a8ee8499cee68c51617a01c253e0236a9164a88f234797","keccak256":"0x7d1a6df1286b08bf72a2cfe575d0536089076055c27d921ec13cb7ffaf265a38"},
+      "hermes-launchpad-readiness": {"sha256":"5832da5200364f9e26bfbd64aab8fdae5e9c7d1cc1125450d375c08c32b856dc","keccak256":"0x79b76be11d407875ed59e0ac11f824eec7af41492d91df8e25b5f754613fe541"},
+      "hermes-launchpad-pin-snapshot": {"sha256":"9b9ed6cacb5dc8a44a56fd239d235049bc4f1025b5a5af5e1cddb649eea6b525","keccak256":"0xd9105e290e12832b9db07c8fedff0044f1905d2ef8e803cf2605c4c609628ddd"},
+      "hermes-launchpad-evidence-report": {"sha256":"0ff3b7be0f44edd0a30997a99c57dd29075d86be88563d8757d9628428d9e5f4","keccak256":"0xd9c443cd72e466a0947bc04b1438606f252f8c494fe9f339e37406f3a13e388a"}
+    },
+    "orchestration": {
+      "run-launchpad-paper-campaign.sh": {"sha256":"4b6bae153ee747164a99ffee3f51ac323344c8ac06700a627e90b7e2ed07edf6","keccak256":"0x11c708fbb10e0f9d77659517762d035c4e1d32d271e5fde8ed275b582b24a7c1","runtime_artifact_bound":false,"evidence_role":"supplemental_checkout_hash_only"},
+      "run-launchpad-paper-local.sh": {"sha256":"372770284a12a7f43b68208fc3bd244e0fdf82db1fed2f1e0f177027faf8aa45","keccak256":"0xb065b10aa70b8caaa586298346ac06d11f27871dd6c35e0e6f3249e876356fa3","runtime_artifact_bound":true,"evidence_role":"campaign_lock_and_report_provenance"}
+    }
+  },
+  "root_artifacts": {
+    "campaign-lock.json": {"sha256":"66d9dac495f1e658a7a9215dc7e23cee0f5ce9451c5cadb7e595d72d8b73924f","keccak256":"0xa44de6ef4de4f88cff3c728e9c7598211da2a20e110d165d6541473c0db0ebb2"},
+    "expected-pins.locked.json": {"sha256":"36e632865b3fef00217fe5cb454f1fb7272025e81a8d25c3369eee0d4c1b8820","keccak256":"0x3a192547af7a76a47d5de1b8102da0dc0bb77b7047a53c855b7d264aefa1a34c"},
+    "authoritative-readiness.jsonl": {"sha256":"5931a1c63f35ed3805932ddaf76bc805e31696f0be699edc6a7371534a4d3c74","keccak256":"0xffb320f3cc3b87dbcce947492f142557f2a1c472f784c7a0f6e261a794928618"},
+    "launchpad-evidence-report.jsonl": {"sha256":"2a0b61a83eb3bdd44a3a6cac299571593b00e803b018211e3178d3126bfd7d3d","keccak256":"0xfa7c90544ad0f26bb755f792925e75e1d020801ac1e76ce4d27fb386cd7225a5"}
+  },
+  "supplemental_artifacts": {
+    "POST_STONKS_FRESH_PAPER_CAMPAIGN_2026-07-17_38FC684_MISS_FORENSICS.json": {
+      "sha256": "9baef8a9abed896128090ea7d4188fb1fca1f184ee8b528524b40c46a40929ea",
+      "keccak256": "0x011029a7d8989a691ef3428315083450b88a8f5f183251b047cb183e06c02b7f",
+      "bytes": 19109,
+      "part_of_original_campaign_manifest": false,
+      "purpose": "reproducible read-only RPC and deterministic decode evidence for all three misses"
+    }
+  },
+  "windows": [
+    {
+      "name": "post-stonks-a",
+      "snapshot": {"l2":12104929,"hash":"0x8da3670e21b33e6ac6c07648778f1f2113acbeddd6b5a13531ee921561f13e4c","l1":25552288,"timestamp":1784289871,"sha256":"bb407c8a816f6a5610afa1aa8e6c5f30a768a39aa937477847df406d98a3949e","keccak256":"0xdd72d0b0de76feaf2aa027c04776f7ffefc23760b4d04f0ce6a8c3a1a3179a9b"},
+      "snapshot_report": {"sha256":"87dd848eb204e59b946cef8e652c2d392c5fccc0fbcdf51b5e72ad75398f3c72","keccak256":"0x05c038e9d108744fe20b2c667e4bba26ac987b20e1279598090a41a3b16781e7","expected_validation_passed":true,"rpc":{"logical_requests":77,"http_attempts":77,"retries":0,"rate_limited":0,"server_errors":0,"transport_errors":0}},
+      "coverage": {"from_l2":12105003,"to_l2":12107982,"start_hash":"0x30b7812ec691061ad090497c94d9daf78cf3000074ad1447fa4b317207ab1520","cutoff_hash":"0x2671ac31c4d428e7621aa47789b2133e00733f8958b05bba978e526d208a1af0","continuity":["connected","coverage_closed"]},
+      "error_totals": {"false_positives":0,"detector_misses":1,"coverage_misses":0,"identity_mismatches":0,"direction_mismatches":0,"prediction_mismatches":0,"quote_mismatches":0},
+      "plan_outcomes": {"policy":{"entry_amount_in_wei":1000000000000000,"slippage_bps":100},"launch_hood_v3":{"entry":4,"exit":4,"round_trip_return_bps":9801},"clanker":{"entry":19,"exit":19,"round_trip_return_bps":849},"bankr_doppler":{"entry":10,"exit":10,"round_trip_return_bps":97}},
+      "manifest": {"sha256":"7935904005af565d52ce543ac57604a5cb7e47b41b8e3c6fc4219b6a40a098a1","keccak256":"0xbb86e783955ed63906d835a711c149150b73e00a8619579c2f1e8736c21b0d0f","completed":true,"published_last":true},
+      "artifacts": {
+        "cutoff-anchor.txt":{"keccak256":"0x008a961c769242d7a250f11617b3375b6acc416c0688845468a1a70f58da2234","bytes":76},
+        "expected-pins.input.json":{"keccak256":"0x3a192547af7a76a47d5de1b8102da0dc0bb77b7047a53c855b7d264aefa1a34c","bytes":9587},
+        "launchpad-paper-finalized.jsonl":{"keccak256":"0xf20b596e6619b117c5c17003c0e887fbcf0c8f910dc01a197537663a1f3125df","bytes":76538},
+        "launchpad-paper.jsonl":{"keccak256":"0xd9ff8ac10017804b2f77f7d53c25a7e5f39c5a7a55e1733c93051f09df179f61","bytes":5156474},
+        "observed-startup-snapshot.input.json":{"keccak256":"0xdd72d0b0de76feaf2aa027c04776f7ffefc23760b4d04f0ce6a8c3a1a3179a9b","bytes":11477},
+        "probe-metrics.jsonl":{"keccak256":"0x339a734e5f9b3a77149caaf2c924ff77d3e2ccde1423b8f9833861ad34f22235","bytes":5544890},
+        "raw-feed.jsonl":{"keccak256":"0xd8a73d0b3f9a6b9d18f07449c0aa4354a766ec4f4ab70fb9cbcab6eb2da67cec","bytes":19483531},
+        "reconciliation-evidence.jsonl":{"keccak256":"0x4f9082ffa4d8660ab68a6d5af0c8d54298718efd7f5f626ed68f196ec2edd728","bytes":309011},
+        "start-anchor.txt":{"keccak256":"0x69ca76d1265c408c0abf033b1cf021824882a98447c3cfa3b29e092791d16783","bytes":76}
+      },
+      "results": [
+        {"launchpad":"bow","raw":0,"confirmed":0,"eligible":0,"false_positives":0,"misses":0,"latency_ns":[null,null,null],"profiles":{"payable_initial_buy":0,"zero_initial_buy":0},"plans":0},
+        {"launchpad":"launch_hood_v3","raw":4,"confirmed":4,"eligible":4,"false_positives":0,"misses":0,"latency_ns":[242000,312000,312000],"profiles":{"embedded_initial_buy":4},"plans":4},
+        {"launchpad":"clanker","raw":19,"confirmed":19,"eligible":19,"false_positives":0,"misses":0,"latency_ns":[398000,1390000,1390000],"profiles":{"extensionless_single_position":0,"pinned_extension_five_position":19},"plans":19},
+        {"launchpad":"bankr_doppler","raw":11,"confirmed":10,"eligible":10,"false_positives":0,"misses":1,"latency_ns":[423000,1442000,1442000],"profiles":{"curve_ticks_v1":0,"curve_ticks_v2":0,"curve_ticks_v3":0,"curve_ticks_v4":10,"curve_ticks_v5":0,"direct_airlock":1,"erc7579":9},"plans":10},
+        {"launchpad":"pons","raw":21,"confirmed":21,"eligible":0,"false_positives":0,"misses":0,"latency_ns":[358000,1205000,1286000],"profiles":{"current_generation":0},"plans":0},
+        {"launchpad":"hood_fun","raw":0,"confirmed":0,"eligible":0,"false_positives":0,"misses":0,"latency_ns":[null,null,null],"profiles":{"current_curve":0},"plans":0}
+      ]
+    },
+    {
+      "name": "post-stonks-b",
+      "snapshot": {"l2":12108508,"hash":"0xfa1f7465bae98e03c93e4feae178bbfec7e417b81c77dd61c408c6a51cedcf7e","l1":25552318,"timestamp":1784290231,"sha256":"39ad877ed8544d8575490c5a09a9599d89bb808989702e3b7a192bcecd8625e5","keccak256":"0x544397672a8ad1b703e65283beeab93d8e965e5ae30a824b4f17b0e97d3ec20b"},
+      "snapshot_report": {"sha256":"472e5d23efddf1cd2d9c4f4b4b66f19584a90c2f45de422293192465606981cc","keccak256":"0x18b4c681f8bcab3ff9dcd0f6618a9747c24d6f990e9a48b901c8f00d5f3cae93","expected_validation_passed":true,"rpc":{"logical_requests":77,"http_attempts":77,"retries":0,"rate_limited":0,"server_errors":0,"transport_errors":0}},
+      "coverage": {"from_l2":12108577,"to_l2":12111560,"start_hash":"0x36ba08f8235b11fd47cf11a08d157e88ab3bfa42966b10564bc9dd7344229c35","cutoff_hash":"0x3164dad8dd709d585178c719989d67a69a1eee44d78f8c6f86b88abae565da1c","continuity":["connected","coverage_closed"]},
+      "error_totals": {"false_positives":0,"detector_misses":2,"coverage_misses":0,"identity_mismatches":0,"direction_mismatches":0,"prediction_mismatches":0,"quote_mismatches":0},
+      "plan_outcomes": {"policy":{"entry_amount_in_wei":1000000000000000,"slippage_bps":100},"launch_hood_v3":{"entry":2,"exit":2,"round_trip_return_bps":9801},"clanker":{"entry":39,"exit":39,"round_trip_return_bps":849},"bankr_doppler":{"entry":8,"exit":8,"round_trip_return_bps":97}},
+      "manifest": {"sha256":"e0e47e24df5b82de6f85afd213f56a691798131bedf1d07f77e12bccfb1edb07","keccak256":"0xe4fda75b8d525da9771909cdb61973ad32f4f772e5581650901e26e903b1f081","completed":true,"published_last":true},
+      "artifacts": {
+        "cutoff-anchor.txt":{"keccak256":"0xff3f7f4403fdb386d67fb1f18a6c22ced451f0a47bbc5da727e32e85845fe6e6","bytes":76},
+        "expected-pins.input.json":{"keccak256":"0x3a192547af7a76a47d5de1b8102da0dc0bb77b7047a53c855b7d264aefa1a34c","bytes":9587},
+        "launchpad-paper-finalized.jsonl":{"keccak256":"0x3dbc982e160130d55f8044a526bb310ca7c024504f0e9317253cb68fd1f90fa7","bytes":104651},
+        "launchpad-paper.jsonl":{"keccak256":"0x4d38434f2c3178bbe3ad552ec155a3e4d46f03066564ff7ef7d6c63fe1c47fbd","bytes":7488975},
+        "observed-startup-snapshot.input.json":{"keccak256":"0x544397672a8ad1b703e65283beeab93d8e965e5ae30a824b4f17b0e97d3ec20b","bytes":11477},
+        "probe-metrics.jsonl":{"keccak256":"0xb2a99cdd99cefddec59fa532ce7d4252a4d1b88c9f8ac2778a341195773fd190","bytes":7618619},
+        "raw-feed.jsonl":{"keccak256":"0xb0f6cae9d8b6530f069f8da76c4ce3bb8db647ae1f94e93e7d86e8c0989b8290","bytes":25844045},
+        "reconciliation-evidence.jsonl":{"keccak256":"0xc5c47edc6063c8f296cfe1d00781426d1bf654bc297abb083d5ffcc3abb32e87","bytes":644024},
+        "start-anchor.txt":{"keccak256":"0xa19bca766311721ea9960ddf99274c410c8f4e62289b90d8b51052a04fdaafcc","bytes":76}
+      },
+      "results": [
+        {"launchpad":"bow","raw":0,"confirmed":0,"eligible":0,"false_positives":0,"misses":0,"latency_ns":[null,null,null],"profiles":{"payable_initial_buy":0,"zero_initial_buy":0},"plans":0},
+        {"launchpad":"launch_hood_v3","raw":2,"confirmed":2,"eligible":2,"false_positives":0,"misses":0,"latency_ns":[273000,393000,393000],"profiles":{"embedded_initial_buy":2},"plans":2},
+        {"launchpad":"clanker","raw":39,"confirmed":39,"eligible":39,"false_positives":0,"misses":0,"latency_ns":[370000,687000,1503000],"profiles":{"extensionless_single_position":0,"pinned_extension_five_position":39},"plans":39},
+        {"launchpad":"bankr_doppler","raw":9,"confirmed":8,"eligible":8,"false_positives":0,"misses":1,"latency_ns":[421000,1478000,1478000],"profiles":{"curve_ticks_v1":0,"curve_ticks_v2":0,"curve_ticks_v3":0,"curve_ticks_v4":8,"curve_ticks_v5":0,"direct_airlock":0,"erc7579":8},"plans":8},
+        {"launchpad":"pons","raw":30,"confirmed":29,"eligible":0,"false_positives":0,"misses":1,"latency_ns":[476000,847000,1477000],"profiles":{"current_generation":0},"plans":0},
+        {"launchpad":"hood_fun","raw":0,"confirmed":0,"eligible":0,"false_positives":0,"misses":0,"latency_ns":[null,null,null],"profiles":{"current_curve":0},"plans":0}
+      ]
+    },
+    {
+      "name": "post-stonks-c",
+      "snapshot": {"l2":12112408,"hash":"0x82ee1bb04350a538775242c1e54f28e87f63cce91eaaac762a4397a301151887","l1":25552350,"timestamp":1784290622,"sha256":"c5af2c622e8f3a64d7c030b2f69dd50d97f19e53d5175578ea2123335350d10a","keccak256":"0x3ced615e8cbda31c10c44a691e454034f4f5237c941ef61184b1c2b38991a58d"},
+      "snapshot_report": {"sha256":"3c487c2dd4d0218febb8fad2a58869f78890438843b2d530bfd7c1e908b50a68","keccak256":"0x7622540259cf1ed8ba1c0b9926e6fe3caa6e01df0cc25f6a217aca54a3209527","expected_validation_passed":true,"rpc":{"logical_requests":77,"http_attempts":77,"retries":0,"rate_limited":0,"server_errors":0,"transport_errors":0}},
+      "coverage": {"from_l2":12112481,"to_l2":12115460,"start_hash":"0x61cd6ef54527819c141312b4d11a4dc13672c55fbbc607c0a4e8aa5f15ab80ae","cutoff_hash":"0xb868671e8d6806becca5770db8836aedf12ff3d8840c8e7e09f348f1999448d2","continuity":["connected","coverage_closed"]},
+      "error_totals": {"false_positives":0,"detector_misses":0,"coverage_misses":0,"identity_mismatches":0,"direction_mismatches":0,"prediction_mismatches":0,"quote_mismatches":0},
+      "plan_outcomes": {"policy":{"entry_amount_in_wei":1000000000000000,"slippage_bps":100},"launch_hood_v3":{"entry":2,"exit":2,"round_trip_return_bps":9801},"clanker":{"entry":0,"exit":0,"round_trip_return_bps":null},"bankr_doppler":{"entry":1,"exit":1,"round_trip_return_bps":97}},
+      "manifest": {"sha256":"d286ea2229349b836b598109cac852699d9669684e2d08910d9e7d58ca8705de","keccak256":"0x0208091d3d6b42d333f161e8e5d1f7caea6e3b8700c742cf2d0a30625fff498b","completed":true,"published_last":true},
+      "artifacts": {
+        "cutoff-anchor.txt":{"keccak256":"0x45ddff80d0c162c9cddda77e3ae1c2a2d6253e2d14cb72a752c424f0f153111b","bytes":76},
+        "expected-pins.input.json":{"keccak256":"0x3a192547af7a76a47d5de1b8102da0dc0bb77b7047a53c855b7d264aefa1a34c","bytes":9587},
+        "launchpad-paper-finalized.jsonl":{"keccak256":"0x51f84e144139c175ce35a58c225f73acfc2255df6ef8c6d597b0c7042f5e40d7","bytes":24046},
+        "launchpad-paper.jsonl":{"keccak256":"0x85a70d52413be07d4727e714e7eacb1b3ba992863c020d949c48dffce8ebbcc7","bytes":5606688},
+        "observed-startup-snapshot.input.json":{"keccak256":"0x3ced615e8cbda31c10c44a691e454034f4f5237c941ef61184b1c2b38991a58d","bytes":11477},
+        "probe-metrics.jsonl":{"keccak256":"0xcfd2a1bf24afca3c81d52b4acf01b9cb856bcb81e7a8dea9c5a51897b0a7f844","bytes":5714135},
+        "raw-feed.jsonl":{"keccak256":"0x4c6a600eaa0c0b1001c6155903294bb68ed21027c519d2d79d3fe7fd30fc0be5","bytes":20121346},
+        "reconciliation-evidence.jsonl":{"keccak256":"0x6b4f2e48ba9c76996013db114f91c0f60a9b71d44ca45f7d72d6f723de94c216","bytes":100738},
+        "start-anchor.txt":{"keccak256":"0xee69959ae5a3b448a70f2f07de4f6faa917bc99571cf40db2cb46c0fbb3ce7c9","bytes":76}
+      },
+      "results": [
+        {"launchpad":"bow","raw":0,"confirmed":0,"eligible":0,"false_positives":0,"misses":0,"latency_ns":[null,null,null],"profiles":{"payable_initial_buy":0,"zero_initial_buy":0},"plans":0},
+        {"launchpad":"launch_hood_v3","raw":2,"confirmed":2,"eligible":2,"false_positives":0,"misses":0,"latency_ns":[205000,555000,555000],"profiles":{"embedded_initial_buy":2},"plans":2},
+        {"launchpad":"clanker","raw":0,"confirmed":0,"eligible":0,"false_positives":0,"misses":0,"latency_ns":[null,null,null],"profiles":{"extensionless_single_position":0,"pinned_extension_five_position":0},"plans":0},
+        {"launchpad":"bankr_doppler","raw":1,"confirmed":1,"eligible":1,"false_positives":0,"misses":0,"latency_ns":[332000,332000,332000],"profiles":{"curve_ticks_v1":0,"curve_ticks_v2":0,"curve_ticks_v3":0,"curve_ticks_v4":1,"curve_ticks_v5":0,"direct_airlock":1,"erc7579":0},"plans":1},
+        {"launchpad":"pons","raw":22,"confirmed":22,"eligible":0,"false_positives":0,"misses":0,"latency_ns":[485000,1301000,1337000],"profiles":{"current_generation":0},"plans":0},
+        {"launchpad":"hood_fun","raw":0,"confirmed":0,"eligible":0,"false_positives":0,"misses":0,"latency_ns":[null,null,null],"profiles":{"current_curve":0},"plans":0}
+      ]
+    }
+  ],
+  "aggregate": [
+    {"launchpad":"bow","confirmed":0,"eligible":0,"latency_ns":{"p50":null,"p95":null,"p99":null},"errors":{"false_positives":0,"detector_misses":0,"coverage_misses":0,"identity":0,"direction":0,"prediction":0,"quote":0},"profiles":{"payable_initial_buy":0,"zero_initial_buy":0},"entry_plans":0,"exit_plans":0,"round_trip_return_bps":null,"ready":false},
+    {"launchpad":"launch_hood_v3","confirmed":8,"eligible":8,"latency_ns":{"p50":273000,"p95":555000,"p99":555000},"errors":{"false_positives":0,"detector_misses":0,"coverage_misses":0,"identity":0,"direction":0,"prediction":0,"quote":0},"profiles":{"embedded_initial_buy":8},"entry_plans":8,"exit_plans":8,"entry_amount_in_wei":1000000000000000,"slippage_bps":100,"round_trip_return_bps":9801,"ready":false},
+    {"launchpad":"clanker","confirmed":58,"eligible":58,"latency_ns":{"p50":380000,"p95":945000,"p99":1503000},"errors":{"false_positives":0,"detector_misses":0,"coverage_misses":0,"identity":0,"direction":0,"prediction":0,"quote":0},"profiles":{"extensionless_single_position":0,"pinned_extension_five_position":58},"entry_plans":58,"exit_plans":58,"entry_amount_in_wei":1000000000000000,"slippage_bps":100,"round_trip_return_bps":849,"ready":false},
+    {"launchpad":"bankr_doppler","confirmed":19,"eligible":19,"latency_ns":{"p50":423000,"p95":1478000,"p99":1478000},"errors":{"false_positives":0,"detector_misses":2,"coverage_misses":0,"identity":0,"direction":0,"prediction":0,"quote":0},"profiles":{"curve_ticks_v1":0,"curve_ticks_v2":0,"curve_ticks_v3":0,"curve_ticks_v4":19,"curve_ticks_v5":0,"direct_airlock":2,"erc7579":17},"entry_plans":19,"exit_plans":19,"entry_amount_in_wei":1000000000000000,"slippage_bps":100,"round_trip_return_bps":97,"ready":false},
+    {"launchpad":"pons","confirmed":72,"eligible":0,"latency_ns":{"p50":401000,"p95":1286000,"p99":1477000},"errors":{"false_positives":0,"detector_misses":1,"coverage_misses":0,"identity":0,"direction":0,"prediction":0,"quote":0},"profiles":{"current_generation":0},"entry_plans":0,"exit_plans":0,"round_trip_return_bps":null,"ready":false},
+    {"launchpad":"hood_fun","confirmed":0,"eligible":0,"latency_ns":{"p50":null,"p95":null,"p99":null},"errors":{"false_positives":0,"detector_misses":0,"coverage_misses":0,"identity":0,"direction":0,"prediction":0,"quote":0},"profiles":{"current_curve":0},"entry_plans":0,"exit_plans":0,"round_trip_return_bps":null,"ready":false}
+  ],
+  "stonks_v3": {
+    "fresh_ground_truth_transactions": 0,
+    "fresh_reconciliation_evidence_rows": 0,
+    "fresh_quote_rows": 0,
+    "fresh_finalized_plans": 0,
+    "shared_airlock_conflicts": 0,
+    "shared_airlock_suppression_result": "not_exercised_vacuous",
+    "historical_fixture_is_fresh_campaign_evidence": false,
+    "historical_fixture_sha256": {
+      "stonks-v3-direct-launch-paper-quote.json":"5a01f176480c6e8e617de9e3c4eb2a21a7e5c33379287a552fb3d3ed2d02de52",
+      "stonks-v3-first-swap-differential.json":"979175df35050b22918447779a15e08c7eacfd4cbe03fdd7573c8fe4a34799ed",
+      "stonks-v3-concrete-rpc-transcript.json":"c23ebcd4b1af5c474b6ea9c999cfd766ab7753ae740c255f3f2bf77f06733819"
+    }
+  },
+  "misses": [
+    {
+      "tx_hash":"0xccf350bfed931d136f9fbf5bc20fe49eb1404a5912aae2684549e32be68e4567",
+      "launchpad":"bankr_doppler","l2_block":12107164,"leader":"0x9b60922370fe0f6bd079e0302612bfb9a3045c3d","outer_selector":"0x765e827f","account_selector":"0xe9ae5c53","mode":"0x0000000000000000000000000000000000000000000000000000000000000000","target":"0xeb7c034704ef8dcd2d32324c1545f62fb4ad0862","value_wei":0,"inner_selector":"0x882db707","account_designator_hash":"0x4542cbf1da24ba964614e4f5585736e22884e23e97c0f0915de4f602585d2dd4","delegation":"0xd6cedde84be40893d153be9d467cd6ad37875b28","factory":null,"curve_profile":"curve_ticks_v4","curves":[[-229400,-119200,1,990000000000000000],[-119200,887200,1,10000000000000000]],"token":"0x0106e926a9ccaedce5f87c859beaf89a56e96ba3","weth":"0x0bd7d308f8e1639fab988df18a8011f41eacad73","pool_id":"0x1d40b4a7fb7768a884ea86f285e00cb9fd5ca3d282680984875888c6e5b81720","emitted_blocker":"bankr_strict_quote:receipt launch identity is missing, duplicated, or inconsistent","exact_blocker":"curve_ticks_v4_reverse_token_below_weth_orientation_not_admitted","account_identity_passed":true
+    },
+    {
+      "tx_hash":"0x88eaff5b44775c8ccda07bae4ca7548cf448093013d6c7326fac3c0c8d4b2c49",
+      "launchpad":"bankr_doppler","l2_block":12109627,"leader":"0x289a2b7758257a666c7561bb6b680f26ef4be208","outer_selector":"0x765e827f","account_selector":"0xe9ae5c53","mode":"0x0000000000000000000000000000000000000000000000000000000000000000","target":"0xeb7c034704ef8dcd2d32324c1545f62fb4ad0862","value_wei":0,"inner_selector":"0x882db707","account_designator_hash":"0x4542cbf1da24ba964614e4f5585736e22884e23e97c0f0915de4f602585d2dd4","delegation":"0xd6cedde84be40893d153be9d467cd6ad37875b28","factory":null,"curve_profile":"curve_ticks_v4","curves":[[-229400,-119200,1,990000000000000000],[-119200,887200,1,10000000000000000]],"token":"0x022df6568187016fde9651cb8b5bc4aedcf80ba3","weth":"0x0bd7d308f8e1639fab988df18a8011f41eacad73","pool_id":"0xa3a17284bba4c29e85ace5fe502177d3c8db97a45b5069e2b1ba467418047832","emitted_blocker":"bankr_strict_quote:receipt launch identity is missing, duplicated, or inconsistent","exact_blocker":"curve_ticks_v4_reverse_token_below_weth_orientation_not_admitted","account_identity_passed":true
+    },
+    {
+      "tx_hash":"0x8fa866828e07b65be51bf88ee429c9ce9cdbda06e900585b7dee90a551a92165",
+      "launchpad":"pons","generation":"current","l2_block":12110485,"type":4,"signer":"0x50f70cf40c32826095a2a350d6ac523bddf0ef82","self_target":"0x50f70cf40c32826095a2a350d6ac523bddf0ef82","outer_selector":"0x3f707e6b","authorization":{"chain_id":4663,"nonce":27,"implementation":"0xdc44136e7ca3509a73fc6c22b6a6bd302bf9a1e2"},"designator_hash":"0x9bdfa4cdd2727209e60a7bbb51630848fd4abafc4f612d59fde7018262fa23f3","implementation_runtime_hash":"0x6d7379e6220b87ceeade4a4e069c6a5ca4636fc228a0c948a0c87177860f3baa","auxiliary_call":{"target":"0x83cab64494cff66ce1c331fa9224692bdece5abb","value_wei":538332961881668,"data":"0x"},"inner_call":{"target":"0x0c37a24f5d23a486fa692d1500881d698b1f77a4","value_wei":30500000000000000,"selector":"0x686399cb","launch_config_id":0,"dex_config_id":0,"developer_wallet":"0x50f70cf40c32826095a2a350d6ac523bddf0ef82","initial_buy_wei":30000000000000000},"token":"0xa817ac2c627004ba83dd5cf24762b119d89d2869","pool":"0x50086639b2a00a5adc87453eeaccece5ddab069d","emitted_blocker":"pons_quote_error:transaction, receipt, or paper policy envelope is invalid","exact_blocker":"outside_single_reviewed_eip7702_self_batch_proof_account_nonce_value_hash_and_block","reviewed_account":"0xfb3538b3fac2cc5ffc582446c55875a889abd146","reviewed_authorization_nonce":15,"reviewed_inner_value_wei":60500000000000000,"reviewed_initial_buy_wei":60000000000000000
+    }
+  ],
+  "claims": {
+    "complete_non_overlapping_windows": 3,
+    "excluded_partial_windows": 0,
+    "all_continuity_exact": true,
+    "all_snapshots_distinct": true,
+    "all_expected_pin_validations_passed": true,
+    "snapshot_rpc_errors": 0,
+    "residue_partial_fifo_symlink_count": 0,
+    "file_modes_0600": true,
+    "directory_modes_0700": true,
+    "readiness_regeneration_byte_identical": true,
+    "report_regeneration_byte_identical": true,
+    "source_commit_runtime_bound": false,
+    "campaign_runner_runtime_bound": false,
+    "miss_forensics_supplement_reproducible": true,
+    "sample_sufficient_for_promotion": false,
+    "any_paper_evidence_ready": false,
+    "any_canary_authorized": false,
+    "any_execution_eligible": false
+  }
+}

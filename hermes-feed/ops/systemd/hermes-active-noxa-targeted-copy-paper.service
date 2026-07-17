@@ -1,0 +1,17 @@
+[Unit]
+Description=Hermes active Noxa verified-wallet copy latency paper shadow
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/codex-workspaces/pumpfunnoti/hermes-feed
+ExecStart=/srv/codex-workspaces/pumpfunnoti/hermes-feed/target/release/hermes-noxa-runtime --mode paper --deployment active-noxa --strategy copy --recipient 0xd7A41D7E502F5D63B36Ec59c84F59A3eFA6B99a0 --watch-wallet-file /srv/codex-workspaces/pumpfunnoti/.runtime/hermes-copy/verified-noxa-wallets.txt --copy-token 0xec3ff0ab2f0260615f4f8e49fe8212db89d93517 --copy-token 0xca07d97e25a87a0acb4d51515b7ab892d3d43849 --run-seconds 3600 --warmup-seconds 5 --copy-max-triggers 100 --slippage-bps 100 --max-slippage-bps 100
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+InaccessiblePaths=/srv/codex-workspaces/hermes-secrets
+
+[Install]
+WantedBy=default.target

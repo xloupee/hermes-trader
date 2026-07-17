@@ -1,0 +1,272 @@
+{
+  "schema_version": 1,
+  "checked_at_utc_date": "2026-07-15",
+  "network": "robinhood_chain_mainnet",
+  "chain_id": 4663,
+  "mode": "paper",
+  "broadcast": false,
+  "watched_wallet": "0xb36b00eb1b73e1396c2ea4dfe6108c2b15d582c8",
+  "prevalidated_tokens": [
+    {
+      "token": "0xb4d560a2e300255dd4f5a92e55321dec41cebca4",
+      "pool": "0x2fe353ca3cc6e04ca671390b67aee106d3f0903f"
+    },
+    {
+      "token": "0x24802ff6a9909288811ba95f50514f08f11ba1e6",
+      "pool": "0x6f637138c1f0ef165a5e759190e3f90449820532"
+    },
+    {
+      "token": "0xa1f3dc500a92898faeb2da7229ecc2c9866d17e5",
+      "pool": "0x05851b878f30e7c011d7a9aae94530f567a62c23",
+      "source": "learned_and_rpc_validated_during_targeted_run"
+    }
+  ],
+  "before_factory_observed_gate": {
+    "run_seconds": 30,
+    "rpc_logical_requests": 286
+  },
+  "after_factory_observed_gate": {
+    "run_seconds": 30,
+    "local_non_noxa_suppressions": 45,
+    "rpc_validation_rejections": 0,
+    "rpc_logical_requests": 46,
+    "rpc_request_reduction_percent": 83.9,
+    "feed_reconnects": 0,
+    "feed_replayed_messages": 0,
+    "feed_resume_forward_gaps": 0,
+    "sequence_first": 10143328,
+    "sequence_last": 10144286,
+    "sequence_gaps": 0,
+    "sequence_missing": 0,
+    "copy_triggers": 0
+  },
+  "detection_to_order_latency": {
+    "live_measurement": true,
+    "measurement_scope": "feed_candidate_detection_to_guarded_paper_order",
+    "nanoseconds": 1005491,
+    "microseconds": 1005.491,
+    "milliseconds": 1.005491,
+    "leader": "0x7d678fb0f95633ed17ea2b0cdd29a5855cb0ca46",
+    "source_transaction": "0xcb57e30094081a4f0b52e9c3f2480d09c8d475886f622940cd2f6396150c0087",
+    "l2_block": 10523579,
+    "route": "robinhood_aggregator",
+    "token": "0x7ca559897c59689614ae03f5e6124ecba5557398",
+    "pool": "0x17ad550ab52fc5d72a61284ab2c6d5eca28b0bee",
+    "follower_amount_in_wei": "100000000000000",
+    "factory_identity_proof": "pinned_active_noxa_factory_log",
+    "independent_market_scan_eligible": true,
+    "paper_boundary_submitted": true,
+    "paper_reconciled": true,
+    "paper_realized_loss_wei": "0"
+  },
+  "latency_status": "live_guarded_paper_latency_captured_full_hour_health_gate_in_progress",
+  "historical_guarded_path_replay": {
+    "live_measurement": false,
+    "measurement_scope": "normalized_verified_candidate_to_paper_order",
+    "source_route": "robinhood_aggregator",
+    "historical_transaction": "0x0e4bdf93808f65b30f86fbafb68598e1abddc963202acc29467fae250f976ab3",
+    "leader": "0xbc7a9028acec6d69f170bb86eb2f9bded02da053",
+    "token": "0xac2ceeda7072982fe34f231025d2e919a7e07863",
+    "pool": "0x48f7ac5aebcb3bb8b64ecd454cff3a8718fce7ab",
+    "iterations": 10000,
+    "historical_amount_out_minimum": "0x2c922a6677dc19f0e139",
+    "benchmark_limit_adjusted": false,
+    "production_policy_would_accept_historical_trade": true,
+    "latency_ns": {
+      "min": 1132,
+      "median": 2735,
+      "p95": 4912,
+      "p99": 5759,
+      "max": 111492
+    }
+  },
+  "targeted_30_minute_run": {
+    "run_seconds": 1800,
+    "new_active_noxa_launches_observed": 1,
+    "new_active_noxa_tokens_validated": 1,
+    "launch_prediction_ns": 289331,
+    "copy_triggers": 0,
+    "rpc_logical_requests": 70,
+    "rpc_rate_limited": 0,
+    "rpc_retries": 0,
+    "rpc_server_errors": 0,
+    "rpc_transport_errors": 0,
+    "feed_reconnects": 0,
+    "feed_replayed_messages": 0,
+    "feed_resume_forward_gaps": 0,
+    "sequence_first": 10144608,
+    "sequence_last": 10163144,
+    "sequence_gaps": 0,
+    "sequence_missing": 0,
+    "completion_reason": "duration_complete"
+  },
+  "targeted_60_minute_run": {
+    "started_at_utc": "2026-07-15T06:35:09Z",
+    "run_seconds": 3600,
+    "completion_reason": "duration_complete",
+    "copy_triggers": 0,
+    "active_noxa_launches_observed": 0,
+    "post_warmup_candidates_suppressed_as_launch_not_observed": 4451,
+    "warmup_candidates_suppressed": 93,
+    "unique_candidate_tokens": 325,
+    "post_run_factory_registry_audit": {
+      "tokens_checked": 325,
+      "registered_active_noxa_tokens": 0,
+      "not_registered": 325,
+      "validation_failures": 0,
+      "query_failures": 0
+    },
+    "rpc": {
+      "logical_requests": 57,
+      "http_attempts": 57,
+      "rate_limited": 0,
+      "retries": 0,
+      "server_errors": 0,
+      "transport_errors": 0
+    },
+    "feed": {
+      "sequence_first": 10180003,
+      "sequence_last": 10216614,
+      "sequence_gaps": 0,
+      "sequence_missing": 0,
+      "duplicates_or_reordered": 0,
+      "reconnects": 0,
+      "replayed_messages": 0,
+      "resume_forward_gaps": 0
+    }
+  },
+  "recent_active_noxa_market_scan": {
+    "factory_launches_backfilled": 2170,
+    "first_launch_l2_block": 8147432,
+    "last_launch_l2_block": 10225469,
+    "last_launch_token": "0x034e2a33c1bab02b31043ff79768c0e060ecff51",
+    "last_launch_pool": "0x92d6de37ab1ee1517a925ef45bcce88d43e9ee63",
+    "recent_l2_blocks_scanned": 100000,
+    "swap_transactions": 304,
+    "wallets": 172,
+    "production_eligible_entries": 49,
+    "most_recent_repeat_entry_and_exit_leader": "0x26ed2f8f0bbc6dbb4071a2da6d7bdd0c3c32bd35"
+  },
+  "current_targeted_watch_interval_scan": {
+    "runtime_started_at_utc": "2026-07-15T08:13:16Z",
+    "runtime_start_l2_block": 10239444,
+    "scan_to_l2_block": 10251503,
+    "canonical_pool_swap_transactions": 17,
+    "wallets": 12,
+    "production_eligible_entries": 1,
+    "eligible_entry": {
+      "transaction": "0x0e4bdf93808f65b30f86fbafb68598e1abddc963202acc29467fae250f976ab3",
+      "l2_block": 10249054,
+      "leader": "0xbc7a9028acec6d69f170bb86eb2f9bded02da053",
+      "token": "0xac2ceeda7072982fe34f231025d2e919a7e07863",
+      "pool": "0x48f7ac5aebcb3bb8b64ecd454cff3a8718fce7ab",
+      "deployed_watchlist_match": false
+    }
+  },
+  "completed_targeted_watch": {
+    "runtime_started_at_utc": "2026-07-15T08:13:16Z",
+    "runtime_stopped_at_utc": "2026-07-15T09:13:18Z",
+    "run_seconds": 3600,
+    "completion_reason": "duration_complete",
+    "copy_triggers": 0,
+    "rpc": {
+      "logical_requests": 46,
+      "http_attempts": 46,
+      "rate_limited": 0,
+      "retries": 0,
+      "server_errors": 0,
+      "transport_errors": 0
+    },
+    "feed": {
+      "sequence_first": 10238700,
+      "sequence_last": 10275571,
+      "sequence_gaps": 0,
+      "sequence_missing": 0,
+      "duplicates_or_reordered": 0,
+      "reconnects": 0,
+      "replayed_messages": 0,
+      "resume_forward_gaps": 0
+    },
+    "live_detection_to_order_latency_captured": false,
+    "latency_blocker": "the deployed two-wallet allowlist produced no eligible trigger"
+  },
+  "final_60_minute_all_wallet_discovery_watch": {
+    "runtime_started_at_utc": "2026-07-15T15:59:32Z",
+    "runtime_stopped_at_utc": "2026-07-15T17:00:24Z",
+    "run_seconds": 3600,
+    "completion_reason": "duration_complete",
+    "mode": "paper",
+    "broadcast": false,
+    "historical_factory_launches": 2184,
+    "market_scan": {
+      "scan_from_l2_block": 10520067,
+      "scan_to_l2_block": 10556976,
+      "pool_swap_transactions": 53,
+      "wallets": 33,
+      "production_eligible_entries": 2
+    },
+    "copy_triggers": 1,
+    "armed_entry": {
+      "leader": "0x7d678fb0f95633ed17ea2b0cdd29a5855cb0ca46",
+      "source_transaction": "0xcb57e30094081a4f0b52e9c3f2480d09c8d475886f622940cd2f6396150c0087",
+      "token": "0x7ca559897c59689614ae03f5e6124ecba5557398",
+      "detection_to_order_ns": 1005491,
+      "paper_reconciled": true,
+      "paper_realized_loss_wei": "0"
+    },
+    "second_eligible_entry": {
+      "leader": "0x59cb462cd4adabe9734b1c7a8517a1b52d1c36d0",
+      "source_transaction": "0x18052118d42acd12bd94e89ad87ea171405152b9ed33def68061739f7c479809",
+      "token": "0x3c937b294c5f750088bb998f080f557d07ba9e7e",
+      "runtime_decision": "position_already_open"
+    },
+    "feed": {
+      "sequence_first": 10519457,
+      "sequence_last": 10556371,
+      "sequence_gaps": 0,
+      "sequence_missing": 0,
+      "duplicates_or_reordered": 0,
+      "reconnects": 2,
+      "replayed_messages": 0,
+      "resume_forward_gaps": 0,
+      "all_resumes_exact": true
+    },
+    "rpc_startup": {
+      "logical_requests": 190,
+      "http_attempts": 201,
+      "rate_limited": 11,
+      "retries": 11,
+      "server_errors": 0,
+      "transport_errors": 0
+    },
+    "rpc_after_startup": {
+      "logical_requests": 60,
+      "http_attempts": 60,
+      "rate_limited": 0,
+      "retries": 0,
+      "server_errors": 0,
+      "transport_errors": 0
+    },
+    "matching_paper_exit_observed": false,
+    "final_paper_position_open": true
+  },
+  "next_targeted_watch": {
+    "mode": "paper",
+    "discover_all_wallets": true,
+    "prevalidated_tokens": [
+      "0xac2ceeda7072982fe34f231025d2e919a7e07863",
+      "0x23345757dc6c48152bc7a4cbe1f1c7afdd33eaa2",
+      "0x7ca559897c59689614ae03f5e6124ecba5557398",
+      "0x59cd0ed22a7db4667d552539380e326226fcd3a4",
+      "0x76acd431f6aec99f04f49d1add91ff70d038f9c5",
+      "0x07bccfa8f6a267b1f574a19f0a74d1396ed827d7"
+    ],
+    "signed_mode_permitted": false,
+    "status": "completed_live_entry_latency_captured"
+  },
+  "live_entry_eligibility_gate_passed": true,
+  "live_eligibility_gate_passed": false,
+  "live_eligibility_blocker": "the entry and full-hour health gates passed, but no matching paper exit occurred; a tiny mainnet canary still requires a bounded unwind plan and separate explicit authorization",
+  "mainnet_canary_authorized": false,
+  "result": "live_entry_latency_and_full_hour_health_passed_bounded_exit_and_separate_mainnet_authorization_required"
+}

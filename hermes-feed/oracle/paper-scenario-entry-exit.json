@@ -1,0 +1,63 @@
+{
+  "pending_nonce": 12,
+  "limits": {
+    "max_trade_amount_in": "1000",
+    "max_open_exposure": "1500",
+    "max_gas_cost_wei": "100",
+    "max_session_loss": "200",
+    "max_slippage_bps": 500
+  },
+  "steps": [
+    {
+      "action": "prepare_entry",
+      "token": "0x0000000000000000000000000000000000000001",
+      "amount_in": "500",
+      "expected_token_out": "5000",
+      "gas_limit": 10,
+      "max_fee_per_gas": "5",
+      "slippage_bps": 100,
+      "launch_l1_block": 100,
+      "l1_window": 2,
+      "timestamp_max": null
+    },
+    {
+      "action": "boundary",
+      "l1_block_number": 100,
+      "l1_timestamp": 1800000100
+    },
+    {
+      "action": "boundary",
+      "l1_block_number": 101,
+      "l1_timestamp": 1800000101
+    },
+    {
+      "action": "fill",
+      "actual_amount": "4900",
+      "gas_cost": "10"
+    },
+    {
+      "action": "prepare_exit",
+      "token": "0x0000000000000000000000000000000000000001",
+      "expected_proceeds": "450",
+      "gas_limit": 10,
+      "max_fee_per_gas": "5",
+      "slippage_bps": 100,
+      "boundary_base_l1_block": 101,
+      "l1_window": 2,
+      "timestamp_max": null
+    },
+    {
+      "action": "boundary",
+      "l1_block_number": 102,
+      "l1_timestamp": 1800000102
+    },
+    {
+      "action": "fill",
+      "actual_amount": "450",
+      "gas_cost": "10"
+    },
+    {
+      "action": "snapshot"
+    }
+  ]
+}

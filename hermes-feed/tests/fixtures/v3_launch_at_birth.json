@@ -1,0 +1,18 @@
+{
+  "chain_id": 4663,
+  "bow": {
+    "factory": "0xC70E510E14710Ea535CAB7b2414860aF63FEab79",
+    "selector": "f6efccd9",
+    "prediction": "unavailable"
+  },
+  "launchhood_v3": {
+    "factory": "0x62B33A039D289CBDa50EbeB72Fe4261449E61Bcf",
+    "selector": "4110a41c",
+    "prediction": "unavailable"
+  },
+  "paper_plan": {
+    "router": "0xCaf681a66D020601342297493863E78C959E5cb2",
+    "value": "0",
+    "leader_min_out_must_not_be_reused": true
+  }
+}

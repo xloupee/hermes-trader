@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-07-16T04:47:06Z",
+  "hermes_baseline": "5c1827ec57a155e24c30bb32204ffa76352991ea",
+  "chain": {
+    "name": "Robinhood Chain",
+    "chain_id": 4663,
+    "public_rpc": "https://rpc.mainnet.chain.robinhood.com",
+    "blockscout": "https://robinhoodchain.blockscout.com"
+  },
+  "decision": "tier_2_observe_first",
+  "contracts": {
+    "portal_proxy": {
+      "address": "0x26605f322f7fF986f381bB9A6e3f5DAb0bEaEb09",
+      "runtime_keccak256": "0xcecb292d9c022858199c9348abf0d5836f9ea4dab5cf03710e1dcf41fd9a4c35",
+      "implementation": "0xd9C9981D784A3765D8264D6104650B901C4e36b1",
+      "version": "v5.14.16"
+    },
+    "portal_implementation": {
+      "address": "0xd9C9981D784A3765D8264D6104650B901C4e36b1",
+      "runtime_keccak256": "0x85facd83c203c88ea8f37c4f00c328f983e90c5045b06ec20ef18639c818186b"
+    },
+    "vault_portal_proxy": {
+      "address": "0xe9F7AB7DE8FB8756acbB6a1cd13316a43308197B",
+      "runtime_keccak256": "0xe7109718479fd7c6d05b829ffc6a1469e4c949ae282497c15d179b2af4e5e3a9",
+      "implementation": "0x2813CD0b6089f76F3407792f79276E5d4f80935A"
+    },
+    "vault_portal_implementation": {
+      "address": "0x2813CD0b6089f76F3407792f79276E5d4f80935A",
+      "runtime_keccak256": "0x4f096b230a8db270585d54fdd549982efda99462daad9c4b3e771a62e7071f56",
+      "source_verified": false
+    },
+    "standard_token_implementation": {
+      "address": "0x88882688a067FE97E11C2185b996286e53132222",
+      "runtime_keccak256": "0x40c79e4f08bc0f8da02b1314b2a7987111b6898adcdcef691579dda6f2fcabf2"
+    },
+    "tax_v3_token_implementation": {
+      "address": "0x7777C8743C88B3aff3cf262135beF2c8b2e83333",
+      "runtime_keccak256": "0xa73abf611d52de6364ec684feed2ef3e9aec9706a02b808523e75a6d8438b164"
+    },
+    "v2_migrator": {
+      "address": "0x40373043d4a672c55f1dde0ae137e9da4ab37083",
+      "runtime_keccak256": "0xaee87486e47cec3d1f7a125e84e975ae2d5df31610e955ab34d909173220d6ca"
+    },
+    "v3_migrator": {
+      "address": "0xa80cc552c2b425715d73dbb3f71e754788377dd4",
+      "runtime_keccak256": "0x35641decfa2b70b956a84a964ea47864c74f73755fd5d25bef0d4cfa3a62c242"
+    },
+    "v4_migrator": {
+      "address": "0x1c8847736521f5cd725dfb8f33c7c610826e7c42",
+      "runtime_keccak256": "0x32fd5bc20ab94f5774a35023621a79ac996603b364b3e43e3867fc8446f74eae"
+    },
+    "portal_dex_router": {
+      "address": "0x6f8de19af17c3622af9342930f8f459e429f31f7",
+      "runtime_keccak256": "0xf3491fbf71c566a33130b14a688b67ea3e5d7b4b0c0ac6046e87dd8f0fa45814"
+    },
+    "multi_dex_router": {
+      "address": "0x12008835d60fcda9f6bc6ba8fb0f8e37539771eb",
+      "runtime_keccak256": "0x31f50be79a593a3de332e6c573428a715bf276fe81e7484e7683f163a705ae74"
+    }
+  },
+  "topics": {
+    "TokenCreated": "0x504e7f360b2e5fe33cbaaae4c593bc55305328341bf79009e43e0e3b7f699603",
+    "TokenBought": "0xa800a2038683844fac66747f771bfdfae862eb28b16bcfa387afa9fbacce8ff7",
+    "TokenSold": "0x03a4693e592f5e75dc7c136acb39b146d2b4966c0e509c34f362dee02b3b861a",
+    "LaunchedToDEX": "0x6e4f47630b8745b8cacbd44f42a8a33e7eea7cc08ef22fc7630f4f385784ff7d"
+  },
+  "activity": {
+    "measurement_block": 10980306,
+    "measurement_timestamp": "2026-07-16T04:46:18Z",
+    "h24": {
+      "from_block": 10115167,
+      "to_block": 10980306,
+      "from_timestamp": "2026-07-15T04:46:18Z",
+      "to_timestamp": "2026-07-16T04:46:18Z",
+      "launches": 10852,
+      "unique_launch_tokens": 10852,
+      "unique_creators": 1499,
+      "buys": 35479,
+      "unique_buyers": 2632,
+      "raw_buy_quote_field": "852420969719242526906",
+      "raw_buy_fee_field": "8524209697192423427",
+      "sells": 30458,
+      "unique_sellers": 1644,
+      "raw_sell_quote_field": "982454865743392985135",
+      "raw_sell_fee_field": "10056743589155814112",
+      "normalized_volume": null,
+      "graduations": null,
+      "liquidity": null
+    },
+    "d7": {
+      "from_block": 4941282,
+      "to_block": 10980306,
+      "from_timestamp": "2026-07-09T04:46:18Z",
+      "to_timestamp": "2026-07-16T04:46:18Z",
+      "launches": 31697,
+      "unique_launch_tokens": 31697,
+      "unique_creators": 6134,
+      "buys": 141231,
+      "unique_buyers": 6469,
+      "raw_buy_quote_field": "3921955374139991743322",
+      "raw_buy_fee_field": "39219553741399911515",
+      "sells": 115630,
+      "unique_sellers": 4057,
+      "raw_sell_quote_field": "4014690116653328122936",
+      "raw_sell_fee_field": "41254762821257575302",
+      "normalized_volume": null,
+      "graduations": null,
+      "liquidity": null
+    }
+  },
+  "unknowns": [
+    "normalized economic volume across per-token quote configurations",
+    "24h and 7d graduations across all alternate CL and external migrator events",
+    "migrated and current liquidity",
+    "complete DEX factory/router/init-code mapping for every migrator and DEX ID"
+  ]
+}

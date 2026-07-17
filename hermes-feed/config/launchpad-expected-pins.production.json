@@ -1,0 +1,185 @@
+{
+  "schema_version": 4,
+  "document_role": "expected_protocol_pins",
+  "provenance": "reviewed_protocol_pins",
+  "fixture_id": null,
+  "reviewed_at": {
+    "l2_block_number": 10980306,
+    "l2_block_hash": "0x918363e5b20e86dbe7e952f261a60c9882975ec434abb5815a9dbecdc6354173",
+    "l1_block_number": 25542926,
+    "block_timestamp": 1784177178
+  },
+  "pons_v3": {
+    "identities": [
+      {"address": "0x0c37a24f5d23a486fa692d1500881d698b1f77a4", "code_bytes": 24192, "runtime_hash": "0x921a0d1b2d854de5435804e8ee118658f05173a0eeebca5f41b41385b97cd1b5"},
+      {"address": "0xa5aab3f0c6eeadf30ef1d3eb997108e976351feb", "code_bytes": 24353, "runtime_hash": "0x0a62b8ed1d88d30c7b342ea8361dfaf0ac336706992cf0c8ba38b129f06391d4"},
+      {"address": "0x31ca5e101941a93a7dd6d0497928700625cf54b5", "code_bytes": 4861, "runtime_hash": "0x5bfb52957c2df2cc05b894cd707811c811ee0e38b4a26ea59bae08cd65b39bbd"},
+      {"address": "0x1f7d7550b1b028f7571e69a784071f0205fd2efa", "code_bytes": 24535, "runtime_hash": "0xec72b1abd1f2faee020cfea9c646bd8994f9fb389054f6e574f103a895091739"},
+      {"address": "0x73991a25c818bf1f1128deaab1492d45638de0d3", "code_bytes": 24384, "runtime_hash": "0x0a493d1af3d0f25fed8efa205244ebee14114267a08647fc38c515c7cd6ead4f"},
+      {"address": "0xcaf681a66d020601342297493863e78c959e5cb2", "code_bytes": 24497, "runtime_hash": "0x6f36c378e272c6324c48f045182bcb54bd8ad654cf9ebd42e8893d52c4cb25dc"},
+      {"address": "0x0bd7d308f8e1639fab988df18a8011f41eacad73", "code_bytes": 2202, "runtime_hash": "0x5706be52f64875fee65a2cec0d80e47a23d8793cbe85d214b48445e2d05f5353"}
+    ],
+    "prediction": {
+      "factory": "0x0c37a24f5d23a486fa692d1500881d698b1f77a4",
+      "launch_enabled": true,
+      "launch_fee": "0x1c6bf52634000",
+      "locker": "0x31ca5e101941a93a7dd6d0497928700625cf54b5",
+      "token_creation_code_offset": 14686,
+      "token_creation_code_bytes": 9453,
+      "token_creation_code_hash": "0x86588bc75e5a00a2e28ba6f44fb4c15c899dcd9a0622b28d116d8ca5f8635804",
+      "prediction_selector": [234, 157, 63, 220],
+      "pool_init_code_hash": "0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54",
+      "launch_config_0": {
+        "pair_token": "0x0bd7d308f8e1639fab988df18a8011f41eacad73",
+        "initial_liquidity": "0x3a4965bf58a40000",
+        "initial_tick": -204200,
+        "supply": "0x33b2e3c9fd0803ce8000000",
+        "max_wallet_bps": "0xc8",
+        "max_tx_bps": "0xdc",
+        "restriction_blocks": 366,
+        "flags": [false, true, false]
+      },
+      "dex_config_0": {
+        "name": "uniswap v3",
+        "factory": "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
+        "position_manager": "0x73991a25c818bf1f1128deaab1492d45638de0d3",
+        "swap_router": "0xcaf681a66d020601342297493863e78c959e5cb2",
+        "pool_fee": 10000,
+        "tick_spacing": 200,
+        "enabled": true
+      }
+    }
+  },
+  "pons_eip7702_self_batch": {
+    "account": "0xfb3538b3fac2cc5ffc582446c55875a889abd146",
+    "implementation": "0xdc44136e7ca3509a73fc6c22b6a6bd302bf9a1e2",
+    "designator_hash": "0x9bdfa4cdd2727209e60a7bbb51630848fd4abafc4f612d59fde7018262fa23f3",
+    "implementation_runtime_hash": "0x6d7379e6220b87ceeade4a4e069c6a5ca4636fc228a0c948a0c87177860f3baa",
+    "authorization_nonce": 15,
+    "proof_transaction": "0x7a13c94f90ddaa7d35d639f046f30a44d1d9b5fe449550fd0b75e5e65a0fb4c6",
+    "proof_l2_block_number": 11777530,
+    "proof_l2_block_hash": "0xd8cda07d851127f7c500e598aaa63e8ec8a3d6b3bae39556d2e7c6ed92801fd6",
+    "proof_l1_block_number": 25549554,
+    "proof_block_timestamp": 1784256986,
+    "proof_transaction_index": 7,
+    "implementation_deployment_transaction": "0xf9e2b8d0c51a2357469ca8d4b06f2c4abc6d6456f843550e1f0ce0152c25a49e"
+  },
+  "bow_factory_runtime_hash": "0x8d56cbcdf72dbf04ed8170d55878cc894997ccc54c2ab0aec782274eb7fe7a14",
+  "launchhood_v3_factory_runtime_hash": "0x9b785dd157fe757dd427822df3e2bc3a1b6134f1d338b21c36c3de279bb67766",
+  "launchhood_v3_token_implementation": {
+    "address": "0x5fdf73abc7a232d91b03638c2f9a52c16ab0e3be",
+    "code_bytes": 6821,
+    "runtime_hash": "0xc4717d14bba5f205e8d92a9bf736e038467a353ce7053fcefa5c17da1dec6a47"
+  },
+  "hood_factory_runtime_hash": "0x4aa0ce56b5b67d27f2fab59dcb796fa552d10ceafdecb06e088cdd254c92c0fc",
+  "hood_curve": {
+    "identities": [
+      {"role":"factory","address":"0x5fcc1df0dc020cf454e742e9a8ae2554c37a452c","code_bytes":20518,"runtime_hash":"0x4aa0ce56b5b67d27f2fab59dcb796fa552d10ceafdecb06e088cdd254c92c0fc"},
+      {"role":"migrator","address":"0x5790ef23be2e1543442c12f4550fae147ba8edbe","code_bytes":3577,"runtime_hash":"0x88b7c4f6dfb99df8493cf7b7905a538212fc1c7eb176ffbbcaade5a6988c83d6"},
+      {"role":"locker","address":"0xad69d8a00564f4a2365cc74594925f95281706aa","code_bytes":3583,"runtime_hash":"0xee4522db997a71e396e90ef14a123f3a4a857268040b17a618ff2f47e204eb4a"},
+      {"role":"position_manager","address":"0x73991a25c818bf1f1128deaab1492d45638de0d3","code_bytes":24384,"runtime_hash":"0x0a493d1af3d0f25fed8efa205244ebee14114267a08647fc38c515c7cd6ead4f"},
+      {"role":"v3_factory","address":"0x1f7d7550b1b028f7571e69a784071f0205fd2efa","code_bytes":24535,"runtime_hash":"0xec72b1abd1f2faee020cfea9c646bd8994f9fb389054f6e574f103a895091739"},
+      {"role":"swap_router","address":"0xcaf681a66d020601342297493863e78c959e5cb2","code_bytes":24497,"runtime_hash":"0x6f36c378e272c6324c48f045182bcb54bd8ad654cf9ebd42e8893d52c4cb25dc"},
+      {"role":"weth","address":"0x0bd7d308f8e1639fab988df18a8011f41eacad73","code_bytes":2202,"runtime_hash":"0x5706be52f64875fee65a2cec0d80e47a23d8793cbe85d214b48445e2d05f5353"},
+      {"role":"fallback_factory","address":"0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f","code_bytes":13859,"runtime_hash":"0xbab145d02e7005f0d84c6c1639d39b799b0ea16df99ebbdaf5a14d9da820b4e0"},
+      {"role":"owner_safe_proxy","address":"0xb3f3b54e11217f4f73e7a766b7caa187390d700d","code_bytes":171,"runtime_hash":"0xd7d408ebcd99b2b70be43e20253d6d92a8ea8fab29bd3be7f55b10032331fb4c"},
+      {"role":"owner_safe_singleton","address":"0x29fcb43b46531bca003ddc8fcb67ffe91900c762","code_bytes":24421,"runtime_hash":"0xb1f926978a0f44a2c0ec8fe822418ae969bd8c3f18d61e5103100339894f81ff"}
+    ],
+    "semantic": {
+      "factory":"0x5fcc1df0dc020cf454e742e9a8ae2554c37a452c",
+      "weth":"0x0bd7d308f8e1639fab988df18a8011f41eacad73",
+      "fallback_factory":"0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f",
+      "active_migrator":"0x5790ef23be2e1543442c12f4550fae147ba8edbe",
+      "virtual_eth_seed":"2810000000000000000",
+      "creation_fee":"0",
+      "default_trade_fee_bps":100,
+      "migration_fee":"50000000000000000",
+      "migration_fee_bps":300,
+      "guard_blocks":100,
+      "current_guard_max_wallet_bps":0,
+      "historical_guard_max_wallet_bps":1000,
+      "guard_disabled_l2_block":5780966,
+      "guard_transition_tx_index":3,
+      "fail_closed_on_guard_transition_block":true,
+      "creator_fee_share_bps":8000,
+      "vanity_enforced":true,
+      "curve_allocation_bps":8000,
+      "min_trade_fee_bps":100,
+      "max_trade_fee_bps":500
+    },
+    "owner":"0xb3f3b54e11217f4f73e7a766b7caa187390d700d",
+    "pending_owner":"0x0000000000000000000000000000000000000000",
+    "v3_fee":10000,
+    "v3_tick_spacing":200,
+    "full_range_tick_lower":-887200,
+    "full_range_tick_upper":887200,
+    "migrator_creator_share_bps":8000,
+    "locker_token_fee_burn_bps":8000,
+    "v3_pool_init_code_hash":"0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54"
+  },
+  "leavehood_factory_proxy_runtime_hash": null,
+  "leavehood_factory_implementation_runtime_hash": null,
+  "leavehood_core_proxy_runtime_hash": null,
+  "leavehood_core_implementation_runtime_hash": null,
+  "klik_factory_runtime_hash": null,
+  "trench_proxy_runtime_hash": null,
+  "trench_implementation_runtime_hash": null,
+  "clanker_v4": {
+    "factory_runtime_hash": "0xf895112a2deed34ba2765d0147aff3494104a28293cc2f19af9275934088da33",
+    "deployer_runtime_hash": "0x90b7bf626c59dbc11e746825236f79693e2f3da80b2f551f59ab7b5030e5a3c4",
+    "pool_manager_runtime_hash": "0xbd3881180b547f5fe817545743cfb4343e96b1bc6640dcd70c106b0066e95626",
+    "hook_runtime_hash": "0x0883056c4856f8fe464ff49f9c1c028455459dad8ceddcc6d5159259fe51e07f",
+    "locker_runtime_hash": "0x2175e20d41bc72ad6596b2fdd2c43c75e9d8ca10a706a1ca6c1a3d1526c336bc",
+    "mev_module_runtime_hash": "0x0815a0af5e056adaf07a1941b92082caa886b207676bd42c89ea6bde3956bc13",
+    "extension_runtime_hash": "0xf742a12de7ec06481d0e98942d1830d8bf33502d854e5d97062ef5fda6f5e004",
+    "max_static_fee_ppm": 100000,
+    "max_mev_fee_ppm": 800000,
+    "max_mev_seconds_to_decay": 120,
+    "mev_delay_guard_seconds": 1,
+    "protocol_fee_share_percent": 20
+  },
+  "bankr_doppler_v4": {
+    "airlock_runtime_hash": "0x86b37100cbe9841771c452a592985b4e921254b127a380246073b84ec953f7f8",
+    "pool_manager_runtime_hash": "0xbd3881180b547f5fe817545743cfb4343e96b1bc6640dcd70c106b0066e95626",
+    "initializer_runtime_hash": "0xc41a91106002f15bf70ae266824317f3f3ac638ac72ca5253bae395fa47ee631",
+    "rehype_hook_runtime_hash": "0x5d33a1d867ba0d17cc7af077786b1356848c72f8e0bf960ef88aa15f7a6962d1",
+    "token_factory_runtime_hash": "0x27abd63146eb5743b7871e211da17163afbb495863a626c0d002312af6813459",
+    "token_implementation_runtime_hash": "0x67a382a66d2b14a7032698e11c9ae4432435d2c803429d5c660692289ad10e12",
+    "governance_factory_runtime_hash": "0xefce8ac4a6fe83ae3dd1c3cfebc0e370e1595a66608bed5610ffdd1f291b7f63",
+    "liquidity_migrator_runtime_hash": "0x7bf5115543e8e0769ceabe4da9b8e23547c9e95c1cce15d24d96f164406129e3",
+    "standard_lp_fee_ppm": 7000,
+    "max_lp_fee_ppm": 100000,
+    "hook_fee_denominator_ppm": 800000,
+    "hook_start_fee_ppm": 800000,
+    "hook_end_fee_ppm": 5000,
+    "hook_duration_seconds": 10,
+    "quote_delay_guard_seconds": 1,
+    "tick_spacing": 200,
+    "pool_allocation_bps": 8500,
+    "primary_curve_share_bps": 9900,
+    "secondary_curve_share_bps": 100,
+    "creator_beneficiary_bps": 9500,
+    "protocol_beneficiary_bps": 500
+  },
+  "bankr_doppler_calls": [
+    {
+      "destination": "0xeb7c034704ef8dcd2d32324c1545f62fb4ad0862",
+      "runtime_hash": "0x86b37100cbe9841771c452a592985b4e921254b127a380246073b84ec953f7f8",
+      "selector": [136, 45, 183, 7]
+    }
+  ],
+  "erc4337": {
+    "entry_point_runtime_hash": "0x8db5ff695839d655407cc8490bb7a5d82337a86a6b39c3f0258aa6c3b582fc58",
+    "accounts": [
+      {
+        "account": "0xff89978cb8171132395741b785d4a1f7e3efa124",
+        "runtime_hash": "0x4542cbf1da24ba964614e4f5585736e22884e23e97c0f0915de4f602585d2dd4",
+        "execution_profile": "erc7579_single_call",
+        "factory": null,
+        "factory_runtime_hash": null,
+        "delegation_implementation": "0xd6cedde84be40893d153be9d467cd6ad37875b28",
+        "delegation_runtime_hash": "0x6f6d6691dc11fda98d3102802f20e7e816ccc576c16c9279ee1a884a51d1935d"
+      }
+    ]
+  }
+}

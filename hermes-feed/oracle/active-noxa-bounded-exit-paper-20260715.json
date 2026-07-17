@@ -1,0 +1,168 @@
+{
+  "schema_version": 1,
+  "checked_at_utc_date": "2026-07-15",
+  "source": "falkenstein",
+  "network": "robinhood_chain_mainnet",
+  "chain_id": 4663,
+  "mode": "paper",
+  "broadcast": false,
+  "deployed_commit": "beebe0dea47d3c3e8969b98dd1ce88a4ee15fa56",
+  "service": "hermes-active-noxa-bounded-exit-paper.service",
+  "runtime_started_at_utc": "2026-07-15T17:33:38.661322Z",
+  "runtime_stopped_at_utc": "2026-07-15T18:33:39.083485Z",
+  "configured_run_seconds": 3600,
+  "completion_reason": "duration_complete",
+  "paper_policy": {
+    "deployment": "active-noxa",
+    "discover_all_wallets": true,
+    "copy_max_triggers": 1,
+    "fixed_entry_amount_wei": "100000000000000",
+    "max_trade_amount_in_wei": "100000000000000",
+    "max_open_exposure_wei": "100000000000000",
+    "max_slippage_bps": 100,
+    "bounded_exit_min_weth_out_wei": "99000000000000",
+    "bounded_exit_full_position": true,
+    "bootstrap_tokens": 7,
+    "historical_factory_launches": 2184
+  },
+  "runtime_identity": {
+    "factory": "0x52453b4289a6c3a70bb8b4682bcd3d8731267e28",
+    "router": "0xcaf681a66d020601342297493863e78c959e5cb2",
+    "factory_runtime_keccak256": "0xf4c5e57d72e716c1da2dbe6c598a26b43528fb27fe234534c15527b47fae4a67",
+    "runtime_hash_matches_pin": true,
+    "factory_owner_is_eoa": true,
+    "launch_enabled": true
+  },
+  "confirmed_noxa_traders": [
+    {
+      "wallet": "0x264de668e32fd12a77843bd5488281bf4f4f725e",
+      "transactions": [
+        {
+          "transaction": "0x00e1172d9e7b1430394423f0d0d5bf6e84c49760e6d7147ccee842c7e6feb3c2",
+          "direction": "exit",
+          "token": "0x3329faf5cc5af48e0d4779e5b3e2f5e21ab93333",
+          "pool": "0x50720976a22891d727f865538b60bacea63624f7",
+          "route": "robinhood_aggregator",
+          "token_valid": true,
+          "receipt_status": true,
+          "runtime_decision": "position_missing"
+        },
+        {
+          "transaction": "0x30eee4d25cb5aeec716af93735cbc7374f666caaa81402329ffaf7fd3acaeafa",
+          "direction": "exit",
+          "token": "0xff401cf4c72fe0b20b1f6455e966af2fd891ffff",
+          "pool": "0xe1fe3c2cdae27b4a5590ab1e6770bb910b0d82f8",
+          "route": "robinhood_aggregator",
+          "token_valid": true,
+          "receipt_status": true,
+          "runtime_decision": "position_missing"
+        }
+      ]
+    },
+    {
+      "wallet": "0xa5cd583d88ab54572bc1ea177388d44e77fde5b1",
+      "transactions": [
+        {
+          "transaction": "0x50a886ff7b8689607ce6ca6b6d65b50c740a1bdeeff919606e47f6725d08577e",
+          "direction": "entry",
+          "token": "0xfab5f908facac184db22c69caee7b6258e215223",
+          "pool": "0x95e21e929529561212e36a1a1bf3497d006284ad",
+          "route": "robinhood_aggregator",
+          "token_valid": true,
+          "receipt_status": true,
+          "production_policy_eligible": true,
+          "runtime_decision": "paper_entry_armed"
+        },
+        {
+          "transaction": "0xe7c44f5e027f3598ca26ff3b8f1760d2a6e9a2c3f7a3a3c997d6b5aac806fee4",
+          "direction": "exit",
+          "token": "0xfab5f908facac184db22c69caee7b6258e215223",
+          "pool": "0x95e21e929529561212e36a1a1bf3497d006284ad",
+          "route": "robinhood_aggregator",
+          "token_valid": true,
+          "receipt_status": true,
+          "runtime_decision": "trigger_limit"
+        }
+      ]
+    },
+    {
+      "wallet": "0xfdd7d3d0d16ecc0151aad35e68b3c88735022b0b",
+      "transactions": [
+        {
+          "transaction": "0xc37cf1bf60fa1cd27eaca67d3c41fd9f8ff1e67819747ccec364657932b94666",
+          "direction": "exit",
+          "token": "0x3c937b294c5f750088bb998f080f557d07ba9e7e",
+          "pool": "0xab1c618c0ee8b9566c2d06fb6916fd98a9d7b92d",
+          "route": "robinhood_aggregator",
+          "token_valid": true,
+          "receipt_status": true,
+          "runtime_decision": "trigger_limit"
+        }
+      ]
+    }
+  ],
+  "bounded_lifecycle": {
+    "copy_triggers": 1,
+    "leader": "0xa5cd583d88ab54572bc1ea177388d44e77fde5b1",
+    "source_transaction": "0x50a886ff7b8689607ce6ca6b6d65b50c740a1bdeeff919606e47f6725d08577e",
+    "token": "0xfab5f908facac184db22c69caee7b6258e215223",
+    "pool": "0x95e21e929529561212e36a1a1bf3497d006284ad",
+    "detection_to_order_ns": 1495757,
+    "detection_to_order_microseconds": 1495.757,
+    "detection_to_order_milliseconds": 1.495757,
+    "entry_paper_order_id": 0,
+    "entry_nonce": 0,
+    "entry_reconciled": true,
+    "exit_automatically_armed": true,
+    "exit_full_position": true,
+    "exit_paper_order_id": 1,
+    "exit_nonce": 1,
+    "exit_reconciled": true,
+    "bounded_exit_min_weth_out_wei": "99000000000000",
+    "realized_session_loss_wei": "1000000000000",
+    "realized_session_loss_bps": 100,
+    "final_open_exposure_wei": "0",
+    "final_positions": 0,
+    "final_pending_order": null,
+    "next_nonce": 2
+  },
+  "feed": {
+    "sequence_first": 10576312,
+    "sequence_last": 10612835,
+    "sequence_gaps": 0,
+    "sequence_missing": 0,
+    "duplicates_or_reordered": 0,
+    "reconnects": 2,
+    "replayed_messages": 0,
+    "resume_forward_gaps": 0,
+    "all_resumes_exact": true,
+    "resume_sequences": [10599579, 10601287]
+  },
+  "rpc_startup": {
+    "logical_requests": 193,
+    "http_attempts": 203,
+    "rate_limited": 10,
+    "retries": 10,
+    "server_errors": 0,
+    "transport_errors": 0
+  },
+  "rpc_after_startup": {
+    "logical_requests": 60,
+    "http_attempts": 60,
+    "rate_limited": 0,
+    "retries": 0,
+    "server_errors": 0,
+    "transport_errors": 0
+  },
+  "release_validation": {
+    "library_tests_passed": 141,
+    "runtime_tests_passed": 28,
+    "release_binary_built": true
+  },
+  "testnet_canary_evidence": "oracle/testnet-canary-falkenstein-20260713.json",
+  "testnet_canary_receipt_status": true,
+  "mainnet_key_accessed": false,
+  "mainnet_broadcast_attempted": false,
+  "mainnet_canary_authorized": false,
+  "result": "bounded_entry_exit_and_full_hour_health_gates_passed_separate_mainnet_authorization_required"
+}

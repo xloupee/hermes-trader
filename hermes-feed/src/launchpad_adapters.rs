@@ -1,0 +1,1255 @@
+//! Static chain-4663 launchpad dispatch and narrow adapter observations.
+//!
+//! The research snapshot does not contain enough PoolManager, hook, Permit2,
+//! Doppler, Klik, or Trench runtime pins to enable execution. This module keeps
+//! those absences explicit: callers may install startup-validated code pins,
+//! but candidate processing performs only immutable comparisons and pure ABI
+//! decoding.
+
+use std::sync::LazyLock;
+
+use alloy_primitives::{Address, B256, U256, keccak256, uint};
+use alloy_sol_types::{SolCall, SolValue, sol};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::launchpad_adapter::{AttributionSource, LaunchpadId};
+use crate::robinhood::CHAIN_ID;
+use crate::uniswap_v4::{
+    DYNAMIC_FEE_FLAG, FollowerV4Policy, V4Error, V4MarketSnapshot, V4PaperPlan, V4PoolKey,
+    WarmV4Quote, build_follower_v4_plan,
+};
+
+pub const CLANKER_FACTORY: Address =
+    alloy_primitives::address!("d3f2cc1731b7fd17f28798835c2e02f0a1839a94");
+pub const CLANKER_FACTORY_RUNTIME_HASH: B256 =
+    alloy_primitives::b256!("f895112a2deed34ba2765d0147aff3494104a28293cc2f19af9275934088da33");
+pub const CLANKER_DEPLOYER: Address =
+    alloy_primitives::address!("fb2bae281d9f9d11ae3aed87bb717b058c9797e6");
+pub const CLANKER_DEPLOYER_RUNTIME_HASH: B256 =
+    alloy_primitives::b256!("90b7bf626c59dbc11e746825236f79693e2f3da80b2f551f59ab7b5030e5a3c4");
+pub const CLANKER_DEPLOY_SELECTOR: [u8; 4] = [0xdf, 0x40, 0x22, 0x4a];
+pub const CLANKER_TOKEN_CREATED_TOPIC: B256 =
+    alloy_primitives::b256!("9299d1d1a88d8e1abdc591ae7a167a6bc63a8f17d695804e9091ee33aa89fb67");
+pub const CLANKER_LOCKER: Address =
+    alloy_primitives::address!("290f735f63824bb5836cde24a35f5103a5b5bc99");
+
+// Exact append-only context observed on the three reconciled `charms` direct
+// launches. Its semantics are not assumed; accepting any other trailer remains
+// fail-closed.
+const CLANKER_CHARMS_CONTEXT_TRAILER_V1: &[u8; 29] =
+    b"bc_peo3dkke\x0b\x00\x80\x21\x80\x21\x80\x21\x80\x21\x80\x21\x80\x21\x80\x21\x80\x21";
+const CLANKER_TOKEN_CREATION_CODE_LEN: usize = 16_310;
+const CLANKER_TOKEN_CREATION_CODE_HASH: B256 =
+    alloy_primitives::b256!("c3cf9289693d52fa53c127db0773c5eca16d8b29ab5c8b9aa9d3a72f39ad4815");
+const CLANKER_TOKEN_SUPPLY: U256 = uint!(100000000000000000000000000000_U256);
+
+static CLANKER_TOKEN_CREATION_CODE: LazyLock<Option<Box<[u8]>>> = LazyLock::new(|| {
+    let bytes = hex::decode(
+        include_str!("pins/clanker-token-creation-code.hex")
+            .trim()
+            .strip_prefix("0x")?,
+    )
+    .ok()?;
+    (bytes.len() == CLANKER_TOKEN_CREATION_CODE_LEN
+        && keccak256(&bytes) == CLANKER_TOKEN_CREATION_CODE_HASH)
+        .then(|| bytes.into_boxed_slice())
+});
+
+pub const V4_POOL_MANAGER: Address =
+    alloy_primitives::address!("8366a39cc670b4001a1121b8f6a443a643e40951");
+
+pub const DOPPLER_CREATE_EMITTER: Address =
+    alloy_primitives::address!("eb7c034704ef8dcd2d32324c1545f62fb4ad0862");
+pub const DOPPLER_CREATE_TOPIC: B256 =
+    alloy_primitives::b256!("68ff1cfcdcf76864161555fc0de1878d8f83ec6949bf351df74d8a4a1a2679ab");
+
+pub const KLIK_FACTORY: Address =
+    alloy_primitives::address!("16cf6788b762ee8969744586ed16fc5705140dd7");
+pub const KLIK_DEPLOY_SELECTOR: [u8; 4] = [0x41, 0x01, 0x65, 0x9e];
+pub const KLIK_TOKEN_CREATED_TOPIC: B256 =
+    alloy_primitives::b256!("60122e78030aba0a2e4a67adb3e52b411343cc51778f919095d3fe394090c1b2");
+
+pub const TRENCH_PROXY: Address =
+    alloy_primitives::address!("77dc6f6361b7b99456fc3761ce5b7dda80d83f9d");
+pub const TRENCH_IMPLEMENTATION: Address =
+    alloy_primitives::address!("6d0ff368db6cf9c94a182ad2375e640ec71acee9");
+pub const TRENCH_LAUNCH_SELECTOR: [u8; 4] = [0xf3, 0x9d, 0xc3, 0xed];
+pub const TRENCH_UNPROVEN_SELECTOR_A: [u8; 4] = [0x2c, 0xe7, 0xa0, 0xfa];
+pub const TRENCH_UNPROVEN_SELECTOR_B: [u8; 4] = [0xae, 0x87, 0xc3, 0x97];
+
+const MAX_DISCOVERY_CALLDATA: usize = 128 * 1024;
+const MAX_OBSERVED_ROUTE_BYTES: usize = 32 * 1024;
+
+sol! {
+    struct ClankerTokenConfig {
+        address tokenAdmin;
+        string name;
+        string symbol;
+        bytes32 salt;
+        string image;
+        string metadata;
+        string context;
+        uint256 originatingChainId;
+    }
+
+    struct ClankerPoolConfig {
+        address hook;
+        address pairedToken;
+        int24 tickIfToken0IsClanker;
+        int24 tickSpacing;
+        bytes poolData;
+    }
+
+    struct ClankerLockerConfig {
+        address locker;
+        address[] rewardAdmins;
+        address[] rewardRecipients;
+        uint16[] rewardBps;
+        int24[] tickLower;
+        int24[] tickUpper;
+        uint16[] positionBps;
+        bytes lockerData;
+    }
+
+    struct ClankerMevModuleConfig {
+        address mevModule;
+        bytes mevModuleData;
+    }
+
+    struct ClankerExtensionConfig {
+        address extension;
+        uint256 extensionSupply;
+        uint16 extensionBps;
+        bytes extensionData;
+    }
+
+    struct ClankerDeploymentConfig {
+        ClankerTokenConfig tokenConfig;
+        ClankerPoolConfig poolConfig;
+        ClankerLockerConfig lockerConfig;
+        ClankerMevModuleConfig mevModuleConfig;
+        ClankerExtensionConfig[] extensionConfigs;
+    }
+
+    function deployToken(ClankerDeploymentConfig config) external;
+
+    function deployCoin(
+        string name,
+        string symbol,
+        string metadata,
+        bytes32 salt,
+        uint256 initialBuy
+    ) external payable;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    /// Observation plus a pure follower paper plan is structurally available,
+    /// but signed execution remains outside this module.
+    PaperOnly,
+    /// More startup pins or protocol semantics are required even for planning.
+    ExecutionGated,
+    /// Launch discovery only; no trade direction or quote semantics are known.
+    DiscoveryOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RuntimeCodePin {
+    pub address: Address,
+    pub runtime_code_hash: B256,
+}
+
+impl RuntimeCodePin {
+    fn complete(self) -> bool {
+        self.address != Address::ZERO && self.runtime_code_hash != B256::ZERO
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DispatchEntry {
+    pub launchpad: LaunchpadId,
+    pub destination: RuntimeCodePin,
+    pub selector: [u8; 4],
+    pub implementation: Option<RuntimeCodePin>,
+    pub mode: ExecutionMode,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ResearchStartupPins {
+    /// Klik's address is evidenced, but its runtime hash was not. Omit this
+    /// until startup has independently validated the exact chain-4663 hash.
+    pub klik_factory: Option<RuntimeCodePin>,
+    /// Trench is an EIP-1967 proxy. Both proxy and point-in-time implementation
+    /// must be independently code-hash pinned before discovery is admitted.
+    pub trench_proxy: Option<RuntimeCodePin>,
+    pub trench_implementation: Option<RuntimeCodePin>,
+    /// Direct Bankr/Doppler call shapes were not recovered in the artifacts.
+    /// Each admitted form therefore requires an explicit destination, selector,
+    /// and code hash supplied by off-path startup validation.
+    pub bankr_doppler_calls: Vec<(RuntimeCodePin, [u8; 4])>,
+}
+
+#[derive(Debug, Clone)]
+pub struct V4AdapterSet {
+    entries: Vec<DispatchEntry>,
+}
+
+impl V4AdapterSet {
+    pub fn from_research(pins: ResearchStartupPins) -> Result<Self, V4AdapterError> {
+        preload_clanker_prediction_profile()?;
+        let mut entries = vec![DispatchEntry {
+            launchpad: LaunchpadId::Clanker,
+            destination: RuntimeCodePin {
+                address: CLANKER_FACTORY,
+                runtime_code_hash: CLANKER_FACTORY_RUNTIME_HASH,
+            },
+            selector: CLANKER_DEPLOY_SELECTOR,
+            implementation: None,
+            // Clanker deploy discovery is pinned, but token-specific hook,
+            // PoolManager, locker, extension, router, and Permit2 pins are not.
+            mode: ExecutionMode::ExecutionGated,
+        }];
+
+        if let Some(pin) = pins.klik_factory {
+            if pin.address != KLIK_FACTORY || !pin.complete() {
+                return Err(V4AdapterError::InvalidStartupPin);
+            }
+            entries.push(DispatchEntry {
+                launchpad: LaunchpadId::KlikFinance,
+                destination: pin,
+                selector: KLIK_DEPLOY_SELECTOR,
+                implementation: None,
+                mode: ExecutionMode::DiscoveryOnly,
+            });
+        }
+
+        match (pins.trench_proxy, pins.trench_implementation) {
+            (None, None) => {}
+            (Some(proxy), Some(implementation))
+                if proxy.address == TRENCH_PROXY
+                    && implementation.address == TRENCH_IMPLEMENTATION
+                    && proxy.complete()
+                    && implementation.complete() =>
+            {
+                entries.push(DispatchEntry {
+                    launchpad: LaunchpadId::TrenchToday,
+                    destination: proxy,
+                    selector: TRENCH_LAUNCH_SELECTOR,
+                    implementation: Some(implementation),
+                    mode: ExecutionMode::DiscoveryOnly,
+                });
+            }
+            _ => return Err(V4AdapterError::InvalidStartupPin),
+        }
+
+        for (destination, selector) in pins.bankr_doppler_calls {
+            if !destination.complete() {
+                return Err(V4AdapterError::InvalidStartupPin);
+            }
+            entries.push(DispatchEntry {
+                launchpad: LaunchpadId::BankrDoppler,
+                destination,
+                selector,
+                implementation: None,
+                mode: ExecutionMode::ExecutionGated,
+            });
+        }
+        Self::validate_entries(entries)
+    }
+
+    #[cfg(test)]
+    fn from_entries(entries: Vec<DispatchEntry>) -> Result<Self, V4AdapterError> {
+        Self::validate_entries(entries)
+    }
+
+    fn validate_entries(entries: Vec<DispatchEntry>) -> Result<Self, V4AdapterError> {
+        if entries.iter().any(|entry| !entry.destination.complete()) {
+            return Err(V4AdapterError::InvalidStartupPin);
+        }
+        for (index, entry) in entries.iter().enumerate() {
+            if entries[..index].iter().any(|existing| {
+                existing.destination.address == entry.destination.address
+                    && existing.selector == entry.selector
+            }) {
+                return Err(V4AdapterError::Ambiguous);
+            }
+        }
+        Ok(Self { entries })
+    }
+
+    pub fn dispatch(
+        &self,
+        candidate: &V4CandidateCall<'_>,
+    ) -> Result<DispatchEntry, V4AdapterError> {
+        if candidate.chain_id != CHAIN_ID {
+            return Err(V4AdapterError::WrongChain);
+        }
+        let selector: [u8; 4] = candidate
+            .input
+            .get(..4)
+            .ok_or(V4AdapterError::MalformedCalldata)?
+            .try_into()
+            .expect("four-byte slice");
+        let mut matched = None;
+        for entry in self.entries.iter().copied().filter(|entry| {
+            entry.destination.address == candidate.destination
+                && entry.destination.runtime_code_hash == candidate.destination_runtime_hash
+                && entry.selector == selector
+                && match (entry.implementation, candidate.implementation) {
+                    (None, None) => true,
+                    (Some(expected), Some(observed)) => expected == observed,
+                    _ => false,
+                }
+        }) {
+            if matched.replace(entry).is_some() {
+                return Err(V4AdapterError::Ambiguous);
+            }
+        }
+        matched.ok_or(V4AdapterError::NoMatch)
+    }
+
+    pub fn entries(&self) -> &[DispatchEntry] {
+        &self.entries
+    }
+
+    pub fn observe(
+        &self,
+        candidate: &V4CandidateCall<'_>,
+    ) -> Result<LaunchObservation, V4AdapterError> {
+        let entry = self.dispatch(candidate)?;
+        Self::observe_resolved(entry, candidate)
+    }
+
+    /// Decode a V4-family call already resolved by the canonical launchpad
+    /// registry. This validates the resolved identity but performs no second
+    /// destination/selector search.
+    pub fn observe_resolved(
+        entry: DispatchEntry,
+        candidate: &V4CandidateCall<'_>,
+    ) -> Result<LaunchObservation, V4AdapterError> {
+        if candidate.chain_id != CHAIN_ID {
+            return Err(V4AdapterError::WrongChain);
+        }
+        if candidate.destination != entry.destination.address
+            || candidate.destination_runtime_hash != entry.destination.runtime_code_hash
+            || candidate.implementation != entry.implementation
+            || candidate.input.get(..4) != Some(&entry.selector)
+        {
+            return Err(V4AdapterError::NoMatch);
+        }
+        match entry.launchpad {
+            LaunchpadId::Clanker => {
+                let predicted_market = predict_clanker_market(candidate.input)?;
+                Ok(LaunchObservation::OpaqueLaunch {
+                    launchpad: LaunchpadId::Clanker,
+                    leader: candidate.leader,
+                    calldata_hash: keccak256(candidate.input),
+                    value: candidate.value,
+                    mode: entry.mode,
+                    predicted_market: Some(predicted_market),
+                })
+            }
+            LaunchpadId::BankrDoppler => {
+                validate_opaque_abi(candidate.input, entry.selector)?;
+                Ok(LaunchObservation::OpaqueLaunch {
+                    launchpad: LaunchpadId::BankrDoppler,
+                    leader: candidate.leader,
+                    calldata_hash: keccak256(candidate.input),
+                    value: candidate.value,
+                    mode: entry.mode,
+                    predicted_market: None,
+                })
+            }
+            LaunchpadId::KlikFinance => {
+                let call = deployCoinCall::abi_decode(candidate.input)
+                    .map_err(|_| V4AdapterError::MalformedCalldata)?;
+                if call.abi_encode().as_slice() != candidate.input {
+                    return Err(V4AdapterError::MalformedCalldata);
+                }
+                Ok(LaunchObservation::KlikLaunch {
+                    leader: candidate.leader,
+                    name: call.name,
+                    symbol: call.symbol,
+                    metadata: call.metadata,
+                    salt: call.salt,
+                    observed_initial_buy: call.initialBuy,
+                    value: candidate.value,
+                })
+            }
+            LaunchpadId::TrenchToday => {
+                validate_opaque_abi(candidate.input, TRENCH_LAUNCH_SELECTOR)?;
+                Ok(LaunchObservation::OpaqueLaunch {
+                    launchpad: LaunchpadId::TrenchToday,
+                    leader: candidate.leader,
+                    calldata_hash: keccak256(candidate.input),
+                    value: candidate.value,
+                    mode: ExecutionMode::DiscoveryOnly,
+                    predicted_market: None,
+                })
+            }
+            _ => Err(V4AdapterError::NoMatch),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct V4CandidateCall<'a> {
+    pub chain_id: u64,
+    pub leader: Address,
+    pub destination: Address,
+    pub destination_runtime_hash: B256,
+    pub implementation: Option<RuntimeCodePin>,
+    pub value: U256,
+    pub input: &'a [u8],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ClankerPredictedMarket {
+    pub token: Address,
+    pub pool_id: B256,
+    pub pool_key: V4PoolKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LaunchObservation {
+    OpaqueLaunch {
+        launchpad: LaunchpadId,
+        leader: Address,
+        calldata_hash: B256,
+        value: U256,
+        mode: ExecutionMode,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        predicted_market: Option<ClankerPredictedMarket>,
+    },
+    KlikLaunch {
+        leader: Address,
+        name: String,
+        symbol: String,
+        metadata: String,
+        salt: B256,
+        observed_initial_buy: U256,
+        value: U256,
+    },
+}
+
+impl LaunchObservation {
+    pub fn planning_mode(&self) -> ExecutionMode {
+        match self {
+            Self::OpaqueLaunch { mode, .. } => *mode,
+            Self::KlikLaunch { .. } => ExecutionMode::DiscoveryOnly,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ObservedV4Action {
+    pub launchpad: LaunchpadId,
+    pub attribution: Option<AttributionSource>,
+    pub leader: Address,
+    pub pool_id: B256,
+    pub asset_in: Address,
+    pub asset_out: Address,
+    pub observed_amount_in: U256,
+    pub observed_min_out: U256,
+    /// Audit-only fingerprint. It is intentionally absent from follower plans.
+    pub observed_route_hash: B256,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidatedAdapterMarket {
+    launchpad: LaunchpadId,
+    pool_id: B256,
+    currency0: Address,
+    currency1: Address,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct V4ActionObservationInput<'a> {
+    pub launchpad: LaunchpadId,
+    pub attribution: Option<AttributionSource>,
+    pub leader: Address,
+    pub asset_in: Address,
+    pub asset_out: Address,
+    pub observed_amount_in: U256,
+    pub observed_min_out: U256,
+    pub observed_route: &'a [u8],
+}
+
+pub fn normalize_v4_action(
+    validated: ValidatedAdapterMarket,
+    input: V4ActionObservationInput<'_>,
+) -> Result<ObservedV4Action, V4AdapterError> {
+    if input.launchpad != validated.launchpad
+        || !matches!(
+            input.launchpad,
+            LaunchpadId::Clanker | LaunchpadId::BankrDoppler
+        )
+        || input.observed_route.len() > MAX_OBSERVED_ROUTE_BYTES
+    {
+        return Err(V4AdapterError::InvalidObservation);
+    }
+    if input.attribution.is_some() && input.launchpad != LaunchpadId::BankrDoppler {
+        return Err(V4AdapterError::InvalidAttribution);
+    }
+    if input.leader == Address::ZERO
+        || input.asset_in == input.asset_out
+        || ![validated.currency0, validated.currency1].contains(&input.asset_in)
+        || ![validated.currency0, validated.currency1].contains(&input.asset_out)
+        || input.observed_amount_in == U256::ZERO
+    {
+        return Err(V4AdapterError::InvalidObservation);
+    }
+    Ok(ObservedV4Action {
+        launchpad: input.launchpad,
+        attribution: input.attribution,
+        leader: input.leader,
+        pool_id: validated.pool_id,
+        asset_in: input.asset_in,
+        asset_out: input.asset_out,
+        observed_amount_in: input.observed_amount_in,
+        observed_min_out: input.observed_min_out,
+        observed_route_hash: keccak256(input.observed_route),
+    })
+}
+
+pub fn build_adapter_paper_plan(
+    validated: ValidatedAdapterMarket,
+    action: &ObservedV4Action,
+    market: &V4MarketSnapshot,
+    quote: WarmV4Quote,
+    policy: FollowerV4Policy,
+) -> Result<V4PaperPlan, V4AdapterError> {
+    match action.launchpad {
+        LaunchpadId::KlikFinance | LaunchpadId::TrenchToday => {
+            return Err(V4AdapterError::ExecutionGated);
+        }
+        LaunchpadId::Clanker | LaunchpadId::BankrDoppler => {}
+        _ => return Err(V4AdapterError::ExecutionGated),
+    }
+    if validated.launchpad != action.launchpad
+        || validated.pool_id != market.pool_id
+        || action.pool_id != market.pool_id
+        || action.asset_in != quote.asset_in
+        || action.asset_out != quote.asset_out
+    {
+        return Err(V4AdapterError::InvalidObservation);
+    }
+    // No leader amount, min-out, route hash, value, hook bytes, deadline, or
+    // permit material is passed to the shared follower planner.
+    build_follower_v4_plan(market, V4_POOL_MANAGER, quote, policy).map_err(V4AdapterError::V4)
+}
+
+pub fn validate_clanker_market(
+    factory: RuntimeCodePin,
+    locker: RuntimeCodePin,
+    market: &V4MarketSnapshot,
+) -> Result<ValidatedAdapterMarket, V4AdapterError> {
+    if factory.address != CLANKER_FACTORY
+        || factory.runtime_code_hash != CLANKER_FACTORY_RUNTIME_HASH
+        || locker.address != CLANKER_LOCKER
+        || !locker.complete()
+    {
+        return Err(V4AdapterError::InvalidStartupPin);
+    }
+    market
+        .validate(V4_POOL_MANAGER)
+        .map_err(V4AdapterError::V4)?;
+    Ok(ValidatedAdapterMarket {
+        launchpad: LaunchpadId::Clanker,
+        pool_id: market.pool_id,
+        currency0: market.key.currency0,
+        currency1: market.key.currency1,
+    })
+}
+
+pub fn validate_doppler_market(
+    emitter: RuntimeCodePin,
+    market: &V4MarketSnapshot,
+) -> Result<ValidatedAdapterMarket, V4AdapterError> {
+    if emitter.address != DOPPLER_CREATE_EMITTER || !emitter.complete() {
+        return Err(V4AdapterError::InvalidStartupPin);
+    }
+    market
+        .validate(V4_POOL_MANAGER)
+        .map_err(V4AdapterError::V4)?;
+    Ok(ValidatedAdapterMarket {
+        launchpad: LaunchpadId::BankrDoppler,
+        pool_id: market.pool_id,
+        currency0: market.key.currency0,
+        currency1: market.key.currency1,
+    })
+}
+
+fn validate_opaque_abi(input: &[u8], selector: [u8; 4]) -> Result<(), V4AdapterError> {
+    if input.len() < 4
+        || input.len() > MAX_DISCOVERY_CALLDATA
+        || input[..4] != selector
+        || !(input.len() - 4).is_multiple_of(32)
+    {
+        return Err(V4AdapterError::MalformedCalldata);
+    }
+    Ok(())
+}
+
+fn decode_clanker_deploy_calldata(input: &[u8]) -> Result<deployTokenCall, V4AdapterError> {
+    if input.len() < 4
+        || input.len() > MAX_DISCOVERY_CALLDATA
+        || input[..4] != CLANKER_DEPLOY_SELECTOR
+    {
+        return Err(V4AdapterError::MalformedCalldata);
+    }
+
+    if let Some(call) = canonical_clanker_deploy(input) {
+        return Ok(call);
+    }
+
+    let Some(prefix) = input.strip_suffix(CLANKER_CHARMS_CONTEXT_TRAILER_V1) else {
+        return Err(V4AdapterError::MalformedCalldata);
+    };
+    canonical_clanker_deploy(prefix).ok_or(V4AdapterError::MalformedCalldata)
+}
+
+fn canonical_clanker_deploy(input: &[u8]) -> Option<deployTokenCall> {
+    deployTokenCall::abi_decode(input)
+        .ok()
+        .filter(|call| call.abi_encode().as_slice() == input)
+}
+
+fn clanker_token_creation_code() -> Result<&'static [u8], V4AdapterError> {
+    CLANKER_TOKEN_CREATION_CODE
+        .as_deref()
+        .ok_or(V4AdapterError::InvalidStartupPin)
+}
+
+/// Decode and authenticate the pinned creation template during startup so the
+/// candidate path performs no file I/O or first-use initialization.
+pub fn preload_clanker_prediction_profile() -> Result<(), V4AdapterError> {
+    clanker_token_creation_code().map(|_| ())
+}
+
+pub fn predict_clanker_market(input: &[u8]) -> Result<ClankerPredictedMarket, V4AdapterError> {
+    let call = decode_clanker_deploy_calldata(input)?;
+    predict_clanker_market_from_call(&call)
+}
+
+fn predict_clanker_market_from_call(
+    call: &deployTokenCall,
+) -> Result<ClankerPredictedMarket, V4AdapterError> {
+    let token_config = &call.config.tokenConfig;
+    if token_config.originatingChainId != U256::from(CHAIN_ID) {
+        return Err(V4AdapterError::WrongChain);
+    }
+    let constructor_args = (
+        token_config.name.as_str(),
+        token_config.symbol.as_str(),
+        CLANKER_TOKEN_SUPPLY,
+        token_config.tokenAdmin,
+        token_config.image.as_str(),
+        token_config.metadata.as_str(),
+        token_config.context.as_str(),
+        token_config.originatingChainId,
+    )
+        .abi_encode_params();
+    let creation_code = clanker_token_creation_code()?;
+    let mut init_code = Vec::with_capacity(creation_code.len() + constructor_args.len());
+    init_code.extend_from_slice(creation_code);
+    init_code.extend_from_slice(&constructor_args);
+
+    let mut encoded_salt = [0_u8; 64];
+    encoded_salt[12..32].copy_from_slice(token_config.tokenAdmin.as_slice());
+    encoded_salt[32..].copy_from_slice(token_config.salt.as_slice());
+    let create2_salt = keccak256(encoded_salt);
+    let mut preimage = [0_u8; 85];
+    preimage[0] = 0xff;
+    preimage[1..21].copy_from_slice(CLANKER_FACTORY.as_slice());
+    preimage[21..53].copy_from_slice(create2_salt.as_slice());
+    preimage[53..].copy_from_slice(keccak256(init_code).as_slice());
+    let token = Address::from_slice(&keccak256(preimage)[12..]);
+
+    let pool_config = &call.config.poolConfig;
+    let tick_spacing =
+        i32::try_from(pool_config.tickSpacing).map_err(|_| V4AdapterError::MalformedCalldata)?;
+    let pool_key = V4PoolKey::canonical(
+        token,
+        pool_config.pairedToken,
+        DYNAMIC_FEE_FLAG,
+        tick_spacing,
+        pool_config.hook,
+    )?;
+    Ok(ClankerPredictedMarket {
+        token,
+        pool_id: pool_key.pool_id(),
+        pool_key,
+    })
+}
+
+pub fn reconcile_clanker_predicted_market(
+    predicted: ClankerPredictedMarket,
+    receipt_token: Address,
+    receipt_pool_id: B256,
+) -> Result<ClankerPredictedMarket, V4AdapterError> {
+    if receipt_token == Address::ZERO
+        || receipt_pool_id == B256::ZERO
+        || receipt_token != predicted.token
+        || receipt_pool_id != predicted.pool_id
+    {
+        return Err(V4AdapterError::PredictionMismatch);
+    }
+    Ok(predicted)
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum V4AdapterError {
+    #[error("startup runtime or implementation pin is invalid")]
+    InvalidStartupPin,
+    #[error("candidate is not Robinhood Chain mainnet")]
+    WrongChain,
+    #[error("candidate does not match an exact pinned adapter")]
+    NoMatch,
+    #[error("candidate matches more than one adapter")]
+    Ambiguous,
+    #[error("candidate calldata is malformed or non-canonical")]
+    MalformedCalldata,
+    #[error("receipt token or pool id does not match the Clanker pre-receipt prediction")]
+    PredictionMismatch,
+    #[error("attribution is not valid for this protocol")]
+    InvalidAttribution,
+    #[error("normalized observation does not match the pinned market")]
+    InvalidObservation,
+    #[error("protocol execution is gated by missing evidence")]
+    ExecutionGated,
+    #[error(transparent)]
+    V4(#[from] V4Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::{Bytes, address};
+
+    use super::*;
+    use crate::robinhood::WETH;
+    use crate::uniswap_v4::{CodePin, DYNAMIC_FEE_FLAG, HookPin, V4FeePolicy, V4PoolKey};
+
+    const TOKEN: Address = address!("6bbbb3be7424a911d5d131e272639512c1c12b07");
+    const HOOK: Address = address!("0000000000000000000000000000000000000042");
+
+    #[derive(Deserialize)]
+    struct ClankerCharmsDirectDeploy {
+        tx_hash: B256,
+        signer: Address,
+        expected_token: Address,
+        expected_pool_id: B256,
+        calldata_len: usize,
+        calldata: Bytes,
+    }
+
+    fn clanker_charms_direct_deploys() -> Vec<ClankerCharmsDirectDeploy> {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/clanker-charms-direct-deploys.json"
+        ))
+        .unwrap()
+    }
+
+    fn hash(byte: u8) -> B256 {
+        B256::repeat_byte(byte)
+    }
+
+    fn pin(address: Address, byte: u8) -> RuntimeCodePin {
+        RuntimeCodePin {
+            address,
+            runtime_code_hash: hash(byte),
+        }
+    }
+
+    fn research_registry() -> V4AdapterSet {
+        V4AdapterSet::from_research(ResearchStartupPins {
+            klik_factory: Some(pin(KLIK_FACTORY, 0x22)),
+            trench_proxy: Some(pin(TRENCH_PROXY, 0x33)),
+            trench_implementation: Some(pin(TRENCH_IMPLEMENTATION, 0x44)),
+            bankr_doppler_calls: vec![(pin(Address::with_last_byte(0x55), 0x55), [1, 2, 3, 4])],
+        })
+        .unwrap()
+    }
+
+    fn candidate<'a>(
+        destination: Address,
+        runtime_hash: B256,
+        implementation: Option<RuntimeCodePin>,
+        input: &'a [u8],
+    ) -> V4CandidateCall<'a> {
+        V4CandidateCall {
+            chain_id: CHAIN_ID,
+            leader: Address::with_last_byte(9),
+            destination,
+            destination_runtime_hash: runtime_hash,
+            implementation,
+            value: U256::from(30_000_000_000_000_000_u64),
+            input,
+        }
+    }
+
+    fn market() -> V4MarketSnapshot {
+        let key = V4PoolKey::canonical(WETH, TOKEN, DYNAMIC_FEE_FLAG, 60, HOOK).unwrap();
+        V4MarketSnapshot {
+            chain_id: CHAIN_ID,
+            pool_manager: CodePin {
+                address: V4_POOL_MANAGER,
+                runtime_code_hash: hash(0x66),
+            },
+            key,
+            pool_id: key.pool_id(),
+            hook: HookPin {
+                code: CodePin {
+                    address: HOOK,
+                    runtime_code_hash: hash(0x77),
+                },
+                configuration_hash: hash(0x88),
+            },
+            quote_asset: WETH,
+            fee_policy: V4FeePolicy::Dynamic {
+                min_fee_ppm: 1_000,
+                max_fee_ppm: 10_000,
+            },
+            state_version: 12,
+        }
+    }
+
+    fn validated_clanker(market: &V4MarketSnapshot) -> ValidatedAdapterMarket {
+        validate_clanker_market(
+            RuntimeCodePin {
+                address: CLANKER_FACTORY,
+                runtime_code_hash: CLANKER_FACTORY_RUNTIME_HASH,
+            },
+            pin(CLANKER_LOCKER, 0x99),
+            market,
+        )
+        .unwrap()
+    }
+
+    fn validated_bankr(market: &V4MarketSnapshot) -> ValidatedAdapterMarket {
+        validate_doppler_market(pin(DOPPLER_CREATE_EMITTER, 0x98), market).unwrap()
+    }
+
+    #[test]
+    fn observes_exact_clanker_and_rejects_lookalikes() {
+        let registry = research_registry();
+        let input = clanker_charms_direct_deploys()[0]
+            .calldata
+            .strip_suffix(CLANKER_CHARMS_CONTEXT_TRAILER_V1)
+            .unwrap()
+            .to_vec();
+        let exact = candidate(CLANKER_FACTORY, CLANKER_FACTORY_RUNTIME_HASH, None, &input);
+        assert!(matches!(
+            registry.observe(&exact),
+            Ok(LaunchObservation::OpaqueLaunch {
+                launchpad: LaunchpadId::Clanker,
+                mode: ExecutionMode::ExecutionGated,
+                ..
+            })
+        ));
+
+        let wrong_address = candidate(
+            Address::with_last_byte(0x94),
+            CLANKER_FACTORY_RUNTIME_HASH,
+            None,
+            &input,
+        );
+        assert_eq!(
+            registry.observe(&wrong_address),
+            Err(V4AdapterError::NoMatch)
+        );
+        let wrong_hash = candidate(CLANKER_FACTORY, hash(1), None, &input);
+        assert_eq!(registry.observe(&wrong_hash), Err(V4AdapterError::NoMatch));
+    }
+
+    #[test]
+    fn observes_three_reconciled_clanker_charms_direct_deploys() {
+        let registry = research_registry();
+        let proofs = clanker_charms_direct_deploys();
+        assert_eq!(deployTokenCall::SELECTOR, CLANKER_DEPLOY_SELECTOR);
+        assert_eq!(proofs.len(), 3);
+
+        for proof in proofs {
+            assert_ne!(proof.tx_hash, B256::ZERO);
+            assert_eq!(proof.calldata.len(), proof.calldata_len);
+            let predicted = predict_clanker_market(&proof.calldata).unwrap();
+            assert_eq!(predicted.token, proof.expected_token, "{}", proof.tx_hash);
+            assert_eq!(
+                predicted.pool_id, proof.expected_pool_id,
+                "{}",
+                proof.tx_hash
+            );
+            let mut call = candidate(
+                CLANKER_FACTORY,
+                CLANKER_FACTORY_RUNTIME_HASH,
+                None,
+                &proof.calldata,
+            );
+            call.leader = proof.signer;
+            assert!(matches!(
+                registry.observe(&call),
+                Ok(LaunchObservation::OpaqueLaunch {
+                    launchpad: LaunchpadId::Clanker,
+                    leader,
+                    mode: ExecutionMode::ExecutionGated,
+                    predicted_market: Some(predicted),
+                    ..
+                }) if leader == proof.signer
+                    && predicted.token == proof.expected_token
+                    && predicted.pool_id == proof.expected_pool_id
+            ));
+        }
+    }
+
+    #[test]
+    fn clanker_charms_trailer_is_exact_and_prefix_must_be_canonical() {
+        let registry = research_registry();
+        let proof = &clanker_charms_direct_deploys()[0];
+
+        let mut changed_trailer = proof.calldata.to_vec();
+        *changed_trailer.last_mut().unwrap() ^= 1;
+        let mut truncated_trailer = proof.calldata.to_vec();
+        truncated_trailer.pop();
+        let mut appended_byte = proof.calldata.to_vec();
+        appended_byte.push(0);
+        let mut changed_prefix = proof.calldata.to_vec();
+        changed_prefix[4 + 31] = 0x21;
+
+        for malformed in [
+            changed_trailer,
+            truncated_trailer,
+            appended_byte,
+            changed_prefix,
+        ] {
+            let call = candidate(
+                CLANKER_FACTORY,
+                CLANKER_FACTORY_RUNTIME_HASH,
+                None,
+                &malformed,
+            );
+            assert_eq!(
+                registry.observe(&call),
+                Err(V4AdapterError::MalformedCalldata)
+            );
+        }
+    }
+
+    #[test]
+    fn clanker_prediction_binds_creator_salt_config_hook_pair_and_receipt() {
+        let proof = &clanker_charms_direct_deploys()[0];
+        let canonical = predict_clanker_market(&proof.calldata).unwrap();
+        assert_eq!(canonical.token, proof.expected_token);
+        assert_eq!(canonical.pool_id, proof.expected_pool_id);
+        assert_eq!(
+            reconcile_clanker_predicted_market(
+                canonical,
+                proof.expected_token,
+                proof.expected_pool_id,
+            ),
+            Ok(canonical)
+        );
+
+        let mut call = decode_clanker_deploy_calldata(&proof.calldata).unwrap();
+        call.config.tokenConfig.tokenAdmin = Address::with_last_byte(0xa1);
+        let changed_creator = predict_clanker_market_from_call(&call).unwrap();
+        assert_ne!(changed_creator.token, canonical.token);
+
+        let mut call = decode_clanker_deploy_calldata(&proof.calldata).unwrap();
+        call.config.tokenConfig.salt = B256::repeat_byte(0xa2);
+        let changed_salt = predict_clanker_market_from_call(&call).unwrap();
+        assert_ne!(changed_salt.token, canonical.token);
+
+        let mut call = decode_clanker_deploy_calldata(&proof.calldata).unwrap();
+        call.config.tokenConfig.context.push('!');
+        let changed_config = predict_clanker_market_from_call(&call).unwrap();
+        assert_ne!(changed_config.token, canonical.token);
+
+        let mut call = decode_clanker_deploy_calldata(&proof.calldata).unwrap();
+        call.config.tokenConfig.originatingChainId = U256::from(CHAIN_ID + 1);
+        assert_eq!(
+            predict_clanker_market_from_call(&call),
+            Err(V4AdapterError::WrongChain)
+        );
+
+        let mut call = decode_clanker_deploy_calldata(&proof.calldata).unwrap();
+        call.config.poolConfig.hook = Address::with_last_byte(0xa3);
+        let changed_hook = predict_clanker_market_from_call(&call).unwrap();
+        assert_eq!(changed_hook.token, canonical.token);
+        assert_ne!(changed_hook.pool_id, canonical.pool_id);
+
+        let mut call = decode_clanker_deploy_calldata(&proof.calldata).unwrap();
+        call.config.poolConfig.pairedToken = Address::with_last_byte(0xa4);
+        let changed_pair = predict_clanker_market_from_call(&call).unwrap();
+        assert_eq!(changed_pair.token, canonical.token);
+        assert_ne!(changed_pair.pool_id, canonical.pool_id);
+
+        for (forged_token, forged_pool) in [
+            (Address::with_last_byte(0xf1), canonical.pool_id),
+            (canonical.token, B256::repeat_byte(0xf2)),
+            (Address::ZERO, canonical.pool_id),
+            (canonical.token, B256::ZERO),
+        ] {
+            assert_eq!(
+                reconcile_clanker_predicted_market(canonical, forged_token, forged_pool),
+                Err(V4AdapterError::PredictionMismatch)
+            );
+        }
+    }
+
+    #[test]
+    fn klik_strictly_decodes_but_is_discovery_only() {
+        let registry = research_registry();
+        let input = deployCoinCall {
+            name: "Klik".to_owned(),
+            symbol: "KLIK".to_owned(),
+            metadata: "ipfs://fixture".to_owned(),
+            salt: hash(7),
+            initialBuy: U256::from(42),
+        }
+        .abi_encode();
+        let call = candidate(KLIK_FACTORY, hash(0x22), None, &input);
+        let observation = registry.observe(&call).unwrap();
+        assert_eq!(observation.planning_mode(), ExecutionMode::DiscoveryOnly);
+        let mut malformed = input;
+        malformed.push(0);
+        let call = candidate(KLIK_FACTORY, hash(0x22), None, &malformed);
+        assert_eq!(
+            registry.observe(&call),
+            Err(V4AdapterError::MalformedCalldata)
+        );
+    }
+
+    #[test]
+    fn trench_is_opaque_discovery_and_unproven_trade_selectors_never_dispatch() {
+        let registry = research_registry();
+        let input = [TRENCH_LAUNCH_SELECTOR.as_slice(), &[0_u8; 32]].concat();
+        let call = candidate(
+            TRENCH_PROXY,
+            hash(0x33),
+            Some(pin(TRENCH_IMPLEMENTATION, 0x44)),
+            &input,
+        );
+        assert!(matches!(
+            registry.observe(&call),
+            Ok(LaunchObservation::OpaqueLaunch {
+                launchpad: LaunchpadId::TrenchToday,
+                mode: ExecutionMode::DiscoveryOnly,
+                ..
+            })
+        ));
+
+        for selector in [TRENCH_UNPROVEN_SELECTOR_A, TRENCH_UNPROVEN_SELECTOR_B] {
+            let input = [selector.as_slice(), &[0_u8; 32]].concat();
+            let call = candidate(
+                TRENCH_PROXY,
+                hash(0x33),
+                Some(pin(TRENCH_IMPLEMENTATION, 0x44)),
+                &input,
+            );
+            assert_eq!(registry.observe(&call), Err(V4AdapterError::NoMatch));
+        }
+    }
+
+    #[test]
+    fn rejects_wrong_chain_proxy_implementation_and_registry_ambiguity() {
+        let registry = research_registry();
+        let input = [TRENCH_LAUNCH_SELECTOR.as_slice(), &[0_u8; 32]].concat();
+        let mut call = candidate(
+            TRENCH_PROXY,
+            hash(0x33),
+            Some(pin(TRENCH_IMPLEMENTATION, 0x44)),
+            &input,
+        );
+        call.chain_id = 8453;
+        assert_eq!(registry.observe(&call), Err(V4AdapterError::WrongChain));
+        call.chain_id = CHAIN_ID;
+        call.implementation = Some(pin(TRENCH_IMPLEMENTATION, 0x45));
+        assert_eq!(registry.observe(&call), Err(V4AdapterError::NoMatch));
+
+        let entry = DispatchEntry {
+            launchpad: LaunchpadId::Clanker,
+            destination: pin(Address::with_last_byte(1), 1),
+            selector: [1, 2, 3, 4],
+            implementation: None,
+            mode: ExecutionMode::ExecutionGated,
+        };
+        assert!(matches!(
+            V4AdapterSet::from_entries(vec![entry, entry]),
+            Err(V4AdapterError::Ambiguous)
+        ));
+
+        let mut drifted_duplicate = entry;
+        drifted_duplicate.destination.runtime_code_hash = hash(2);
+        assert!(matches!(
+            V4AdapterSet::from_entries(vec![entry, drifted_duplicate]),
+            Err(V4AdapterError::Ambiguous)
+        ));
+    }
+
+    #[test]
+    fn virtuals_is_only_bankr_attribution() {
+        let market = market();
+        assert_eq!(
+            normalize_v4_action(
+                validated_clanker(&market),
+                V4ActionObservationInput {
+                    launchpad: LaunchpadId::Clanker,
+                    attribution: Some(AttributionSource::Virtuals),
+                    leader: Address::with_last_byte(1),
+                    asset_in: WETH,
+                    asset_out: TOKEN,
+                    observed_amount_in: U256::from(10),
+                    observed_min_out: U256::from(1),
+                    observed_route: &[1, 2, 3],
+                },
+            ),
+            Err(V4AdapterError::InvalidAttribution)
+        );
+        let bankr = normalize_v4_action(
+            validated_bankr(&market),
+            V4ActionObservationInput {
+                launchpad: LaunchpadId::BankrDoppler,
+                attribution: Some(AttributionSource::Virtuals),
+                leader: Address::with_last_byte(1),
+                asset_in: WETH,
+                asset_out: TOKEN,
+                observed_amount_in: U256::from(10),
+                observed_min_out: U256::from(1),
+                observed_route: &[1, 2, 3],
+            },
+        )
+        .unwrap();
+        assert_eq!(bankr.launchpad, LaunchpadId::BankrDoppler);
+        assert_eq!(bankr.attribution, Some(AttributionSource::Virtuals));
+    }
+
+    #[test]
+    fn follower_plan_never_inherits_leader_min_out_or_route() {
+        let market = market();
+        let validated = validated_clanker(&market);
+        let make_action = |min_out, route: &[u8]| {
+            normalize_v4_action(
+                validated,
+                V4ActionObservationInput {
+                    launchpad: LaunchpadId::Clanker,
+                    attribution: None,
+                    leader: Address::with_last_byte(1),
+                    asset_in: WETH,
+                    asset_out: TOKEN,
+                    observed_amount_in: U256::from(999_999),
+                    observed_min_out: min_out,
+                    observed_route: route,
+                },
+            )
+            .unwrap()
+        };
+        let quote = WarmV4Quote {
+            pool_id: market.pool_id,
+            state_version: market.state_version,
+            asset_in: WETH,
+            asset_out: TOKEN,
+            amount_in: U256::from(100),
+            expected_amount_out: U256::from(1_000),
+            applied_fee_ppm: 5_000,
+        };
+        let policy = FollowerV4Policy {
+            recipient: Address::with_last_byte(9),
+            spend_limit: U256::from(100),
+            max_slippage_bps: 100,
+        };
+        let first = build_adapter_paper_plan(
+            validated,
+            &make_action(U256::from(1), &[0xaa]),
+            &market,
+            quote,
+            policy,
+        )
+        .unwrap();
+        let second = build_adapter_paper_plan(
+            validated,
+            &make_action(U256::MAX, &[0xbb, 0xcc]),
+            &market,
+            quote,
+            policy,
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.min_receive, U256::from(990));
+    }
+
+    #[test]
+    fn cross_adapter_destinations_do_not_inherit_selectors() {
+        let registry = research_registry();
+        let clanker_input = [CLANKER_DEPLOY_SELECTOR.as_slice(), &[0_u8; 32]].concat();
+        let at_klik = candidate(KLIK_FACTORY, hash(0x22), None, &clanker_input);
+        assert_eq!(registry.observe(&at_klik), Err(V4AdapterError::NoMatch));
+
+        let klik_input = deployCoinCall {
+            name: "x".into(),
+            symbol: "x".into(),
+            metadata: "x".into(),
+            salt: hash(1),
+            initialBuy: U256::ZERO,
+        }
+        .abi_encode();
+        let at_clanker = candidate(
+            CLANKER_FACTORY,
+            CLANKER_FACTORY_RUNTIME_HASH,
+            None,
+            &klik_input,
+        );
+        assert_eq!(registry.observe(&at_clanker), Err(V4AdapterError::NoMatch));
+    }
+
+    #[test]
+    fn v4_action_normalization_rejects_unvalidated_markets_foreign_protocols_and_large_routes() {
+        let valid_market = market();
+        fn action<'a>(
+            launchpad: LaunchpadId,
+            observed_route: &'a [u8],
+        ) -> V4ActionObservationInput<'a> {
+            V4ActionObservationInput {
+                launchpad,
+                attribution: None,
+                leader: Address::with_last_byte(9),
+                asset_in: WETH,
+                asset_out: TOKEN,
+                observed_amount_in: U256::from(1),
+                observed_min_out: U256::from(1),
+                observed_route,
+            }
+        }
+
+        let mut drifted = valid_market.clone();
+        drifted.pool_manager.runtime_code_hash = B256::ZERO;
+        assert!(matches!(
+            validate_clanker_market(
+                RuntimeCodePin {
+                    address: CLANKER_FACTORY,
+                    runtime_code_hash: CLANKER_FACTORY_RUNTIME_HASH,
+                },
+                pin(CLANKER_LOCKER, 0x99),
+                &drifted,
+            ),
+            Err(V4AdapterError::V4(V4Error::PoolManagerPinMismatch))
+        ));
+        assert_eq!(
+            normalize_v4_action(
+                validated_clanker(&valid_market),
+                action(LaunchpadId::Flap, &[])
+            ),
+            Err(V4AdapterError::InvalidObservation)
+        );
+        let oversized = vec![0_u8; MAX_OBSERVED_ROUTE_BYTES + 1];
+        assert_eq!(
+            normalize_v4_action(
+                validated_bankr(&valid_market),
+                action(LaunchpadId::BankrDoppler, &oversized),
+            ),
+            Err(V4AdapterError::InvalidObservation)
+        );
+    }
+}

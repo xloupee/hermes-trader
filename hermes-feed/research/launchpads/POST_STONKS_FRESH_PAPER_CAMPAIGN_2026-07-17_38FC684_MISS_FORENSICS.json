@@ -1,0 +1,342 @@
+{
+  "record_type": "post_stonks_fresh_campaign_miss_forensics",
+  "schema_version": 1,
+  "campaign_runtime_root": "/Users/kennethjiang/.codex/worktrees/hermes-post-stonks-campaign/hermes-feed/.runtime/post-stonks-38fc684/campaign-20260717T120432Z",
+  "evidence_scope": "supplemental_read_only_rpc_and_deterministic_decode_evidence_for_three_campaign_misses",
+  "acquisition": {
+    "rpc_url": "https://rpc.mainnet.chain.robinhood.com",
+    "rpc_transport": "public_read_only_https_json_rpc",
+    "wallet_access": false,
+    "keys_loaded": false,
+    "signing": false,
+    "broadcast": false,
+    "execution": false,
+    "canary": false,
+    "deployment": false,
+    "server_access": false,
+    "tools": {
+      "cast": "1.7.1",
+      "jq": "1.7.1-apple",
+      "curl": "8.7.1"
+    }
+  },
+  "canonicalization": {
+    "rpc_request": "JSON-RPC 2.0 request with id 1 and the exact method/params recorded below",
+    "rpc_result": "select .result, then jq -cS with no trailing newline; digest the resulting UTF-8 bytes",
+    "raw_hex": "remove 0x, hex-decode to bytes, then digest the decoded bytes",
+    "canonical_reconciliation_row": "select the exact transaction hash from the named JSONL, then jq -cS with no trailing newline",
+    "sha256": "SHA-256",
+    "keccak256": "legacy Keccak-256 as emitted by cast keccak"
+  },
+  "decoder_contract": {
+    "entrypoint_v07": "handleOps((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes)[],address)",
+    "erc7579_account": "execute(bytes32,bytes)",
+    "airlock": "create((uint256,uint256,address,address,bytes,address,bytes,address,bytes,address,bytes,address,bytes32))",
+    "doppler_initializer": "f()((uint24,int24,int24,(int24,int24,uint16,uint256)[],(address,uint96)[],address,bytes,bytes))",
+    "pons_self_batch": "execute((address,uint256,bytes)[])",
+    "pons_launch": "launchToken((string,string,string,string,(string,string,string,string,string),address),uint256,uint256,bytes32)",
+    "erc7579_single_call_packing": "target is the first 20 bytes, value is the next 32-byte big-endian word, and calldata is the remaining bytes"
+  },
+  "misses": [
+    {
+      "tx_hash": "0xccf350bfed931d136f9fbf5bc20fe49eb1404a5912aae2684549e32be68e4567",
+      "campaign_window": "post-stonks-a",
+      "reconciliation_evidence": {
+        "path": "windows/post-stonks-a/reconciliation-evidence.jsonl",
+        "canonical_row_sha256": "1bb6f01741b41fb0be150e30c03141e4dbf0d4b4c99556a00dcd96518cbc7e83",
+        "canonical_row_keccak256": "0x29d773dc2e8d611ca02c1a47143bc37b6dee9411575eca334df4afa7b9cd364a",
+        "canonical_row_bytes": 1265,
+        "observer_claim": false,
+        "ground_truth_event": true,
+        "quote_status": "blocked",
+        "protocol_blocker": "bankr_strict_quote:receipt launch identity is missing, duplicated, or inconsistent"
+      },
+      "rpc": {
+        "transaction": {
+          "method": "eth_getTransactionByHash",
+          "params": ["0xccf350bfed931d136f9fbf5bc20fe49eb1404a5912aae2684549e32be68e4567"],
+          "canonical_result_sha256": "713d93ea46891aab4408dbc75b246c9b831e3f8033f1927654cdd7b9ced5d7de",
+          "canonical_result_keccak256": "0x45252e6b5fae9348e4a4aa15c1745368a669032b8cec489586d90edde8b1597f",
+          "canonical_result_bytes": 7974,
+          "block_hash": "0x211b8d309984f13fb79ba904451e26ed2c190389d393530b9b45d19f5ef415f6",
+          "block_number": "0xb8bd9c",
+          "transaction_index": "0x5",
+          "from": "0x463928d45ed7e052b62ee86999c6d75f861e1944",
+          "to": "0x0000000071727de22e5e9d8baf0edac6f37da032",
+          "type": "0x2",
+          "value": "0x0",
+          "input_raw_sha256": "c1d4c28fe27f71b58449abaae11ae34058febe3ff6e33bf888b0800bae3681f8",
+          "input_raw_keccak256": "0xfa38242f4e7aba036a17170404532c1d5f2367336080941d88bf91f4a52258f2",
+          "input_bytes": 3652,
+          "input_selector": "0x765e827f"
+        },
+        "receipt": {
+          "method": "eth_getTransactionReceipt",
+          "params": ["0xccf350bfed931d136f9fbf5bc20fe49eb1404a5912aae2684549e32be68e4567"],
+          "canonical_result_sha256": "f0a9bda1193791f384d2f8e337ee505b5e8102e344212d44494ebe6824aa1f2d",
+          "canonical_result_keccak256": "0x23e58ba2ad70a294ff6679174c9f05826136cc63de7656bf53b9aa3d3ef5cc75",
+          "canonical_result_bytes": 14702,
+          "status": "0x1",
+          "log_count": 20
+        },
+        "block": {
+          "method": "eth_getBlockByHash",
+          "params": ["0x211b8d309984f13fb79ba904451e26ed2c190389d393530b9b45d19f5ef415f6", false],
+          "canonical_result_sha256": "9b9ea9229824cd8557a64d69146aa7d6872f520b576d372db67ea97e6ed7fe9d",
+          "canonical_result_keccak256": "0x82cdbc578d5d19464326cbf95d395855faefdf06278bdf9706efde9b8cf8dddb",
+          "canonical_result_bytes": 1994,
+          "parent_hash": "0x204143f0e34c216705d03dc466e653172841961db91d57902aa739c4ec177f00",
+          "timestamp": "0x6a5a1b2f",
+          "l1_block_number": "0x185e5b3"
+        },
+        "account_code": {
+          "method": "eth_getCode",
+          "params": ["0x9b60922370fe0f6bd079e0302612bfb9a3045c3d", "0xb8bd9c"],
+          "canonical_result_sha256": "78012ad937ccbbaedc2db4349e3af976e8789d530ab448441e91870fa14ffe49",
+          "canonical_result_keccak256": "0x1ad8240e692c9fc80cb68c6b03041f8bbb29f231d916254c0887fb27d1544756",
+          "code": "0xef0100d6cedde84be40893d153be9d467cd6ad37875b28",
+          "code_bytes": 23,
+          "code_keccak256": "0x4542cbf1da24ba964614e4f5585736e22884e23e97c0f0915de4f602585d2dd4"
+        },
+        "delegation_code": {
+          "method": "eth_getCode",
+          "params": ["0xd6cedde84be40893d153be9d467cd6ad37875b28", "0xb8bd9c"],
+          "canonical_result_sha256": "0d33f1319c3f89f4d7743eaa2f06fea3caf42510db7019acc916a11952880b4f",
+          "canonical_result_keccak256": "0x60b3c02381b1adef6702db80659d542823a32d9250edc7a3ab3c012655a0cd06",
+          "code_bytes": 24469,
+          "code_keccak256": "0x6f6d6691dc11fda98d3102802f20e7e816ccc576c16c9279ee1a884a51d1935d"
+        }
+      },
+      "decoded": {
+        "entrypoint_version": "0.7",
+        "user_operation_count": 1,
+        "leader": "0x9b60922370fe0f6bd079e0302612bfb9a3045c3d",
+        "factory_bytes": "0x",
+        "factory": null,
+        "account_selector": "0xe9ae5c53",
+        "account_calldata_raw_sha256": "9a3f6defb5fa279b4ea41bcc61f109ff02aeea3fe92eab8eb6b01d6b55c7976a",
+        "account_calldata_raw_keccak256": "0x98566e0d9f72ee1b463cce74d5796e355a0655634925481ae0c3ff2fdd0f82c9",
+        "account_calldata_bytes": 2980,
+        "mode": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "target": "0xeb7c034704ef8dcd2d32324c1545f62fb4ad0862",
+        "call_value_wei": 0,
+        "inner_selector": "0x882db707",
+        "create_calldata_raw_sha256": "0e679de0042bbd47413093911bd9bc7eeec0986af07bcdc4a0c09e1aacb93fc1",
+        "create_calldata_raw_keccak256": "0x344f5fef0d50be1309028f03003966cfb37cb7148bf655bc252b752f1a9fd2d0",
+        "create_calldata_bytes": 2820,
+        "curve_profile": "curve_ticks_v4",
+        "fee": 7000,
+        "tick_spacing": 200,
+        "far_tick": 887000,
+        "curves": [[-229400, -119200, 1, 990000000000000000], [-119200, 887200, 1, 10000000000000000]],
+        "token": "0x0106e926a9ccaedce5f87c859beaf89a56e96ba3",
+        "weth": "0x0bd7d308f8e1639fab988df18a8011f41eacad73",
+        "token_below_weth": true,
+        "pool_id": "0x1d40b4a7fb7768a884ea86f285e00cb9fd5ca3d282680984875888c6e5b81720",
+        "exact_blocker": "curve_ticks_v4_reverse_token_below_weth_orientation_not_admitted"
+      }
+    },
+    {
+      "tx_hash": "0x88eaff5b44775c8ccda07bae4ca7548cf448093013d6c7326fac3c0c8d4b2c49",
+      "campaign_window": "post-stonks-b",
+      "reconciliation_evidence": {
+        "path": "windows/post-stonks-b/reconciliation-evidence.jsonl",
+        "canonical_row_sha256": "0524a41b52c1d3b36386abb593ad92fc248c106d189ea84e28f811f2c8eba916",
+        "canonical_row_keccak256": "0xf39f3367f56a8f11f464a5031da7d170a3fa8d03eee8bf3072348d534872fd5b",
+        "canonical_row_bytes": 1267,
+        "observer_claim": false,
+        "ground_truth_event": true,
+        "quote_status": "blocked",
+        "protocol_blocker": "bankr_strict_quote:receipt launch identity is missing, duplicated, or inconsistent"
+      },
+      "rpc": {
+        "transaction": {
+          "method": "eth_getTransactionByHash",
+          "params": ["0x88eaff5b44775c8ccda07bae4ca7548cf448093013d6c7326fac3c0c8d4b2c49"],
+          "canonical_result_sha256": "1144f707ba2a5e547e2385b7514869c23e69c125f00bf98713c5d19bc0aaaf0c",
+          "canonical_result_keccak256": "0x1c65e86de3272fcab376c7e50c43f6797d3fd6b3ca6fb1cf6cb175934f465e3f",
+          "canonical_result_bytes": 7973,
+          "block_hash": "0x03abbf543e60ec81fbda59d0a91f7d7d52c3b04894b29df26990d81deac155c9",
+          "block_number": "0xb8c73b",
+          "transaction_index": "0xa",
+          "from": "0x48f07c16cbd5f12939e1ab24b8a23d161d6c3596",
+          "to": "0x0000000071727de22e5e9d8baf0edac6f37da032",
+          "type": "0x2",
+          "value": "0x0",
+          "input_raw_sha256": "cfd2ed0abcc48459efb152aca9a40b30965c80c95ac4756fc2266fe184ae0a95",
+          "input_raw_keccak256": "0xe4e75c05ab2b353659057d70b702b0f02e0ca2201ba916bb78664a75f614c67d",
+          "input_bytes": 3652,
+          "input_selector": "0x765e827f"
+        },
+        "receipt": {
+          "method": "eth_getTransactionReceipt",
+          "params": ["0x88eaff5b44775c8ccda07bae4ca7548cf448093013d6c7326fac3c0c8d4b2c49"],
+          "canonical_result_sha256": "0193e825cdb465c1a56193ca4297405ee77cca5ccecd4a9fa63c209f5817afc1",
+          "canonical_result_keccak256": "0x603671df3e7718d659d99d7bc21650b12e8af875e662250dbeec8f582b83bae1",
+          "canonical_result_bytes": 14699,
+          "status": "0x1",
+          "log_count": 20
+        },
+        "block": {
+          "method": "eth_getBlockByHash",
+          "params": ["0x03abbf543e60ec81fbda59d0a91f7d7d52c3b04894b29df26990d81deac155c9", false],
+          "canonical_result_sha256": "6ef219199a5c41029162bec26f34a3575862e0a265e09b7ef89bb20b57e7c96a",
+          "canonical_result_keccak256": "0x723b48072c718d03b6f21c77aff2af10b1800a87592157a4a6804dcc6ec67390",
+          "canonical_result_bytes": 2477,
+          "parent_hash": "0xd26b0e0eb041fce5c4575e6f64df5e2e5e36fb991cd088fecb52bb959b9fea7d",
+          "timestamp": "0x6a5a1c27",
+          "l1_block_number": "0x185e5c7"
+        },
+        "account_code": {
+          "method": "eth_getCode",
+          "params": ["0x289a2b7758257a666c7561bb6b680f26ef4be208", "0xb8c73b"],
+          "canonical_result_sha256": "78012ad937ccbbaedc2db4349e3af976e8789d530ab448441e91870fa14ffe49",
+          "canonical_result_keccak256": "0x1ad8240e692c9fc80cb68c6b03041f8bbb29f231d916254c0887fb27d1544756",
+          "code": "0xef0100d6cedde84be40893d153be9d467cd6ad37875b28",
+          "code_bytes": 23,
+          "code_keccak256": "0x4542cbf1da24ba964614e4f5585736e22884e23e97c0f0915de4f602585d2dd4"
+        },
+        "delegation_code": {
+          "method": "eth_getCode",
+          "params": ["0xd6cedde84be40893d153be9d467cd6ad37875b28", "0xb8c73b"],
+          "canonical_result_sha256": "0d33f1319c3f89f4d7743eaa2f06fea3caf42510db7019acc916a11952880b4f",
+          "canonical_result_keccak256": "0x60b3c02381b1adef6702db80659d542823a32d9250edc7a3ab3c012655a0cd06",
+          "code_bytes": 24469,
+          "code_keccak256": "0x6f6d6691dc11fda98d3102802f20e7e816ccc576c16c9279ee1a884a51d1935d"
+        }
+      },
+      "decoded": {
+        "entrypoint_version": "0.7",
+        "user_operation_count": 1,
+        "leader": "0x289a2b7758257a666c7561bb6b680f26ef4be208",
+        "factory_bytes": "0x",
+        "factory": null,
+        "account_selector": "0xe9ae5c53",
+        "account_calldata_raw_sha256": "203e2ab578c20735cbbcb68793f91d75ed7f06a15c5c66a20d157a46f66e746c",
+        "account_calldata_raw_keccak256": "0x2e90e9f5f1202ee0ad77f6e206868d20514939c92512da629cdba0b673cd1934",
+        "account_calldata_bytes": 2980,
+        "mode": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "target": "0xeb7c034704ef8dcd2d32324c1545f62fb4ad0862",
+        "call_value_wei": 0,
+        "inner_selector": "0x882db707",
+        "create_calldata_raw_sha256": "f49f88bdcd0c318eb4c74b623b75f141039972cb9178fbb683e5055a160f6762",
+        "create_calldata_raw_keccak256": "0x8de84acb58378933768fe800a4f69acacd87e72818c9731db37acc4f0d0c0972",
+        "create_calldata_bytes": 2820,
+        "curve_profile": "curve_ticks_v4",
+        "fee": 7000,
+        "tick_spacing": 200,
+        "far_tick": 887000,
+        "curves": [[-229400, -119200, 1, 990000000000000000], [-119200, 887200, 1, 10000000000000000]],
+        "token": "0x022df6568187016fde9651cb8b5bc4aedcf80ba3",
+        "weth": "0x0bd7d308f8e1639fab988df18a8011f41eacad73",
+        "token_below_weth": true,
+        "pool_id": "0xa3a17284bba4c29e85ace5fe502177d3c8db97a45b5069e2b1ba467418047832",
+        "exact_blocker": "curve_ticks_v4_reverse_token_below_weth_orientation_not_admitted"
+      }
+    },
+    {
+      "tx_hash": "0x8fa866828e07b65be51bf88ee429c9ce9cdbda06e900585b7dee90a551a92165",
+      "campaign_window": "post-stonks-b",
+      "reconciliation_evidence": {
+        "path": "windows/post-stonks-b/reconciliation-evidence.jsonl",
+        "canonical_row_sha256": "c4215bea6d99e222034e2479b13de4b023da6abd60576241ab87da6d1110fbb9",
+        "canonical_row_keccak256": "0xa207776824168dc25c2b52b1525f00f280950478f5bf87239c500e8c61bfaa76",
+        "canonical_row_bytes": 1754,
+        "observer_claim": false,
+        "ground_truth_event": true,
+        "quote_status": "blocked",
+        "protocol_blocker": "pons_quote_error:transaction, receipt, or paper policy envelope is invalid"
+      },
+      "rpc": {
+        "transaction": {
+          "method": "eth_getTransactionByHash",
+          "params": ["0x8fa866828e07b65be51bf88ee429c9ce9cdbda06e900585b7dee90a551a92165"],
+          "canonical_result_sha256": "98b0feeb81e36664a61743b7208ce0a368817ab21b26094ad4b8b4d8c1b23361",
+          "canonical_result_keccak256": "0xdefbb89fa07f5ee87d0c38ff997287876e4438c02f366ab8c3a4483d19a09410",
+          "canonical_result_bytes": 3895,
+          "block_hash": "0x337c71d4e206a3dd343a9c9afb220844ed0e6fb05d9b21706cad6b0632983b66",
+          "block_number": "0xb8ca95",
+          "transaction_index": "0x2",
+          "from": "0x50f70cf40c32826095a2a350d6ac523bddf0ef82",
+          "to": "0x50f70cf40c32826095a2a350d6ac523bddf0ef82",
+          "type": "0x4",
+          "value": "0x0",
+          "input_raw_sha256": "ad63846f46a1325e1e4584184f9cddb4a765fe93325d3d128d0fb917467b672e",
+          "input_raw_keccak256": "0x67ec295d9c36f866bb07fad24f1365b828fda28f0defc970bb49ca67354368a4",
+          "input_bytes": 1476,
+          "input_selector": "0x3f707e6b",
+          "authorization_list": [{"chain_id": "0x1237", "nonce": "0x1b", "implementation": "0xdc44136e7ca3509a73fc6c22b6a6bd302bf9a1e2"}]
+        },
+        "receipt": {
+          "method": "eth_getTransactionReceipt",
+          "params": ["0x8fa866828e07b65be51bf88ee429c9ce9cdbda06e900585b7dee90a551a92165"],
+          "canonical_result_sha256": "a370b11381f2cb8eaa38eee30eb78cc2c278de7391b694a682c1f015752214a7",
+          "canonical_result_keccak256": "0x589d7b2aefed41162bd6cb1683904dd9d3eb1b7417095ac05960a3fb3b904918",
+          "canonical_result_bytes": 13919,
+          "status": "0x1",
+          "log_count": 18
+        },
+        "block": {
+          "method": "eth_getBlockByHash",
+          "params": ["0x337c71d4e206a3dd343a9c9afb220844ed0e6fb05d9b21706cad6b0632983b66", false],
+          "canonical_result_sha256": "7348ff582244bfc7a4dd63c0a44d71018bf107a562d22dea426a5438ef9a4807",
+          "canonical_result_keccak256": "0x0bd1b965cd3901624573d4bf9223a31a7ab001a3e032e12586ed22da9c257633",
+          "canonical_result_bytes": 1786,
+          "parent_hash": "0x8e501790dc16b604aaf7a3a04ecb35f18400a06feba2df2c21816c74584bb138",
+          "timestamp": "0x6a5a1c7d",
+          "l1_block_number": "0x185e5ce"
+        },
+        "account_code": {
+          "method": "eth_getCode",
+          "params": ["0x50f70cf40c32826095a2a350d6ac523bddf0ef82", "0xb8ca95"],
+          "canonical_result_sha256": "bb062f936aa358e408aabe4805b4ea221fe62d081bb9f55bdb9c3bb929d43349",
+          "canonical_result_keccak256": "0xe926c6f1eb54575f3a864a9176d5900a1774d32127315c7153f2a91cd33f711c",
+          "code": "0xef0100dc44136e7ca3509a73fc6c22b6a6bd302bf9a1e2",
+          "code_bytes": 23,
+          "code_keccak256": "0x9bdfa4cdd2727209e60a7bbb51630848fd4abafc4f612d59fde7018262fa23f3"
+        },
+        "delegation_code": {
+          "method": "eth_getCode",
+          "params": ["0xdc44136e7ca3509a73fc6c22b6a6bd302bf9a1e2", "0xb8ca95"],
+          "canonical_result_sha256": "b669e9970174ed371931e7f13f3c6e6fcd29109eee9a874283179d9487a6cb0c",
+          "canonical_result_keccak256": "0x32c324a6ee0cf60fe331de8d19bf493d4a6dacee2c81e16365166746f54bc5df",
+          "code_bytes": 749,
+          "code_keccak256": "0x6d7379e6220b87ceeade4a4e069c6a5ca4636fc228a0c948a0c87177860f3baa"
+        }
+      },
+      "decoded": {
+        "signer": "0x50f70cf40c32826095a2a350d6ac523bddf0ef82",
+        "self_target": "0x50f70cf40c32826095a2a350d6ac523bddf0ef82",
+        "authorization_chain_id": 4663,
+        "authorization_nonce": 27,
+        "authorization_implementation": "0xdc44136e7ca3509a73fc6c22b6a6bd302bf9a1e2",
+        "account_factory": null,
+        "outer_selector": "0x3f707e6b",
+        "batch_calldata_raw_sha256": "ad63846f46a1325e1e4584184f9cddb4a765fe93325d3d128d0fb917467b672e",
+        "batch_calldata_raw_keccak256": "0x67ec295d9c36f866bb07fad24f1365b828fda28f0defc970bb49ca67354368a4",
+        "batch_calldata_bytes": 1476,
+        "calls": [
+          {"target": "0x83cab64494cff66ce1c331fa9224692bdece5abb", "value_wei": 538332961881668, "data": "0x"},
+          {"target": "0x0c37a24f5d23a486fa692d1500881d698b1f77a4", "value_wei": 30500000000000000, "selector": "0x686399cb"}
+        ],
+        "launch_call_raw_sha256": "317e5202c9acdc737b040f95d995bec48bac0cb2ae5e4de5aee9f853b0084c7e",
+        "launch_call_raw_keccak256": "0xcc49698abd3eef55f936500c3f6458675a64be537c2e52b7c05c902dfc143f55",
+        "launch_call_bytes": 1060,
+        "launch_config_id": 0,
+        "dex_config_id": 0,
+        "developer_wallet": "0x50f70cf40c32826095a2a350d6ac523bddf0ef82",
+        "initial_buy_wei": 30000000000000000,
+        "token": "0xa817ac2c627004ba83dd5cf24762b119d89d2869",
+        "pool": "0x50086639b2a00a5adc87453eeaccece5ddab069d",
+        "exact_blocker": "outside_single_reviewed_eip7702_self_batch_proof_account_nonce_value_hash_and_block"
+      }
+    }
+  ],
+  "limits": {
+    "campaign_runtime_artifacts_mutated": false,
+    "source_commit_runtime_bound": false,
+    "campaign_runner_runtime_bound": false,
+    "supplemental_evidence_is_part_of_original_manifest": false,
+    "purpose": "make the already reported miss forensics independently reproducible without retroactively changing campaign provenance"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "checked_at_utc_date": "2026-07-13",
+  "checked_at_testnet_l2_block": 89832866,
+  "chain_id": 46630,
+  "rpc": "https://rpc.testnet.chain.robinhood.com",
+  "official_sources": [
+    "https://docs.robinhood.com/chain/connecting/",
+    "https://docs.robinhood.com/chain/contracts/",
+    "https://docs.noxa.fi/contracts/noxa-fun/"
+  ],
+  "documentation_result": {
+    "testnet_rpc_feed_and_sequencer_published": true,
+    "published_contract_tables_are_mainnet_chain_4663_only": true,
+    "official_testnet_weth_published": false,
+    "official_testnet_uniswap_router_published": false,
+    "official_testnet_noxa_factory_published": false
+  },
+  "live_code_checks": [
+    {
+      "label": "documented_mainnet_weth",
+      "address": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+      "testnet_eth_getCode": "0x"
+    },
+    {
+      "label": "pinned_mainnet_swap_router_02",
+      "address": "0xCaF681a66D020601342297493863E78C959e5cb2",
+      "testnet_eth_getCode": "0x"
+    },
+    {
+      "label": "documented_mainnet_noxa_factory",
+      "address": "0xD9eC2db5f3D1b236843925949fe5bd8a3836FCcB",
+      "testnet_eth_getCode": "0x"
+    }
+  ],
+  "result": "blocked_no_canonical_testnet_dex_deployment",
+  "safe_next_action": "Do not wrap, approve, or attempt a swap until official testnet contract addresses and suitable liquidity are published or independently deployed test fixtures are explicitly approved."
+}

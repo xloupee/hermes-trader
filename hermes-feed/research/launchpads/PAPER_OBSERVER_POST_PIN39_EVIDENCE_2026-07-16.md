@@ -351,6 +351,91 @@ has the hard detector miss. Clean4 is deliberately not added blindly to the
 historical replay aggregate below because that aggregate mixes older live code
 and replay-only cohorts with different evidence boundaries.
 
+## Clean5 exclusion and clean6 completed live evidence
+
+Clean5 is excluded. Its direct feed reported a transient WebSocket reset
+without a closing handshake, followed by `read_error`, `disconnected`, one
+reconnect, and a later `coverage_closed`. The run retained only `.partial`
+anchors and stream artifacts; it has no completion manifest, reconciliation,
+finalized evidence, or readiness decision. This is the intended fail-closed
+disposition: none of clean5's 7,987 raw rows is scored, used for latency, or
+counted toward readiness, and the partial evidence remains untouched.
+
+Clean6 is a completed live session at
+`.runtime/paper-session-20260716-e975555-clean6`. Its schema-1 completion
+manifest binds the exact expected pins, startup snapshot, executables, anchors,
+raw stream, observer output, independent reconciliation, and finalized output.
+The snapshot boundary is L2 block `11825120`, hash
+`0xb197966685eeef043e1db2e137266e6d1689f77f843c402b721b7c606d8a1476`,
+L1 block `25549949`, timestamp `1784261757`, with 39 observed pins. The start
+boundary is block `11825238`, hash
+`0x84c4c9043e8bbc95e41e47e5422ac897b4fa090ab5df250752fc7a7ac35ce13a`;
+the cutoff is block `11831205`, hash
+`0x6f67bbea8d056a47fc1534b8ae08a697700366f44a54e911d492560e43eb3742`.
+The 118-block snapshot-to-start gap is within the manifest's 500-block limit.
+The complete scored interval is `11825239..=11831205`, or 5,967 blocks.
+
+Clean6 contains 6,817 raw rows, 6,818 observer rows, 69,656 isolated probe
+metric rows, 116 reconciliation rows, and 28 finalized rows. Probe state was
+exactly `connected` then `coverage_closed`, with zero reconnects. The directory
+is mode 0700 and every contained artifact is mode 0600.
+
+| Launchpad | Truth | Confirmed | False positives | Missed (detector / coverage) | Live latency p50 / p95 / p99 | Quote result | Profile evidence |
+|---|---:|---:|---:|---:|---|---|---|
+| Bow | 0 | 0 | 0 | 0 (0 / 0) | - | no activity | payable 0; zero-buy 0 |
+| LaunchHood V3 | 2 | 2 | 0 | 0 (0 / 0) | 0.242 / 0.611 / 0.611 ms | 2/2 available and matched; zero identity, action, direction, prediction, or quote errors | embedded buy 2 |
+| Clanker | 5 | 5 | 0 | 0 (0 / 0) | 0.498 / 0.632 / 0.632 ms | 5/5 available and matched; zero identity, action, direction, prediction, or quote errors | extensionless 0; pinned extension 5 |
+| Bankr/Doppler | 10 | 9 | 0 | 1 (1 / 0) | 0.530 / 1.510 / 1.510 ms | 9 available and matched; one truth row blocked; zero identity, action, direction, prediction, or quote mismatches on eligible rows | V3 9; ERC-7579 9; V1/V2/direct 0 |
+| Pons | 29 | 29 | 0 | 0 (0 / 0) | 0.393 / 3.289 / 5.324 ms | 29 legacy/not applicable; zero current-generation quote-eligible rows | current generation 0 |
+| Hood | 0 | 0 | 0 | 0 (0 / 0) | - | no in-scope activity; one claim was out of scope, not a false positive | current curve 0 |
+
+Bankr emitted 17 claims: nine confirmations and eight reverted attempts. Pons
+emitted 35 claims: 29 confirmed legacy observations and six out-of-scope
+observations. Across the six scored launchpads, false positives, feed-coverage
+misses, identity mismatches, direction mismatches, prediction mismatches, and
+independent-quote mismatches are all zero. The one Bankr detector miss is the
+only hard scoring error.
+
+The exact Bankr miss is transaction
+`0xc85b51ecb810158b02511586552295fc26e2720764a9b4a4a9a9cda774efdc20`
+at block `11828501`. Independent review classifies it as a supported Bankr V4
+`curve_ticks_v3` launch inside the reviewed ERC-4337/ERC-7579 envelope. The
+observer rejected it because its strict receipt validator assumed the creator
+beneficiary must be first, while this launch's canonical address ordering put
+the protocol beneficiary first. The bounded fix derives beneficiary roles by
+identity and share while preserving canonical address ordering, then binds
+token vesting to the derived creator. As of this report commit, that fix exists
+only in an isolated worktree: it is not integrated or pushed, its tests are
+pending, and clean6 retains the detector miss and blocked quote. This
+provisional disposition does not authorize support or promotion.
+
+Clean6 finalized 16 independent paper plans: two LaunchHood, five Clanker, and
+nine Bankr. Their simulated immediate round-trip returns are 9,801, 849, and
+97 bps respectively. Every plan includes an independent entry quote and
+slippage minimum, a full-position exit quote and minimum, and the exit policy;
+both the top-level and nested exit-plan `execution_eligible` and `broadcast`
+flags are `false` for all 16 plans.
+
+The manifest-trusted clean6 readiness decision uses one submitted, complete,
+independent live window. Policy requires 100 quote-eligible confirmations per
+launchpad, ten observations per supported profile/envelope, three independent
+complete windows, and zero false positives, detector misses, identity,
+direction, prediction, or quote mismatches:
+
+| Launchpad | Quote eligible / 100 | Profile observations / 10 | Complete windows / 3 | Hard error |
+|---|---:|---|---:|---|
+| Bow | 0 | payable 0; zero-buy 0 | 1 | none; no samples |
+| LaunchHood V3 | 2 | embedded buy 2 | 1 | none |
+| Clanker | 5 | extensionless 0; pinned extension 5 | 1 | none |
+| Bankr/Doppler | 9 | V1 0; V2 0; V3 9; direct 0; ERC-7579 9 | 1 | one detector miss; policy maximum 0 |
+| Pons | 0 | current generation 0 | 1 | none; legacy rows do not qualify |
+| Hood | 0 | current curve 0 | 1 | none; no samples |
+
+Every clean6 readiness row remains `paper_evidence_ready: false`,
+`authorizes_canary: false`, and `execution_eligible: false`. Clean6 is not
+combined blindly with older live or replay cohorts whose completion and binary
+provenance do not satisfy the current manifest-trust boundary.
+
 ## Historical replay aggregate readiness decision
 
 The conservative evaluator accepts the four non-overlapping anchored windows
@@ -417,6 +502,14 @@ The key local files are bound by these SHA-256 digests:
 | clean4 live finalized output | `b39447733c727fc8255d59a5ed98a8755d74d272e159a6a7f27b4cc40ee77c97` |
 | clean4 corrected-generation reconciliation | `314d7bc6f80f56b0f133ed9eef846fba87c3423c46bb731f85ae88cd63c58946` |
 | clean4 corrected-generation finalized output | `a01cad25800d648aba56e8bc5e525ed21831686c205dcd4528b2a2a050389546` |
+| clean6 39-pin startup snapshot | `0cb94e5fe0e8191efe72bf45941ef81f59b7b92ac913a8eeeecb27778b14fc50` |
+| clean6 raw feed | `8e5746208e0acc12c9feae3f317869afac04880729032115466bee31ccff2ec9` |
+| clean6 live observer output | `a5db86fd1270bd7fa273455c1926953b5925a684ef6b1199b01f45c28a8fb915` |
+| clean6 probe metrics | `6b59401fb0fb009327e170456b976a34c5dd65966afa55e7ef023bd1067c1e21` |
+| clean6 live reconciliation | `2206306943e15f17db55543e7437953641a63d14f61da21cd2ffff99c4accfac` |
+| clean6 live finalized output | `d49ff708445a6095b1fafc7f9e55ea364f5cb0d5d71cb5c8aab3e0357750e8f4` |
+| clean6 completion manifest | `19cc64b36e7166a4b1f0365606675792e9851e1d270de34d26ca3fd8d0eb30fb` |
+| clean6 readiness decision | `8da7d5c09205acfeca47914d0d9eb82870350aa52189ab1a0eb5faf3127790f6` |
 
 ## Remaining evidence gaps
 
@@ -426,17 +519,20 @@ complete non-overlapping windows, with zero false positives, detector misses,
 identity failures, direction failures, prediction failures, or quote failures.
 Current gaps include:
 
-1. Clean4 is the first clean, build-idle current-code warm-state window.
-   Accumulate two more complete non-overlapping current-code live windows, not
-   replay-only scores, while retaining the clean4 Pons hard miss.
+1. Clean6 is the first live window accepted by the current completion-manifest
+   trust boundary. Accumulate two more complete, non-overlapping,
+   provenance-compatible live windows, not replay-only scores. Retain both the
+   historical clean4 Pons miss and the clean6 Bankr miss as hard errors in
+   their respective evidence cohorts.
 2. Observe both Clanker
    `extensionless_single_position` and `pinned_extension_five_position` at
    least ten times each. The pinned-extension profile has 15 observations, but
    extensionless remains at one. Keep the payable Tator-extension/two-position
    envelope quote-blocked pending separate pin and semantic review.
-3. Expand Bankr beyond the observed V3/ERC-7579 confirmations. V1, V2, direct
-   Airlock, and the remaining per-stratum thresholds are still sparse or
-   absent.
+3. Keep the clean6 Bankr beneficiary-order fix unpromoted until its exact real
+   proof and strict negative tests pass and the bounded change is integrated.
+   Expand Bankr beyond V3/ERC-7579: V1, V2, direct Airlock, and the remaining
+   per-stratum thresholds are still sparse or absent.
 4. Keep the 37 fresh1 legacy Pons confirmations discovery-only; they are not a
    promotion profile. Collect current-generation observations with strict
    token/pool identity and quote validation instead.

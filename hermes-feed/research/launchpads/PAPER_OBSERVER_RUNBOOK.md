@@ -8,14 +8,15 @@ recorded in [PAPER_OBSERVER_SAMPLE_2026-07-16.md](PAPER_OBSERVER_SAMPLE_2026-07-
 
 ## Build and startup inputs
 
-Build the four runtime binaries:
+Build the runtime binaries:
 
 ```sh
 cargo build --release \
   --bin hermes-feed \
   --bin hermes-launchpad-chain-head \
   --bin hermes-launchpad-paper \
-  --bin hermes-launchpad-reconcile
+  --bin hermes-launchpad-reconcile \
+  --bin hermes-launchpad-readiness
 ```
 
 The expected-pin document and fresh observed snapshot must be different files.
@@ -125,3 +126,78 @@ A typed quote can become a finalized paper plan only when all of these agree:
 Blocked, unsupported, migration-only, out-of-range, or missed transactions
 produce evidence and metrics but never a finalized plan. Final plans remain
 `execution_eligible: false` and `broadcast: false`.
+
+## Meaningful-sample readiness gate
+
+Readiness is a separate evidence aggregation step. It does not enable a wallet,
+signer, broadcast path, deployment, or canary. The evaluator always emits
+`authorizes_canary: false` and `execution_eligible: false`, even when
+`paper_evidence_ready` is true. Promotion remains a separate, explicitly
+authorized review after production-pin validation and paper evidence.
+
+Feed one `launchpad_paper_readiness_window` JSON object per line to:
+
+```sh
+cargo run --release --bin hermes-launchpad-readiness -- \
+  --input .runtime/readiness-windows.jsonl \
+  > .runtime/launchpad-readiness.jsonl
+```
+
+Each input row binds one reconciled measurement window with these fields:
+
+```json
+{
+  "record_type": "launchpad_paper_readiness_window",
+  "launchpad": "bankr_doppler",
+  "coverage_from_l2_block": 1000,
+  "coverage_to_l2_block": 1099,
+  "start_head_hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+  "cutoff_head_hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+  "complete": true,
+  "quote_eligible_confirmed_observations": 34,
+  "profile_envelope_observations": {
+    "curve_ticks_v1": 3,
+    "curve_ticks_v2": 3,
+    "direct_airlock": 3,
+    "erc7579": 4
+  },
+  "false_positives": 0,
+  "detector_misses": 0,
+  "identity_mismatches": 0,
+  "direction_mismatches": 0,
+  "prediction_mismatches": 0,
+  "quote_mismatches": 0
+}
+```
+
+The row must be derived from the anchored paper-observer and reconciliation
+artifacts. `complete` means receipt/event reconciliation finished and both
+nonzero boundary hashes were confirmed canonical. Independent windows are
+complete, non-overlapping L2 ranges. Duplicate or overlapping ranges and
+incomplete windows cannot increase the sample or per-profile totals. Error
+counters are conservatively accumulated over every submitted row, so discarded
+or overlapping evidence cannot hide an error.
+
+The fixed readiness policy is evaluated independently for every launchpad:
+
+- at least 100 quote-eligible confirmed observations;
+- at least 10 observations for every supported profile or envelope;
+- at least three independent complete windows; and
+- zero false positives, detector misses, identity mismatches, direction
+  mismatches, prediction mismatches, and quote mismatches.
+
+Supported strata are fixed in code so an input cannot omit a difficult stratum:
+
+- Bow: `zero_initial_buy`, `payable_initial_buy`;
+- LaunchHood V3: `embedded_initial_buy`;
+- Clanker: `extensionless_single_position`,
+  `pinned_extension_five_position`;
+- Bankr/Doppler: `curve_ticks_v1`, `curve_ticks_v2`, `direct_airlock`,
+  `erc7579`;
+- Pons: `current_generation`; and
+- Hood: `current_curve`.
+
+Unknown strata are rejected. Missing strata count as zero. The output always
+contains one machine-readable `launchpad_paper_readiness` row for each of the
+six launchpads. Missing, sparse, or no-activity launchpads therefore remain
+explicitly not ready rather than disappearing from the report.

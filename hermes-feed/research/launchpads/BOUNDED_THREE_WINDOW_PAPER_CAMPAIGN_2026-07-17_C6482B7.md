@@ -19,7 +19,8 @@ The companion machine record is
 
 - Each probe duration was 300 seconds total, including about ten seconds of
   warmup. Ground-truth coverage begins at the start anchor after `connected`;
-  the first non-warm/scored frame arrived about ten seconds later.
+  the first frame no longer marked warmup in probe metrics arrived about ten
+  seconds later.
 - The expected-pin file stayed fixed at SHA-256
   `f1fa4f3080fc3d3c193a5de4424410bc747da784d465f118b6a67d2e74a93095`
   and Keccak-256

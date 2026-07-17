@@ -833,17 +833,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn production_clanker_snapshot_requests_the_pinned_deployer_library() {
+    fn production_snapshot_requests_all_independently_pinned_runtime_dependencies() {
         let expected: PaperExpectedPins = serde_json::from_str(include_str!(
             "../../config/launchpad-expected-pins.production.json"
         ))
         .unwrap();
         let requests = pin_requests(Some(&expected)).unwrap();
-        assert_eq!(requests.len(), 37);
+        assert_eq!(requests.len(), 39);
         assert_eq!(
             requests
                 .iter()
                 .filter(|request| request.address == CLANKER_DEPLOYER)
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.address == LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION)
+                .count(),
+            1
+        );
+        let bankr = BankrDopplerExpectedProfile::production();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.address == bankr.token_implementation.address)
                 .count(),
             1
         );

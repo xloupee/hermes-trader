@@ -1173,7 +1173,7 @@ fn validate_create_calldata(
         || create.numTokensToSell != expected_tokens_to_sell
         || create.numeraire != profile.weth.address
         || create.tokenFactory != profile.token_factory.address
-        || create.tokenFactoryData.len() != 928
+        || !matches!(create.tokenFactoryData.len(), 928 | 960)
         || create.governanceFactory != profile.governance_factory.address
         || create.governanceFactoryData.as_ref() != [0_u8; 32]
         || create.poolInitializer != profile.initializer.address
@@ -1254,7 +1254,7 @@ fn validate_create_calldata(
         .ok_or(BankrQuoteError::ArithmeticOverflow)?;
     if token.abi_encode().get(4..) != Some(create.tokenFactoryData.as_ref())
         || token.name.is_empty()
-        || token.name.len() > 32
+        || token.name.len() > 64
         || token.symbol.is_empty()
         || token.symbol.len() > 32
         || token.schedules.len() != 1
@@ -1880,9 +1880,49 @@ mod tests {
         data: Bytes,
     }
 
+    #[derive(Debug, Deserialize)]
+    struct LongNameLiveProof {
+        tx_hash: B256,
+        chain_id: u64,
+        block_number: String,
+        block_hash: B256,
+        transaction_index: String,
+        transaction_type: String,
+        receipt_status: String,
+        outer_bundler: Address,
+        entry_point: Address,
+        handle_ops_selector: String,
+        outer_input: Bytes,
+        user_operation_sender: Address,
+        account_call_selector: String,
+        mode: B256,
+        target: Address,
+        value: String,
+        create_calldata: Bytes,
+        account_designator: Bytes,
+        account_designator_hash: B256,
+        delegation_implementation: Address,
+        delegation_runtime_hash: B256,
+        token: Address,
+        pool_id: B256,
+        airlock_create_emitter: Address,
+        airlock_create_topic: B256,
+        token_name: String,
+        token_name_bytes: usize,
+        token_factory_data_bytes: usize,
+        create_profile_version: String,
+    }
+
     fn curve_ticks_v3_proofs() -> Vec<CurveTicksV3Proof> {
         serde_json::from_str(include_str!(
             "../tests/fixtures/bankr-doppler-v3-quiet1-proof.json"
+        ))
+        .unwrap()
+    }
+
+    fn long_name_live_proof() -> LongNameLiveProof {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/bankr-doppler-v3-long-name-live-proof.json"
         ))
         .unwrap()
     }
@@ -2493,6 +2533,138 @@ mod tests {
     }
 
     #[test]
+    fn live_curve_ticks_v3_long_name_is_an_exact_bounded_proof() {
+        let proof = long_name_live_proof();
+        let profile = BankrDopplerExpectedProfile::production();
+        assert_eq!(
+            proof.tx_hash,
+            alloy_primitives::b256!(
+                "c38dc6277d87370878d2479bc7f0267879f08460b00e219d3782145d707289c6"
+            )
+        );
+        assert_eq!(proof.chain_id, CHAIN_ID);
+        assert_eq!(proof.block_number, "0xb31ce8");
+        assert_eq!(
+            proof.block_hash,
+            alloy_primitives::b256!(
+                "bd14972ff5c4d65b51b90059db89471e047e103e800355a4287454f51bd5324e"
+            )
+        );
+        assert_eq!(proof.transaction_index, "0xa");
+        assert_eq!(proof.transaction_type, "0x2");
+        assert_eq!(proof.receipt_status, "0x1");
+        assert_eq!(proof.entry_point, profile.entry_point.address);
+        assert_eq!(proof.handle_ops_selector, "0x765e827f");
+        assert_eq!(proof.account_call_selector, "0xe9ae5c53");
+        assert_eq!(proof.mode, B256::ZERO);
+        assert_eq!(proof.target, profile.airlock.address);
+        assert_eq!(proof.value, "0x0");
+        assert_eq!(proof.airlock_create_emitter, profile.airlock.address);
+        assert_eq!(
+            proof.airlock_create_topic,
+            airlock_events::Create::SIGNATURE_HASH
+        );
+        assert_eq!(
+            keccak256(&proof.account_designator),
+            proof.account_designator_hash
+        );
+        assert_eq!(
+            proof.account_designator_hash,
+            profile.smart_account.account.runtime_code_hash
+        );
+        assert_eq!(proof.delegation_implementation, BANKR_KERNEL_IMPLEMENTATION);
+        assert_eq!(proof.delegation_runtime_hash, BANKR_KERNEL_RUNTIME_HASH);
+        let mut expected_designator = vec![0xef, 0x01, 0x00];
+        expected_designator.extend_from_slice(proof.delegation_implementation.as_slice());
+        assert_eq!(proof.account_designator.as_ref(), expected_designator);
+
+        let discovered = discover_entry_point_v07_erc7579(
+            EntryPointCall {
+                chain_id: CHAIN_ID,
+                destination: profile.entry_point,
+                outer_bundler: proof.outer_bundler,
+                calldata: &proof.outer_input,
+            },
+            profile.entry_point,
+            ContractPin {
+                address: profile.airlock.address,
+                runtime_code_hash: profile.airlock.runtime_code_hash,
+            },
+        )
+        .unwrap();
+        assert_eq!(discovered.leader, proof.user_operation_sender);
+        assert_eq!(discovered.target, proof.target);
+        assert_eq!(discovered.value, U256::ZERO);
+        assert_eq!(discovered.calldata, proof.create_calldata);
+
+        let call = abi::createCall::abi_decode(&proof.create_calldata).unwrap();
+        assert_eq!(call.abi_encode().as_slice(), proof.create_calldata.as_ref());
+        assert_eq!(
+            call.createData.tokenFactoryData.len(),
+            proof.token_factory_data_bytes
+        );
+        let token = decode_token_factory_data(&call);
+        assert_eq!(token.name, proof.token_name);
+        assert_eq!(token.name.len(), proof.token_name_bytes);
+        let decoded = validate_create_calldata(&call, profile).unwrap();
+        assert_eq!(
+            decoded.profile_version,
+            BankrCreateProfileVersion::CurveTicksV3
+        );
+        assert_eq!(proof.create_profile_version, "curve_ticks_v3");
+        assert!(validate_bankr_create_calldata_for_observation(
+            &proof.create_calldata
+        ));
+        let prediction = predict_bankr_create_identity(&proof.create_calldata, profile).unwrap();
+        assert_eq!(
+            prediction.create_profile_version,
+            BankrCreateProfileVersion::CurveTicksV3
+        );
+        assert_eq!(prediction.token, proof.token);
+        assert_eq!(prediction.pool_id, proof.pool_id);
+    }
+
+    #[test]
+    fn long_name_profile_rejects_65_bytes_and_noncanonical_inner_padding() {
+        let proof = long_name_live_proof();
+        let call = abi::createCall::abi_decode(&proof.create_calldata).unwrap();
+        let token = decode_token_factory_data(&call);
+
+        let mut maximum_token = token.clone();
+        maximum_token.name = "x".repeat(64);
+        let mut maximum = call.clone();
+        replace_token_factory_data(&mut maximum, &maximum_token);
+        assert_eq!(maximum.createData.tokenFactoryData.len(), 960);
+        assert!(validate_bankr_create_calldata_for_observation(
+            &maximum.abi_encode()
+        ));
+
+        let mut overlong_token = token.clone();
+        overlong_token.name = "x".repeat(65);
+        let mut overlong = call.clone();
+        replace_token_factory_data(&mut overlong, &overlong_token);
+        assert_eq!(overlong.createData.tokenFactoryData.len(), 992);
+        assert!(!validate_bankr_create_calldata_for_observation(
+            &overlong.abi_encode()
+        ));
+
+        let mut malformed = call;
+        let mut token_factory_data = malformed.createData.tokenFactoryData.to_vec();
+        let name = proof.token_name.as_bytes();
+        let name_start = token_factory_data
+            .windows(name.len())
+            .position(|window| window == name)
+            .expect("live name bytes are present once in token factory data");
+        assert_eq!(token_factory_data[name_start + name.len()], 0);
+        token_factory_data[name_start + name.len()] = 1;
+        malformed.createData.tokenFactoryData = token_factory_data.into();
+        assert_eq!(malformed.abi_encode().len(), proof.create_calldata.len());
+        assert!(!validate_bankr_create_calldata_for_observation(
+            &malformed.abi_encode()
+        ));
+    }
+
+    #[test]
     fn prereceipt_prediction_reproduces_v1_v2_and_both_envelopes() {
         let profile = BankrDopplerExpectedProfile::production();
         let v1 = live_fixture();
@@ -2858,7 +3030,7 @@ mod tests {
                 &candidate.abi_encode()
             ));
         };
-        rejects_token(|token| token.name = "x".repeat(33));
+        rejects_token(|token| token.name = "x".repeat(65));
         rejects_token(|token| token.symbol.clear());
         rejects_token(|token| token.schedules.push(token.schedules[0].clone()));
         rejects_token(|token| token.beneficiaries.push(token.beneficiaries[0]));

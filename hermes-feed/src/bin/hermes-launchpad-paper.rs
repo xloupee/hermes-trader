@@ -87,6 +87,8 @@ struct ReconciliationEvidence {
     action: Option<ActionKind>,
     token: Option<alloy_primitives::Address>,
     pool: Option<alloy_primitives::Address>,
+    #[serde(default)]
+    pool_id: Option<B256>,
     quote_status: QuoteStatus,
     l2_block_number: Option<u64>,
     block_hash: Option<B256>,
@@ -148,6 +150,10 @@ struct ReconciliationMetrics {
     pool_prediction_missing: usize,
     pool_prediction_matches: usize,
     pool_prediction_mismatches: usize,
+    pool_id_prediction_eligible: usize,
+    pool_id_prediction_missing: usize,
+    pool_id_prediction_matches: usize,
+    pool_id_prediction_mismatches: usize,
     independent_quote_validation_eligible: usize,
     independent_quote_validation_missing: usize,
     independent_quote_validation_matches: usize,
@@ -326,6 +332,8 @@ fn readiness_windows(
                         row.token_prediction_mismatches,
                         row.pool_prediction_missing,
                         row.pool_prediction_mismatches,
+                        row.pool_id_prediction_missing,
+                        row.pool_id_prediction_mismatches,
                     ],
                     "identity mismatches",
                 )?,
@@ -392,6 +400,7 @@ struct ObserverClaim {
     action: Option<ActionKind>,
     predicted_token: Option<alloy_primitives::Address>,
     predicted_pool: Option<alloy_primitives::Address>,
+    predicted_pool_id: Option<B256>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -886,6 +895,7 @@ fn main() -> Result<()> {
                     action: observation.action,
                     predicted_token: observation.predicted_token,
                     predicted_pool: observation.predicted_pool,
+                    predicted_pool_id: observation.predicted_pool_id,
                 },
             );
         }
@@ -1053,6 +1063,12 @@ fn read_observed_output_candidates(path: &Path) -> Result<ObservedOutputCandidat
                     .transpose()?,
                 predicted_pool: observation
                     .get("predicted_pool")
+                    .filter(|value| !value.is_null())
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()?,
+                predicted_pool_id: observation
+                    .get("predicted_pool_id")
                     .filter(|value| !value.is_null())
                     .cloned()
                     .map(serde_json::from_value)
@@ -2588,6 +2604,10 @@ fn reconciliation_metrics(
         let mut pool_missing = 0_usize;
         let mut pool_matches = 0_usize;
         let mut pool_mismatches = 0_usize;
+        let mut pool_id_eligible = 0_usize;
+        let mut pool_id_missing = 0_usize;
+        let mut pool_id_matches = 0_usize;
+        let mut pool_id_mismatches = 0_usize;
         for key in &confirmed_keys {
             let claim = claims[key];
             let record = truth[key];
@@ -2614,6 +2634,14 @@ fn reconciliation_metrics(
                 &mut pool_missing,
                 &mut pool_matches,
                 &mut pool_mismatches,
+            );
+            compare_prediction(
+                claim.predicted_pool_id,
+                record.pool_id,
+                &mut pool_id_eligible,
+                &mut pool_id_missing,
+                &mut pool_id_matches,
+                &mut pool_id_mismatches,
             );
         }
 
@@ -2723,6 +2751,10 @@ fn reconciliation_metrics(
             pool_prediction_missing: pool_missing,
             pool_prediction_matches: pool_matches,
             pool_prediction_mismatches: pool_mismatches,
+            pool_id_prediction_eligible: pool_id_eligible,
+            pool_id_prediction_missing: pool_id_missing,
+            pool_id_prediction_matches: pool_id_matches,
+            pool_id_prediction_mismatches: pool_id_mismatches,
             independent_quote_validation_eligible: quote_eligible_keys.len(),
             independent_quote_validation_missing: quote_missing,
             independent_quote_validation_matches: quote_matches,
@@ -2888,6 +2920,7 @@ mod tests {
             action: Some(ActionKind::Launch),
             token: Some(Address::with_last_byte(1)),
             pool: Some(Address::with_last_byte(2)),
+            pool_id: None,
             quote_status,
             l2_block_number: Some(10),
             block_hash: Some(B256::with_last_byte(10)),
@@ -2929,6 +2962,7 @@ mod tests {
                         action: Some(ActionKind::Launch),
                         predicted_token: Some(Address::with_last_byte(1)),
                         predicted_pool: Some(Address::with_last_byte(2)),
+                        predicted_pool_id: None,
                     },
                 ),
                 (
@@ -2937,6 +2971,7 @@ mod tests {
                         action: Some(ActionKind::Launch),
                         predicted_token: None,
                         predicted_pool: None,
+                        predicted_pool_id: None,
                     },
                 ),
                 (
@@ -2945,6 +2980,7 @@ mod tests {
                         action: Some(ActionKind::Launch),
                         predicted_token: None,
                         predicted_pool: None,
+                        predicted_pool_id: None,
                     },
                 ),
                 (
@@ -2953,6 +2989,7 @@ mod tests {
                         action: Some(ActionKind::Launch),
                         predicted_token: None,
                         predicted_pool: None,
+                        predicted_pool_id: None,
                     },
                 ),
             ]),
@@ -3069,6 +3106,7 @@ mod tests {
                     action: Some(ActionKind::Launch),
                     predicted_token: Some(quote.market.token),
                     predicted_pool: Some(quote.market.pool),
+                    predicted_pool_id: None,
                 },
             )]),
             ..ObservedOutputCandidates::default()
@@ -3135,6 +3173,7 @@ mod tests {
         let mut evidence = evidence_row(key, true, true, true, QuoteStatus::Available);
         evidence.token = Some(quote.market.token);
         evidence.pool = None;
+        evidence.pool_id = Some(quote.market.pool_id);
         evidence.l2_block_number = Some(quote.state_version.l2_block_number);
         evidence.block_hash = Some(quote.state_version.block_hash);
         evidence.transaction_index = Some(quote.state_version.transaction_index);
@@ -3161,7 +3200,7 @@ mod tests {
             ground_truth_window: Some(window),
             ..ReconciliationRecords::default()
         };
-        let observed = ObservedOutputCandidates {
+        let mut observed = ObservedOutputCandidates {
             feed_transactions: HashMap::from([(key.0, 7)]),
             claims: HashMap::from([(
                 key,
@@ -3169,6 +3208,7 @@ mod tests {
                     action: Some(ActionKind::Launch),
                     predicted_token: Some(quote.market.token),
                     predicted_pool: None,
+                    predicted_pool_id: Some(quote.market.pool_id),
                 },
             )]),
             ..ObservedOutputCandidates::default()
@@ -3192,6 +3232,14 @@ mod tests {
             &promotion,
         )
         .unwrap();
+        let bankr_metrics = metrics
+            .iter()
+            .find(|row| row.launchpad == LaunchpadId::BankrDoppler)
+            .unwrap();
+        assert_eq!(bankr_metrics.token_prediction_matches, 1);
+        assert_eq!(bankr_metrics.pool_prediction_eligible, 0);
+        assert_eq!(bankr_metrics.pool_id_prediction_eligible, 1);
+        assert_eq!(bankr_metrics.pool_id_prediction_matches, 1);
         let windows = readiness_windows(&records, &metrics, &promotion).unwrap();
         let bankr = windows
             .iter()
@@ -3211,6 +3259,30 @@ mod tests {
         assert_eq!(bankr.profile_envelope_observations[curve], 1);
         assert_eq!(bankr.profile_envelope_observations[envelope], 1);
         assert_eq!(bankr.profile_envelope_observations.values().sum::<u64>(), 2);
+
+        observed.claims.get_mut(&key).unwrap().predicted_pool_id = Some(B256::with_last_byte(0xff));
+        let forged_metrics = reconciliation_metrics(
+            &observed,
+            &records.evidence,
+            records.ground_truth_window.as_ref(),
+            &promotion,
+        )
+        .unwrap();
+        let forged_bankr_metrics = forged_metrics
+            .iter()
+            .find(|row| row.launchpad == LaunchpadId::BankrDoppler)
+            .unwrap();
+        assert_eq!(forged_bankr_metrics.pool_id_prediction_matches, 0);
+        assert_eq!(forged_bankr_metrics.pool_id_prediction_mismatches, 1);
+        let forged_windows = readiness_windows(&records, &forged_metrics, &promotion).unwrap();
+        assert_eq!(
+            forged_windows
+                .iter()
+                .find(|row| row.launchpad == LaunchpadId::BankrDoppler)
+                .unwrap()
+                .identity_mismatches,
+            1
+        );
     }
 
     #[test]

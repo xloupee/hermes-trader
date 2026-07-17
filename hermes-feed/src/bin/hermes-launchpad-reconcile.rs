@@ -164,6 +164,7 @@ struct ReconciliationEvidence {
     action: Option<ActionKind>,
     token: Option<alloy_primitives::Address>,
     pool: Option<alloy_primitives::Address>,
+    pool_id: Option<B256>,
     quote_status: QuoteStatus,
     l2_block_number: Option<u64>,
     block_hash: Option<B256>,
@@ -564,6 +565,7 @@ async fn reconcile_candidate(
             let mut truth_action = None;
             let mut truth_token = None;
             let mut truth_pool = None;
+            let mut truth_pool_id = None;
             let mut quote_status = QuoteStatus::NotApplicable;
             if receipt.status
                 && matches!(
@@ -655,6 +657,7 @@ async fn reconcile_candidate(
                             protocol_match = true;
                             truth_action = Some(ActionKind::Launch);
                             truth_token = Some(quote.market.token);
+                            truth_pool_id = Some(quote.market.pool_id);
                             quote_status = QuoteStatus::Available;
                             bankr_quote = Some(quote);
                         }
@@ -800,6 +803,7 @@ async fn reconcile_candidate(
                     action: truth_action,
                     token: truth_token,
                     pool: truth_pool,
+                    pool_id: truth_pool_id,
                     quote_status,
                     l2_block_number: Some(receipt.l2_block_number),
                     block_hash: Some(receipt.block_hash),
@@ -831,6 +835,7 @@ async fn reconcile_candidate(
                     action: None,
                     token: None,
                     pool: None,
+                    pool_id: None,
                     quote_status: QuoteStatus::Blocked,
                     l2_block_number: None,
                     block_hash: None,

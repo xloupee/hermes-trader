@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::PonsAdapter;
 use crate::bankr_receipt_quote::{
-    BANKR_CREATE_SELECTOR, BankrDopplerExpectedProfile,
+    BANKR_CREATE_SELECTOR, BankrDopplerExpectedProfile, predict_bankr_create_identity,
     validate_bankr_create_calldata_for_observation,
 };
 use crate::clanker_receipt_quote::{
@@ -115,6 +115,7 @@ pub struct PaperLaunchpadObservation {
     pub action: Option<ActionKind>,
     pub predicted_token: Option<Address>,
     pub predicted_pool: Option<Address>,
+    /// Canonical Uniswap V4 PoolKey hash when the protocol has no pool address.
     pub predicted_pool_id: Option<B256>,
     pub planning_mode: ExecutionMode,
     pub live_execution_enabled: bool,
@@ -399,6 +400,7 @@ pub struct ConfiguredBankrDopplerV4 {
     pub initializer_runtime_hash: B256,
     pub rehype_hook_runtime_hash: B256,
     pub token_factory_runtime_hash: B256,
+    pub token_implementation_runtime_hash: B256,
     pub governance_factory_runtime_hash: B256,
     pub liquidity_migrator_runtime_hash: B256,
     pub standard_lp_fee_ppm: u32,
@@ -424,6 +426,7 @@ impl ConfiguredBankrDopplerV4 {
         profile.initializer.runtime_code_hash = self.initializer_runtime_hash;
         profile.rehype_hook.runtime_code_hash = self.rehype_hook_runtime_hash;
         profile.token_factory.runtime_code_hash = self.token_factory_runtime_hash;
+        profile.token_implementation.runtime_code_hash = self.token_implementation_runtime_hash;
         profile.governance_factory.runtime_code_hash = self.governance_factory_runtime_hash;
         profile.liquidity_migrator.runtime_code_hash = self.liquidity_migrator_runtime_hash;
         profile.standard_lp_fee_ppm = self.standard_lp_fee_ppm;
@@ -1116,214 +1119,233 @@ impl PaperLaunchpadObserver {
                 },
             )
             .map_err(|_| PaperObserverError::UnknownDispatch)?;
-        let (launchpad, kind, planning_mode, action, predicted_token, predicted_pool, detail) =
-            match (spec.id, spec.family) {
-                (LaunchpadId::Noxa, AdapterKind::V3LaunchAtBirth) => {
-                    let intent = decode_launch_call(input, value).ok_or_else(|| {
-                        PaperObserverError::Adapter("malformed Noxa launch".into())
-                    })?;
-                    (
-                        LaunchpadId::Noxa,
-                        "launch",
-                        ExecutionMode::PaperOnly,
-                        Some(ActionKind::Launch),
-                        None,
-                        None,
-                        serde_json::json!({
-                            "launch_config_id": intent.launch_config_id,
-                            "dex_id": intent.dex_id,
-                            "salt": intent.salt,
-                            "observed_value": value,
-                        }),
-                    )
-                }
-                (LaunchpadId::Bow | LaunchpadId::LaunchHoodV3, AdapterKind::V3LaunchAtBirth) => {
-                    let observed = self
-                        .v3
-                        .observe_launch_call(CHAIN_ID, destination, leader, value, input)
-                        .map_err(|error| PaperObserverError::Adapter(error.to_string()))?;
-                    let predicted_token = observed
-                        .predicted_market
-                        .as_ref()
-                        .map(|market| market.token);
-                    let predicted_pool =
-                        observed.predicted_market.as_ref().map(|market| market.pool);
-                    (
-                        observed.launchpad,
-                        "launch",
-                        ExecutionMode::ExecutionGated,
-                        Some(ActionKind::Launch),
-                        predicted_token,
-                        predicted_pool,
-                        serde_json::to_value(observed).expect("serializable V3 observation"),
-                    )
-                }
+        let (
+            launchpad,
+            kind,
+            planning_mode,
+            action,
+            predicted_token,
+            predicted_pool,
+            predicted_pool_id,
+            detail,
+        ) = match (spec.id, spec.family) {
+            (LaunchpadId::Noxa, AdapterKind::V3LaunchAtBirth) => {
+                let intent = decode_launch_call(input, value)
+                    .ok_or_else(|| PaperObserverError::Adapter("malformed Noxa launch".into()))?;
                 (
-                    LaunchpadId::Clanker
-                    | LaunchpadId::BankrDoppler
-                    | LaunchpadId::KlikFinance
-                    | LaunchpadId::TrenchToday,
-                    AdapterKind::UniswapV4 | AdapterKind::DopplerV4 | AdapterKind::NativeCurve,
-                ) => {
-                    let selector = selector(input).ok_or(PaperObserverError::UnknownDispatch)?;
-                    let destination_pin = spec
-                        .contract_pins
-                        .iter()
-                        .find(|pin| pin.address == destination)
-                        .ok_or(PaperObserverError::UnknownDispatch)?;
-                    let implementation = destination_pin
-                        .implementation
-                        .map(|address| {
-                            spec.contract_pins
-                                .iter()
-                                .find(|pin| pin.address == address)
-                                .map(|pin| RuntimeCodePin {
-                                    address,
-                                    runtime_code_hash: pin.runtime_code_hash,
-                                })
-                                .ok_or(PaperObserverError::UnknownDispatch)
-                        })
-                        .transpose()?;
-                    let entry = DispatchEntry {
-                        launchpad: spec.id,
-                        destination: RuntimeCodePin {
-                            address: destination,
-                            runtime_code_hash: destination_pin.runtime_code_hash,
-                        },
-                        selector,
+                    LaunchpadId::Noxa,
+                    "launch",
+                    ExecutionMode::PaperOnly,
+                    Some(ActionKind::Launch),
+                    None,
+                    None,
+                    None,
+                    serde_json::json!({
+                        "launch_config_id": intent.launch_config_id,
+                        "dex_id": intent.dex_id,
+                        "salt": intent.salt,
+                        "observed_value": value,
+                    }),
+                )
+            }
+            (LaunchpadId::Bow | LaunchpadId::LaunchHoodV3, AdapterKind::V3LaunchAtBirth) => {
+                let observed = self
+                    .v3
+                    .observe_launch_call(CHAIN_ID, destination, leader, value, input)
+                    .map_err(|error| PaperObserverError::Adapter(error.to_string()))?;
+                let predicted_token = observed
+                    .predicted_market
+                    .as_ref()
+                    .map(|market| market.token);
+                let predicted_pool = observed.predicted_market.as_ref().map(|market| market.pool);
+                (
+                    observed.launchpad,
+                    "launch",
+                    ExecutionMode::ExecutionGated,
+                    Some(ActionKind::Launch),
+                    predicted_token,
+                    predicted_pool,
+                    None,
+                    serde_json::to_value(observed).expect("serializable V3 observation"),
+                )
+            }
+            (
+                LaunchpadId::Clanker
+                | LaunchpadId::BankrDoppler
+                | LaunchpadId::KlikFinance
+                | LaunchpadId::TrenchToday,
+                AdapterKind::UniswapV4 | AdapterKind::DopplerV4 | AdapterKind::NativeCurve,
+            ) => {
+                let selector = selector(input).ok_or(PaperObserverError::UnknownDispatch)?;
+                let destination_pin = spec
+                    .contract_pins
+                    .iter()
+                    .find(|pin| pin.address == destination)
+                    .ok_or(PaperObserverError::UnknownDispatch)?;
+                let implementation = destination_pin
+                    .implementation
+                    .map(|address| {
+                        spec.contract_pins
+                            .iter()
+                            .find(|pin| pin.address == address)
+                            .map(|pin| RuntimeCodePin {
+                                address,
+                                runtime_code_hash: pin.runtime_code_hash,
+                            })
+                            .ok_or(PaperObserverError::UnknownDispatch)
+                    })
+                    .transpose()?;
+                let entry = DispatchEntry {
+                    launchpad: spec.id,
+                    destination: RuntimeCodePin {
+                        address: destination,
+                        runtime_code_hash: destination_pin.runtime_code_hash,
+                    },
+                    selector,
+                    implementation,
+                    mode: match spec.id {
+                        LaunchpadId::KlikFinance | LaunchpadId::TrenchToday => {
+                            ExecutionMode::DiscoveryOnly
+                        }
+                        _ => ExecutionMode::ExecutionGated,
+                    },
+                };
+                let observed = V4AdapterSet::observe_resolved(
+                    entry,
+                    &V4CandidateCall {
+                        chain_id: CHAIN_ID,
+                        leader,
+                        destination,
+                        destination_runtime_hash: destination_pin.runtime_code_hash,
                         implementation,
-                        mode: match spec.id {
-                            LaunchpadId::KlikFinance | LaunchpadId::TrenchToday => {
-                                ExecutionMode::DiscoveryOnly
-                            }
-                            _ => ExecutionMode::ExecutionGated,
-                        },
-                    };
-                    let observed = V4AdapterSet::observe_resolved(
-                        entry,
-                        &V4CandidateCall {
-                            chain_id: CHAIN_ID,
-                            leader,
-                            destination,
-                            destination_runtime_hash: destination_pin.runtime_code_hash,
-                            implementation,
-                            value,
-                            input,
-                        },
+                        value,
+                        input,
+                    },
+                )
+                .map_err(|error| PaperObserverError::Adapter(error.to_string()))?;
+                let launchpad = match &observed {
+                    crate::launchpad_adapters::LaunchObservation::OpaqueLaunch {
+                        launchpad,
+                        ..
+                    } => *launchpad,
+                    crate::launchpad_adapters::LaunchObservation::KlikLaunch { .. } => {
+                        LaunchpadId::KlikFinance
+                    }
+                };
+                let mode = observed.planning_mode();
+                let (predicted_token, predicted_pool_id) = if launchpad == LaunchpadId::BankrDoppler
+                {
+                    let prediction = predict_bankr_create_identity(
+                        input,
+                        self.bankr_profile.ok_or_else(|| {
+                            PaperObserverError::Adapter(
+                                "Bankr prediction profile is unavailable".into(),
+                            )
+                        })?,
                     )
                     .map_err(|error| PaperObserverError::Adapter(error.to_string()))?;
-                    let launchpad = match &observed {
-                        crate::launchpad_adapters::LaunchObservation::OpaqueLaunch {
-                            launchpad,
-                            ..
-                        } => *launchpad,
-                        crate::launchpad_adapters::LaunchObservation::KlikLaunch { .. } => {
-                            LaunchpadId::KlikFinance
-                        }
-                    };
-                    let mode = observed.planning_mode();
-                    let predicted_token = match &observed {
+                    (Some(prediction.token), Some(prediction.pool_id))
+                } else {
+                    match &observed {
                         crate::launchpad_adapters::LaunchObservation::OpaqueLaunch {
                             predicted_market: Some(market),
                             ..
-                        } => Some(market.token),
-                        _ => None,
-                    };
-                    (
-                        launchpad,
-                        "discovery",
-                        mode,
-                        Some(ActionKind::Launch),
-                        predicted_token,
-                        None,
-                        serde_json::to_value(observed).expect("serializable V4 observation"),
-                    )
-                }
-                (LaunchpadId::Pons, AdapterKind::V3LaunchAtBirth) => {
-                    let runtime_hash = self
-                        .pons_profile
-                        .identity(destination)
-                        .ok_or(PaperObserverError::UnknownDispatch)?
-                        .runtime_hash;
-                    let observed = self
-                        .pons
-                        .observe_launch(crate::pons::PonsObservationInput {
-                            tx_hash,
+                        } => (Some(market.token), Some(market.pool_id)),
+                        _ => (None, None),
+                    }
+                };
+                (
+                    launchpad,
+                    "discovery",
+                    mode,
+                    Some(ActionKind::Launch),
+                    predicted_token,
+                    None,
+                    predicted_pool_id,
+                    serde_json::to_value(observed).expect("serializable V4 observation"),
+                )
+            }
+            (LaunchpadId::Pons, AdapterKind::V3LaunchAtBirth) => {
+                let runtime_hash = self
+                    .pons_profile
+                    .identity(destination)
+                    .ok_or(PaperObserverError::UnknownDispatch)?
+                    .runtime_hash;
+                let observed = self
+                    .pons
+                    .observe_launch(crate::pons::PonsObservationInput {
+                        tx_hash,
+                        chain_id: CHAIN_ID,
+                        destination,
+                        destination_runtime_hash: runtime_hash,
+                        calldata: input,
+                        value,
+                        sender: leader,
+                        provenance: crate::pons::PonsAttributionProvenance::ExactFactoryTransaction,
+                    })
+                    .map_err(|error| PaperObserverError::Adapter(error.to_string()))?;
+                (
+                    LaunchpadId::Pons,
+                    "launch",
+                    if observed.generation == crate::pons::PonsGeneration::Current {
+                        ExecutionMode::ExecutionGated
+                    } else {
+                        ExecutionMode::DiscoveryOnly
+                    },
+                    Some(ActionKind::Launch),
+                    None,
+                    None,
+                    None,
+                    serde_json::to_value(observed).expect("serializable Pons observation"),
+                )
+            }
+            (LaunchpadId::HoodFun | LaunchpadId::LeaveHood, AdapterKind::NativeCurve) => {
+                let observed = self
+                    .curves
+                    .observe(
+                        CurveCandidateCall {
                             chain_id: CHAIN_ID,
                             destination,
-                            destination_runtime_hash: runtime_hash,
-                            calldata: input,
+                            input,
                             value,
-                            sender: leader,
-                            provenance:
-                                crate::pons::PonsAttributionProvenance::ExactFactoryTransaction,
-                        })
-                        .map_err(|error| PaperObserverError::Adapter(error.to_string()))?;
-                    (
-                        LaunchpadId::Pons,
-                        "launch",
-                        if observed.generation == crate::pons::PonsGeneration::Current {
-                            ExecutionMode::ExecutionGated
-                        } else {
-                            ExecutionMode::DiscoveryOnly
                         },
-                        Some(ActionKind::Launch),
-                        None,
-                        None,
-                        serde_json::to_value(observed).expect("serializable Pons observation"),
+                        &[],
                     )
+                    .map_err(|error| PaperObserverError::Adapter(error.to_string()))?;
+                (
+                    observed.protocol,
+                    "observation",
+                    if observed.paper_plan_supported {
+                        ExecutionMode::PaperOnly
+                    } else {
+                        ExecutionMode::DiscoveryOnly
+                    },
+                    Some(observed.action),
+                    observed.token,
+                    None,
+                    None,
+                    serde_json::to_value(observed).expect("serializable curve observation"),
+                )
+            }
+            (LaunchpadId::Flap, AdapterKind::FlapPortal) => {
+                if input.len() > MAX_OPAQUE_CALLDATA || input.len() < 4 + 32 {
+                    return Err(PaperObserverError::Adapter(
+                        "malformed Flap launch envelope".into(),
+                    ));
                 }
-                (LaunchpadId::HoodFun | LaunchpadId::LeaveHood, AdapterKind::NativeCurve) => {
-                    let observed = self
-                        .curves
-                        .observe(
-                            CurveCandidateCall {
-                                chain_id: CHAIN_ID,
-                                destination,
-                                input,
-                                value,
-                            },
-                            &[],
-                        )
-                        .map_err(|error| PaperObserverError::Adapter(error.to_string()))?;
-                    (
-                        observed.protocol,
-                        "observation",
-                        if observed.paper_plan_supported {
-                            ExecutionMode::PaperOnly
-                        } else {
-                            ExecutionMode::DiscoveryOnly
-                        },
-                        Some(observed.action),
-                        observed.token,
-                        None,
-                        serde_json::to_value(observed).expect("serializable curve observation"),
-                    )
-                }
-                (LaunchpadId::Flap, AdapterKind::FlapPortal) => {
-                    if input.len() > MAX_OPAQUE_CALLDATA || input.len() < 4 + 32 {
-                        return Err(PaperObserverError::Adapter(
-                            "malformed Flap launch envelope".into(),
-                        ));
-                    }
-                    (
-                        LaunchpadId::Flap,
-                        "launch_discovery",
-                        ExecutionMode::DiscoveryOnly,
-                        Some(ActionKind::Launch),
-                        None,
-                        None,
-                        serde_json::json!({"destination": destination, "selector": selector(input)}),
-                    )
-                }
-                _ => return Err(PaperObserverError::UnknownDispatch),
-            };
-        let predicted_pool_id = detail
-            .pointer("/predicted_market/pool_id")
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|error| PaperObserverError::Adapter(error.to_string()))?;
+                (
+                    LaunchpadId::Flap,
+                    "launch_discovery",
+                    ExecutionMode::DiscoveryOnly,
+                    Some(ActionKind::Launch),
+                    None,
+                    None,
+                    None,
+                    serde_json::json!({"destination": destination, "selector": selector(input)}),
+                )
+            }
+            _ => return Err(PaperObserverError::UnknownDispatch),
+        };
         Ok(PaperLaunchpadObservation {
             tx_hash,
             launchpad,
@@ -1715,6 +1737,12 @@ fn paper_specs(
                     profile.token_factory.address,
                     None,
                     profile.token_factory.runtime_code_hash,
+                ),
+                contract_pin(
+                    ContractRole::Implementation,
+                    profile.token_implementation.address,
+                    None,
+                    profile.token_implementation.runtime_code_hash,
                 ),
                 contract_pin(
                     ContractRole::ProtocolDependency,
@@ -2819,6 +2847,7 @@ mod tests {
             initializer_runtime_hash: profile.initializer.runtime_code_hash,
             rehype_hook_runtime_hash: profile.rehype_hook.runtime_code_hash,
             token_factory_runtime_hash: profile.token_factory.runtime_code_hash,
+            token_implementation_runtime_hash: profile.token_implementation.runtime_code_hash,
             governance_factory_runtime_hash: profile.governance_factory.runtime_code_hash,
             liquidity_migrator_runtime_hash: profile.liquidity_migrator.runtime_code_hash,
             standard_lp_fee_ppm: profile.standard_lp_fee_ppm,
@@ -2887,6 +2916,11 @@ mod tests {
                 profile.token_factory.runtime_code_hash,
             ),
             observed(
+                profile.token_implementation.address,
+                None,
+                profile.token_implementation.runtime_code_hash,
+            ),
+            observed(
                 profile.governance_factory.address,
                 None,
                 profile.governance_factory.runtime_code_hash,
@@ -2908,8 +2942,42 @@ mod tests {
             ),
             observed(delegation.address, None, delegation.runtime_code_hash),
         ]);
-        PaperLaunchpadObserver::from_startup_snapshots(expected.clone(), observed_snapshot.clone())
+        let observer = PaperLaunchpadObserver::from_startup_snapshots(
+            expected.clone(),
+            observed_snapshot.clone(),
+        )
+        .unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/bankr-doppler-v2-direct-live-proof.json"
+        ))
+        .unwrap();
+        let calldata: Bytes =
+            serde_json::from_value(fixture["transaction"]["input"].clone()).unwrap();
+        let observation = observer
+            .observe_call(
+                B256::with_last_byte(1),
+                Address::with_last_byte(1),
+                Address::with_last_byte(1),
+                LeaderOrigin::DirectSigner,
+                WrapperKind::Direct,
+                profile.airlock.address,
+                U256::ZERO,
+                &calldata,
+            )
             .unwrap();
+        assert_eq!(
+            observation.predicted_token,
+            Some(alloy_primitives::address!(
+                "88368c6d8e52bfd2af862caf33b01acd57c53ba3"
+            ))
+        );
+        assert_eq!(observation.predicted_pool, None);
+        assert_eq!(
+            observation.predicted_pool_id,
+            Some(alloy_primitives::b256!(
+                "3110c3afa7fd12379c53b5a49829e5a78144f2bff0440cd7da6917dda5f88f02"
+            ))
+        );
 
         let mut semantic_drift = expected.clone();
         semantic_drift

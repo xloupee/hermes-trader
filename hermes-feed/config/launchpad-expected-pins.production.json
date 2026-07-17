@@ -95,6 +95,7 @@
     "initializer_runtime_hash": "0xc41a91106002f15bf70ae266824317f3f3ac638ac72ca5253bae395fa47ee631",
     "rehype_hook_runtime_hash": "0x5d33a1d867ba0d17cc7af077786b1356848c72f8e0bf960ef88aa15f7a6962d1",
     "token_factory_runtime_hash": "0x27abd63146eb5743b7871e211da17163afbb495863a626c0d002312af6813459",
+    "token_implementation_runtime_hash": "0x67a382a66d2b14a7032698e11c9ae4432435d2c803429d5c660692289ad10e12",
     "governance_factory_runtime_hash": "0xefce8ac4a6fe83ae3dd1c3cfebc0e370e1595a66608bed5610ffdd1f291b7f63",
     "liquidity_migrator_runtime_hash": "0x7bf5115543e8e0769ceabe4da9b8e23547c9e95c1cce15d24d96f164406129e3",
     "standard_lp_fee_ppm": 7000,

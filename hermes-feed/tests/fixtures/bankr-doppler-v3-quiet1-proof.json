@@ -1,6 +1,8 @@
 [
   {
     "tx_hash": "0xeb5099bdb19890787a6479d63ffe22677c9009a85ee8f56f8a3400cb727964de",
+    "token": "0x047134b3eab4ca7007041325f04c3f8bf17daba3",
+    "pool_id": "0xaf4947c1c3e649b91e6a50b168bc0d51648a7d9c3cfed89ff4289226f6c11514",
     "block_number": "0xb243c8",
     "block_hash": "0x29406dced95a6bf7267ab9f7641c72c07e9ba6cbb9caa783899cd42acdde4972",
     "transaction_index": "0x1",
@@ -36,6 +38,8 @@
   },
   {
     "tx_hash": "0xadc88464c56530e2b1cec5d6467287a407a10184ad782fa03fee6cb3f77217e2",
+    "token": "0x5e322af6540fbbf350ae1b36c2db67c50abb9ba3",
+    "pool_id": "0xd2d580ae78a268275878dd57f29d1f852f0528c192bb56179c6a4a2765f09e68",
     "block_number": "0xb24c57",
     "block_hash": "0x6ecaf95aa19ae40ad44a7503f5ad90a903d83f1f77e079307871db9139b5a5d5",
     "transaction_index": "0xd",
@@ -70,4 +74,3 @@
     ]
   }
 ]
-

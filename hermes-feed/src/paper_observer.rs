@@ -63,11 +63,12 @@ use crate::smart_account::{
     discover_entry_point_v07_erc7579,
 };
 use crate::tier2_curve::{
-    CurveCandidateCall, HOOD_BUY_SELECTOR, HOOD_CREATE_SELECTOR, HOOD_FACTORY, HOOD_SELL_SELECTOR,
-    LEAVEHOOD_BUY_SELECTOR, LEAVEHOOD_CORE_IMPLEMENTATION, LEAVEHOOD_CORE_PROXY,
-    LEAVEHOOD_FACTORY_IMPLEMENTATION, LEAVEHOOD_FACTORY_PROXY, LEAVEHOOD_LAUNCH_SELECTORS,
-    LEAVEHOOD_SELL_SELECTOR, LEAVEHOOD_SELL_WITH_SLIPPAGE_SELECTOR, RuntimePin as CurveRuntimePin,
-    StartupPins as CurveStartupPins, Tier2CurveAdapter,
+    CurveCandidateCall, HOOD_BUY_FOR_SELECTOR, HOOD_BUY_SELECTOR, HOOD_CREATE_SELECTOR,
+    HOOD_FACTORY, HOOD_SELL_SELECTOR, LEAVEHOOD_BUY_SELECTOR, LEAVEHOOD_CORE_IMPLEMENTATION,
+    LEAVEHOOD_CORE_PROXY, LEAVEHOOD_FACTORY_IMPLEMENTATION, LEAVEHOOD_FACTORY_PROXY,
+    LEAVEHOOD_LAUNCH_SELECTORS, LEAVEHOOD_SELL_SELECTOR, LEAVEHOOD_SELL_WITH_SLIPPAGE_SELECTOR,
+    RuntimePin as CurveRuntimePin, StartupPins as CurveStartupPins, Tier2CurveAdapter,
+    predict_hood_token_address,
 };
 use crate::uniswap_v4::CodePin as V4CodePin;
 use crate::v3_launch_at_birth::{
@@ -1327,6 +1328,16 @@ impl PaperLaunchpadObserver {
                         &[],
                     )
                     .map_err(|error| PaperObserverError::Adapter(error.to_string()))?;
+                let predicted_token = if observed.protocol == LaunchpadId::HoodFun
+                    && observed.action == ActionKind::Launch
+                {
+                    Some(
+                        predict_hood_token_address(leader, input)
+                            .map_err(|error| PaperObserverError::Adapter(error.to_string()))?,
+                    )
+                } else {
+                    observed.token
+                };
                 (
                     observed.protocol,
                     "observation",
@@ -1336,7 +1347,7 @@ impl PaperLaunchpadObserver {
                         ExecutionMode::DiscoveryOnly
                     },
                     Some(observed.action),
-                    observed.token,
+                    predicted_token,
                     None,
                     None,
                     serde_json::to_value(observed).expect("serializable curve observation"),
@@ -1806,6 +1817,7 @@ fn paper_specs(
                 &[
                     (HOOD_FACTORY, HOOD_CREATE_SELECTOR),
                     (HOOD_FACTORY, HOOD_BUY_SELECTOR),
+                    (HOOD_FACTORY, HOOD_BUY_FOR_SELECTOR),
                     (HOOD_FACTORY, HOOD_SELL_SELECTOR),
                 ],
                 &direct,
@@ -2481,6 +2493,14 @@ mod tests {
     }
 
     fn signed_transaction(destination: Address, input: Vec<u8>) -> TxEnvelope {
+        signed_transaction_with_value(destination, input, U256::ZERO)
+    }
+
+    fn signed_transaction_with_value(
+        destination: Address,
+        input: Vec<u8>,
+        value: U256,
+    ) -> TxEnvelope {
         let transaction = TxEip1559 {
             chain_id: CHAIN_ID,
             nonce: 0,
@@ -2488,7 +2508,7 @@ mod tests {
             max_fee_per_gas: 1,
             max_priority_fee_per_gas: 0,
             to: TxKind::Call(destination),
-            value: U256::ZERO,
+            value,
             access_list: Default::default(),
             input: Bytes::from(input),
         };
@@ -2516,6 +2536,21 @@ mod tests {
         .unwrap()
     }
 
+    fn hood_launch_input() -> Vec<u8> {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/hood-launch-atomic-buy-live-proof.json"
+        ))
+        .unwrap();
+        hex::decode(
+            fixture["transaction"]["input"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("0x")
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
     fn observer() -> PaperLaunchpadObserver {
         let (expected, observed) = startup();
         PaperLaunchpadObserver::from_startup_snapshots(expected, observed).unwrap()
@@ -2524,9 +2559,7 @@ mod tests {
     #[test]
     fn raw_signed_nitro_fixture_reaches_registry_adapter_and_observation_output() {
         let observer = observer();
-        let mut input = HOOD_CREATE_SELECTOR.to_vec();
-        input.extend_from_slice(&[0_u8; 32]);
-        let transaction = signed_transaction(HOOD_FACTORY, input);
+        let transaction = signed_transaction(HOOD_FACTORY, hood_launch_input());
         let expected_leader = transaction.recover_signer().unwrap();
         let mut runtime = PaperFeedRuntime::new(observer);
         let source_received_unix_ns = 1;
@@ -2547,6 +2580,7 @@ mod tests {
         assert!(report.rejections.is_empty());
         assert_eq!(report.observations.len(), 1);
         assert_eq!(report.observations[0].launchpad, LaunchpadId::HoodFun);
+        assert!(report.observations[0].predicted_token.is_some());
         assert_eq!(report.observations[0].leader, expected_leader);
         assert_eq!(report.observations[0].feed_sequence, Some(42));
         assert_eq!(report.observations[0].l1_block_number, Some(9));
@@ -2577,11 +2611,42 @@ mod tests {
     }
 
     #[test]
+    fn raw_hood_buy_for_reaches_observer_with_exact_token_identity() {
+        let observer = observer();
+        let token = Address::with_last_byte(0xa1);
+        let recipient = Address::with_last_byte(0xa2);
+        let mut input = HOOD_BUY_FOR_SELECTOR.to_vec();
+        for word in [
+            U256::from_be_slice(token.as_slice()),
+            U256::from_be_slice(recipient.as_slice()),
+            U256::from(123_u64),
+        ] {
+            input.extend_from_slice(&word.to_be_bytes::<32>());
+        }
+        let transaction = signed_transaction_with_value(
+            HOOD_FACTORY,
+            input,
+            U256::from(1_000_000_000_000_000_u64),
+        );
+        let mut runtime = PaperFeedRuntime::new(observer);
+        let report = runtime.decode(&feed(&transaction)).unwrap();
+
+        assert!(report.rejections.is_empty());
+        assert_eq!(report.observations.len(), 1);
+        assert_eq!(report.observations[0].launchpad, LaunchpadId::HoodFun);
+        assert_eq!(report.observations[0].action, Some(ActionKind::Buy));
+        assert_eq!(report.observations[0].predicted_token, Some(token));
+        assert_eq!(
+            report.observations[0].detail["recipient"],
+            serde_json::json!(recipient)
+        );
+        assert_eq!(report.reconciliation_requests.len(), 1);
+    }
+
+    #[test]
     fn cross_adapter_destination_does_not_fall_through() {
         let observer = observer();
-        let mut input = HOOD_CREATE_SELECTOR.to_vec();
-        input.extend_from_slice(&[0_u8; 32]);
-        let transaction = signed_transaction(Address::with_last_byte(0xee), input);
+        let transaction = signed_transaction(Address::with_last_byte(0xee), hood_launch_input());
         let mut runtime = PaperFeedRuntime::new(observer);
         let report = runtime.decode(&feed(&transaction)).unwrap();
         assert!(report.observations.is_empty());

@@ -5,7 +5,10 @@
 //! code and proxy implementation checks happen before constructing the
 //! registry; candidate handling only reads the resulting immutable snapshot.
 
-use alloy_primitives::{Address, B256, U256};
+use std::sync::LazyLock;
+
+use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_sol_types::{SolCall, SolValue, sol};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -38,6 +41,7 @@ pub const LEAVEHOOD_CORE_IMPLEMENTATION: Address =
 
 pub const HOOD_CREATE_SELECTOR: [u8; 4] = [0x42, 0xb6, 0x21, 0x37];
 pub const HOOD_BUY_SELECTOR: [u8; 4] = [0xcc, 0xe7, 0xec, 0x13];
+pub const HOOD_BUY_FOR_SELECTOR: [u8; 4] = [0xa2, 0x00, 0xdd, 0x45];
 pub const HOOD_SELL_SELECTOR: [u8; 4] = [0x6a, 0x27, 0x24, 0x62];
 pub const LEAVEHOOD_LAUNCH_SELECTORS: [[u8; 4]; 2] =
     [[0x0e, 0x1d, 0x30, 0x73], [0xfc, 0xd0, 0x50, 0x8f]];
@@ -47,6 +51,34 @@ pub const LEAVEHOOD_SELL_SELECTOR: [u8; 4] = [0x6c, 0x19, 0x7f, 0xf5];
 pub const LEAVEHOOD_CLAIM_FEES_SELECTOR: [u8; 4] = [0xd6, 0xae, 0x6e, 0x44];
 pub const HOOD_V3_FEE: u32 = 10_000;
 pub const MAX_CURVE_CANDIDATE_CALLDATA_BYTES: usize = 32 * 1024;
+
+const HOOD_TOKEN_CREATION_CODE_LEN: usize = 3_636;
+const HOOD_TOKEN_CREATION_CODE_HASH: B256 =
+    alloy_primitives::b256!("ec5e362ebe430cb8be425b477597e8a4394ad22ad9f1d3a3eacfd1ed483aa8dd");
+
+static HOOD_TOKEN_CREATION_CODE: LazyLock<Option<Box<[u8]>>> = LazyLock::new(|| {
+    let bytes = hex::decode(
+        include_str!("pins/hood-token-creation-code.hex")
+            .trim()
+            .strip_prefix("0x")?,
+    )
+    .ok()?;
+    (bytes.len() == HOOD_TOKEN_CREATION_CODE_LEN
+        && keccak256(&bytes) == HOOD_TOKEN_CREATION_CODE_HASH)
+        .then(|| bytes.into_boxed_slice())
+});
+
+sol! {
+    function createToken(
+        string name,
+        string symbol,
+        string metadataURI,
+        uint256 minTokensOut,
+        bytes32 salt,
+        uint16 tradeFeeBps,
+        uint256 totalSupply_
+    ) external payable returns (address token);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -122,6 +154,9 @@ pub struct CurveObservation {
     pub action: ActionKind,
     pub phase: MarketPhase,
     pub token: Option<Address>,
+    /// Explicit beneficiary for Hood `buyFor`; direct buys credit the caller.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipient: Option<Address>,
     pub amount_in: Option<U256>,
     pub leader_min_receive: Option<U256>,
     pub launch_automation: bool,
@@ -264,6 +299,9 @@ impl Tier2CurveAdapter {
         );
         let v3 = valid_pin(pins.v3_factory, UNISWAP_V3_FACTORY, None)
             && valid_pin(pins.v3_router, UNISWAP_V3_SWAP_ROUTER_02, None);
+        if hood && HOOD_TOKEN_CREATION_CODE.is_none() {
+            return Err(CurveAdapterError::PinMismatch);
+        }
         Ok(Self {
             enabled: EnabledAdapters {
                 hood,
@@ -311,6 +349,7 @@ impl Tier2CurveAdapter {
                     action: ActionKind::Launch,
                     phase: MarketPhase::Curve,
                     token: None,
+                    recipient: None,
                     amount_in: None,
                     leader_min_receive: None,
                     launch_automation: true,
@@ -340,6 +379,7 @@ impl Tier2CurveAdapter {
                     },
                     phase: MarketPhase::Curve,
                     token: None,
+                    recipient: None,
                     amount_in: None,
                     leader_min_receive: None,
                     launch_automation: false,
@@ -592,32 +632,80 @@ fn valid_pin(pin: RuntimePin, address: Address, implementation: Option<Address>)
         }
 }
 
+/// Predict the exact Hood CREATE2 token identity from canonical direct
+/// `createToken` calldata. The static creation code is extracted from and
+/// hash-bound to the separately pinned factory runtime; no candidate-time RPC
+/// or observed receipt data participates in this calculation.
+pub fn predict_hood_token_address(
+    caller: Address,
+    input: &[u8],
+) -> Result<Address, CurveAdapterError> {
+    if caller == Address::ZERO || input.len() > MAX_CURVE_CANDIDATE_CALLDATA_BYTES {
+        return Err(CurveAdapterError::Malformed);
+    }
+    let call = createTokenCall::abi_decode(input).map_err(|_| CurveAdapterError::Malformed)?;
+    if call.abi_encode() != input {
+        return Err(CurveAdapterError::Malformed);
+    }
+    let creation_code = HOOD_TOKEN_CREATION_CODE
+        .as_deref()
+        .ok_or(CurveAdapterError::PinMismatch)?;
+    let constructor = (call.name, call.symbol, call.totalSupply_).abi_encode_params();
+    let mut init_code = Vec::with_capacity(creation_code.len() + constructor.len());
+    init_code.extend_from_slice(creation_code);
+    init_code.extend_from_slice(&constructor);
+    let init_code_hash = keccak256(init_code);
+
+    let mut salt_input = [0_u8; 52];
+    salt_input[..20].copy_from_slice(caller.as_slice());
+    salt_input[20..].copy_from_slice(call.salt.as_slice());
+    let effective_salt = keccak256(salt_input);
+
+    let mut preimage = [0_u8; 85];
+    preimage[0] = 0xff;
+    preimage[1..21].copy_from_slice(HOOD_FACTORY.as_slice());
+    preimage[21..53].copy_from_slice(effective_salt.as_slice());
+    preimage[53..].copy_from_slice(init_code_hash.as_slice());
+    let digest = keccak256(preimage);
+    Ok(Address::from_slice(&digest[12..]))
+}
+
 fn observe_hood(
     selector: [u8; 4],
     input: &[u8],
     value: U256,
 ) -> Result<CurveObservation, CurveAdapterError> {
     if selector == HOOD_CREATE_SELECTOR {
-        require_abi_envelope(input)?;
+        let call = createTokenCall::abi_decode(input).map_err(|_| CurveAdapterError::Malformed)?;
+        if call.abi_encode() != input {
+            return Err(CurveAdapterError::Malformed);
+        }
         return Ok(CurveObservation {
             protocol: LaunchpadId::HoodFun,
             generation: FactoryGeneration::HoodCustomLaunchpad,
             action: ActionKind::Launch,
             phase: MarketPhase::Curve,
             token: None,
+            recipient: None,
             amount_in: None,
             leader_min_receive: None,
             launch_automation: true,
             paper_plan_supported: false,
         });
     }
-    let (action, words) = match selector {
-        HOOD_BUY_SELECTOR => (ActionKind::Buy, decode_static_words(input, 2)?),
-        HOOD_SELL_SELECTOR => (ActionKind::Sell, decode_static_words(input, 3)?),
+    let (action, words, recipient) = match selector {
+        HOOD_BUY_SELECTOR => (ActionKind::Buy, decode_static_words(input, 2)?, None),
+        HOOD_BUY_FOR_SELECTOR => {
+            let words = decode_static_words(input, 3)?;
+            let recipient = decode_address(words[1]).ok_or(CurveAdapterError::Malformed)?;
+            (ActionKind::Buy, words, Some(recipient))
+        }
+        HOOD_SELL_SELECTOR => (ActionKind::Sell, decode_static_words(input, 3)?, None),
         _ => return Err(CurveAdapterError::UnknownDispatch),
     };
     let token = decode_address(words[0]).ok_or(CurveAdapterError::Malformed)?;
     if token == Address::ZERO
+        || recipient == Some(Address::ZERO)
         || (action == ActionKind::Buy && value == U256::ZERO)
         || (action == ActionKind::Sell && value != U256::ZERO)
     {
@@ -628,7 +716,9 @@ fn observe_hood(
     } else {
         words[1]
     };
-    let leader_min_receive = if action == ActionKind::Buy {
+    let leader_min_receive = if selector == HOOD_BUY_FOR_SELECTOR {
+        words[2]
+    } else if action == ActionKind::Buy {
         words[1]
     } else {
         words[2]
@@ -642,6 +732,7 @@ fn observe_hood(
         action,
         phase: MarketPhase::Curve,
         token: Some(token),
+        recipient,
         amount_in: Some(amount_in),
         leader_min_receive: Some(leader_min_receive),
         launch_automation: false,
@@ -682,6 +773,7 @@ fn observe_v3(
         action,
         phase: MarketPhase::MigratedV3,
         token: Some(token),
+        recipient: None,
         amount_in: Some(intent.amount_in),
         leader_min_receive: Some(intent.amount_out_minimum),
         launch_automation: false,
@@ -1015,6 +1107,24 @@ mod tests {
         encode_words(HOOD_BUY_SELECTOR, &[address_word(token()), minimum])
     }
 
+    fn hood_launch_fixture() -> (Address, Address, Vec<u8>) {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/hood-launch-atomic-buy-live-proof.json"
+        ))
+        .unwrap();
+        let caller = serde_json::from_value(fixture["transaction"]["from"].clone()).unwrap();
+        let token = serde_json::from_value(fixture["state"]["token"].clone()).unwrap();
+        let input = hex::decode(
+            fixture["transaction"]["input"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("0x")
+                .unwrap(),
+        )
+        .unwrap();
+        (caller, token, input)
+    }
+
     fn hood_market() -> MarketSnapshot<'static> {
         MarketSnapshot {
             protocol: LaunchpadId::HoodFun,
@@ -1065,8 +1175,7 @@ mod tests {
         assert_eq!(normalized.launchpad, LaunchpadId::HoodFun);
         assert_eq!(normalized.observed_route, ObservedRoute::HoodCurve);
 
-        let mut launch = HOOD_CREATE_SELECTOR.to_vec();
-        launch.extend_from_slice(&[0_u8; 32]);
+        let (_, _, launch) = hood_launch_fixture();
         let launch = adapter
             .observe(
                 CurveCandidateCall {
@@ -1099,6 +1208,121 @@ mod tests {
             .unwrap();
         assert_eq!(sell.action, ActionKind::Sell);
         assert_eq!(sell.amount_in, Some(U256::from(50)));
+    }
+
+    #[test]
+    fn hood_create2_prediction_matches_live_and_fresh1_identity_proofs() {
+        let (caller, expected, input) = hood_launch_fixture();
+        assert_eq!(
+            predict_hood_token_address(caller, &input).unwrap(),
+            expected
+        );
+
+        // Identity-affecting fields from fresh1 tx e4473124...c544b7. Metadata
+        // and minTokensOut are deliberately different because the verified
+        // factory constructor hash excludes both; the expected receipt token
+        // still has to reproduce exactly.
+        let fresh1 = createTokenCall {
+            name: "MEMES ARE JUST AWESOME".into(),
+            symbol: "SOMEME".into(),
+            metadataURI: "identity-independent".into(),
+            minTokensOut: U256::from(1_u8),
+            salt: alloy_primitives::b256!(
+                "00000000000000000000000000000000000000000000000000097fbfcabba00f"
+            ),
+            tradeFeeBps: 100,
+            totalSupply_: U256::from(10_u8).pow(U256::from(27_u8)),
+        }
+        .abi_encode();
+        assert_eq!(
+            predict_hood_token_address(
+                alloy_primitives::address!("9bcd74c91f1e03f412da32a421cb6c069bfd1306"),
+                &fresh1,
+            )
+            .unwrap(),
+            alloy_primitives::address!("ec0ae38da2f99a4b666046ca1cb7e8aef47a600d")
+        );
+
+        let mut trailing = input;
+        trailing.push(0);
+        assert_eq!(
+            predict_hood_token_address(caller, &trailing),
+            Err(CurveAdapterError::Malformed)
+        );
+        assert_eq!(
+            predict_hood_token_address(Address::ZERO, &fresh1),
+            Err(CurveAdapterError::Malformed)
+        );
+    }
+
+    #[test]
+    fn observes_exact_hood_buy_for_and_rejects_ambiguous_variants() {
+        let adapter = registry();
+        let recipient = Address::with_last_byte(0x42);
+        let input = encode_words(
+            HOOD_BUY_FOR_SELECTOR,
+            &[
+                address_word(token()),
+                address_word(recipient),
+                U256::from(999),
+            ],
+        );
+        let observed = adapter
+            .observe(
+                CurveCandidateCall {
+                    chain_id: CHAIN_ID,
+                    destination: HOOD_FACTORY,
+                    input: &input,
+                    value: U256::from(100),
+                },
+                &[],
+            )
+            .unwrap();
+        assert_eq!(observed.action, ActionKind::Buy);
+        assert_eq!(observed.token, Some(token()));
+        assert_eq!(observed.recipient, Some(recipient));
+        assert_eq!(observed.amount_in, Some(U256::from(100)));
+        assert_eq!(observed.leader_min_receive, Some(U256::from(999)));
+
+        for rejected in [
+            encode_words(
+                HOOD_BUY_FOR_SELECTOR,
+                &[address_word(token()), U256::ZERO, U256::from(999)],
+            ),
+            encode_words(
+                HOOD_BUY_FOR_SELECTOR,
+                &[address_word(token()), address_word(recipient), U256::ZERO],
+            ),
+            encode_words(
+                HOOD_BUY_FOR_SELECTOR,
+                &[address_word(token()), address_word(recipient)],
+            ),
+        ] {
+            assert_eq!(
+                adapter.observe(
+                    CurveCandidateCall {
+                        chain_id: CHAIN_ID,
+                        destination: HOOD_FACTORY,
+                        input: &rejected,
+                        value: U256::from(100),
+                    },
+                    &[],
+                ),
+                Err(CurveAdapterError::Malformed)
+            );
+        }
+        assert_eq!(
+            adapter.observe(
+                CurveCandidateCall {
+                    chain_id: CHAIN_ID,
+                    destination: HOOD_FACTORY,
+                    input: &input,
+                    value: U256::ZERO,
+                },
+                &[],
+            ),
+            Err(CurveAdapterError::Malformed)
+        );
     }
 
     #[test]
@@ -1309,6 +1533,7 @@ mod tests {
             action: ActionKind::Buy,
             phase: MarketPhase::Curve,
             token: Some(token()),
+            recipient: None,
             amount_in: Some(U256::from(1)),
             leader_min_receive: Some(U256::from(1)),
             launch_automation: false,
@@ -1638,6 +1863,7 @@ mod tests {
             action: ActionKind::Buy,
             phase: MarketPhase::MigratedV3,
             token: Some(token()),
+            recipient: None,
             amount_in: Some(U256::from(10_000)),
             leader_min_receive: Some(U256::from(1)),
             launch_automation: false,

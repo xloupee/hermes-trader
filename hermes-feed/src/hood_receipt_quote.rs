@@ -15,9 +15,9 @@ use crate::noxa_abi::ReceiptLog;
 use crate::noxa_rpc::{HoodMarketSnapshot, NoxaReceipt, RobinhoodBlock, RobinhoodTransaction};
 use crate::robinhood::CHAIN_ID;
 use crate::tier2_curve::{
-    CurveAdapterError, CurveFormula, CurveState, HOOD_BUY_SELECTOR, HOOD_CREATE_SELECTOR,
-    HOOD_FACTORY, HOOD_SELL_SELECTOR, HoodCurveBuyQuote, HoodCurveSellQuote, quote_hood_curve_buy,
-    quote_hood_curve_sell,
+    CurveAdapterError, CurveFormula, CurveState, HOOD_BUY_FOR_SELECTOR, HOOD_BUY_SELECTOR,
+    HOOD_CREATE_SELECTOR, HOOD_FACTORY, HOOD_SELL_SELECTOR, HoodCurveBuyQuote, HoodCurveSellQuote,
+    quote_hood_curve_buy, quote_hood_curve_sell,
 };
 use crate::v3_pool::V3PoolState;
 
@@ -1304,14 +1304,31 @@ fn reconcile_direct_trade(
     trade: TradeEvidence,
     logs: &[ReceiptLog],
 ) -> Result<(HoodObservedTradeEvidence, CurveState), HoodQuoteError> {
-    if trade.trader != transaction.from || trade.token != snapshot.token {
+    if trade.token != snapshot.token {
         return Err(HoodQuoteError::CalldataMismatch);
     }
     if trade.is_buy {
-        let words = exact_static_words(&transaction.input, HOOD_BUY_SELECTOR, 2)?;
+        let (words, expected_trader, minimum_index) =
+            if transaction.input.get(..4) == Some(HOOD_BUY_SELECTOR.as_slice()) {
+                (
+                    exact_static_words(&transaction.input, HOOD_BUY_SELECTOR, 2)?,
+                    transaction.from,
+                    1,
+                )
+            } else if transaction.input.get(..4) == Some(HOOD_BUY_FOR_SELECTOR.as_slice()) {
+                let words = exact_static_words(&transaction.input, HOOD_BUY_FOR_SELECTOR, 3)?;
+                let recipient = address_word(words[1]).ok_or(HoodQuoteError::CalldataMismatch)?;
+                if recipient == Address::ZERO {
+                    return Err(HoodQuoteError::CalldataMismatch);
+                }
+                (words, recipient, 2)
+            } else {
+                return Err(HoodQuoteError::CalldataMismatch);
+            };
         if address_word(words[0]) != Some(trade.token)
+            || trade.trader != expected_trader
             || transaction.value == U256::ZERO
-            || trade.token_amount < words[1]
+            || trade.token_amount < words[minimum_index]
         {
             return Err(HoodQuoteError::CalldataMismatch);
         }
@@ -1355,7 +1372,8 @@ fn reconcile_direct_trade(
         ))
     } else {
         let words = exact_static_words(&transaction.input, HOOD_SELL_SELECTOR, 3)?;
-        if address_word(words[0]) != Some(trade.token)
+        if trade.trader != transaction.from
+            || address_word(words[0]) != Some(trade.token)
             || words[1] != trade.token_amount
             || trade.eth_amount < words[2]
             || transaction.value != U256::ZERO
@@ -1792,6 +1810,73 @@ mod tests {
         assert!(output.full_position_exit.expected_output > U256::ZERO);
         assert!(!output.execution_eligible);
         assert!(!output.broadcast);
+    }
+
+    #[test]
+    fn live_buy_for_proof_binds_token_recipient_minimum_and_receipt_trade() {
+        let value = fixture(include_str!(
+            "../tests/fixtures/hood-buy-for-live-proof.json"
+        ));
+        let output = quote(&value).unwrap();
+        assert_eq!(
+            output.tx_hash,
+            alloy_primitives::b256!(
+                "f7298ac6be29ffe53d0bac67be4dd0c1ff3353cd7fecb1be5bd0bc5d5f94ffad"
+            )
+        );
+        assert_eq!(output.token, value.state.token);
+        assert_eq!(output.leader, value.transaction.from);
+        assert_eq!(output.observed.action, ActionKind::Buy);
+        assert_eq!(output.observed.trader, value.transaction.from);
+        assert_eq!(
+            output.observed.token_amount,
+            U256::from_str_radix("23239417169561597708568813", 10).unwrap()
+        );
+        assert!(output.entry.expected_output > U256::ZERO);
+        assert!(output.full_position_exit.expected_output > U256::ZERO);
+        assert!(!output.execution_eligible);
+        assert!(!output.broadcast);
+    }
+
+    #[test]
+    fn buy_for_proof_rejects_recipient_selector_and_minimum_drift() {
+        let value = fixture(include_str!(
+            "../tests/fixtures/hood-buy-for-live-proof.json"
+        ));
+        let assert_rejected = |transaction: &RobinhoodTransaction| {
+            assert!(matches!(
+                quote_hood_curve_receipt(
+                    transaction,
+                    &value.receipt,
+                    &value.block,
+                    &value.snapshot(),
+                    HoodSemanticProfile::production(),
+                    policy(),
+                ),
+                Err(HoodQuoteError::CalldataMismatch)
+            ));
+        };
+
+        let mut wrong_recipient = value.transaction.clone();
+        let mut input = wrong_recipient.input.to_vec();
+        input[48..68].copy_from_slice(Address::with_last_byte(0xee).as_slice());
+        wrong_recipient.input = input.into();
+        assert_rejected(&wrong_recipient);
+
+        let mut wrong_selector = value.transaction.clone();
+        let mut input = wrong_selector.input.to_vec();
+        input[..4].copy_from_slice(&HOOD_BUY_SELECTOR);
+        wrong_selector.input = input.into();
+        assert_rejected(&wrong_selector);
+
+        let mut impossible_minimum = value.transaction.clone();
+        let mut input = impossible_minimum.input.to_vec();
+        let minimum = (U256::from_str_radix("23239417169561597708568813", 10).unwrap()
+            + U256::from(1_u8))
+        .to_be_bytes::<32>();
+        input[68..100].copy_from_slice(&minimum);
+        impossible_minimum.input = input.into();
+        assert_rejected(&impossible_minimum);
     }
 
     #[test]

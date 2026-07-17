@@ -21,7 +21,7 @@ use hermes_feed::{
     ClankerV4ExpectedProfile, HoodExpectedProfile, HoodMigrationEvidence, HoodReceiptPaperQuote,
     PonsReceiptPaperQuote, V3ReceiptPaperQuote, bankr_hook_fee_ppm, quote_hood_curve_buy,
     quote_hood_curve_sell, validate_clanker_quote_replay,
-    validate_hood_migration_boundary_evidence,
+    validate_hood_migration_boundary_evidence, validate_v3_quote_replay,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1343,6 +1343,15 @@ fn finalized_v3_plans(
             || quote.execution_eligible
             || quote.state_version.chain_id != hermes_feed::robinhood::CHAIN_ID
             || quote.state_version.l2_block_number != quote.l2_block_number
+            || validate_v3_quote_replay(
+                &quote,
+                hermes_feed::V3ReceiptQuotePolicy {
+                    amount_in: quote.entry.amount_in,
+                    max_amount_in: policy.max_input_wei,
+                    slippage_bps: policy.slippage_bps,
+                },
+            )
+            .is_err()
         {
             anyhow::bail!("unsafe or inconsistent V3 quote evidence for {key:?}");
         }
@@ -2819,8 +2828,9 @@ mod tests {
     use hermes_feed::tier2_curve::HOOD_FACTORY;
     use hermes_feed::{
         ClankerQuotePolicy, ClankerV4ExpectedProfile, NoxaReceipt, PonsQuotePolicy, RobinhoodBlock,
-        RobinhoodTransaction, V3PaperSwapQuote, V3Quote, V3QuoteStateVersion,
-        V3ReceiptMarketEvidence, quote_clanker_launch_receipt, quote_pons_launch_receipt,
+        RobinhoodTransaction, V3PaperSwapQuote, V3PoolState, V3QuoteStateVersion,
+        V3ReceiptMarketEvidence, V3ReceiptPositionEvidence, predict_v3_pool_address,
+        quote_clanker_launch_receipt, quote_pons_launch_receipt,
     };
 
     use super::*;
@@ -3389,36 +3399,56 @@ mod tests {
         );
     }
 
-    fn swap_quote(
-        token_in: Address,
-        token_out: Address,
-        amount_in: u64,
-        amount_out: u64,
-    ) -> V3PaperSwapQuote {
-        V3PaperSwapQuote {
-            amount_in: U256::from(amount_in),
-            expected_output: U256::from(amount_out),
-            min_receive: U256::from(amount_out * 99 / 100),
-            slippage_bps: 100,
-            state_after: V3Quote {
-                token_in,
-                token_out,
-                amount_in_requested: U256::from(amount_in),
-                amount_in_consumed: U256::from(amount_in),
-                amount_out: U256::from(amount_out),
-                sqrt_price_x96_after: U256::from(1_u128 << 96),
-                tick_after: 0,
-                liquidity_after: 1_000_000,
-                initialized_ticks_crossed: 0,
-                steps: 1,
-            },
-        }
-    }
-
     fn quote_fixture() -> V3ReceiptPaperQuote {
         let weth = hermes_feed::robinhood::WETH;
-        let token = Address::with_last_byte(0xee);
+        let token = Address::repeat_byte(0xee);
         let tx_hash = B256::with_last_byte(0xaa);
+        let pool = predict_v3_pool_address(
+            hermes_feed::robinhood::UNISWAP_V3_FACTORY,
+            weth,
+            token,
+            10_000,
+            hermes_feed::robinhood::UNISWAP_V3_POOL_INIT_CODE_KECCAK256,
+        );
+        let mut state = V3PoolState::new(
+            pool,
+            weth,
+            token,
+            10_000,
+            200,
+            U256::from(1_u128 << 96),
+            0,
+            0,
+        )
+        .unwrap();
+        state.add_position(-887_200, 887_200, 1_000_000).unwrap();
+        let entry_state = state
+            .quote_exact_input(weth, U256::from(1_000_u64), None)
+            .unwrap();
+        let entry = V3PaperSwapQuote {
+            amount_in: U256::from(1_000_u64),
+            expected_output: entry_state.amount_out,
+            min_receive: entry_state.amount_out * U256::from(99_u8) / U256::from(100_u8),
+            slippage_bps: 100,
+            state_after: entry_state.clone(),
+        };
+        state
+            .set_observation(
+                entry_state.sqrt_price_x96_after,
+                entry_state.tick_after,
+                entry_state.liquidity_after,
+            )
+            .unwrap();
+        let exit_state = state
+            .quote_exact_input(token, entry_state.amount_out, None)
+            .unwrap();
+        let exit = V3PaperSwapQuote {
+            amount_in: entry_state.amount_out,
+            expected_output: exit_state.amount_out,
+            min_receive: exit_state.amount_out * U256::from(99_u8) / U256::from(100_u8),
+            slippage_bps: 100,
+            state_after: exit_state.clone(),
+        };
         V3ReceiptPaperQuote {
             record_type: "launchpad_v3_paper_quote".into(),
             tx_hash,
@@ -3435,21 +3465,31 @@ mod tests {
             sizing_source: "independent_fixed_tiny_weth_policy".into(),
             market: V3ReceiptMarketEvidence {
                 token,
-                pool: Address::with_last_byte(0xdd),
+                pool,
                 quote_asset: weth,
                 fee: 10_000,
                 tick_spacing: 200,
                 launch_log_index: 12,
                 pool_created_log_index: 1,
                 initialize_log_index: 2,
-                last_state_log_index: 6,
+                last_state_log_index: 3,
                 mint_count: 1,
                 swap_count: 0,
                 restriction_end_block: None,
+                positions: vec![V3ReceiptPositionEvidence {
+                    tick_lower: -887_200,
+                    tick_upper: 887_200,
+                    liquidity: 1_000_000,
+                    log_index: 3,
+                }],
+                receipt_end_sqrt_price_x96: U256::from(1_u128 << 96),
+                receipt_end_tick: 0,
+                receipt_end_liquidity: 1_000_000,
             },
-            entry: swap_quote(weth, token, 1_000, 2_000),
-            full_position_exit: swap_quote(token, weth, 2_000, 980),
-            simulated_round_trip_return_bps: U256::from(9_800),
+            entry,
+            full_position_exit: exit,
+            simulated_round_trip_return_bps: exit_state.amount_out * U256::from(10_000_u16)
+                / U256::from(1_000_u64),
             execution_eligible: false,
             execution_blocker: "paper_only_token_restriction_and_runtime_checks_not_satisfied"
                 .into(),
@@ -3619,6 +3659,9 @@ mod tests {
     #[test]
     fn confirmed_quote_becomes_non_broadcast_finalized_plan() {
         let quote = quote_fixture();
+        let expected_output = quote.entry.expected_output;
+        let expected_min_receive = quote.entry.min_receive;
+        let expected_exit_output = quote.full_position_exit.expected_output;
         let key = (quote.tx_hash, quote.launchpad);
         let ground_truth = quote_authority(
             key,
@@ -3641,9 +3684,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plans.len(), 1);
-        assert_eq!(plans[0].expected_output, U256::from(2_000));
-        assert_eq!(plans[0].min_receive, U256::from(1_980));
-        assert_eq!(plans[0].exit_expected_output, U256::from(980));
+        assert_eq!(plans[0].expected_output, expected_output);
+        assert_eq!(plans[0].min_receive, expected_min_receive);
+        assert_eq!(plans[0].exit_expected_output, expected_exit_output);
         assert!(!plans[0].execution_eligible);
         assert!(!plans[0].broadcast);
         assert!(!plans[0].leader_amounts_reused);
@@ -3670,6 +3713,48 @@ mod tests {
                 vec![quote],
                 PaperPlanPolicy {
                     max_input_wei: U256::from(1_000),
+                    slippage_bps: 100,
+                    ..PaperPlanPolicy::default()
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn coordinated_v3_output_and_state_forgery_cannot_finalize() {
+        let mut quote = quote_fixture();
+        let key = (quote.tx_hash, quote.launchpad);
+        let ground_truth = quote_authority(
+            key,
+            ActionKind::Launch,
+            quote.market.token,
+            Some(quote.market.pool),
+            quote.state_version.l2_block_number,
+            quote.state_version.block_hash,
+            quote.state_version.transaction_index,
+        );
+        quote.entry.expected_output += U256::from(1_u8);
+        quote.entry.state_after.amount_out = quote.entry.expected_output;
+        quote.entry.min_receive =
+            quote.entry.expected_output * U256::from(99_u8) / U256::from(100_u8);
+        quote.full_position_exit.amount_in = quote.entry.expected_output;
+        quote.full_position_exit.state_after.amount_in_requested = quote.entry.expected_output;
+        quote.full_position_exit.state_after.amount_in_consumed = quote.entry.expected_output;
+        quote.full_position_exit.expected_output += U256::from(1_u8);
+        quote.full_position_exit.state_after.amount_out = quote.full_position_exit.expected_output;
+        quote.full_position_exit.min_receive =
+            quote.full_position_exit.expected_output * U256::from(99_u8) / U256::from(100_u8);
+        quote.simulated_round_trip_return_bps = quote.full_position_exit.expected_output
+            * U256::from(10_000_u16)
+            / quote.entry.amount_in;
+        assert!(
+            finalized_v3_plans(
+                &HashMap::from([(key, 42)]),
+                &ground_truth,
+                vec![quote],
+                PaperPlanPolicy {
+                    max_input_wei: U256::from(1_000_u64),
                     slippage_bps: 100,
                     ..PaperPlanPolicy::default()
                 },

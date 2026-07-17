@@ -186,5 +186,6 @@ pub use v3_launch_at_birth::{
 pub use v3_pool::{V3PoolError, V3PoolState, V3Quote};
 pub use v3_receipt_quote::{
     V3PaperSwapQuote, V3QuoteStateVersion, V3ReceiptMarketEvidence, V3ReceiptPaperQuote,
-    V3ReceiptQuoteError, V3ReceiptQuotePolicy, quote_v3_launch_receipt,
+    V3ReceiptPositionEvidence, V3ReceiptQuoteError, V3ReceiptQuotePolicy, quote_v3_launch_receipt,
+    validate_v3_quote_replay,
 };

@@ -654,7 +654,7 @@ async fn reconcile_candidate(
                     .transaction_by_hash(candidate.tx_hash)
                     .await?
                     .with_context(|| format!("missing transaction {}", candidate.tx_hash))?;
-                match quote_v3_launch_receipt(
+                match collect_v3_receipt_quote(
                     &transaction,
                     &receipt,
                     candidate.launchpad,
@@ -934,6 +934,15 @@ async fn reconcile_candidate(
     }
 }
 
+fn collect_v3_receipt_quote(
+    transaction: &hermes_feed::RobinhoodTransaction,
+    receipt: &hermes_feed::NoxaReceipt,
+    launchpad: LaunchpadId,
+    policy: V3ReceiptQuotePolicy,
+) -> std::result::Result<V3ReceiptPaperQuote, hermes_feed::V3ReceiptQuoteError> {
+    quote_v3_launch_receipt(transaction, receipt, launchpad, policy)
+}
+
 fn validate_ground_truth_receipt_binding(
     candidate: &ObservedCandidate,
     receipt: &hermes_feed::NoxaReceipt,
@@ -1097,6 +1106,7 @@ fn unix_now_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
+    use std::str::FromStr;
 
     use alloy_primitives::{Address, Bytes};
     use hermes_feed::{NoxaReceipt, RobinhoodTransaction};
@@ -1217,6 +1227,107 @@ mod tests {
                 .to_string()
                 .contains("duplicate reconciliation request")
         );
+    }
+
+    fn live_log(address: &str, log_index: u64, topics: &[&str], data: &str) -> ReceiptLog {
+        ReceiptLog {
+            address: Address::from_str(address).unwrap(),
+            log_index,
+            topics: topics
+                .iter()
+                .map(|topic| B256::from_str(topic).unwrap())
+                .collect(),
+            data: Bytes::from(hex::decode(data).unwrap()),
+        }
+    }
+
+    fn bow_zero_buy_live_proof() -> (RobinhoodTransaction, NoxaReceipt) {
+        let tx_hash =
+            B256::from_str("1adcd30a5de19423f56b93d91df33d950179ed7ef4f9d4aae31fca13f72fc009")
+                .unwrap();
+        let logs = vec![
+            live_log(
+                "1f7d7550b1b028f7571e69a784071f0205fd2efa",
+                1,
+                &[
+                    "783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118",
+                    "00000000000000000000000000488257d5942b60119dc8c23dfe1c613c061b03",
+                    "0000000000000000000000000bd7d308f8e1639fab988df18a8011f41eacad73",
+                    "0000000000000000000000000000000000000000000000000000000000002710",
+                ],
+                "00000000000000000000000000000000000000000000000000000000000000c8000000000000000000000000d4759258987f7be17ae5afc7151da10bf54b2192",
+            ),
+            live_log(
+                "d4759258987f7be17ae5afc7151da10bf54b2192",
+                2,
+                &["98636036cb66a9c19a37435efc1e90142190214e8abeb821bdba3f2990dd4c95"],
+                "0000000000000000000000000000000000000000000289c75e384277ff7a6484fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffce64b",
+            ),
+            live_log(
+                "d4759258987f7be17ae5afc7151da10bf54b2192",
+                6,
+                &[
+                    "7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde",
+                    "00000000000000000000000073991a25c818bf1f1128deaab1492d45638de0d3",
+                    "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffce7d0",
+                    "00000000000000000000000000000000000000000000000000000000000d89a0",
+                ],
+                "00000000000000000000000073991a25c818bf1f1128deaab1492d45638de0d300000000000000000000000000000000000000000000085cb16d31e60a6c05e20000000000000000000000000000000000000000033b2e3c9fd0803ce7ffc25c0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            live_log(
+                "c70e510e14710ea535cab7b2414860af63feab79",
+                12,
+                &[
+                    "ec774f0683e9ac48e8d835f412f9f877a8a5dee9af3170d78cf3ef33149d15e7",
+                    "00000000000000000000000000488257d5942b60119dc8c23dfe1c613c061b03",
+                    "000000000000000000000000660591c04dd40ac2d6604ecc2951e155fbd914b7",
+                ],
+                "000000000000000000000000d4759258987f7be17ae5afc7151da10bf54b2192000000000000000000000000000000000000000000000000000000000002a4c40000000000000000000000000000000000000000000000000000000000000462",
+            ),
+        ];
+        (
+            RobinhoodTransaction {
+                hash: tx_hash,
+                from: Address::from_str("660591c04dd40ac2d6604ecc2951e155fbd914b7").unwrap(),
+                to: Some(BOW_LAUNCH_FACTORY),
+                input: Bytes::new(),
+                value: U256::ZERO,
+                l2_block_number: Some(11_463_668),
+                transaction_index: Some(1),
+            },
+            NoxaReceipt {
+                transaction_hash: tx_hash,
+                block_hash: B256::from_str(
+                    "c15c854c65b16eae04478c619eaf930f3dfd897ce9e9e85b4cfb9448d82962cd",
+                )
+                .unwrap(),
+                status: true,
+                l2_block_number: 11_463_668,
+                l1_block_number: Some(0x185d0bf),
+                transaction_index: 1,
+                gas_used: Some(0x6d680a),
+                effective_gas_price: None,
+                logs,
+            },
+        )
+    }
+
+    #[test]
+    fn collector_wires_bow_receipt_to_replayable_two_leg_quote() {
+        let (transaction, receipt) = bow_zero_buy_live_proof();
+        let policy = V3ReceiptQuotePolicy {
+            amount_in: U256::from(1_000_000_000_000_000_u64),
+            max_amount_in: U256::from(10_000_000_000_000_000_u64),
+            slippage_bps: 100,
+        };
+        let quote =
+            collect_v3_receipt_quote(&transaction, &receipt, LaunchpadId::Bow, policy).unwrap();
+        hermes_feed::validate_v3_quote_replay(&quote, policy).unwrap();
+        assert_eq!(quote.tx_hash, transaction.hash);
+        assert!(quote.entry.expected_output > U256::ZERO);
+        assert!(quote.full_position_exit.expected_output > U256::ZERO);
+        assert!(!quote.execution_eligible);
+        assert!(!quote.broadcast);
     }
 
     #[test]

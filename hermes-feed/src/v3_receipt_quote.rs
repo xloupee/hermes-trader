@@ -66,6 +66,36 @@ pub struct V3ReceiptQuotePolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct V3ReceiptPositionEvidence {
+    pub tick_lower: i32,
+    pub tick_upper: i32,
+    #[serde(
+        serialize_with = "serialize_u128_hex",
+        deserialize_with = "deserialize_u128_hex"
+    )]
+    pub liquidity: u128,
+    pub log_index: u64,
+}
+
+fn serialize_u128_hex<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&format!("0x{value:x}"))
+}
+
+fn deserialize_u128_hex<'de, D>(deserializer: D) -> Result<u128, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    let digits = value
+        .strip_prefix("0x")
+        .ok_or_else(|| serde::de::Error::custom("u128 hex value must start with 0x"))?;
+    u128::from_str_radix(digits, 16).map_err(serde::de::Error::custom)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct V3ReceiptMarketEvidence {
     pub token: Address,
     pub pool: Address,
@@ -79,6 +109,20 @@ pub struct V3ReceiptMarketEvidence {
     pub mint_count: usize,
     pub swap_count: usize,
     pub restriction_end_block: Option<U256>,
+    /// Exact receipt-created liquidity positions needed to replay a serialized
+    /// quote without trusting its claimed outputs.
+    #[serde(default)]
+    pub positions: Vec<V3ReceiptPositionEvidence>,
+    #[serde(default)]
+    pub receipt_end_sqrt_price_x96: U256,
+    #[serde(default)]
+    pub receipt_end_tick: i32,
+    #[serde(
+        default,
+        serialize_with = "serialize_u128_hex",
+        deserialize_with = "deserialize_u128_hex"
+    )]
+    pub receipt_end_liquidity: u128,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -149,6 +193,8 @@ pub enum V3ReceiptQuoteError {
     RestrictionEvidence,
     #[error("local quote did not consume all input or returned zero output")]
     IncompleteQuote,
+    #[error("serialized V3 quote cannot be independently replayed")]
+    QuoteReplayMismatch,
     #[error(transparent)]
     Pool(#[from] V3PoolError),
 }
@@ -245,6 +291,7 @@ pub fn quote_v3_launch_receipt(
     let mut last_state_log_index = None;
     let mut mint_count = 0_usize;
     let mut swap_count = 0_usize;
+    let mut positions = Vec::new();
     for log in receipt.logs.iter().filter(|log| log.address == launch.pool) {
         let event = decode_v3_pool_event(log).ok_or(V3ReceiptQuoteError::UnknownPoolEvent)?;
         if log.log_index <= *pool_created_log_index {
@@ -282,6 +329,12 @@ pub fn quote_v3_launch_receipt(
                     .as_mut()
                     .ok_or(V3ReceiptQuoteError::InvalidStateSequence)?;
                 pool.add_position(tick_lower, tick_upper, amount)?;
+                positions.push(V3ReceiptPositionEvidence {
+                    tick_lower,
+                    tick_upper,
+                    liquidity: amount,
+                    log_index: log.log_index,
+                });
                 mint_count += 1;
             }
             V3PoolEvent::Swap {
@@ -381,6 +434,10 @@ pub fn quote_v3_launch_receipt(
             mint_count,
             swap_count,
             restriction_end_block: launch.restriction_end_block,
+            positions,
+            receipt_end_sqrt_price_x96: state.sqrt_price_x96,
+            receipt_end_tick: state.tick,
+            receipt_end_liquidity: state.liquidity,
         },
         entry: V3PaperSwapQuote {
             amount_in: policy.amount_in,
@@ -401,6 +458,122 @@ pub fn quote_v3_launch_receipt(
         execution_blocker: "paper_only_token_restriction_and_runtime_checks_not_satisfied".into(),
         broadcast: false,
     })
+}
+
+/// Rebuild both legs from the serialized receipt-end pool state. This is
+/// intentionally separate from receipt collection so finalization does not
+/// trust claimed outputs merely because their transaction identity matches.
+pub fn validate_v3_quote_replay(
+    quote: &V3ReceiptPaperQuote,
+    policy: V3ReceiptQuotePolicy,
+) -> Result<(), V3ReceiptQuoteError> {
+    let market = &quote.market;
+    if !matches!(
+        quote.launchpad,
+        LaunchpadId::Bow | LaunchpadId::LaunchHoodV3
+    ) || quote.record_type != "launchpad_v3_paper_quote"
+        || quote.quote_source != "confirmed_receipt_end_v3_state"
+        || quote.sizing_source != "independent_fixed_tiny_weth_policy"
+        || quote.execution_eligible
+        || quote.broadcast
+        || market.token == Address::ZERO
+        || market.token == WETH
+        || market.pool == Address::ZERO
+        || market.quote_asset != WETH
+        || market.fee != V3_FEE
+        || market.tick_spacing != V3_TICK_SPACING
+        || market.mint_count == 0
+        || market.mint_count != market.positions.len()
+        || market.positions.is_empty()
+        || market.receipt_end_sqrt_price_x96 == U256::ZERO
+        || policy.amount_in == U256::ZERO
+        || policy.max_amount_in == U256::ZERO
+        || policy.amount_in > policy.max_amount_in
+        || policy.slippage_bps >= BPS_DENOMINATOR
+        || quote.entry.amount_in != policy.amount_in
+        || quote.entry.slippage_bps != policy.slippage_bps
+        || quote.full_position_exit.slippage_bps != policy.slippage_bps
+    {
+        return Err(V3ReceiptQuoteError::QuoteReplayMismatch);
+    }
+    match quote.launchpad {
+        LaunchpadId::Bow if market.restriction_end_block.is_some() => {
+            return Err(V3ReceiptQuoteError::QuoteReplayMismatch);
+        }
+        LaunchpadId::LaunchHoodV3
+            if market
+                .restriction_end_block
+                .is_none_or(|block| block == U256::ZERO) =>
+        {
+            return Err(V3ReceiptQuoteError::QuoteReplayMismatch);
+        }
+        _ => {}
+    }
+    let (token0, token1) = sorted_pair(market.token, WETH)?;
+    if predict_v3_pool_address(
+        UNISWAP_V3_FACTORY,
+        token0,
+        token1,
+        V3_FEE,
+        UNISWAP_V3_POOL_INIT_CODE_KECCAK256,
+    ) != market.pool
+    {
+        return Err(V3ReceiptQuoteError::QuoteReplayMismatch);
+    }
+    let mut state = V3PoolState::new(
+        market.pool,
+        token0,
+        token1,
+        market.fee,
+        market.tick_spacing,
+        market.receipt_end_sqrt_price_x96,
+        market.receipt_end_tick,
+        0,
+    )?;
+    let mut previous_log_index = None;
+    for position in &market.positions {
+        if position.log_index <= market.initialize_log_index
+            || position.log_index >= market.launch_log_index
+            || previous_log_index.is_some_and(|previous| position.log_index <= previous)
+        {
+            return Err(V3ReceiptQuoteError::QuoteReplayMismatch);
+        }
+        state.add_position(position.tick_lower, position.tick_upper, position.liquidity)?;
+        previous_log_index = Some(position.log_index);
+    }
+    if state.liquidity != market.receipt_end_liquidity {
+        return Err(V3ReceiptQuoteError::QuoteReplayMismatch);
+    }
+    let entry = state.quote_exact_input(WETH, policy.amount_in, None)?;
+    validate_complete_quote(&entry)?;
+    if quote.entry.expected_output != entry.amount_out
+        || quote.entry.min_receive != apply_slippage(entry.amount_out, policy.slippage_bps)?
+        || quote.entry.state_after != entry
+    {
+        return Err(V3ReceiptQuoteError::QuoteReplayMismatch);
+    }
+    state.set_observation(
+        entry.sqrt_price_x96_after,
+        entry.tick_after,
+        entry.liquidity_after,
+    )?;
+    let exit = state.quote_exact_input(market.token, entry.amount_out, None)?;
+    validate_complete_quote(&exit)?;
+    let expected_round_trip = exit
+        .amount_out
+        .checked_mul(U256::from(BPS_DENOMINATOR))
+        .ok_or(V3ReceiptQuoteError::QuoteReplayMismatch)?
+        / policy.amount_in;
+    if quote.full_position_exit.amount_in != entry.amount_out
+        || quote.full_position_exit.expected_output != exit.amount_out
+        || quote.full_position_exit.min_receive
+            != apply_slippage(exit.amount_out, policy.slippage_bps)?
+        || quote.full_position_exit.state_after != exit
+        || quote.simulated_round_trip_return_bps != expected_round_trip
+    {
+        return Err(V3ReceiptQuoteError::QuoteReplayMismatch);
+    }
+    Ok(())
 }
 
 fn validate_receipt_and_policy(
@@ -877,6 +1050,27 @@ mod tests {
             Some(U256::from(0x185d295_u64))
         );
         assert!(quote.full_position_exit.expected_output < quote.entry.amount_in);
+        validate_v3_quote_replay(&quote, policy()).unwrap();
+    }
+
+    #[test]
+    fn serialized_live_quote_replay_rejects_output_state_and_position_tampering() {
+        let (transaction, receipt) = bow_payable_fixture();
+        let quote =
+            quote_v3_launch_receipt(&transaction, &receipt, LaunchpadId::Bow, policy()).unwrap();
+        validate_v3_quote_replay(&quote, policy()).unwrap();
+
+        let mut output = quote.clone();
+        output.entry.expected_output += U256::from(1_u8);
+        output.entry.state_after.amount_out = output.entry.expected_output;
+        assert!(matches!(
+            validate_v3_quote_replay(&output, policy()),
+            Err(V3ReceiptQuoteError::QuoteReplayMismatch)
+        ));
+
+        let mut position = quote;
+        position.market.positions[0].liquidity += 1;
+        assert!(validate_v3_quote_replay(&position, policy()).is_err());
     }
 
     #[test]

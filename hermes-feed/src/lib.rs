@@ -7,6 +7,7 @@ pub mod clanker_receipt_quote;
 pub mod copy_observation;
 pub mod copy_policy;
 pub mod decoder;
+pub mod eip7702_self_batch;
 pub mod evidence_provenance;
 pub mod feed;
 pub mod flap_abi;
@@ -78,6 +79,11 @@ pub use decoder::{
     Candidate, DecodeError, DecodeReport, FeedDecoder, Filter, TransactionContext,
     TransactionFingerprint,
 };
+pub use eip7702_self_batch::{
+    Eip7702ObservedDelegation, Eip7702SelfBatchExpectedPins, Eip7702SelfBatchPons,
+    Eip7702SelfBatchProvenance, Eip7702SelfBatchReject, decode_pons_eip7702_self_batch,
+    validate_pons_eip7702_reconciliation,
+};
 pub use hood_receipt_quote::{
     HOOD_GRADUATED_TOPIC, HOOD_MIGRATED_TOPIC, HOOD_TOKEN_CREATED_TOPIC, HOOD_TRADE_TOPIC,
     HoodExpectedProfile, HoodIdentityRole, HoodMigrationEvidence, HoodMigrationLogOrderEvidence,
@@ -147,7 +153,8 @@ pub use pons::{
 };
 pub use pons_receipt_quote::{
     PonsMarketEvidence, PonsPaperSwapQuote, PonsQuoteError, PonsQuotePolicy, PonsReceiptPaperQuote,
-    PonsStateVersion, quote_pons_launch_receipt,
+    PonsStateVersion, quote_pons_eip7702_provenance_receipt, quote_pons_eip7702_self_batch_receipt,
+    quote_pons_launch_receipt,
 };
 pub use probe::{FrameReport, SequenceObservation, SequenceTracker};
 pub use rpc::{FactoryBootstrap, SyncUpdate, V2SnapshotClient};

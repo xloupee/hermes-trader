@@ -13,7 +13,7 @@ use hermes_feed::evidence_provenance::{
     read_json_with_keccak, verify_expected_self_keccak256,
 };
 use hermes_feed::flap_abi::{decode_flap_token_bought, decode_flap_token_created};
-use hermes_feed::launchpad_adapter::{ActionKind, LaunchpadId};
+use hermes_feed::launchpad_adapter::{ActionKind, LaunchpadId, WrapperKind};
 use hermes_feed::launchpad_adapters::{
     CLANKER_FACTORY, CLANKER_TOKEN_CREATED_TOPIC, DOPPLER_CREATE_EMITTER, DOPPLER_CREATE_TOPIC,
     KLIK_FACTORY, KLIK_TOKEN_CREATED_TOPIC,
@@ -38,12 +38,13 @@ use hermes_feed::robinhood::{
 use hermes_feed::tier2_curve::HOOD_FACTORY;
 use hermes_feed::{
     BankrDopplerExpectedProfile, BankrDopplerQuotePolicy, BankrDopplerReceiptPaperQuote,
-    ClankerQuotePolicy, ClankerReceiptPaperQuote, ClankerV4ExpectedProfile, HoodExpectedProfile,
+    ClankerQuotePolicy, ClankerReceiptPaperQuote, ClankerV4ExpectedProfile,
+    Eip7702SelfBatchExpectedPins, Eip7702SelfBatchProvenance, HoodExpectedProfile,
     HoodMigrationEvidence, HoodQuotePolicy, HoodReceiptPaperQuote, NoxaRpcClient, PonsQuotePolicy,
     PonsReceiptPaperQuote, V3ReceiptPaperQuote, V3ReceiptQuotePolicy,
     quote_bankr_doppler_launch_receipt_at_receipt_block, quote_clanker_launch_receipt,
-    quote_hood_curve_receipt, quote_pons_launch_receipt, quote_v3_launch_receipt,
-    verify_hood_graduation_receipt,
+    quote_hood_curve_receipt, quote_pons_eip7702_provenance_receipt, quote_pons_launch_receipt,
+    quote_v3_launch_receipt, verify_hood_graduation_receipt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -122,9 +123,11 @@ struct ObservedCandidate {
     observer_claim: bool,
     ground_truth_event: bool,
     ground_truth_hits: Vec<GroundTruthHit>,
+    wrapper: WrapperKind,
+    wrapper_provenance: Option<Eip7702SelfBatchProvenance>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReconciliationRequest {
     tx_hash: B256,
@@ -134,6 +137,10 @@ struct ReconciliationRequest {
     l1_timestamp: u64,
     evidence_source: EvidenceSource,
     initial_decision_dependency: bool,
+    #[serde(default = "direct_wrapper")]
+    wrapper: WrapperKind,
+    #[serde(default)]
+    wrapper_provenance: Option<Eip7702SelfBatchProvenance>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -149,6 +156,12 @@ struct ObservationIdentity {
     feed_sequence: u64,
     l1_block_number: u64,
     l1_timestamp: u64,
+    #[serde(default = "direct_wrapper")]
+    wrapper: WrapperKind,
+}
+
+const fn direct_wrapper() -> WrapperKind {
+    WrapperKind::Direct
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -254,6 +267,7 @@ struct ReconcileProfiles {
     clanker: Option<ClankerV4ExpectedProfile>,
     bankr: Option<BankrDopplerExpectedProfile>,
     pons: hermes_feed::PonsExpectedProfile,
+    pons_eip7702: Option<Eip7702SelfBatchExpectedPins>,
     hood: HoodExpectedProfile,
 }
 
@@ -340,6 +354,7 @@ async fn main() -> Result<()> {
         clanker: clanker_profile,
         bankr: bankr_profile,
         pons: pons_profile,
+        pons_eip7702: expected.pons_eip7702_self_batch.clone(),
         hood: hood_profile.clone(),
     };
     let rpc = NoxaRpcClient::with_url(args.rpc_url)?;
@@ -517,8 +532,32 @@ fn read_observer_input_from_reader(
             if request.feed_sequence != observation.feed_sequence
                 || request.l1_block_number != observation.l1_block_number
                 || request.l1_timestamp != observation.l1_timestamp
+                || request.wrapper != observation.wrapper
             {
                 bail!("reconciliation request {key:?} feed provenance disagrees with observation");
+            }
+            match request.wrapper {
+                WrapperKind::Eip7702SelfBatch => {
+                    let valid = request.launchpad == LaunchpadId::Pons
+                        && request
+                            .wrapper_provenance
+                            .as_ref()
+                            .is_some_and(|provenance| {
+                                Eip7702SelfBatchExpectedPins::production()
+                                    .validate_provenance(provenance)
+                                    .is_ok()
+                            });
+                    if !valid {
+                        bail!("reconciliation request {key:?} has incomplete EIP-7702 provenance");
+                    }
+                }
+                WrapperKind::Direct | WrapperKind::Erc4337 | WrapperKind::Multicall => {
+                    if request.wrapper_provenance.is_some() {
+                        bail!(
+                            "reconciliation request {key:?} attaches EIP-7702 provenance to the wrong wrapper"
+                        );
+                    }
+                }
             }
             if !requested_keys.insert(key) {
                 bail!("duplicate reconciliation request {key:?}");
@@ -529,6 +568,8 @@ fn read_observer_input_from_reader(
                 observer_claim: true,
                 ground_truth_event: false,
                 ground_truth_hits: Vec::new(),
+                wrapper: request.wrapper,
+                wrapper_provenance: request.wrapper_provenance,
             };
             let key = (candidate.tx_hash, candidate.launchpad);
             if candidates.insert(key, candidate).is_some() {
@@ -649,6 +690,8 @@ async fn augment_with_ground_truth(
                 observer_claim: false,
                 ground_truth_event: true,
                 ground_truth_hits: vec![hit],
+                wrapper: WrapperKind::Direct,
+                wrapper_provenance: None,
             });
     }
     let stable_start = rpc.block_by_number(scan.start_head).await?;
@@ -837,8 +880,15 @@ async fn reconcile_candidate(
                     .transaction_by_hash(candidate.tx_hash)
                     .await?
                     .with_context(|| format!("missing transaction {}", candidate.tx_hash))?;
-                let outcome =
-                    strict_pons_reconciliation(&transaction, &receipt, profiles.pons, quote_policy);
+                let outcome = strict_pons_reconciliation(
+                    &transaction,
+                    &receipt,
+                    candidate.wrapper,
+                    candidate.wrapper_provenance.as_ref(),
+                    profiles.pons,
+                    profiles.pons_eip7702.as_ref(),
+                    quote_policy,
+                );
                 pons_generation = outcome.generation;
                 pons_quote = outcome.quote;
                 protocol_blocker = outcome.blocker;
@@ -1048,22 +1098,38 @@ fn validate_ground_truth_receipt_binding(
 fn strict_pons_reconciliation(
     transaction: &hermes_feed::RobinhoodTransaction,
     receipt: &hermes_feed::NoxaReceipt,
+    wrapper: WrapperKind,
+    wrapper_provenance: Option<&Eip7702SelfBatchProvenance>,
     expected_profile: hermes_feed::PonsExpectedProfile,
+    expected_eip7702: Option<&Eip7702SelfBatchExpectedPins>,
     policy: V3ReceiptQuotePolicy,
 ) -> PonsReconciliationOutcome {
     let generation = pons_receipt_generation(receipt);
     match generation {
         Some(hermes_feed::PonsGeneration::Current) => {
-            match quote_pons_launch_receipt(
-                transaction,
-                receipt,
-                expected_profile,
-                PonsQuotePolicy {
-                    amount_in: policy.amount_in,
-                    max_amount_in: policy.max_amount_in,
-                    slippage_bps: policy.slippage_bps,
+            let quote_policy = PonsQuotePolicy {
+                amount_in: policy.amount_in,
+                max_amount_in: policy.max_amount_in,
+                slippage_bps: policy.slippage_bps,
+            };
+            let quote = match wrapper {
+                WrapperKind::Direct if wrapper_provenance.is_none() => {
+                    quote_pons_launch_receipt(transaction, receipt, expected_profile, quote_policy)
+                }
+                WrapperKind::Eip7702SelfBatch => match (wrapper_provenance, expected_eip7702) {
+                    (Some(provenance), Some(expected)) => quote_pons_eip7702_provenance_receipt(
+                        transaction,
+                        receipt,
+                        provenance,
+                        expected,
+                        expected_profile,
+                        quote_policy,
+                    ),
+                    _ => Err(hermes_feed::PonsQuoteError::InvalidEnvelope),
                 },
-            ) {
+                _ => Err(hermes_feed::PonsQuoteError::InvalidEnvelope),
+            };
+            match quote {
                 Ok(quote) => PonsReconciliationOutcome {
                     generation,
                     quote: Some(quote),
@@ -1302,6 +1368,58 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("feed provenance disagrees")
+        );
+    }
+
+    #[test]
+    fn collector_deserializes_direct_and_exact_eip7702_requests_and_rejects_malformed_provenance() {
+        let direct = parse_observer_frame(observer_frame()).unwrap();
+        let direct_candidate = direct.candidates.values().next().unwrap();
+        assert_eq!(direct_candidate.wrapper, WrapperKind::Direct);
+        assert!(direct_candidate.wrapper_provenance.is_none());
+
+        let profile = Eip7702SelfBatchExpectedPins::production();
+        let provenance = profile.expected_provenance().unwrap();
+        let mut wrapped = json!({
+            "record_type": "launchpad_paper_frame",
+            "report": {
+                "observations": [{
+                    "tx_hash": profile.proof_transaction,
+                    "launchpad": "pons",
+                    "feed_sequence": 42,
+                    "l1_block_number": 25_549_554,
+                    "l1_timestamp": 1_784_256_986,
+                    "wrapper": "eip7702_self_batch"
+                }],
+                "reconciliation_requests": [{
+                    "tx_hash": profile.proof_transaction,
+                    "launchpad": "pons",
+                    "feed_sequence": 42,
+                    "l1_block_number": 25_549_554,
+                    "l1_timestamp": 1_784_256_986,
+                    "evidence_source": "independent_receipt_and_protocol_events",
+                    "initial_decision_dependency": false,
+                    "wrapper": "eip7702_self_batch",
+                    "wrapper_provenance": provenance
+                }]
+            }
+        });
+        let parsed = parse_observer_frame(wrapped.clone()).unwrap();
+        let candidate = parsed
+            .candidates
+            .get(&(profile.proof_transaction, LaunchpadId::Pons))
+            .unwrap();
+        assert_eq!(candidate.wrapper, WrapperKind::Eip7702SelfBatch);
+        assert_eq!(candidate.wrapper_provenance, Some(provenance.clone()));
+
+        *wrapped
+            .pointer_mut("/report/reconciliation_requests/0/wrapper_provenance/authority")
+            .unwrap() = json!(Address::with_last_byte(1));
+        assert!(
+            parse_observer_frame(wrapped)
+                .unwrap_err()
+                .to_string()
+                .contains("incomplete EIP-7702 provenance")
         );
     }
 
@@ -1587,6 +1705,8 @@ mod tests {
                 transaction_index: 3,
                 log: event.clone(),
             }],
+            wrapper: WrapperKind::Direct,
+            wrapper_provenance: None,
         };
         let receipt = NoxaReceipt {
             transaction_hash: tx_hash,
@@ -1647,6 +1767,8 @@ mod tests {
                     transaction_index: fixture.receipt.transaction_index,
                     log: event,
                 }],
+                wrapper: WrapperKind::Direct,
+                wrapper_provenance: None,
             };
             validate_ground_truth_receipt_binding(&candidate, &fixture.receipt).unwrap();
         }
@@ -1672,6 +1794,40 @@ mod tests {
     }
 
     #[test]
+    fn collector_dispatches_exact_clean4_eip7702_proof_to_wrapper_quote() {
+        let fixture: PonsLiveFixture = serde_json::from_str(include_str!(
+            "../../tests/fixtures/pons-eip7702-self-batch-clean4-proof.json"
+        ))
+        .unwrap();
+        let profile = Eip7702SelfBatchExpectedPins::production();
+        let provenance = profile.expected_provenance().unwrap();
+        let outcome = strict_pons_reconciliation(
+            &fixture.transaction,
+            &fixture.receipt,
+            WrapperKind::Eip7702SelfBatch,
+            Some(&provenance),
+            hermes_feed::PonsExpectedProfile::production(),
+            Some(&profile),
+            V3ReceiptQuotePolicy {
+                amount_in: U256::from(1_000_000_000_000_000_u64),
+                max_amount_in: U256::from(10_000_000_000_000_000_u64),
+                slippage_bps: 100,
+            },
+        );
+        assert_eq!(
+            outcome.generation,
+            Some(hermes_feed::PonsGeneration::Current)
+        );
+        assert!(outcome.blocker.is_none());
+        let quote = outcome.quote.unwrap();
+        assert_eq!(quote.wrapper_provenance, Some(provenance));
+        assert!(quote.entry.expected_output > U256::ZERO);
+        assert!(quote.full_position_exit.expected_output > U256::ZERO);
+        assert!(!quote.execution_eligible);
+        assert!(!quote.broadcast);
+    }
+
+    #[test]
     fn collector_emits_quote_only_for_strict_current_pons_proof() {
         let fixture: PonsLiveFixture = serde_json::from_str(include_str!(
             "../../tests/fixtures/pons-current-live-proof.json"
@@ -1685,7 +1841,10 @@ mod tests {
         let outcome = strict_pons_reconciliation(
             &fixture.transaction,
             &fixture.receipt,
+            WrapperKind::Direct,
+            None,
             hermes_feed::PonsExpectedProfile::production(),
+            None,
             policy,
         );
         let event_identity = fixture
@@ -1717,7 +1876,10 @@ mod tests {
         let legacy = strict_pons_reconciliation(
             &legacy,
             &legacy_receipt,
+            WrapperKind::Direct,
+            None,
             hermes_feed::PonsExpectedProfile::production(),
+            None,
             policy,
         );
         assert_eq!(legacy.generation, Some(hermes_feed::PonsGeneration::Legacy));
@@ -1744,7 +1906,10 @@ mod tests {
         let outcome = strict_pons_reconciliation(
             &wrapped,
             &fixture.receipt,
+            WrapperKind::Direct,
+            None,
             hermes_feed::PonsExpectedProfile::production(),
+            None,
             policy,
         );
 
@@ -1786,7 +1951,10 @@ mod tests {
         let outcome = strict_pons_reconciliation(
             &fixture.transaction,
             &mixed_receipt,
+            WrapperKind::Direct,
+            None,
             hermes_feed::PonsExpectedProfile::production(),
+            None,
             policy,
         );
 

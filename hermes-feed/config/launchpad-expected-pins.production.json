@@ -20,6 +20,20 @@
       {"address": "0x0bd7d308f8e1639fab988df18a8011f41eacad73", "code_bytes": 2202, "runtime_hash": "0x5706be52f64875fee65a2cec0d80e47a23d8793cbe85d214b48445e2d05f5353"}
     ]
   },
+  "pons_eip7702_self_batch": {
+    "account": "0xfb3538b3fac2cc5ffc582446c55875a889abd146",
+    "implementation": "0xdc44136e7ca3509a73fc6c22b6a6bd302bf9a1e2",
+    "designator_hash": "0x9bdfa4cdd2727209e60a7bbb51630848fd4abafc4f612d59fde7018262fa23f3",
+    "implementation_runtime_hash": "0x6d7379e6220b87ceeade4a4e069c6a5ca4636fc228a0c948a0c87177860f3baa",
+    "authorization_nonce": 15,
+    "proof_transaction": "0x7a13c94f90ddaa7d35d639f046f30a44d1d9b5fe449550fd0b75e5e65a0fb4c6",
+    "proof_l2_block_number": 11777530,
+    "proof_l2_block_hash": "0xd8cda07d851127f7c500e598aaa63e8ec8a3d6b3bae39556d2e7c6ed92801fd6",
+    "proof_l1_block_number": 25549554,
+    "proof_block_timestamp": 1784256986,
+    "proof_transaction_index": 7,
+    "implementation_deployment_transaction": "0xf9e2b8d0c51a2357469ca8d4b06f2c4abc6d6456f843550e1f0ce0152c25a49e"
+  },
   "bow_factory_runtime_hash": "0x8d56cbcdf72dbf04ed8170d55878cc894997ccc54c2ab0aec782274eb7fe7a14",
   "launchhood_v3_factory_runtime_hash": "0x9b785dd157fe757dd427822df3e2bc3a1b6134f1d338b21c36c3de279bb67766",
   "launchhood_v3_token_implementation": {

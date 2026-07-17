@@ -20,6 +20,10 @@ use crate::clanker_receipt_quote::{
     CLANKER_DESCENDING_MEV_MODULE, CLANKER_EXTENSION, CLANKER_STATIC_HOOK, ClankerV4ExpectedProfile,
 };
 use crate::decoder::{DecodeError, DecodeReport, FeedDecoder, Filter};
+use crate::eip7702_self_batch::{
+    Eip7702ObservedDelegation, Eip7702SelfBatchExpectedPins, PONS_EIP7702_OUTER_SELECTOR,
+    decode_pons_eip7702_self_batch, pons_eip7702_designator,
+};
 use crate::feed::BroadcastMessage;
 use crate::flap_identity::{
     FLAP_PORTAL_IMPLEMENTATION, FLAP_PORTAL_IMPLEMENTATION_RUNTIME_KECCAK256, FLAP_PORTAL_PROXY,
@@ -105,6 +109,7 @@ pub struct LaunchpadCapability {
 pub enum LeaderOrigin {
     DirectSigner,
     Erc4337Sender,
+    Eip7702Authority,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -219,6 +224,9 @@ pub struct PaperReconciliationRequest {
     pub l1_timestamp: u64,
     pub evidence_source: &'static str,
     pub initial_decision_dependency: bool,
+    pub wrapper: WrapperKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrapper_provenance: Option<crate::eip7702_self_batch::Eip7702SelfBatchProvenance>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -261,6 +269,8 @@ pub struct PaperExpectedPins {
     #[serde(default)]
     pub reviewed_at: Option<PinBlockBoundary>,
     pub pons_v3: ConfiguredPonsV3,
+    #[serde(default)]
+    pub pons_eip7702_self_batch: Option<Eip7702SelfBatchExpectedPins>,
     pub bow_factory_runtime_hash: B256,
     pub launchhood_v3_factory_runtime_hash: B256,
     pub launchhood_v3_token_implementation: ConfiguredRuntimeIdentity,
@@ -548,6 +558,7 @@ pub struct PaperLaunchpadObserver {
     v3: V3LaunchAtBirthAdapter,
     pons: PonsAdapter,
     pons_profile: PonsExpectedProfile,
+    pons_eip7702_self_batch: Option<Eip7702SelfBatchExpectedPins>,
     curves: Tier2CurveAdapter,
     smart_accounts: Option<OwnedValidatedSmartAccountPins>,
     bankr_profile: Option<BankrDopplerExpectedProfile>,
@@ -720,6 +731,11 @@ fn paper_trade_plan(
 fn paper_reconciliation_request(
     observation: &PaperLaunchpadObservation,
 ) -> PaperReconciliationRequest {
+    let wrapper_provenance = observation
+        .detail
+        .get("eip7702_self_batch")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
     PaperReconciliationRequest {
         tx_hash: observation.tx_hash,
         launchpad: observation.launchpad,
@@ -734,6 +750,8 @@ fn paper_reconciliation_request(
             .expect("runtime attaches L1 timestamp before reconciliation"),
         evidence_source: "independent_receipt_and_protocol_events",
         initial_decision_dependency: false,
+        wrapper: observation.wrapper,
+        wrapper_provenance,
     }
 }
 
@@ -746,6 +764,45 @@ impl PaperLaunchpadObserver {
         validate_observed_pins(&observed)?;
         validate_launchhood_identity(&expected, &observed.pins)?;
         let pons_profile = expected.pons_v3.expected_profile()?;
+        let pons_eip7702_self_batch = expected
+            .pons_eip7702_self_batch
+            .as_ref()
+            .map(|profile| {
+                profile
+                    .validate()
+                    .map_err(|error| PaperObserverError::Startup(error.to_string()))?;
+                let account = find_observed_pin(
+                    &observed.pins,
+                    profile.account,
+                    Some(profile.implementation),
+                )
+                .ok_or_else(|| {
+                    PaperObserverError::Startup(
+                        "fresh startup snapshot is missing the reviewed Pons EIP-7702 designator"
+                            .into(),
+                    )
+                })?;
+                let implementation =
+                    find_observed_pin(&observed.pins, profile.implementation, None).ok_or_else(
+                        || {
+                            PaperObserverError::Startup(
+                                "fresh startup snapshot is missing the reviewed Pons EIP-7702 implementation"
+                                    .into(),
+                            )
+                        },
+                    )?;
+                if account.runtime_hash != profile.designator_hash
+                    || account.code_bytes != Some(23)
+                    || implementation.runtime_hash != profile.implementation_runtime_hash
+                    || implementation.code_bytes.is_none_or(|length| length == 0)
+                {
+                    return Err(PaperObserverError::Startup(
+                        "reviewed Pons EIP-7702 delegation pair is incomplete or drifted".into(),
+                    ));
+                }
+                Ok(profile.clone())
+            })
+            .transpose()?;
         let hood_profile = match (expected.provenance, expected.hood_curve.as_ref()) {
             (ExpectedPinsProvenance::ReviewedProtocolPins, Some(profile)) => {
                 profile
@@ -981,6 +1038,7 @@ impl PaperLaunchpadObserver {
             v3,
             pons,
             pons_profile,
+            pons_eip7702_self_batch,
             curves,
             smart_accounts,
             bankr_profile,
@@ -998,6 +1056,12 @@ impl PaperLaunchpadObserver {
                 destination == pins.entry_point().address
                     && selector == ENTRY_POINT_V07_HANDLE_OPS_SELECTOR
             })
+            || self
+                .pons_eip7702_self_batch
+                .as_ref()
+                .is_some_and(|profile| {
+                    destination == profile.account && selector == PONS_EIP7702_OUTER_SELECTOR
+                })
     }
 
     pub fn observe_transaction(
@@ -1016,6 +1080,42 @@ impl PaperLaunchpadObserver {
         let outer_signer = transaction
             .recover_signer()
             .map_err(|error| PaperObserverError::Signer(error.to_string()))?;
+        if let Some(profile) = &self.pons_eip7702_self_batch
+            && destination == profile.account
+            && selector(transaction.input()) == Some(PONS_EIP7702_OUTER_SELECTOR)
+        {
+            let designator = pons_eip7702_designator();
+            let decoded = decode_pons_eip7702_self_batch(
+                transaction,
+                Eip7702ObservedDelegation {
+                    account: profile.account,
+                    designator: &designator,
+                    designator_hash: profile.designator_hash,
+                    implementation: profile.implementation,
+                    implementation_runtime_hash: profile.implementation_runtime_hash,
+                },
+                profile,
+            )
+            .map_err(|error| PaperObserverError::Wrapper(error.to_string()))?;
+            let mut observation = self.observe_call(
+                decoded.tx_hash,
+                decoded.provenance.authority,
+                decoded.provenance.outer_signer,
+                LeaderOrigin::Eip7702Authority,
+                WrapperKind::Eip7702SelfBatch,
+                decoded.provenance.inner_factory,
+                decoded.provenance.inner_value,
+                &decoded.inner_calldata,
+            )?;
+            let detail = observation.detail.as_object_mut().ok_or_else(|| {
+                PaperObserverError::Adapter("Pons observation detail is not an object".into())
+            })?;
+            detail.insert(
+                "eip7702_self_batch".into(),
+                serde_json::to_value(decoded.provenance).expect("serializable EIP-7702 provenance"),
+            );
+            return Ok(Some(observation));
+        }
         if let Some(pins) = &self.smart_accounts
             && destination == pins.entry_point().address
         {
@@ -1466,7 +1566,11 @@ impl PaperLaunchpadObserver {
                 LaunchpadId::Pons,
                 enabled(LaunchpadId::Pons),
                 true,
-                wrappers(false),
+                if self.pons_eip7702_self_batch.is_some() {
+                    vec![WrapperKind::Direct, WrapperKind::Eip7702SelfBatch]
+                } else {
+                    wrappers(false)
+                },
                 crate::pons::PONS_EXECUTION_GAPS.to_vec(),
             ),
             capability(
@@ -1533,7 +1637,7 @@ fn paper_specs(
         pins.extend(shared_v3_pins());
         pins
     };
-    let pons_pins = pons_profile
+    let mut pons_pins: Vec<_> = pons_profile
         .identities()
         .into_iter()
         .map(|identity| {
@@ -1549,6 +1653,22 @@ fn paper_specs(
             )
         })
         .collect();
+    if let Some(profile) = &expected.pons_eip7702_self_batch {
+        pons_pins.extend([
+            contract_pin(
+                ContractRole::ProtocolDependency,
+                profile.account,
+                Some(profile.implementation),
+                profile.designator_hash,
+            ),
+            contract_pin(
+                ContractRole::Implementation,
+                profile.implementation,
+                None,
+                profile.implementation_runtime_hash,
+            ),
+        ]);
+    }
     let mut specs = vec![
         spec(
             LaunchpadId::Noxa,
@@ -1614,13 +1734,23 @@ fn paper_specs(
         spec(
             LaunchpadId::Pons,
             AdapterKind::V3LaunchAtBirth,
-            keys(
-                &[
-                    (PONS_LEGACY_FACTORY, PONS_LAUNCH_SELECTOR),
-                    (PONS_CURRENT_FACTORY, PONS_LAUNCH_SELECTOR),
-                ],
-                &direct,
-            ),
+            {
+                let mut pons_keys = keys(
+                    &[
+                        (PONS_LEGACY_FACTORY, PONS_LAUNCH_SELECTOR),
+                        (PONS_CURRENT_FACTORY, PONS_LAUNCH_SELECTOR),
+                    ],
+                    &direct,
+                );
+                if expected.pons_eip7702_self_batch.is_some() {
+                    pons_keys.push(DispatchKey {
+                        destination: PONS_CURRENT_FACTORY,
+                        selector: PONS_LAUNCH_SELECTOR,
+                        wrapper: WrapperKind::Eip7702SelfBatch,
+                    });
+                }
+                pons_keys
+            },
             pons_pins,
             RouteKind::V3SingleHop,
         ),
@@ -2315,6 +2445,7 @@ mod tests {
                     })
                     .collect(),
             },
+            pons_eip7702_self_batch: None,
             bow_factory_runtime_hash: crate::robinhood::BOW_LAUNCH_FACTORY_RUNTIME_KECCAK256,
             launchhood_v3_factory_runtime_hash: LAUNCHHOOD_V3_FACTORY_RUNTIME_KECCAK256,
             launchhood_v3_token_implementation: ConfiguredRuntimeIdentity {
@@ -2472,6 +2603,77 @@ mod tests {
         (expected, snapshot)
     }
 
+    #[test]
+    fn pons_eip7702_profile_is_a_distinct_inner_dispatch_and_requires_both_pins() {
+        let (mut expected, mut observed) = startup();
+        let profile = Eip7702SelfBatchExpectedPins::production();
+        expected.pons_eip7702_self_batch = Some(profile.clone());
+        observed.pins.extend([
+            ObservedRuntimePin {
+                address: profile.account,
+                implementation: Some(profile.implementation),
+                runtime_hash: profile.designator_hash,
+                code_bytes: Some(23),
+            },
+            ObservedRuntimePin {
+                address: profile.implementation,
+                implementation: None,
+                runtime_hash: profile.implementation_runtime_hash,
+                code_bytes: Some(1),
+            },
+        ]);
+        let observer =
+            PaperLaunchpadObserver::from_startup_snapshots(expected.clone(), observed.clone())
+                .unwrap();
+        let spec = observer
+            .registry
+            .dispatch(
+                Some(CHAIN_ID),
+                BoundedCall {
+                    destination: PONS_CURRENT_FACTORY,
+                    calldata: &[
+                        PONS_LAUNCH_SELECTOR[0],
+                        PONS_LAUNCH_SELECTOR[1],
+                        PONS_LAUNCH_SELECTOR[2],
+                        PONS_LAUNCH_SELECTOR[3],
+                    ],
+                    wrapper: WrapperKind::Eip7702SelfBatch,
+                    depth: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(spec.id, LaunchpadId::Pons);
+        assert!(
+            observer
+                .registry
+                .dispatch(
+                    Some(CHAIN_ID),
+                    BoundedCall {
+                        destination: profile.account,
+                        calldata: &PONS_EIP7702_OUTER_SELECTOR,
+                        wrapper: WrapperKind::Eip7702SelfBatch,
+                        depth: 1,
+                    },
+                )
+                .is_err()
+        );
+        let pons = observer
+            .capabilities()
+            .into_iter()
+            .find(|capability| capability.launchpad == LaunchpadId::Pons)
+            .unwrap();
+        assert_eq!(
+            pons.wrappers,
+            vec![WrapperKind::Direct, WrapperKind::Eip7702SelfBatch]
+        );
+        assert!(!pons.live_execution_enabled);
+
+        observed
+            .pins
+            .retain(|pin| pin.address != profile.implementation);
+        assert!(PaperLaunchpadObserver::from_startup_snapshots(expected, observed).is_err());
+    }
+
     fn observed(
         address: Address,
         implementation: Option<Address>,
@@ -2608,6 +2810,53 @@ mod tests {
         assert_eq!(report.reconciliation_requests.len(), 1);
         assert_eq!(report.reconciliation_requests[0].feed_sequence, 42);
         assert!(!report.reconciliation_requests[0].initial_decision_dependency);
+    }
+
+    #[test]
+    fn clean4_type4_proof_reaches_frame_and_preserves_reconciliation_provenance() {
+        let (mut expected, mut observed) = startup();
+        let profile = Eip7702SelfBatchExpectedPins::production();
+        expected.pons_eip7702_self_batch = Some(profile.clone());
+        observed.pins.extend([
+            ObservedRuntimePin {
+                address: profile.account,
+                implementation: Some(profile.implementation),
+                runtime_hash: profile.designator_hash,
+                code_bytes: Some(23),
+            },
+            ObservedRuntimePin {
+                address: profile.implementation,
+                implementation: None,
+                runtime_hash: profile.implementation_runtime_hash,
+                code_bytes: Some(1),
+            },
+        ]);
+        let observer = PaperLaunchpadObserver::from_startup_snapshots(expected, observed).unwrap();
+        let transaction = crate::eip7702_self_batch::tests::clean4_proof_envelope();
+        let mut runtime = PaperFeedRuntime::new(observer);
+        let report = runtime.decode_received_at(&feed(&transaction), 1).unwrap();
+
+        assert!(report.rejections.is_empty());
+        assert_eq!(report.observations.len(), 1);
+        let observation = &report.observations[0];
+        assert_eq!(observation.launchpad, LaunchpadId::Pons);
+        assert_eq!(observation.leader_origin, LeaderOrigin::Eip7702Authority);
+        assert_eq!(observation.wrapper, WrapperKind::Eip7702SelfBatch);
+        assert_eq!(observation.leader, profile.account);
+        assert_eq!(observation.outer_signer, profile.account);
+        assert!(!observation.live_execution_enabled);
+        assert!(observation.detail.get("eip7702_self_batch").is_some());
+
+        assert_eq!(report.trade_plans.len(), 1);
+        assert!(!report.trade_plans[0].broadcast);
+        assert_eq!(report.reconciliation_requests.len(), 1);
+        let request = &report.reconciliation_requests[0];
+        assert_eq!(request.wrapper, WrapperKind::Eip7702SelfBatch);
+        let provenance = request.wrapper_provenance.as_ref().unwrap();
+        assert_eq!(provenance.authority, profile.account);
+        assert_eq!(provenance.self_target, profile.account);
+        assert_eq!(provenance.implementation, profile.implementation);
+        assert_eq!(provenance.designator_hash, profile.designator_hash);
     }
 
     #[test]

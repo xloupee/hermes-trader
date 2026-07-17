@@ -5,12 +5,19 @@
 //! topology, reconstructs the terminal pool state, and produces an independent
 //! fixed-size WETH entry plus immediate full-position exit.
 
+use alloy_consensus::TxEnvelope;
 use alloy_primitives::{Address, B256, I256, U256};
 use alloy_sol_types::SolEvent;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uniswap_v3_math::tick_math::get_sqrt_ratio_at_tick;
 
+use crate::eip7702_self_batch::{
+    Eip7702ObservedDelegation, Eip7702SelfBatchExpectedPins, Eip7702SelfBatchProvenance,
+    PONS_EIP7702_PROOF_BLOCK, PONS_EIP7702_PROOF_BLOCK_HASH, PONS_EIP7702_PROOF_TX,
+    PONS_EIP7702_PROOF_TX_INDEX, decode_pons_eip7702_self_batch,
+    validate_pons_eip7702_reconciliation,
+};
 use crate::launchpad_adapter::LaunchpadId;
 use crate::noxa_abi::{ReceiptLog, V3PoolEvent, decode_pool_created, decode_v3_pool_event};
 use crate::noxa_predict::predict_v3_pool_address;
@@ -179,6 +186,8 @@ pub struct PonsReceiptPaperQuote {
     pub state_version: PonsStateVersion,
     pub quote_source: String,
     pub sizing_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapper_provenance: Option<Eip7702SelfBatchProvenance>,
     pub market: PonsMarketEvidence,
     pub entry: PonsPaperSwapQuote,
     pub full_position_exit: PonsPaperSwapQuote,
@@ -517,6 +526,7 @@ pub fn quote_pons_launch_receipt(
         },
         quote_source: "confirmed_receipt_end_pons_v3_state".into(),
         sizing_source: "independent_fixed_tiny_weth_fresh_wallet_policy".into(),
+        wrapper_provenance: None,
         market: PonsMarketEvidence {
             generation: PonsGeneration::Current,
             leader: transaction.from,
@@ -590,6 +600,83 @@ pub fn quote_pons_launch_receipt(
                 .into(),
         broadcast: false,
     })
+}
+
+/// Reconcile the one reviewed type-4 self batch and independently quote its receipt-end state.
+/// The normalized inner call is created only after the complete outer provenance validates.
+pub fn quote_pons_eip7702_self_batch_receipt(
+    transaction: &TxEnvelope,
+    receipt: &NoxaReceipt,
+    observed_delegation: Eip7702ObservedDelegation<'_>,
+    expected_delegation: &Eip7702SelfBatchExpectedPins,
+    expected_pons: PonsExpectedProfile,
+    policy: PonsQuotePolicy,
+) -> Result<PonsReceiptPaperQuote, PonsQuoteError> {
+    if *transaction.tx_hash() != PONS_EIP7702_PROOF_TX
+        || receipt.transaction_hash != PONS_EIP7702_PROOF_TX
+        || receipt.block_hash != PONS_EIP7702_PROOF_BLOCK_HASH
+        || receipt.l2_block_number != PONS_EIP7702_PROOF_BLOCK
+        || receipt.transaction_index != PONS_EIP7702_PROOF_TX_INDEX
+        || !receipt.status
+    {
+        return Err(PonsQuoteError::InvalidEnvelope);
+    }
+    let decoded =
+        decode_pons_eip7702_self_batch(transaction, observed_delegation, expected_delegation)
+            .map_err(|_| PonsQuoteError::InvalidEnvelope)?;
+    let normalized = RobinhoodTransaction {
+        hash: decoded.tx_hash,
+        from: decoded.provenance.authority,
+        to: Some(decoded.provenance.inner_factory),
+        input: decoded.inner_calldata,
+        value: decoded.provenance.inner_value,
+        l2_block_number: Some(receipt.l2_block_number),
+        transaction_index: Some(receipt.transaction_index),
+    };
+    let mut quote = quote_pons_launch_receipt(&normalized, receipt, expected_pons, policy)?;
+    quote.wrapper_provenance = Some(decoded.provenance);
+    quote.quote_source =
+        "confirmed_receipt_end_pons_v3_state_after_reviewed_eip7702_self_batch".into();
+    Ok(quote)
+}
+
+/// Collector-side counterpart for an observer-validated wrapper. The RPC transaction is bound
+/// to the one reviewed proof hash and the complete serialized provenance is revalidated before
+/// the inner call is normalized for the independent receipt quote.
+pub fn quote_pons_eip7702_provenance_receipt(
+    transaction: &RobinhoodTransaction,
+    receipt: &NoxaReceipt,
+    provenance: &Eip7702SelfBatchProvenance,
+    expected_delegation: &Eip7702SelfBatchExpectedPins,
+    expected_pons: PonsExpectedProfile,
+    policy: PonsQuotePolicy,
+) -> Result<PonsReceiptPaperQuote, PonsQuoteError> {
+    if transaction.hash != PONS_EIP7702_PROOF_TX
+        || receipt.transaction_hash != PONS_EIP7702_PROOF_TX
+        || receipt.block_hash != PONS_EIP7702_PROOF_BLOCK_HASH
+        || receipt.l2_block_number != PONS_EIP7702_PROOF_BLOCK
+        || receipt.transaction_index != PONS_EIP7702_PROOF_TX_INDEX
+        || !receipt.status
+    {
+        return Err(PonsQuoteError::InvalidEnvelope);
+    }
+    let decoded =
+        validate_pons_eip7702_reconciliation(transaction, provenance, expected_delegation)
+            .map_err(|_| PonsQuoteError::InvalidEnvelope)?;
+    let normalized = RobinhoodTransaction {
+        hash: decoded.tx_hash,
+        from: decoded.provenance.authority,
+        to: Some(decoded.provenance.inner_factory),
+        input: decoded.inner_calldata,
+        value: decoded.provenance.inner_value,
+        l2_block_number: Some(receipt.l2_block_number),
+        transaction_index: Some(receipt.transaction_index),
+    };
+    let mut quote = quote_pons_launch_receipt(&normalized, receipt, expected_pons, policy)?;
+    quote.wrapper_provenance = Some(decoded.provenance);
+    quote.quote_source =
+        "confirmed_receipt_end_pons_v3_state_after_reviewed_eip7702_self_batch".into();
+    Ok(quote)
 }
 
 fn validate_envelope(

@@ -56,12 +56,13 @@ pub enum RouteKind {
     DopplerPermit2,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WrapperKind {
     Direct,
     Multicall,
     Erc4337,
+    Eip7702SelfBatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

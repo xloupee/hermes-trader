@@ -193,6 +193,13 @@ async fn main() -> Result<()> {
             .with_context(|| format!("decode expected pins {}", path.display()))
         })
         .transpose()?;
+    validate_historical_snapshot_output_mode(
+        args.verify_reviewed_boundary,
+        expected
+            .as_ref()
+            .is_some_and(|pins| pins.pons_eip7702_self_batch.is_some()),
+        args.snapshot_output.is_some(),
+    )?;
     if expected.is_some() && args.bankr_proof_tx != BANKR_PROOF_TX {
         bail!("reviewed expected-pin validation requires the canonical Bankr proof transaction");
     }
@@ -220,7 +227,15 @@ async fn main() -> Result<()> {
     let pinned_l2_block = anchor.l2_block_number;
     let observed_at = pin_boundary(&anchor);
 
-    let requests = pin_requests(expected.as_ref())?;
+    let mut requests = pin_requests(expected.as_ref())?;
+    if !args.verify_reviewed_boundary
+        && let Some(profile) = expected
+            .as_ref()
+            .and_then(|pins| pins.pons_eip7702_self_batch.as_ref())
+    {
+        requests.extend(pons_eip7702_pin_requests(profile)?);
+        requests = deduplicate_requests(requests)?;
+    }
     let mut pins = Vec::with_capacity(requests.len());
     let mut derived_implementations = HashSet::new();
     for request in requests {
@@ -306,7 +321,13 @@ async fn main() -> Result<()> {
     let proof = inspect_bankr_proof(&rpc, args.bankr_proof_tx).await?;
     let stable_anchor = rpc.block_by_number(pinned_l2_block).await?;
     ensure_stable_anchor(&anchor, &stable_anchor, "snapshot")?;
-    let expected_validation_passed = if let Some(expected) = expected {
+    let expected_validation_passed = if let Some(mut expected) = expected {
+        if args.verify_reviewed_boundary {
+            if let Some(profile) = expected.pons_eip7702_self_batch.as_ref() {
+                verify_pons_eip7702_review_boundary(&rpc, profile).await?;
+            }
+            expected.pons_eip7702_self_batch = None;
+        }
         PaperLaunchpadObserver::from_startup_snapshots(expected, snapshot.clone())?;
         true
     } else {
@@ -330,6 +351,17 @@ async fn main() -> Result<()> {
             rpc_metrics: rpc.metrics(),
         })?
     );
+    Ok(())
+}
+
+fn validate_historical_snapshot_output_mode(
+    verify_reviewed_boundary: bool,
+    has_multi_boundary_profile: bool,
+    has_snapshot_output: bool,
+) -> Result<()> {
+    if verify_reviewed_boundary && has_multi_boundary_profile && has_snapshot_output {
+        bail!("multi-boundary historical verification cannot emit one observer startup snapshot");
+    }
     Ok(())
 }
 
@@ -470,6 +502,84 @@ fn pin_requests(expected: Option<&PaperExpectedPins>) -> Result<Vec<PinRequest>>
     }
 
     deduplicate_requests(requests)
+}
+
+fn pons_eip7702_pin_requests(
+    profile: &hermes_feed::Eip7702SelfBatchExpectedPins,
+) -> Result<Vec<PinRequest>> {
+    profile.validate()?;
+    Ok(vec![
+        request(profile.account, Some(profile.implementation)),
+        request(profile.implementation, None),
+    ])
+}
+
+fn validate_pons_eip7702_review_boundary(
+    profile: &hermes_feed::Eip7702SelfBatchExpectedPins,
+    block: &hermes_feed::RobinhoodBlock,
+    account_code: &Bytes,
+    implementation_code: &Bytes,
+) -> Result<()> {
+    let implementation = if account_code.is_empty() {
+        None
+    } else {
+        Some(parse_eip7702_designator(account_code)?)
+    };
+    validate_pons_eip7702_review_boundary_evidence(
+        profile,
+        block,
+        account_code.len(),
+        implementation,
+        keccak256(account_code),
+        implementation_code.len(),
+        keccak256(implementation_code),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_pons_eip7702_review_boundary_evidence(
+    profile: &hermes_feed::Eip7702SelfBatchExpectedPins,
+    block: &hermes_feed::RobinhoodBlock,
+    account_code_bytes: usize,
+    designator_implementation: Option<Address>,
+    designator_hash: B256,
+    implementation_code_bytes: usize,
+    implementation_runtime_hash: B256,
+) -> Result<()> {
+    profile.validate()?;
+    if block.l2_block_number != profile.proof_l2_block_number
+        || block.hash != profile.proof_l2_block_hash
+        || block.l1_block_number != profile.proof_l1_block_number
+        || block.timestamp != profile.proof_block_timestamp
+    {
+        bail!("Pons EIP-7702 profile review boundary disagrees with canonical block identity");
+    }
+    if account_code_bytes == 0 || implementation_code_bytes == 0 {
+        bail!("Pons EIP-7702 reviewed delegation pair has empty runtime code");
+    }
+    if designator_implementation != Some(profile.implementation)
+        || designator_hash != profile.designator_hash
+        || implementation_runtime_hash != profile.implementation_runtime_hash
+    {
+        bail!("Pons EIP-7702 reviewed delegation pair drifted at its proof boundary");
+    }
+    Ok(())
+}
+
+async fn verify_pons_eip7702_review_boundary(
+    rpc: &NoxaRpcClient,
+    profile: &hermes_feed::Eip7702SelfBatchExpectedPins,
+) -> Result<()> {
+    let block = rpc.block_by_number(profile.proof_l2_block_number).await?;
+    let account_code = rpc
+        .code_at_l2_block(profile.account, profile.proof_l2_block_number)
+        .await?;
+    let implementation_code = rpc
+        .code_at_l2_block(profile.implementation, profile.proof_l2_block_number)
+        .await?;
+    validate_pons_eip7702_review_boundary(profile, &block, &account_code, &implementation_code)?;
+    let stable = rpc.block_by_number(profile.proof_l2_block_number).await?;
+    ensure_stable_anchor(&block, &stable, "Pons EIP-7702 reviewed profile")
 }
 
 fn deduplicate_requests(requests: Vec<PinRequest>) -> Result<Vec<PinRequest>> {
@@ -840,6 +950,8 @@ mod tests {
         .unwrap();
         let requests = pin_requests(Some(&expected)).unwrap();
         assert_eq!(requests.len(), 39);
+        let pons = expected.pons_eip7702_self_batch.as_ref().unwrap();
+        assert_eq!(pons_eip7702_pin_requests(pons).unwrap().len(), 2);
         assert_eq!(
             requests
                 .iter()
@@ -862,6 +974,57 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn pons_profile_uses_its_later_review_boundary_and_rejects_old_empty_account_state() {
+        let expected: PaperExpectedPins = serde_json::from_str(include_str!(
+            "../../config/launchpad-expected-pins.production.json"
+        ))
+        .unwrap();
+        let profile = expected.pons_eip7702_self_batch.as_ref().unwrap();
+        let proof_block = hermes_feed::RobinhoodBlock {
+            l2_block_number: profile.proof_l2_block_number,
+            l1_block_number: profile.proof_l1_block_number,
+            timestamp: profile.proof_block_timestamp,
+            hash: profile.proof_l2_block_hash,
+        };
+        validate_pons_eip7702_review_boundary_evidence(
+            profile,
+            &proof_block,
+            23,
+            Some(profile.implementation),
+            profile.designator_hash,
+            1,
+            profile.implementation_runtime_hash,
+        )
+        .unwrap();
+
+        let old_global_boundary = hermes_feed::RobinhoodBlock {
+            l2_block_number: expected.reviewed_at.unwrap().l2_block_number,
+            l1_block_number: expected.reviewed_at.unwrap().l1_block_number,
+            timestamp: expected.reviewed_at.unwrap().block_timestamp,
+            hash: expected.reviewed_at.unwrap().l2_block_hash,
+        };
+        assert!(
+            validate_pons_eip7702_review_boundary_evidence(
+                profile,
+                &old_global_boundary,
+                0,
+                None,
+                keccak256([]),
+                0,
+                keccak256([]),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn multi_boundary_historical_verifier_rejects_snapshot_output() {
+        assert!(validate_historical_snapshot_output_mode(true, true, true).is_err());
+        assert!(validate_historical_snapshot_output_mode(true, true, false).is_ok());
+        assert!(validate_historical_snapshot_output_mode(false, true, true).is_ok());
     }
 
     #[test]

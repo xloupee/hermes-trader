@@ -22,7 +22,10 @@ use hermes_feed::noxa_abi::{ReceiptLog, decode_token_launched};
 use hermes_feed::paper_observer::{
     PaperExpectedPins, PaperLaunchpadObserver, PaperObservedStartupSnapshot,
 };
-use hermes_feed::pons::{PONS_CURRENT_FACTORY, PONS_LEGACY_FACTORY, PONS_TOKEN_LAUNCHED_TOPIC};
+use hermes_feed::pons::{
+    PONS_CURRENT_FACTORY, PONS_LEGACY_DISCOVERY_BLOCKER, PONS_LEGACY_FACTORY,
+    PONS_TOKEN_LAUNCHED_TOPIC,
+};
 use hermes_feed::pons_receipt_quote::pons_launch_event_identity;
 use hermes_feed::robinhood::{
     ACTIVE_NOXA_LAUNCH_FACTORY, BOW_LAUNCH_FACTORY, CHAIN_ID, LAUNCHHOOD_V3_FACTORY,
@@ -988,9 +991,7 @@ fn strict_pons_reconciliation(
         Ok(None) => PonsReconciliationOutcome {
             generation,
             quote: None,
-            blocker: Some(
-                "legacy_pons_generation_is_discovery_only_without_strict_receipt_profile".into(),
-            ),
+            blocker: Some(PONS_LEGACY_DISCOVERY_BLOCKER.into()),
         },
         Err(error) => PonsReconciliationOutcome {
             generation,

@@ -15,6 +15,7 @@ use hermes_feed::paper_observer::{
     PaperExpectedPins, PaperFeedRuntime, PaperLaunchpadObserver, PaperObservedStartupSnapshot,
     PaperPlanPolicy,
 };
+use hermes_feed::pons::PONS_LEGACY_DISCOVERY_BLOCKER;
 use hermes_feed::{
     BankrCreateProfileVersion, BankrDopplerExpectedProfile, BankrDopplerReceiptPaperQuote,
     BankrEnvelopeKind, ClankerLiquidityProfile, ClankerQuotePolicy, ClankerReceiptPaperQuote,
@@ -2628,30 +2629,32 @@ fn reconciliation_metrics(
                 &mut action_matches,
                 &mut action_mismatches,
             );
-            compare_prediction(
-                claim.predicted_token,
-                record.token,
-                &mut token_eligible,
-                &mut token_missing,
-                &mut token_matches,
-                &mut token_mismatches,
-            );
-            compare_prediction(
-                claim.predicted_pool,
-                record.pool,
-                &mut pool_eligible,
-                &mut pool_missing,
-                &mut pool_matches,
-                &mut pool_mismatches,
-            );
-            compare_prediction(
-                claim.predicted_pool_id,
-                record.pool_id,
-                &mut pool_id_eligible,
-                &mut pool_id_missing,
-                &mut pool_id_matches,
-                &mut pool_id_mismatches,
-            );
+            if identity_prediction_applicable(record) {
+                compare_prediction(
+                    claim.predicted_token,
+                    record.token,
+                    &mut token_eligible,
+                    &mut token_missing,
+                    &mut token_matches,
+                    &mut token_mismatches,
+                );
+                compare_prediction(
+                    claim.predicted_pool,
+                    record.pool,
+                    &mut pool_eligible,
+                    &mut pool_missing,
+                    &mut pool_matches,
+                    &mut pool_mismatches,
+                );
+                compare_prediction(
+                    claim.predicted_pool_id,
+                    record.pool_id,
+                    &mut pool_id_eligible,
+                    &mut pool_id_missing,
+                    &mut pool_id_matches,
+                    &mut pool_id_mismatches,
+                );
+            }
         }
 
         let quote_eligible_keys = truth
@@ -2787,6 +2790,19 @@ fn reconciliation_metrics(
     Ok(rows)
 }
 
+/// Legacy Pons launches are admitted only to measure detector coverage. Their
+/// reviewed profile deliberately has neither receipt-free CREATE2 identity
+/// prediction nor strict quote semantics, so receipt identities are not a
+/// promotion-eligible prediction surface. Require the collector's complete,
+/// exact legacy classification before excluding them; ambiguous/current Pons
+/// evidence continues to fail closed as prediction-eligible.
+fn identity_prediction_applicable(record: &ReconciliationEvidence) -> bool {
+    !(record.launchpad == LaunchpadId::Pons
+        && record.pons_generation == Some(hermes_feed::PonsGeneration::Legacy)
+        && record.quote_status == QuoteStatus::NotApplicable
+        && record.protocol_blocker.as_deref() == Some(PONS_LEGACY_DISCOVERY_BLOCKER))
+}
+
 fn compare_prediction<T: Copy + Eq>(
     predicted: Option<T>,
     actual: Option<T>,
@@ -2823,7 +2839,10 @@ mod tests {
     use hermes_feed::launchpad_ground_truth::{
         BOW_LAUNCHED_SIGNATURE, HOOD_TOKEN_CREATED_SIGNATURE, LAUNCHHOOD_TOKEN_LAUNCHED_SIGNATURE,
     };
-    use hermes_feed::pons::{PONS_CURRENT_FACTORY, PONS_TOKEN_LAUNCHED_TOPIC};
+    use hermes_feed::pons::{
+        PONS_CURRENT_FACTORY, PONS_LEGACY_DISCOVERY_BLOCKER, PONS_LEGACY_FACTORY,
+        PONS_TOKEN_LAUNCHED_TOPIC,
+    };
     use hermes_feed::robinhood::{BOW_LAUNCH_FACTORY, LAUNCHHOOD_V3_FACTORY};
     use hermes_feed::tier2_curve::HOOD_FACTORY;
     use hermes_feed::{
@@ -3070,6 +3089,112 @@ mod tests {
         assert_eq!(bankr.missed_transactions, 1);
         assert_eq!(bankr.detector_misses, 0);
         assert_eq!(bankr.feed_coverage_misses, 1);
+    }
+
+    #[test]
+    fn legacy_pons_discovery_identity_is_not_promotion_eligible_but_current_stays_fail_closed() {
+        let key = (B256::with_last_byte(0x71), LaunchpadId::Pons);
+        let claim = ObserverClaim {
+            action: Some(ActionKind::Launch),
+            predicted_token: None,
+            predicted_pool: None,
+            predicted_pool_id: None,
+        };
+        let observed = ObservedOutputCandidates {
+            observer_latency_ns: HashMap::from([(key, 50)]),
+            feed_sequences: HashMap::from([(key, 7)]),
+            feed_transactions: HashMap::from([(key.0, 7)]),
+            claims: HashMap::from([(key, claim)]),
+            ..ObservedOutputCandidates::default()
+        };
+        let mut legacy = evidence_row(key, true, true, true, QuoteStatus::NotApplicable);
+        legacy.pons_generation = Some(hermes_feed::PonsGeneration::Legacy);
+        legacy.protocol_blocker = Some(PONS_LEGACY_DISCOVERY_BLOCKER.into());
+        legacy.ground_truth_hits[0].log.address = PONS_LEGACY_FACTORY;
+        let window = complete_window(1);
+        let promotion = PromotionValidations::default();
+
+        let metrics = reconciliation_metrics(
+            &observed,
+            std::slice::from_ref(&legacy),
+            Some(&window),
+            &promotion,
+        )
+        .unwrap();
+        let pons = metrics
+            .iter()
+            .find(|row| row.launchpad == LaunchpadId::Pons)
+            .unwrap();
+        assert_eq!(pons.confirmed_observations, 1);
+        assert_eq!(pons.quote_not_applicable, 1);
+        assert_eq!(pons.action_prediction_matches, 1);
+        assert_eq!(pons.token_prediction_eligible, 0);
+        assert_eq!(pons.token_prediction_missing, 0);
+        assert_eq!(pons.pool_prediction_eligible, 0);
+        assert_eq!(pons.pool_prediction_missing, 0);
+
+        let records = ReconciliationRecords {
+            evidence: vec![legacy],
+            ground_truth_window: Some(window.clone()),
+            ..ReconciliationRecords::default()
+        };
+        let readiness = readiness_windows(&records, &metrics, &promotion).unwrap();
+        let pons = readiness
+            .iter()
+            .find(|row| row.launchpad == LaunchpadId::Pons)
+            .unwrap();
+        assert_eq!(pons.identity_mismatches, 0);
+        assert_eq!(pons.profile_envelope_observations["current_generation"], 0);
+        assert_eq!(pons.quote_eligible_confirmed_observations, 0);
+
+        let mut ambiguous_legacy = records.evidence[0].clone();
+        ambiguous_legacy.protocol_blocker = None;
+        let ambiguous_metrics = reconciliation_metrics(
+            &observed,
+            std::slice::from_ref(&ambiguous_legacy),
+            Some(&window),
+            &promotion,
+        )
+        .unwrap();
+        let ambiguous_pons = ambiguous_metrics
+            .iter()
+            .find(|row| row.launchpad == LaunchpadId::Pons)
+            .unwrap();
+        assert_eq!(ambiguous_pons.token_prediction_missing, 1);
+        assert_eq!(ambiguous_pons.pool_prediction_missing, 1);
+
+        let mut current = evidence_row(key, true, true, true, QuoteStatus::Blocked);
+        current.protocol_blocker = Some("pons_quote_error:strict_current_profile_rejected".into());
+        let current_metrics = reconciliation_metrics(
+            &observed,
+            std::slice::from_ref(&current),
+            Some(&window),
+            &promotion,
+        )
+        .unwrap();
+        let current_pons = current_metrics
+            .iter()
+            .find(|row| row.launchpad == LaunchpadId::Pons)
+            .unwrap();
+        assert_eq!(current_pons.token_prediction_eligible, 1);
+        assert_eq!(current_pons.token_prediction_missing, 1);
+        assert_eq!(current_pons.pool_prediction_eligible, 1);
+        assert_eq!(current_pons.pool_prediction_missing, 1);
+        let current_records = ReconciliationRecords {
+            evidence: vec![current],
+            ground_truth_window: Some(window),
+            ..ReconciliationRecords::default()
+        };
+        let current_readiness =
+            readiness_windows(&current_records, &current_metrics, &promotion).unwrap();
+        assert_eq!(
+            current_readiness
+                .iter()
+                .find(|row| row.launchpad == LaunchpadId::Pons)
+                .unwrap()
+                .identity_mismatches,
+            2
+        );
     }
 
     #[test]

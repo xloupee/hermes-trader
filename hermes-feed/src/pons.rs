@@ -25,6 +25,8 @@ pub const PONS_TICK_SPACING: i32 = 200;
 pub const PONS_LAUNCH_CONFIG_ID: u64 = 0;
 pub const PONS_DEX_CONFIG_ID: u64 = 0;
 pub const PONS_LAUNCH_SELECTOR: [u8; 4] = [0x68, 0x63, 0x99, 0xcb];
+pub const PONS_LEGACY_DISCOVERY_BLOCKER: &str =
+    "legacy_pons_generation_is_discovery_only_without_strict_receipt_profile";
 const MAX_PONS_CALLDATA_BYTES: usize = 64 * 1024;
 const MAX_PONS_DYNAMIC_STRING_BYTES: usize = 4 * 1024;
 

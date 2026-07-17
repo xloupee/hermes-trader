@@ -273,6 +273,7 @@ chmod 600 "$raw_feed" "$observer_output" "$probe_metrics" \
 "$readiness_bin" \
   --expected-self-keccak256 "$readiness_digest" \
   --complete-session "$output_dir" \
+  --paper-bin "$paper_bin" \
   --feed-keccak256 "$feed_digest" \
   --paper-keccak256 "$paper_digest" \
   --reconciler-keccak256 "$reconcile_digest" \

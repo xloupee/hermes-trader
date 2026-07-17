@@ -58,7 +58,10 @@ hermes-feed probe --record <mode-0600 FIFO>   (stdout remains metrics only)
 The checked-in local runner enforces a mode-0600 FIFO, a mode-0700 output
 directory, separate raw-feed/observer/probe-metrics files, and distinct
 expected/observed pin documents. Phase outputs publish from `.partial` only on
-success, and a hash-bound completion manifest is written last:
+success. Before the hash-bound completion manifest is written last, the exact
+preflight-verified paper binary semantically replays raw observer input (only
+runtime timing fields are normalized) and byte-for-byte regenerates finalized
+output from canonical observer/reconciliation and frozen pin inputs:
 
 ```sh
 cargo build --release \

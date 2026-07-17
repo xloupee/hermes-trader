@@ -98,6 +98,7 @@ if [[ "$#" -eq 1 && "$1" == --print-self-digest ]]; then
 fi
 [[ "$1" == --expected-self-keccak256 && "$2" == 0x0000000000000000000000000000000000000000000000000000000000000005 && "$3" == --complete-session ]]
 output_dir=$4
+[[ "$5" == --paper-bin && "$6" == "$HERMES_LAUNCHPAD_PAPER_BIN" ]]
 printf '{"record_type":"launchpad_paper_session_completion","completed":true}\n' > "$output_dir/session-completion-manifest.json"
 chmod 600 "$output_dir/session-completion-manifest.json"
 SH

@@ -293,12 +293,13 @@ incomplete windows cannot increase the sample or per-profile totals. Error
 counters are conservatively accumulated over every submitted row, so discarded
 or overlapping evidence cannot hide an error.
 
-Promotion aggregation accepts only `live` rows with the same exact observer,
-reconciler, and finalizer binary tuple and the same independently reviewed
-expected-pin content hash. Missing provenance, replay rows, and mixed build or
-expected-pin inputs fail closed. Fresh startup snapshots intentionally have
-different content hashes across sessions; each hash is retained in aggregate
-output after startup validation instead of forcing reuse of a stale snapshot.
+Promotion aggregation accepts only `live` rows with the same exact feed,
+observer/finalizer, reconciler, chain-head, and readiness executable tuple and
+the same independently reviewed expected-pin content hash. Missing provenance,
+replay rows, and mixed build or expected-pin inputs fail closed. Fresh startup
+snapshots intentionally have different content hashes across sessions; each
+hash is retained in aggregate output after startup validation instead of
+forcing reuse of a stale snapshot.
 Existing pre-provenance readiness rows can still be decoded by the new schema
 but are explicitly ineligible for promotion and must not be backfilled by hand.
 Likewise, free-standing `--input` JSONL is diagnostic only and emits
@@ -313,12 +314,27 @@ recomputes an `--expected-self-keccak256` after exec, so replacing a pathname
 after launcher preflight fails closed. Probe state must be exactly `connected`
 then `coverage_closed`, without connection/read/disconnect errors.
 
+Before publishing that manifest, the readiness process launches the exact
+preflight-verified paper executable from `--paper-bin` twice after feed EOF. It
+replays canonical `raw-feed.jsonl` and requires ordered semantic equality with
+the observer JSONL after normalizing only the runtime-dependent
+`frame_decode_elapsed_ns`, `envelope_decode_ns`, and `observer_latency_ns`
+fields. It then regenerates the finalized JSONL from the frozen pins/snapshot,
+canonical observer output, and canonical reconciliation output and requires
+byte-for-byte equality. Both checks use private temporary outputs which are
+removed on success or failure. Thus an accidental pre-completion edit to a
+readiness count, profile, error counter, coverage field, or observer inventory
+prevents manifest publication.
+
 The observed snapshot boundary must precede the start anchor by no more than
-500 L2 blocks. Independent live sessions must use distinct observed-snapshot
-content hashes; reusing one startup snapshot cannot satisfy the window floor.
-This manifest is an integrity/completeness boundary for accidental edits and
-mixed artifacts. It is not cryptographic authentication against a malicious
-local writer who can replace evidence and regenerate its manifest.
+500 L2 blocks. Independent live sessions must have both distinct snapshot-file
+content hashes and distinct semantic `(l2_block_number, l2_block_hash)`
+boundaries; re-encoding one startup snapshot cannot satisfy the window floor.
+Under the documented non-malicious-local-writer model these regeneration and
+hash checks detect accidental edits, incomplete phases, and mixed artifacts.
+They are not cryptographic authentication and cannot prove origin or detect a
+malicious local writer that replaces the binaries, evidence, and manifest as a
+coordinated set.
 
 `quote_eligible_confirmed_observations` counts independently revalidated quote
 records. Profile and envelope counters are derived from those same typed quote

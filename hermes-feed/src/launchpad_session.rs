@@ -9,6 +9,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use alloy_primitives::B256;
 use anyhow::{Context, Result, bail};
@@ -69,7 +70,7 @@ pub struct SessionArtifact {
     pub bytes: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionBoundary {
     pub l2_block_number: u64,
@@ -96,20 +97,40 @@ pub struct ValidatedPaperSession {
     pub windows: Vec<LaunchpadReadinessWindow>,
     pub manifest_content_keccak256: B256,
     pub observed_snapshot_content_keccak256: B256,
+    pub snapshot_boundary: SessionBoundary,
+    pub executables: SessionExecutables,
 }
 
-pub fn ensure_distinct_observed_snapshots(digests: impl IntoIterator<Item = B256>) -> Result<()> {
-    let mut seen = HashSet::new();
-    for digest in digests {
-        if digest == B256::ZERO || !seen.insert(digest) {
-            bail!("independent live sessions reuse one observed startup snapshot digest");
+pub fn ensure_compatible_independent_sessions(sessions: &[ValidatedPaperSession]) -> Result<()> {
+    let Some(first) = sessions.first() else {
+        bail!("completed-session readiness requires at least one session");
+    };
+    let mut digests = HashSet::new();
+    let mut boundaries = HashSet::new();
+    for session in sessions {
+        if session.observed_snapshot_content_keccak256 == B256::ZERO
+            || !digests.insert(session.observed_snapshot_content_keccak256)
+            || !boundaries.insert(session.snapshot_boundary)
+        {
+            bail!(
+                "independent live sessions reuse observed startup snapshot bytes or one semantic block boundary"
+            );
+        }
+        if session.executables != first.executables {
+            bail!("completed live sessions use a mixed executable tuple");
         }
     }
     Ok(())
 }
 
-pub fn complete_session(directory: &Path, executables: SessionExecutables) -> Result<PathBuf> {
+pub fn complete_session(
+    directory: &Path,
+    executables: SessionExecutables,
+    paper_binary: &Path,
+) -> Result<PathBuf> {
     executables.validate()?;
+    validate_paper_binary(paper_binary, executables.paper_keccak256)?;
+    let paper_binary = fs::canonicalize(paper_binary).context("canonicalize paper executable")?;
     let manifest_path = directory.join(SESSION_MANIFEST_FILE);
     let partial_path = directory.join(format!("{SESSION_MANIFEST_FILE}.partial"));
     if manifest_path.exists() || partial_path.exists() {
@@ -132,6 +153,7 @@ pub fn complete_session(directory: &Path, executables: SessionExecutables) -> Re
     let snapshot_boundary = read_snapshot_boundary(directory)?;
     validate_snapshot_freshness(snapshot_boundary, start_boundary)?;
     validate_probe_metrics(&directory.join("probe-metrics.jsonl"))?;
+    independently_regenerate_outputs(directory, &paper_binary, executables.paper_keccak256)?;
     let windows = read_finalized_windows(&directory.join("launchpad-paper-finalized.jsonl"))?;
     validate_windows(
         &windows,
@@ -231,7 +253,169 @@ pub fn validate_completed_session(directory: &Path) -> Result<ValidatedPaperSess
             .get("observed-startup-snapshot.input.json")
             .expect("validated artifact set")
             .content_keccak256,
+        snapshot_boundary,
+        executables: manifest.executables,
     })
+}
+
+fn validate_paper_binary(path: &Path, expected_digest: B256) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect paper executable {}", path.display()))?;
+    if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        bail!("paper executable is not an executable regular file");
+    }
+    let (_, digest) = read_bytes_with_keccak(path, "paper executable")?;
+    if digest != expected_digest {
+        bail!("paper executable path does not match its preflight digest");
+    }
+    Ok(())
+}
+
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn independently_regenerate_outputs(
+    directory: &Path,
+    paper_binary: &Path,
+    paper_digest: B256,
+) -> Result<()> {
+    run_paper_regeneration(
+        directory,
+        paper_binary,
+        paper_digest,
+        PaperRegeneration {
+            description: "observer",
+            temporary_name: "launchpad-paper.observer-regeneration.partial",
+            canonical_name: "launchpad-paper.jsonl",
+            mode_args: &["--input", "raw-feed.jsonl"],
+            normalize_observer_timings: true,
+        },
+    )?;
+    run_paper_regeneration(
+        directory,
+        paper_binary,
+        paper_digest,
+        PaperRegeneration {
+            description: "finalizer",
+            temporary_name: "launchpad-paper.finalizer-regeneration.partial",
+            canonical_name: "launchpad-paper-finalized.jsonl",
+            mode_args: &[
+                "--observer-output-input",
+                "launchpad-paper.jsonl",
+                "--reconciliation-input",
+                "reconciliation-evidence.jsonl",
+            ],
+            normalize_observer_timings: false,
+        },
+    )
+}
+
+struct PaperRegeneration<'a> {
+    description: &'a str,
+    temporary_name: &'a str,
+    canonical_name: &'a str,
+    mode_args: &'a [&'a str],
+    normalize_observer_timings: bool,
+}
+
+fn run_paper_regeneration(
+    directory: &Path,
+    paper_binary: &Path,
+    paper_digest: B256,
+    regeneration: PaperRegeneration<'_>,
+) -> Result<()> {
+    let temporary_path = directory.join(regeneration.temporary_name);
+    let output_file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary_path)
+        .with_context(|| format!("create {} regeneration output", regeneration.description))?;
+    output_file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    let cleanup = RemoveOnDrop(temporary_path.clone());
+    let mut command = Command::new(paper_binary);
+    command
+        .current_dir(directory)
+        .arg("--expected-self-keccak256")
+        .arg(paper_digest.to_string())
+        .arg("--acquisition")
+        .arg("live")
+        .arg("--expected-pins")
+        .arg("expected-pins.input.json")
+        .arg("--observed-startup-snapshot")
+        .arg("observed-startup-snapshot.input.json")
+        .args(regeneration.mode_args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(output_file))
+        .stderr(Stdio::piped());
+    let output = command.output().with_context(|| {
+        format!(
+            "execute independent paper {} regeneration",
+            regeneration.description
+        )
+    })?;
+    if !output.status.success() {
+        bail!(
+            "independent paper {} regeneration failed: {}",
+            regeneration.description,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let regenerated = fs::read(&temporary_path)?;
+    let canonical = fs::read(directory.join(regeneration.canonical_name))?;
+    let matches = if regeneration.normalize_observer_timings {
+        normalized_observer_jsonl(&regenerated)? == normalized_observer_jsonl(&canonical)?
+    } else {
+        regenerated == canonical
+    };
+    if !matches {
+        bail!(
+            "canonical {} output does not match independent regeneration",
+            regeneration.description
+        );
+    }
+    drop(cleanup);
+    Ok(())
+}
+
+fn normalized_observer_jsonl(bytes: &[u8]) -> Result<Vec<Value>> {
+    let text = std::str::from_utf8(bytes).context("observer output is not UTF-8")?;
+    text.lines()
+        .enumerate()
+        .map(|(index, line)| {
+            let mut value: Value = serde_json::from_str(line)
+                .with_context(|| format!("decode observer output line {}", index + 1))?;
+            normalize_observer_timings(&mut value);
+            Ok(value)
+        })
+        .collect()
+}
+
+fn normalize_observer_timings(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            for (name, field) in fields {
+                if matches!(
+                    name.as_str(),
+                    "frame_decode_elapsed_ns" | "envelope_decode_ns" | "observer_latency_ns"
+                ) {
+                    *field = Value::from(0);
+                } else {
+                    normalize_observer_timings(field);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                normalize_observer_timings(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn validate_private_regular_file(path: &Path) -> Result<()> {
@@ -395,10 +579,10 @@ mod tests {
     use crate::evidence_provenance::LaunchpadReadinessProvenance;
     use crate::launchpad_adapter::LaunchpadId;
 
-    fn executables() -> SessionExecutables {
+    fn executables(paper_keccak256: B256) -> SessionExecutables {
         SessionExecutables {
             feed_keccak256: B256::with_last_byte(1),
-            paper_keccak256: B256::with_last_byte(2),
+            paper_keccak256,
             reconciler_keccak256: B256::with_last_byte(3),
             chain_head_keccak256: B256::with_last_byte(4),
             readiness_keccak256: B256::with_last_byte(5),
@@ -416,13 +600,47 @@ mod tests {
         file.write_all(bytes).unwrap();
     }
 
-    fn session(snapshot_block: u64) -> TempDir {
+    struct TestSession {
+        directory: TempDir,
+        paper_binary: PathBuf,
+        executables: SessionExecutables,
+    }
+
+    impl TestSession {
+        fn path(&self) -> &Path {
+            self.directory.path()
+        }
+
+        fn complete(&self) -> Result<PathBuf> {
+            complete_session(self.path(), self.executables.clone(), &self.paper_binary)
+        }
+    }
+
+    fn session(snapshot_block: u64) -> TestSession {
+        session_with_snapshot_encoding(snapshot_block, false)
+    }
+
+    fn session_with_snapshot_encoding(snapshot_block: u64, pretty_snapshot: bool) -> TestSession {
         let directory = tempfile::tempdir().unwrap();
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let paper_binary = directory.path().join("paper-fixture.sh");
+        fs::write(
+            &paper_binary,
+            b"#!/bin/sh\nset -eu\nmode=observer\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--observer-output-input\" ]; then mode=finalizer; fi\ndone\nif [ \"$mode\" = finalizer ]; then\n  exec cat .expected-finalized-fixture\nelse\n  exec cat .expected-observer-fixture\nfi\n",
+        )
+        .unwrap();
+        fs::set_permissions(&paper_binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let paper_digest = keccak256(fs::read(&paper_binary).unwrap());
+        let executables = executables(paper_digest);
         write_private(&directory.path().join("raw-feed.jsonl"), b"{}\n");
+        let observer_bytes = b"{\"record_type\":\"launchpad_paper_capabilities\"}\n";
         write_private(
             &directory.path().join("launchpad-paper.jsonl"),
-            b"{\"record_type\":\"launchpad_paper_capabilities\"}\n",
+            observer_bytes,
+        );
+        write_private(
+            &directory.path().join(".expected-observer-fixture"),
+            observer_bytes,
         );
         write_private(
             &directory.path().join("probe-metrics.jsonl"),
@@ -448,11 +666,17 @@ mod tests {
             },
             "pins": []
         });
+        let mut snapshot_bytes = if pretty_snapshot {
+            serde_json::to_vec_pretty(&snapshot).unwrap()
+        } else {
+            serde_json::to_vec(&snapshot).unwrap()
+        };
+        snapshot_bytes.push(b'\n');
         write_private(
             &directory
                 .path()
                 .join("observed-startup-snapshot.input.json"),
-            format!("{snapshot}\n").as_bytes(),
+            &snapshot_bytes,
         );
         let start_hash = B256::with_last_byte(10);
         let cutoff_hash = B256::with_last_byte(11);
@@ -482,9 +706,9 @@ mod tests {
             observed_snapshot_content_keccak256: keccak256(observed_bytes),
             observed_snapshot_l2_block_number: snapshot_block,
             observed_snapshot_l2_block_hash: snapshot_hash,
-            observer_paper_binary_keccak256: executables().paper_keccak256,
-            reconciler_binary_keccak256: executables().reconciler_keccak256,
-            finalizer_paper_binary_keccak256: executables().paper_keccak256,
+            observer_paper_binary_keccak256: executables.paper_keccak256,
+            reconciler_binary_keccak256: executables.reconciler_keccak256,
+            finalizer_paper_binary_keccak256: executables.paper_keccak256,
             observer_output_content_keccak256: observer_digest,
             reconciliation_output_content_keccak256: reconciliation_digest,
         };
@@ -523,16 +747,42 @@ mod tests {
             &directory.path().join("launchpad-paper-finalized.jsonl"),
             &finalized,
         );
-        directory
+        write_private(
+            &directory.path().join(".expected-finalized-fixture"),
+            &finalized,
+        );
+        TestSession {
+            directory,
+            paper_binary,
+            executables,
+        }
     }
 
     #[test]
     fn completed_manifest_binds_every_canonical_artifact_and_window() {
         let directory = session(900);
-        complete_session(directory.path(), executables()).unwrap();
+        directory.complete().unwrap();
         let validated = validate_completed_session(directory.path()).unwrap();
         assert_eq!(validated.windows.len(), 6);
         assert_ne!(validated.manifest_content_keccak256, B256::ZERO);
+    }
+
+    #[test]
+    fn observer_replay_normalizes_only_documented_runtime_timings() {
+        let first = br#"{"record_type":"launchpad_paper_frame","report":{"frame_decode_elapsed_ns":1,"decode":{"envelope_decode_ns":2},"observations":[{"observer_latency_ns":3,"tx_hash":"0x01"}]}}
+"#;
+        let second = br#"{"record_type":"launchpad_paper_frame","report":{"frame_decode_elapsed_ns":90,"decode":{"envelope_decode_ns":91},"observations":[{"observer_latency_ns":92,"tx_hash":"0x01"}]}}
+"#;
+        let changed_identity = br#"{"record_type":"launchpad_paper_frame","report":{"frame_decode_elapsed_ns":90,"decode":{"envelope_decode_ns":91},"observations":[{"observer_latency_ns":92,"tx_hash":"0x02"}]}}
+"#;
+        assert_eq!(
+            normalized_observer_jsonl(first).unwrap(),
+            normalized_observer_jsonl(second).unwrap()
+        );
+        assert_ne!(
+            normalized_observer_jsonl(first).unwrap(),
+            normalized_observer_jsonl(changed_identity).unwrap()
+        );
     }
 
     #[test]
@@ -542,7 +792,7 @@ mod tests {
             ("coverage_end_l2_block", Value::from(999)),
         ] {
             let directory = session(900);
-            complete_session(directory.path(), executables()).unwrap();
+            directory.complete().unwrap();
             let finalized_path = directory.path().join("launchpad-paper-finalized.jsonl");
             let mut rows = fs::read_to_string(&finalized_path)
                 .unwrap()
@@ -565,6 +815,63 @@ mod tests {
     }
 
     #[test]
+    fn precompletion_finalizer_and_observer_edits_fail_independent_regeneration() {
+        for (field, value) in [
+            ("quote_eligible_confirmed_observations", Value::from(100)),
+            (
+                "profile_envelope_observations",
+                serde_json::json!({"forged_profile": 1}),
+            ),
+            ("false_positives", Value::from(1)),
+            ("coverage_to_l2_block", Value::from(1099)),
+        ] {
+            let session = session(900);
+            let path = session.path().join("launchpad-paper-finalized.jsonl");
+            let mut rows = fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .collect::<Vec<_>>();
+            rows[0][field] = value;
+            fs::write(
+                &path,
+                rows.iter()
+                    .map(|row| format!("{row}\n"))
+                    .collect::<String>(),
+            )
+            .unwrap();
+            assert!(
+                session
+                    .complete()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("finalizer output does not match independent regeneration")
+            );
+            assert!(!session.path().join(SESSION_MANIFEST_FILE).exists());
+            assert!(
+                !session
+                    .path()
+                    .join("launchpad-paper.finalizer-regeneration.partial")
+                    .exists()
+            );
+        }
+
+        let session = session(900);
+        fs::write(
+            session.path().join("launchpad-paper.jsonl"),
+            b"{\"record_type\":\"launchpad_paper_capabilities\",\"forged\":true}\n",
+        )
+        .unwrap();
+        assert!(
+            session
+                .complete()
+                .unwrap_err()
+                .to_string()
+                .contains("observer output does not match independent regeneration")
+        );
+    }
+
+    #[test]
     fn missing_manifest_partial_finalizer_probe_error_and_stale_snapshot_fail_closed() {
         let no_manifest = session(900);
         assert!(validate_completed_session(no_manifest.path()).is_err());
@@ -577,7 +884,7 @@ mod tests {
                 .join("launchpad-paper-finalized.jsonl.partial"),
         )
         .unwrap();
-        assert!(complete_session(partial.path(), executables()).is_err());
+        assert!(partial.complete().is_err());
         assert!(!partial.path().join(SESSION_MANIFEST_FILE).exists());
 
         let probe_error = session(900);
@@ -586,11 +893,12 @@ mod tests {
             b"{\"state\":\"connected\"}\n{\"state\":\"read_error\"}\n{\"state\":\"coverage_closed\"}\n",
         )
         .unwrap();
-        assert!(complete_session(probe_error.path(), executables()).is_err());
+        assert!(probe_error.complete().is_err());
 
         let stale = session(1);
         assert!(
-            complete_session(stale.path(), executables())
+            stale
+                .complete()
                 .unwrap_err()
                 .to_string()
                 .contains("too stale")
@@ -598,9 +906,32 @@ mod tests {
     }
 
     #[test]
-    fn independent_sessions_cannot_reuse_one_snapshot_digest() {
-        let digest = B256::with_last_byte(1);
-        ensure_distinct_observed_snapshots([digest, B256::with_last_byte(2)]).unwrap();
-        assert!(ensure_distinct_observed_snapshots([digest, digest]).is_err());
+    fn independent_sessions_reject_reencoded_boundaries_and_mixed_executables() {
+        let first = session_with_snapshot_encoding(900, false);
+        let second = session_with_snapshot_encoding(900, true);
+        first.complete().unwrap();
+        second.complete().unwrap();
+        let first = validate_completed_session(first.path()).unwrap();
+        let second = validate_completed_session(second.path()).unwrap();
+        assert_ne!(
+            first.observed_snapshot_content_keccak256,
+            second.observed_snapshot_content_keccak256
+        );
+        assert_eq!(first.snapshot_boundary, second.snapshot_boundary);
+        assert!(ensure_compatible_independent_sessions(&[first, second]).is_err());
+
+        let first = session(900);
+        let mut second = session(901);
+        second.executables.feed_keccak256 = B256::with_last_byte(99);
+        first.complete().unwrap();
+        second.complete().unwrap();
+        let first = validate_completed_session(first.path()).unwrap();
+        let second = validate_completed_session(second.path()).unwrap();
+        assert!(
+            ensure_compatible_independent_sessions(&[first, second])
+                .unwrap_err()
+                .to_string()
+                .contains("mixed executable tuple")
+        );
     }
 }

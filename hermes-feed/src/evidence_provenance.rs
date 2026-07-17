@@ -119,6 +119,9 @@ pub struct AggregatedReadinessProvenance {
     pub observer_paper_binary_keccak256: B256,
     pub reconciler_binary_keccak256: B256,
     pub finalizer_paper_binary_keccak256: B256,
+    pub feed_binary_keccak256: Option<B256>,
+    pub chain_head_binary_keccak256: Option<B256>,
+    pub readiness_binary_keccak256: Option<B256>,
     pub observed_snapshot_content_keccak256: Vec<B256>,
     pub session_manifest_content_keccak256: Vec<B256>,
 }

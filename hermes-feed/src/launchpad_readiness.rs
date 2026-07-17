@@ -188,18 +188,32 @@ pub fn evaluate_launchpad_readiness(
 pub fn evaluate_completed_session_readiness(
     windows: &[LaunchpadReadinessWindow],
     session_manifest_content_keccak256: &[B256],
+    feed_binary_keccak256: B256,
+    chain_head_binary_keccak256: B256,
+    readiness_binary_keccak256: B256,
 ) -> Result<Vec<LaunchpadReadinessRecord>, LaunchpadReadinessError> {
     if windows.is_empty()
         || session_manifest_content_keccak256.is_empty()
         || session_manifest_content_keccak256.contains(&B256::ZERO)
+        || feed_binary_keccak256 == B256::ZERO
+        || chain_head_binary_keccak256 == B256::ZERO
+        || readiness_binary_keccak256 == B256::ZERO
     {
         return Err(LaunchpadReadinessError::InvalidProvenance);
     }
-    evaluate_with_trust(
+    let mut records = evaluate_with_trust(
         windows,
         ReadinessInputTrust::CompletedSessionManifest,
         session_manifest_content_keccak256,
-    )
+    )?;
+    for record in &mut records {
+        if let Some(provenance) = record.provenance.as_mut() {
+            provenance.feed_binary_keccak256 = Some(feed_binary_keccak256);
+            provenance.chain_head_binary_keccak256 = Some(chain_head_binary_keccak256);
+            provenance.readiness_binary_keccak256 = Some(readiness_binary_keccak256);
+        }
+    }
+    Ok(records)
 }
 
 fn evaluate_with_trust(
@@ -307,6 +321,9 @@ fn validate_promotion_provenance(
         observer_paper_binary_keccak256: first.observer_paper_binary_keccak256,
         reconciler_binary_keccak256: first.reconciler_binary_keccak256,
         finalizer_paper_binary_keccak256: first.finalizer_paper_binary_keccak256,
+        feed_binary_keccak256: None,
+        chain_head_binary_keccak256: None,
+        readiness_binary_keccak256: None,
         observed_snapshot_content_keccak256: observed_snapshots.into_iter().collect(),
         session_manifest_content_keccak256: Vec::new(),
     }))
@@ -565,6 +582,9 @@ mod tests {
         let records = evaluate_completed_session_readiness(
             &windows,
             &[B256::with_last_byte(90), B256::with_last_byte(91)],
+            B256::with_last_byte(92),
+            B256::with_last_byte(93),
+            B256::with_last_byte(94),
         )
         .unwrap();
         let bankr = record(&records, LaunchpadId::BankrDoppler);
@@ -574,6 +594,19 @@ mod tests {
         assert_eq!(
             bankr.input_trust,
             ReadinessInputTrust::CompletedSessionManifest
+        );
+        let provenance = bankr.provenance.as_ref().unwrap();
+        assert_eq!(
+            provenance.feed_binary_keccak256,
+            Some(B256::with_last_byte(92))
+        );
+        assert_eq!(
+            provenance.chain_head_binary_keccak256,
+            Some(B256::with_last_byte(93))
+        );
+        assert_eq!(
+            provenance.readiness_binary_keccak256,
+            Some(B256::with_last_byte(94))
         );
         assert_eq!(bankr.totals.quote_eligible_confirmed_observations, 100);
         assert_eq!(bankr.totals.independent_complete_windows, 3);

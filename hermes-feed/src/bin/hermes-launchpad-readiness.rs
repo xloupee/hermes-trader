@@ -10,7 +10,7 @@ use hermes_feed::launchpad_readiness::{
     LaunchpadReadinessWindow, evaluate_completed_session_readiness, evaluate_launchpad_readiness,
 };
 use hermes_feed::launchpad_session::{
-    SessionExecutables, complete_session, ensure_distinct_observed_snapshots,
+    SessionExecutables, complete_session, ensure_compatible_independent_sessions,
     validate_completed_session,
 };
 
@@ -41,6 +41,10 @@ struct Cli {
     reconciler_keccak256: Option<B256>,
     #[arg(long)]
     chain_head_keccak256: Option<B256>,
+    /// Exact preflight-verified paper executable used to independently replay
+    /// raw observer input and regenerate finalizer output before completion.
+    #[arg(long)]
+    paper_bin: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -60,6 +64,7 @@ fn main() -> Result<()> {
             bail!("--complete-session cannot be combined with readiness inputs");
         }
         let readiness_keccak256 = cli.expected_self_keccak256.expect("validated above");
+        let paper_bin = cli.paper_bin.as_ref().context("missing --paper-bin")?;
         let path = complete_session(
             directory,
             SessionExecutables {
@@ -73,6 +78,7 @@ fn main() -> Result<()> {
                     .context("missing --chain-head-keccak256")?,
                 readiness_keccak256,
             },
+            paper_bin,
         )?;
         println!("{}", path.display());
         return Ok(());
@@ -81,18 +87,31 @@ fn main() -> Result<()> {
         if cli.input.is_some() {
             bail!("--input cannot be combined with --session-dir");
         }
-        let mut windows = Vec::new();
-        let mut manifests = Vec::new();
-        let mut snapshots = Vec::new();
+        let mut sessions = Vec::new();
         for directory in &cli.session_dirs {
-            let session = validate_completed_session(directory)
-                .with_context(|| format!("validate completed session {}", directory.display()))?;
-            snapshots.push(session.observed_snapshot_content_keccak256);
-            manifests.push(session.manifest_content_keccak256);
-            windows.extend(session.windows);
+            sessions.push(
+                validate_completed_session(directory).with_context(|| {
+                    format!("validate completed session {}", directory.display())
+                })?,
+            );
         }
-        ensure_distinct_observed_snapshots(snapshots)?;
-        emit(evaluate_completed_session_readiness(&windows, &manifests)?)?;
+        ensure_compatible_independent_sessions(&sessions)?;
+        let executables = sessions[0].executables.clone();
+        let manifests = sessions
+            .iter()
+            .map(|session| session.manifest_content_keccak256)
+            .collect::<Vec<_>>();
+        let windows = sessions
+            .into_iter()
+            .flat_map(|session| session.windows)
+            .collect::<Vec<_>>();
+        emit(evaluate_completed_session_readiness(
+            &windows,
+            &manifests,
+            executables.feed_keccak256,
+            executables.chain_head_keccak256,
+            executables.readiness_keccak256,
+        )?)?;
         return Ok(());
     }
 

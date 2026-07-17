@@ -276,6 +276,7 @@
     "One Bow wrapped Multicall3 launch remains an unsupported scored miss.",
     "Fifty-one rotating Pons wrappers and two ambiguous transaction lookups remain fail closed.",
     "Five Hood migration scopes remain blocked by strict receipt topology and must not be converted into plans without a separately reviewed verifier change.",
+    "Hood reproduction instructions are machine-specific: check-pins.mjs hardcodes /Users/kennethjiang/.foundry/bin/cast and README.md references /private/tmp/hermes-hood-samples-replay-35ed/Cargo.toml; use the recorded hashes or adapt those paths explicitly on another machine.",
     "Clanker live detector false-positive and miss rates were not measured by the historical replay.",
     "Flap zero in-range misses are relative to one public RPC canonical log set; independent provider completeness remains unresolved."
   ],

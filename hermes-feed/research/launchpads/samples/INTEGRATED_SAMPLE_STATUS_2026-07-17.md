@@ -59,6 +59,10 @@ Two disjoint ranges total exactly 750,000 blocks. Runtime pins matched 20/20 at 
 
 The exact 250,000-block finalized scan confirmed all 3,343 canonical Portal `TokenCreated` claims returned by the public RPC: 3,242 direct-Portal origins and 101 VaultPortal origins. It reported zero false positives, decode misses, in-range misses, and action mismatches. `TokenBought` and `TokenSold` were controls only and never substituted for launch ground truth. The zero-miss conclusion is relative to one public RPC log set; independent provider or Blockscout completeness replay remains unresolved.
 
+## Reproduction portability
+
+The imported Hood evidence is hash-bound and verified, but two reproduction commands are machine-specific: `hood/check-pins.mjs` hardcodes `/Users/kennethjiang/.foundry/bin/cast`, and `hood/README.md` references `/private/tmp/hermes-hood-samples-replay-35ed/Cargo.toml`. On another machine, use the recorded evidence hashes or explicitly adapt those paths before rerunning; do not treat the literal commands as portable.
+
 ## Safety conclusion
 
 The integrated branch is suitable as a provenance-bound paper evidence package with the gaps above. It is not promotion-ready, and it grants no authority for wallet access, keys, signing, transaction construction, broadcast, canary, deployment, Droplet/server access, production mutation, or merging main.

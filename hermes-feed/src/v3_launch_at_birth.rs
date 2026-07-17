@@ -2,7 +2,7 @@
 //! the launch transaction. This module observes launch calls and constructs
 //! paper plans only; it does not sign, submit, or perform network I/O.
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, U256, hex, keccak256};
 use alloy_sol_types::{SolCall, sol};
 use serde::Serialize;
 use thiserror::Error;
@@ -11,8 +11,8 @@ use crate::launchpad_adapter::{FollowerTradePlan, LaunchpadId, MarketIdentity, R
 use crate::noxa_abi::{V3ExactInputIntent, encode_v3_exact_input_single};
 use crate::noxa_predict::predict_v3_pool_address;
 use crate::robinhood::{
-    BOW_LAUNCH_FACTORY, CHAIN_ID, LAUNCHHOOD_V3_FACTORY, UNISWAP_V3_FACTORY,
-    UNISWAP_V3_FACTORY_RUNTIME_KECCAK256, UNISWAP_V3_POOL_INIT_CODE_KECCAK256,
+    BOW_LAUNCH_FACTORY, CHAIN_ID, LAUNCHHOOD_V3_FACTORY, LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION,
+    UNISWAP_V3_FACTORY, UNISWAP_V3_FACTORY_RUNTIME_KECCAK256, UNISWAP_V3_POOL_INIT_CODE_KECCAK256,
     UNISWAP_V3_POSITION_MANAGER, UNISWAP_V3_POSITION_MANAGER_RUNTIME_KECCAK256,
     UNISWAP_V3_SWAP_ROUTER_02, UNISWAP_V3_SWAP_ROUTER_02_RUNTIME_KECCAK256, WETH,
     WETH_RUNTIME_KECCAK256,
@@ -127,6 +127,8 @@ pub enum V3LaunchError {
     MalformedReceipt,
     #[error("receipt pool does not equal the canonical V3 pool")]
     WrongPool,
+    #[error("receipt token or pool does not match the pre-receipt prediction")]
+    PredictionMismatch,
     #[error("follower plan violates the pinned V3 or policy invariants")]
     UnsafeFollowerPlan,
     #[error("pre-receipt market identity is not proven by checked-in evidence")]
@@ -237,9 +239,7 @@ impl V3LaunchAtBirthAdapter {
                 transaction_value,
                 embedded_initial_buy: transaction_value != U256::ZERO,
                 leader_min_tokens_out: call.minTokensOut,
-                // The artifacts prove CREATE2 and the canonical dexId, but do
-                // not pin the normalized init-code formula/hash.
-                predicted_market: None,
+                predicted_market: Some(launchhood_market(deployer, call.userSalt)),
                 execution_ready: false,
             });
         }
@@ -254,6 +254,33 @@ impl V3LaunchAtBirthAdapter {
             .predicted_market
             .clone()
             .ok_or(V3LaunchError::PlanUnavailable)
+    }
+
+    /// Compare a LaunchHood prediction with token and pool identities decoded
+    /// from the exact factory event. Callers must independently prove that
+    /// event's receipt provenance before invoking this pure comparison.
+    pub fn reconcile_factory_event_market(
+        &self,
+        observation: &LaunchCallObservation,
+        receipt_token: Option<Address>,
+        receipt_pool: Option<Address>,
+    ) -> Result<LaunchMarket, V3LaunchError> {
+        if observation.launchpad != LaunchpadId::LaunchHoodV3
+            || observation.factory != LAUNCHHOOD_V3_FACTORY
+        {
+            return Err(V3LaunchError::MalformedReceipt);
+        }
+        let predicted = observation
+            .predicted_market
+            .clone()
+            .ok_or(V3LaunchError::PlanUnavailable)?;
+        let (receipt_token, receipt_pool) = receipt_token
+            .zip(receipt_pool)
+            .ok_or(V3LaunchError::MalformedReceipt)?;
+        if receipt_token != predicted.token || receipt_pool != predicted.pool {
+            return Err(V3LaunchError::PredictionMismatch);
+        }
+        Ok(predicted)
     }
 
     /// Construct a paper plan only after asynchronous reconciliation has
@@ -318,9 +345,44 @@ fn canonical_pool(token: Address) -> Address {
     )
 }
 
+fn launchhood_market(deployer: Address, user_salt: B256) -> LaunchMarket {
+    let token = predict_launchhood_token(deployer, user_salt);
+    LaunchMarket {
+        launchpad: LaunchpadId::LaunchHoodV3,
+        token,
+        pool: canonical_pool(token),
+        quote_asset: WETH,
+        fee: V3_FEE,
+        restriction_state: MarketRestrictionState::Unknown,
+    }
+}
+
+/// LaunchHood uses OpenZeppelin's deterministic EIP-1167 clone construction:
+/// `cloneDeterministic(TOKEN_IMPL, keccak256(abi.encode(creator, userSalt)))`.
+fn predict_launchhood_token(creator: Address, user_salt: B256) -> Address {
+    let mut encoded_salt = [0_u8; 64];
+    encoded_salt[12..32].copy_from_slice(creator.as_slice());
+    encoded_salt[32..].copy_from_slice(user_salt.as_slice());
+    let salt = keccak256(encoded_salt);
+
+    let mut init_code = [0_u8; 55];
+    init_code[..20].copy_from_slice(&hex!("3d602d80600a3d3981f3363d3d373d3d3d363d73"));
+    init_code[20..40].copy_from_slice(LAUNCHHOOD_V3_TOKEN_IMPLEMENTATION.as_slice());
+    init_code[40..].copy_from_slice(&hex!("5af43d82803e903d91602b57fd5bf3"));
+
+    let mut create2_preimage = [0_u8; 85];
+    create2_preimage[0] = 0xff;
+    create2_preimage[1..21].copy_from_slice(LAUNCHHOOD_V3_FACTORY.as_slice());
+    create2_preimage[21..53].copy_from_slice(salt.as_slice());
+    create2_preimage[53..].copy_from_slice(keccak256(init_code).as_slice());
+    let digest = keccak256(create2_preimage);
+    Address::from_slice(&digest[12..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::{address, b256};
 
     fn pins() -> Vec<ContractCodeSnapshot> {
         vec![
@@ -347,7 +409,7 @@ mod tests {
         V3LaunchAtBirthAdapter::new(CHAIN_ID, &pins()).unwrap()
     }
 
-    fn launchhood_calldata(min_tokens_out: U256) -> Vec<u8> {
+    fn launchhood_calldata_with_salt(min_tokens_out: U256, user_salt: B256) -> Vec<u8> {
         launchTokenCall {
             p: LaunchHoodTokenParams {
                 name: "fixture".into(),
@@ -357,10 +419,14 @@ mod tests {
             },
             configId: U256::ZERO,
             dexId: U256::ZERO,
-            userSalt: B256::with_last_byte(7),
+            userSalt: user_salt,
             minTokensOut: min_tokens_out,
         }
         .abi_encode()
+    }
+
+    fn launchhood_calldata(min_tokens_out: U256) -> Vec<u8> {
+        launchhood_calldata_with_salt(min_tokens_out, B256::with_last_byte(7))
     }
 
     fn bow_calldata() -> Vec<u8> {
@@ -424,12 +490,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hood.launchpad, LaunchpadId::LaunchHoodV3);
-        assert!(hood.predicted_market.is_none());
+        assert!(hood.predicted_market.is_some());
         assert!(!hood.execution_ready);
         assert_eq!(hood.leader_min_tokens_out, U256::from(888));
         assert_eq!(
-            r.pre_receipt_market(&hood),
-            Err(V3LaunchError::PlanUnavailable)
+            r.pre_receipt_market(&hood).unwrap().restriction_state,
+            MarketRestrictionState::Unknown
         );
     }
 
@@ -448,11 +514,94 @@ mod tests {
         assert_eq!(observation.launchpad, LaunchpadId::LaunchHoodV3);
         assert!(observation.embedded_initial_buy);
         assert_eq!(observation.leader_min_tokens_out, U256::ZERO);
-        assert!(observation.predicted_market.is_none());
+        assert!(observation.predicted_market.is_some());
         assert!(!observation.execution_ready);
+        assert!(r.pre_receipt_market(&observation).is_ok());
+    }
+
+    #[test]
+    fn launchhood_predictions_match_all_quiet1_factory_events() {
+        let fixtures = [
+            (
+                address!("97c3490445d492e943bb9b234a3087ff4a987943"),
+                b256!("f730ac4e5cd2e37e91715eec91261f6c6d748f403bcdb8eabdb184eba7301c1a"),
+                address!("977b296fad263a990c439cfef548978155f8deb6"),
+                address!("ee74b862ea1640e8298015e5521f6046e32fce02"),
+            ),
+            (
+                address!("2cab3d5933ed494f48c221361da75ada676f366a"),
+                b256!("a38c8347cbaf46c9e3c72707c8bbb26dc58eedf1327bb2cf8c32f7452e998cc7"),
+                address!("e20b86ad5729a50728aaf6423c8a95a97034741e"),
+                address!("f7863134da38190bc4e39b1fe2a0bb2b60ffe82d"),
+            ),
+            (
+                address!("249612a76e7654a44d3b4a379b9c74b294c56d43"),
+                b256!("aa80340069d6eac4d485e71b4146fd997391839a691ffa9420e736b6e1870c7d"),
+                address!("c3a9d7f871da5fa115fd3a82e5c23013e219ae75"),
+                address!("90461bc66d008de3e050583d3bee03314b297361"),
+            ),
+        ];
+        let adapter = registry();
+        for (creator, user_salt, receipt_token, receipt_pool) in fixtures {
+            let observed = adapter
+                .observe_launch_call(
+                    CHAIN_ID,
+                    LAUNCHHOOD_V3_FACTORY,
+                    creator,
+                    U256::ZERO,
+                    &launchhood_calldata_with_salt(U256::ZERO, user_salt),
+                )
+                .unwrap();
+            let predicted = adapter.pre_receipt_market(&observed).unwrap();
+            assert_eq!(
+                (predicted.token, predicted.pool),
+                (receipt_token, receipt_pool)
+            );
+            assert_eq!(
+                adapter
+                    .reconcile_factory_event_market(
+                        &observed,
+                        Some(receipt_token),
+                        Some(receipt_pool),
+                    )
+                    .unwrap(),
+                predicted
+            );
+        }
+    }
+
+    #[test]
+    fn launchhood_reconciliation_rejects_missing_or_forged_identity_evidence() {
+        let adapter = registry();
+        let observed = adapter
+            .observe_launch_call(
+                CHAIN_ID,
+                LAUNCHHOOD_V3_FACTORY,
+                Address::with_last_byte(4),
+                U256::ZERO,
+                &launchhood_calldata(U256::ZERO),
+            )
+            .unwrap();
+        let predicted = adapter.pre_receipt_market(&observed).unwrap();
         assert_eq!(
-            r.pre_receipt_market(&observation),
-            Err(V3LaunchError::PlanUnavailable)
+            adapter.reconcile_factory_event_market(&observed, None, Some(predicted.pool)),
+            Err(V3LaunchError::MalformedReceipt)
+        );
+        assert_eq!(
+            adapter.reconcile_factory_event_market(
+                &observed,
+                Some(Address::with_last_byte(99)),
+                Some(predicted.pool),
+            ),
+            Err(V3LaunchError::PredictionMismatch)
+        );
+        assert_eq!(
+            adapter.reconcile_factory_event_market(
+                &observed,
+                Some(predicted.token),
+                Some(Address::with_last_byte(99)),
+            ),
+            Err(V3LaunchError::PredictionMismatch)
         );
     }
 

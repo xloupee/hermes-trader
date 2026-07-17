@@ -77,7 +77,8 @@ trap cleanup EXIT INT TERM HUP
 "$paper_bin" \
   --expected-pins "$expected_pins" \
   --observed-startup-snapshot "$observed_snapshot" \
-  --input "$observer_fifo" \
+  --input - \
+  < "$observer_fifo" \
   > "$observer_output" &
 paper_pid=$!
 

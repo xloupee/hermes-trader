@@ -40,7 +40,7 @@ use hermes_feed::tier2_curve::{
     HOOD_FACTORY, LEAVEHOOD_CORE_IMPLEMENTATION, LEAVEHOOD_CORE_PROXY,
     LEAVEHOOD_FACTORY_IMPLEMENTATION, LEAVEHOOD_FACTORY_PROXY,
 };
-use hermes_feed::{NoxaRpcClient, PonsAdapter};
+use hermes_feed::{Eip7702SelfBatchExpectedPins, NoxaRpcClient, PonsAdapter};
 use serde::Serialize;
 
 const BANKR_PROOF_TX: B256 =
@@ -166,9 +166,17 @@ struct SnapshotReport {
     chain_id: u64,
     observed_at: PinBlockBoundary,
     pin_count: usize,
+    verified_boundaries: Vec<VerifiedPinBoundary>,
     expected_validation_passed: bool,
     bankr_proof: BankrProof,
     rpc_metrics: hermes_feed::RpcMetricsSnapshot,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct VerifiedPinBoundary {
+    profile: &'static str,
+    observed_at: PinBlockBoundary,
+    pin_count: usize,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -193,6 +201,9 @@ async fn main() -> Result<()> {
             .with_context(|| format!("decode expected pins {}", path.display()))
         })
         .transpose()?;
+    let pons_review_profile = expected
+        .as_ref()
+        .and_then(|pins| pins.pons_eip7702_self_batch.clone());
     validate_historical_snapshot_output_mode(
         args.verify_reviewed_boundary,
         expected
@@ -333,6 +344,13 @@ async fn main() -> Result<()> {
     } else {
         false
     };
+    let verified_boundaries = verification_boundaries(
+        expected_validation_passed,
+        args.verify_reviewed_boundary,
+        observed_at,
+        snapshot.pins.len(),
+        pons_review_profile.as_ref(),
+    );
 
     if let Some(path) = args.snapshot_output {
         write_new_json(&path, &snapshot)
@@ -346,12 +364,47 @@ async fn main() -> Result<()> {
             chain_id,
             observed_at,
             pin_count: snapshot.pins.len(),
+            verified_boundaries,
             expected_validation_passed,
             bankr_proof: proof,
             rpc_metrics: rpc.metrics(),
         })?
     );
     Ok(())
+}
+
+fn verification_boundaries(
+    expected_validation_passed: bool,
+    verify_reviewed_boundary: bool,
+    observed_at: PinBlockBoundary,
+    pin_count: usize,
+    pons_profile: Option<&Eip7702SelfBatchExpectedPins>,
+) -> Vec<VerifiedPinBoundary> {
+    if !expected_validation_passed {
+        return Vec::new();
+    }
+    let mut boundaries = vec![VerifiedPinBoundary {
+        profile: if verify_reviewed_boundary {
+            "production_global"
+        } else {
+            "startup_snapshot"
+        },
+        observed_at,
+        pin_count,
+    }];
+    if verify_reviewed_boundary && let Some(profile) = pons_profile {
+        boundaries.push(VerifiedPinBoundary {
+            profile: "pons_eip7702_self_batch",
+            observed_at: PinBlockBoundary {
+                l2_block_number: profile.proof_l2_block_number,
+                l1_block_number: profile.proof_l1_block_number,
+                block_timestamp: profile.proof_block_timestamp,
+                l2_block_hash: profile.proof_l2_block_hash,
+            },
+            pin_count: 2,
+        });
+    }
+    boundaries
 }
 
 fn validate_historical_snapshot_output_mode(
@@ -1025,6 +1078,63 @@ mod tests {
         assert!(validate_historical_snapshot_output_mode(true, true, true).is_err());
         assert!(validate_historical_snapshot_output_mode(true, true, false).is_ok());
         assert!(validate_historical_snapshot_output_mode(false, true, true).is_ok());
+    }
+
+    #[test]
+    fn report_exposes_every_independently_verified_historical_boundary() {
+        let expected: PaperExpectedPins = serde_json::from_str(include_str!(
+            "../../config/launchpad-expected-pins.production.json"
+        ))
+        .unwrap();
+        let global = expected.reviewed_at.unwrap();
+        let profile = expected.pons_eip7702_self_batch.as_ref().unwrap();
+
+        let boundaries = verification_boundaries(true, true, global, 39, Some(profile));
+
+        assert_eq!(boundaries.len(), 2);
+        assert_eq!(boundaries[0].profile, "production_global");
+        assert_eq!(boundaries[0].observed_at, global);
+        assert_eq!(boundaries[0].pin_count, 39);
+        assert_eq!(boundaries[1].profile, "pons_eip7702_self_batch");
+        assert_eq!(
+            boundaries[1].observed_at,
+            PinBlockBoundary {
+                l2_block_number: profile.proof_l2_block_number,
+                l1_block_number: profile.proof_l1_block_number,
+                block_timestamp: profile.proof_block_timestamp,
+                l2_block_hash: profile.proof_l2_block_hash,
+            }
+        );
+        assert_eq!(boundaries[1].pin_count, 2);
+    }
+
+    #[test]
+    fn fresh_report_exposes_one_complete_startup_boundary() {
+        let observed_at = PinBlockBoundary {
+            l2_block_number: 12,
+            l1_block_number: 34,
+            block_timestamp: 56,
+            l2_block_hash: B256::with_last_byte(78),
+        };
+
+        let boundaries = verification_boundaries(true, false, observed_at, 41, None);
+
+        assert_eq!(boundaries.len(), 1);
+        assert_eq!(boundaries[0].profile, "startup_snapshot");
+        assert_eq!(boundaries[0].observed_at, observed_at);
+        assert_eq!(boundaries[0].pin_count, 41);
+    }
+
+    #[test]
+    fn observation_without_expected_pins_claims_no_verified_boundary() {
+        let observed_at = PinBlockBoundary {
+            l2_block_number: 12,
+            l1_block_number: 34,
+            block_timestamp: 56,
+            l2_block_hash: B256::with_last_byte(78),
+        };
+
+        assert!(verification_boundaries(false, false, observed_at, 41, None).is_empty());
     }
 
     #[test]

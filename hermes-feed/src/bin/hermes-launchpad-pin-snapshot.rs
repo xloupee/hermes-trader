@@ -40,7 +40,9 @@ use hermes_feed::tier2_curve::{
     HOOD_FACTORY, LEAVEHOOD_CORE_IMPLEMENTATION, LEAVEHOOD_CORE_PROXY,
     LEAVEHOOD_FACTORY_IMPLEMENTATION, LEAVEHOOD_FACTORY_PROXY,
 };
-use hermes_feed::{Eip7702SelfBatchExpectedPins, NoxaRpcClient, PonsAdapter};
+use hermes_feed::{
+    Eip7702SelfBatchExpectedPins, NoxaRpcClient, PonsAdapter, PonsPredictionSemantics,
+};
 use serde::Serialize;
 
 const BANKR_PROOF_TX: B256 =
@@ -294,6 +296,7 @@ async fn main() -> Result<()> {
             code_bytes: Some(code.len()),
         });
     }
+    let pons_v3_semantics = Some(snapshot_pons_semantics(&rpc, pinned_l2_block).await?);
     let hood_protocol =
         if let Some(profile) = expected.as_ref().and_then(|pins| pins.hood_curve.as_ref()) {
             profile.validate()?;
@@ -326,6 +329,7 @@ async fn main() -> Result<()> {
         chain_id,
         observed_at: Some(observed_at),
         pins,
+        pons_v3_semantics,
         hood_protocol,
     };
 
@@ -371,6 +375,69 @@ async fn main() -> Result<()> {
         })?
     );
     Ok(())
+}
+
+async fn snapshot_pons_semantics(
+    rpc: &NoxaRpcClient,
+    l2_block_number: u64,
+) -> Result<PonsPredictionSemantics> {
+    use hermes_feed::pons::{PONS_CURRENT_FACTORY, PONS_DEX_CONFIG_ID, PONS_LAUNCH_CONFIG_ID};
+    use hermes_feed::pons_predict::{
+        PONS_DEX_CONFIG_SELECTOR, PONS_LAUNCH_CONFIG_SELECTOR, PONS_LAUNCH_ENABLED_SELECTOR,
+        PONS_LAUNCH_FEE_SELECTOR, PONS_LOCKER_SELECTOR, PONS_PREDICT_TOKEN_SELECTOR,
+        PONS_TOKEN_CREATION_CODE_BYTES, PONS_TOKEN_CREATION_CODE_OFFSET, config_call,
+        decode_address, decode_bool, decode_dex_config, decode_launch_config, decode_word,
+        extract_creation_prefix,
+    };
+
+    let runtime = rpc
+        .code_at_l2_block(PONS_CURRENT_FACTORY, l2_block_number)
+        .await?;
+    let prefix = extract_creation_prefix(&runtime)?;
+    let launch_enabled = rpc
+        .call_at_l2_block(
+            PONS_CURRENT_FACTORY,
+            &PONS_LAUNCH_ENABLED_SELECTOR,
+            l2_block_number,
+        )
+        .await?;
+    let launch_fee = rpc
+        .call_at_l2_block(
+            PONS_CURRENT_FACTORY,
+            &PONS_LAUNCH_FEE_SELECTOR,
+            l2_block_number,
+        )
+        .await?;
+    let locker = rpc
+        .call_at_l2_block(PONS_CURRENT_FACTORY, &PONS_LOCKER_SELECTOR, l2_block_number)
+        .await?;
+    let launch_config = rpc
+        .call_at_l2_block(
+            PONS_CURRENT_FACTORY,
+            &config_call(PONS_LAUNCH_CONFIG_SELECTOR, PONS_LAUNCH_CONFIG_ID),
+            l2_block_number,
+        )
+        .await?;
+    let dex_config = rpc
+        .call_at_l2_block(
+            PONS_CURRENT_FACTORY,
+            &config_call(PONS_DEX_CONFIG_SELECTOR, PONS_DEX_CONFIG_ID),
+            l2_block_number,
+        )
+        .await?;
+    Ok(PonsPredictionSemantics {
+        factory: PONS_CURRENT_FACTORY,
+        launch_enabled: decode_bool(&launch_enabled)?,
+        launch_fee: decode_word(&launch_fee)?,
+        locker: decode_address(&locker)?,
+        token_creation_code_offset: PONS_TOKEN_CREATION_CODE_OFFSET,
+        token_creation_code_bytes: PONS_TOKEN_CREATION_CODE_BYTES,
+        token_creation_code_hash: keccak256(prefix),
+        prediction_selector: PONS_PREDICT_TOKEN_SELECTOR,
+        pool_init_code_hash: hermes_feed::robinhood::UNISWAP_V3_POOL_INIT_CODE_KECCAK256,
+        launch_config_0: decode_launch_config(&launch_config)?,
+        dex_config_0: decode_dex_config(&dex_config)?,
+    })
 }
 
 fn verification_boundaries(

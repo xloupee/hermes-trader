@@ -13,7 +13,37 @@
       {"address": "0x73991a25c818bf1f1128deaab1492d45638de0d3", "code_bytes": 24384, "runtime_hash": "0x0a493d1af3d0f25fed8efa205244ebee14114267a08647fc38c515c7cd6ead4f"},
       {"address": "0xcaf681a66d020601342297493863e78c959e5cb2", "code_bytes": 24497, "runtime_hash": "0x6f36c378e272c6324c48f045182bcb54bd8ad654cf9ebd42e8893d52c4cb25dc"},
       {"address": "0x0bd7d308f8e1639fab988df18a8011f41eacad73", "code_bytes": 2202, "runtime_hash": "0x5706be52f64875fee65a2cec0d80e47a23d8793cbe85d214b48445e2d05f5353"}
-    ]
+    ],
+    "prediction": {
+      "factory": "0x0c37a24f5d23a486fa692d1500881d698b1f77a4",
+      "launch_enabled": true,
+      "launch_fee": "0x1c6bf52634000",
+      "locker": "0x31ca5e101941a93a7dd6d0497928700625cf54b5",
+      "token_creation_code_offset": 14686,
+      "token_creation_code_bytes": 9453,
+      "token_creation_code_hash": "0x86588bc75e5a00a2e28ba6f44fb4c15c899dcd9a0622b28d116d8ca5f8635804",
+      "prediction_selector": [234, 157, 63, 220],
+      "pool_init_code_hash": "0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54",
+      "launch_config_0": {
+        "pair_token": "0x0bd7d308f8e1639fab988df18a8011f41eacad73",
+        "initial_liquidity": "0x3a4965bf58a40000",
+        "initial_tick": -204200,
+        "supply": "0x33b2e3c9fd0803ce8000000",
+        "max_wallet_bps": "0xc8",
+        "max_tx_bps": "0xdc",
+        "restriction_blocks": 366,
+        "flags": [false, true, false]
+      },
+      "dex_config_0": {
+        "name": "uniswap v3",
+        "factory": "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
+        "position_manager": "0x73991a25c818bf1f1128deaab1492d45638de0d3",
+        "swap_router": "0xcaf681a66d020601342297493863e78c959e5cb2",
+        "pool_fee": 10000,
+        "tick_spacing": 200,
+        "enabled": true
+      }
+    }
   },
   "bow_factory_runtime_hash": "0x8d56cbcdf72dbf04ed8170d55878cc894997ccc54c2ab0aec782274eb7fe7a14",
   "launchhood_v3_factory_runtime_hash": "0x9b785dd157fe757dd427822df3e2bc3a1b6134f1d338b21c36c3de279bb67766",

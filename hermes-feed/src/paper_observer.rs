@@ -297,6 +297,7 @@ pub struct PaperExpectedPins {
 #[serde(deny_unknown_fields)]
 pub struct ConfiguredPonsV3 {
     pub identities: Vec<ConfiguredPonsRuntimeIdentity>,
+    pub prediction: crate::pons_predict::PonsPredictionSemantics,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -339,6 +340,15 @@ impl ConfiguredPonsV3 {
                         .into(),
                 ));
             }
+        }
+        self.prediction
+            .validate_production()
+            .map_err(|error| PaperObserverError::Startup(error.to_string()))?;
+        if self.prediction != crate::pons_predict::PonsPredictionSemantics::production() {
+            return Err(PaperObserverError::Startup(
+                "configured Pons prediction semantics disagree with the independently reviewed profile"
+                    .into(),
+            ));
         }
         production
             .validate()
@@ -489,6 +499,7 @@ pub struct PaperObservedStartupSnapshot {
     #[serde(default)]
     pub observed_at: Option<PinBlockBoundary>,
     pub pins: Vec<ObservedRuntimePin>,
+    pub pons_v3_semantics: Option<crate::pons_predict::PonsPredictionSemantics>,
     #[serde(default)]
     pub hood_protocol: Option<HoodProtocolSnapshot>,
 }
@@ -558,6 +569,7 @@ pub struct PaperLaunchpadObserver {
     v3: V3LaunchAtBirthAdapter,
     pons: PonsAdapter,
     pons_profile: PonsExpectedProfile,
+    pons_predictor: crate::pons_predict::PonsCurrentPredictor,
     pons_eip7702_self_batch: Option<Eip7702SelfBatchExpectedPins>,
     curves: Tier2CurveAdapter,
     smart_accounts: Option<OwnedValidatedSmartAccountPins>,
@@ -764,6 +776,16 @@ impl PaperLaunchpadObserver {
         validate_observed_pins(&observed)?;
         validate_launchhood_identity(&expected, &observed.pins)?;
         let pons_profile = expected.pons_v3.expected_profile()?;
+        let observed_pons_semantics = observed.pons_v3_semantics.as_ref().ok_or_else(|| {
+            PaperObserverError::Startup(
+                "fresh startup snapshot is missing current Pons semantic getters".into(),
+            )
+        })?;
+        let pons_predictor = crate::pons_predict::PonsCurrentPredictor::from_startup_profiles(
+            &expected.pons_v3.prediction,
+            observed_pons_semantics,
+        )
+        .map_err(|error| PaperObserverError::Startup(error.to_string()))?;
         let pons_eip7702_self_batch = expected
             .pons_eip7702_self_batch
             .as_ref()
@@ -998,7 +1020,7 @@ impl PaperLaunchpadObserver {
         } else {
             vec![WrapperKind::Direct]
         };
-        let specs = paper_specs(&expected, &v4, &wrappers, pons_profile)?;
+        let specs = paper_specs(&expected, &v4, &wrappers, &pons_profile)?;
         let registry = StaticLaunchpadRegistry::from_specs(
             StartupPinSnapshot {
                 chain_id: observed.chain_id,
@@ -1038,6 +1060,7 @@ impl PaperLaunchpadObserver {
             v3,
             pons,
             pons_profile,
+            pons_predictor,
             pons_eip7702_self_batch,
             curves,
             smart_accounts,
@@ -1409,6 +1432,15 @@ impl PaperLaunchpadObserver {
                         provenance: crate::pons::PonsAttributionProvenance::ExactFactoryTransaction,
                     })
                     .map_err(|error| PaperObserverError::Adapter(error.to_string()))?;
+                let predicted = if observed.generation == crate::pons::PonsGeneration::Current {
+                    Some(
+                        self.pons_predictor
+                            .predict(&observed, outer_signer)
+                            .map_err(|error| PaperObserverError::Adapter(error.to_string()))?,
+                    )
+                } else {
+                    None
+                };
                 (
                     LaunchpadId::Pons,
                     "launch",
@@ -1418,8 +1450,8 @@ impl PaperLaunchpadObserver {
                         ExecutionMode::DiscoveryOnly
                     },
                     Some(ActionKind::Launch),
-                    None,
-                    None,
+                    predicted.map(|market| market.token),
+                    predicted.map(|market| market.pool),
                     None,
                     serde_json::to_value(observed).expect("serializable Pons observation"),
                 )
@@ -1611,7 +1643,7 @@ fn paper_specs(
     expected: &PaperExpectedPins,
     v4: &V4AdapterSet,
     v4_wrappers: &[WrapperKind],
-    pons_profile: PonsExpectedProfile,
+    pons_profile: &PonsExpectedProfile,
 ) -> Result<Vec<LaunchpadSpec>, PaperObserverError> {
     let direct = [WrapperKind::Direct];
     let shared_v3_pins = || {
@@ -2504,6 +2536,7 @@ mod tests {
                         runtime_hash: identity.runtime_hash,
                     })
                     .collect(),
+                prediction: crate::pons_predict::PonsPredictionSemantics::production(),
             },
             pons_eip7702_self_batch: None,
             bow_factory_runtime_hash: crate::robinhood::BOW_LAUNCH_FACTORY_RUNTIME_KECCAK256,
@@ -2629,6 +2662,7 @@ mod tests {
                 ),
                 observed(LEAVEHOOD_CORE_IMPLEMENTATION, None, B256::with_last_byte(5)),
             ],
+            pons_v3_semantics: Some(crate::pons_predict::PonsPredictionSemantics::production()),
             hood_protocol: None,
         };
         snapshot.pins.extend([
@@ -3269,6 +3303,8 @@ mod tests {
         assert_eq!(observation.wrapper, WrapperKind::Eip7702SelfBatch);
         assert_eq!(observation.leader, profile.account);
         assert_eq!(observation.outer_signer, profile.account);
+        assert!(observation.predicted_token.is_some());
+        assert!(observation.predicted_pool.is_some());
         assert!(!observation.live_execution_enabled);
         assert!(observation.detail.get("eip7702_self_batch").is_some());
 

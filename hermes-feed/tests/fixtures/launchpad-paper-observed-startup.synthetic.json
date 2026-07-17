@@ -5,6 +5,36 @@
   "fixture_id": "launchpad-paper-offline-v3",
   "chain_id": 4663,
   "observed_at": null,
+  "pons_v3_semantics": {
+    "factory": "0x0c37a24f5d23a486fa692d1500881d698b1f77a4",
+    "launch_enabled": true,
+    "launch_fee": "0x1c6bf52634000",
+    "locker": "0x31ca5e101941a93a7dd6d0497928700625cf54b5",
+    "token_creation_code_offset": 14686,
+    "token_creation_code_bytes": 9453,
+    "token_creation_code_hash": "0x86588bc75e5a00a2e28ba6f44fb4c15c899dcd9a0622b28d116d8ca5f8635804",
+    "prediction_selector": [234, 157, 63, 220],
+    "pool_init_code_hash": "0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54",
+    "launch_config_0": {
+      "pair_token": "0x0bd7d308f8e1639fab988df18a8011f41eacad73",
+      "initial_liquidity": "0x3a4965bf58a40000",
+      "initial_tick": -204200,
+      "supply": "0x33b2e3c9fd0803ce8000000",
+      "max_wallet_bps": "0xc8",
+      "max_tx_bps": "0xdc",
+      "restriction_blocks": 366,
+      "flags": [false, true, false]
+    },
+    "dex_config_0": {
+      "name": "uniswap v3",
+      "factory": "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
+      "position_manager": "0x73991a25c818bf1f1128deaab1492d45638de0d3",
+      "swap_router": "0xcaf681a66d020601342297493863e78c959e5cb2",
+      "pool_fee": 10000,
+      "tick_spacing": 200,
+      "enabled": true
+    }
+  },
   "pins": [
     {"address":"0xd9ec2db5f3d1b236843925949fe5bd8a3836fccb","implementation":null,"runtime_hash":"0xadcfca67f5d7df9f26974a07be2b5d83894765e6e5e9b9f0a232223f25c795e6"},
     {"address":"0x52453b4289a6c3a70bb8b4682bcd3d8731267e28","implementation":null,"runtime_hash":"0xf4c5e57d72e716c1da2dbe6c598a26b43528fb27fe234534c15527b47fae4a67"},

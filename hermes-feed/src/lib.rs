@@ -35,6 +35,7 @@ pub mod paper_observer;
 pub mod paper_runtime;
 pub mod permit2;
 pub mod pons;
+pub mod pons_predict;
 pub mod pons_receipt_quote;
 pub mod probe;
 pub mod robinhood;
@@ -152,6 +153,10 @@ pub use pons::{
     PonsGeneration, PonsLaunchObservation, PonsObservationInput, PonsObservationReject,
     PonsPaperPlanError, PonsPaperRequest, PonsPredictionKind, PonsReceiptProvenance,
     RuntimeIdentity as PonsRuntimeIdentity, VerifiedPonsMarket,
+};
+pub use pons_predict::{
+    PonsCurrentPredictor, PonsDexConfigSnapshot, PonsLaunchConfigSnapshot, PonsPredictionError,
+    PonsPredictionSemantics, PredictedPonsMarket,
 };
 pub use pons_receipt_quote::{
     PonsMarketEvidence, PonsPaperSwapQuote, PonsQuoteError, PonsQuotePolicy, PonsReceiptPaperQuote,

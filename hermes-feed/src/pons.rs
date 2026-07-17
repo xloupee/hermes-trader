@@ -3,8 +3,8 @@
 //! This module deliberately has no RPC client and exposes no signing or
 //! broadcast type. Startup code may validate the supplied runtime identities,
 //! after which candidate admission and paper planning are pure in-memory
-//! operations. Markets are never predicted: a pool must arrive through an
-//! asynchronously verified, factory-proven receipt snapshot.
+//! operations. The strictly pinned current generation predicts token and pool
+//! identity locally; receipts remain mandatory for confirmation and quoting.
 
 use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{SolCall, sol};
@@ -205,18 +205,18 @@ impl PonsExpectedProfile {
         Ok(profile)
     }
 
-    pub fn validate(self) -> Result<(), PonsPinError> {
+    pub fn validate(&self) -> Result<(), PonsPinError> {
         if self.identities != REQUIRED_CURRENT_IDENTITIES {
             return Err(PonsPinError::MissingOrDriftedIdentity);
         }
         Ok(())
     }
 
-    pub const fn identities(self) -> [RuntimeIdentity; 7] {
+    pub const fn identities(&self) -> [RuntimeIdentity; 7] {
         self.identities
     }
 
-    pub fn identity(self, address: Address) -> Option<RuntimeIdentity> {
+    pub fn identity(&self, address: Address) -> Option<RuntimeIdentity> {
         self.identities
             .into_iter()
             .find(|identity| identity.address == address)
@@ -408,7 +408,7 @@ impl PonsAdapter {
     }
 
     pub const fn prediction_kind(&self) -> PonsPredictionKind {
-        PonsPredictionKind::DisabledIncompleteEvidence
+        PonsPredictionKind::CurrentGenerationCreate2
     }
 
     pub const fn execution_gate(&self) -> Result<(), PonsExecutionBlocked> {
@@ -419,8 +419,7 @@ impl PonsAdapter {
 }
 
 pub const PONS_EXECUTION_GAPS: &[&str] = &[
-    "verified current factory source and normalized token creation code",
-    "proved current CREATE2 init-code construction",
+    "legacy Pons generation remains receipt-only discovery",
     "complete buy sell value approval and frontend route semantics",
     "restriction flags creator fees and locker claims",
     "onchain graduation predicate and post-graduation behavior",
@@ -605,6 +604,7 @@ fn validate_market(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PonsPredictionKind {
     DisabledIncompleteEvidence,
+    CurrentGenerationCreate2,
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -941,11 +941,11 @@ mod tests {
     }
 
     #[test]
-    fn prediction_and_execution_gates_are_explicitly_closed() {
+    fn current_prediction_is_bounded_while_execution_remains_closed() {
         let adapter = adapter();
         assert_eq!(
             adapter.prediction_kind(),
-            PonsPredictionKind::DisabledIncompleteEvidence
+            PonsPredictionKind::CurrentGenerationCreate2
         );
         let blocked = adapter.execution_gate().unwrap_err();
         assert_eq!(blocked.missing_evidence, PONS_EXECUTION_GAPS);
@@ -953,7 +953,7 @@ mod tests {
             blocked
                 .missing_evidence
                 .iter()
-                .any(|gap| gap.contains("CREATE2"))
+                .any(|gap| gap.contains("live canary authorization"))
         );
     }
 

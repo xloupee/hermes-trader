@@ -1,0 +1,117 @@
+{
+  "record_type": "post_bankr_pons_six_window_paper_campaign",
+  "schema_version": 1,
+  "source_commit": "08546d508d2c379e495960f8dc1425d4b6c44e9e",
+  "network": {"chain_id": 4663, "rpc": "https://rpc.mainnet.chain.robinhood.com"},
+  "mode": "paper_only_read_only",
+  "safety": {
+    "wallet_access": false,
+    "signing": false,
+    "broadcasting": false,
+    "canary": false,
+    "execution": false,
+    "deployment": false,
+    "server_access": false
+  },
+  "runtime_root": ".runtime/post-bankr-pons-08546d5-20260717T142717Z",
+  "campaigns": ["campaign-3w", "campaign-extra-3w"],
+  "combined_output": "combined-6w",
+  "immutable_tuple": {
+    "directory": ".runtime/post-bankr-pons-08546d5-20260717T142717Z/immutable-seven-binary-tuple/bin",
+    "file_mode": "0500",
+    "binaries": {
+      "hermes-feed": {"sha256":"5b5a8bcbab57edab8bda6628838c7a4809ee1cd3216374fc3fa3c9cf8efeaa34","keccak256":"0x1235393e09d547fbfdc3651f8f01e6873791a30b857ebd203503a3e3f306571e"},
+      "hermes-launchpad-paper": {"sha256":"e5dcc62ea62414c8ae74ed8295da80dba6fd4ff142a3b878a5c82d4aa5400517","keccak256":"0x5d14dfd2eb5b81b6214931926f1c3815b1b6016d06d1580e257e3b6e35a75c81"},
+      "hermes-launchpad-reconcile": {"sha256":"11463f06d186a74a4c2863f86d727e5a52ee10729c9f118f00c68966742eb45f","keccak256":"0x70a8386d82ef11a30b39d36152e7fa7e221892a1a4e8e66ad24af2d179455f7f"},
+      "hermes-launchpad-chain-head": {"sha256":"4303ec8903159294acd48e760c14b85752ff738ff0ccee8c35a72f74122fa963","keccak256":"0x9aa5609e487e3ebcb6a3897637986144d0b620c75bf0f9c07cae3e32a9f90334"},
+      "hermes-launchpad-readiness": {"sha256":"ea9ba17314470944ea284dbb4deb71edbf93a8592ca89126c8a2cf80f89238f6","keccak256":"0x359d026f3923d07f33664a7ea32b8c2d101380aca16f48723b05d1f6634972ab"},
+      "hermes-launchpad-pin-snapshot": {"sha256":"77ba41be025ddc807cc4ca1cd843fb645df874fc7a644fe81276704a4cdb1615","keccak256":"0xfabef2896c6e64363150ed58b2df9766b902ddb3155ef0e2b808191f5df8c7bc"},
+      "hermes-launchpad-evidence-report": {"sha256":"1cc10dbbbd27a74fbd109facac4c20e250c29e1b4d5cc476a7216f6e886cd8a2","keccak256":"0x74315f302482745ebb7d0720f6126ec36ab6320e2e7778c286c0d14d673213fe"}
+    },
+    "campaign_runner_keccak256": "0x11c708fbb10e0f9d77659517762d035c4e1d32d271e5fde8ed275b582b24a7c1",
+    "local_runner_keccak256": "0xb065b10aa70b8caaa586298346ac06d11f27871dd6c35e0e6f3249e876356fa3",
+    "campaign_lock_keccak256": "0xd2013395f02ab04cfd7b59badb650ea53c7e06582d2b7102239194b7a9239fcc"
+  },
+  "pin_validation": {
+    "expected_pins_config_keccak256": "0x76b72032db60f30c777cba1c30c1939381b0af947257cfbcb07ef11caee76633",
+    "pins_per_snapshot": 41,
+    "all_expected_validation_passed": true,
+    "all_locked_pin_bytes_identical": true,
+    "per_snapshot_rpc": {"logical_requests":83,"attempts":83,"retries":0,"rate_limits":0,"server_errors":0,"transport_errors":0},
+    "snapshots": [
+      {"window":"a","l2_block":12191411,"l2_hash":"0x8ab2dd2a008763c6013af686bfdc46cd97b9c9499c96ccdf071082d46a437d19","l1_block":25553007,"l1_timestamp":1784298547},
+      {"window":"b","l2_block":12195063,"l2_hash":"0xdd395e1e60f470c2b021f84d8b2d2277203477aef6f73e1d7666c030b140941d","l1_block":25553038,"l1_timestamp":1784298913},
+      {"window":"c","l2_block":12198654,"l2_hash":"0x8ee41a5bd7b3f6c050bac673cf4b052053827dc6b0048046c43bf0500d746d90","l1_block":25553068,"l1_timestamp":1784299272},
+      {"window":"d","l2_block":12202668,"l2_hash":"0x24cb02ed78228a8a04e37fed3836781702f083f5c7cf86aa2e6bb38cd0411d32","l1_block":25553101,"l1_timestamp":1784299675},
+      {"window":"e","l2_block":12206371,"l2_hash":"0xf2ab72c169b1e33f39d0cd21632f89b8d906882f444f69dbe06045219ca8ea38","l1_block":25553132,"l1_timestamp":1784300046},
+      {"window":"f","l2_block":12209942,"l2_hash":"0x1b1cfbced252eaeaa7e94b44bd7e2e3eacd03ec9f8506a05845aee34e292a195","l1_block":25553162,"l1_timestamp":1784300404}
+    ]
+  },
+  "topology": {
+    "description": "private_mode_0600_fifo_probe_record_to_tee_raw_jsonl_to_observer_stdin",
+    "probe_stdout_role": "metrics_only",
+    "reconcile_after_eof": true,
+    "finalize_after_reconcile": true,
+    "manifest_written_last": true,
+    "partial_fifo_or_symlink_residue": 0,
+    "session_file_mode": "0600"
+  },
+  "windows": [
+    {"window":"a","sequence":{"first":12190850,"last":12194487,"gaps":0,"missing":0,"reordered":0},"scored":{"first":12191489,"last":12194479,"start_hash":"0x11a3127882e0dcae27a257d7f4e53ecf7e1a129e038adcbdf5899b10c7c4ff52","cutoff_hash":"0x04b5003bbd316ea9a672dfd560944c906815beed335aab3fa92b3857732f453c"}},
+    {"window":"b","sequence":{"first":12194360,"last":12198124,"gaps":0,"missing":0,"reordered":0},"scored":{"first":12195142,"last":12198112,"start_hash":"0xd38bfa0ee5c6e912fe4f3bf58b29d8b0eede15cf06be2c66ba16bd2002c82eb3","cutoff_hash":"0x8e44bae0b40552e0cfe3e325547b05ddb740f5cfb99cda7359e23c28563fc4d3"}},
+    {"window":"c","sequence":{"first":12197920,"last":12201739,"gaps":0,"missing":0,"reordered":0},"scored":{"first":12198755,"last":12201730,"start_hash":"0xfcb6d9acd55621cfdfa2e85af69ff215a6724a9e6970a6f84be49729b3097f3f","cutoff_hash":"0x9de87a393aa278c991d1ac65d8258a2fcbc9130db5cf42e7bb24775e45c5991b"}},
+    {"window":"d","sequence":{"first":12201978,"last":12205728,"gaps":0,"missing":0,"reordered":0},"scored":{"first":12202746,"last":12205720,"start_hash":"0x56da044a32febb5b11247654a4b6b487313c75f7f76ef84cdb4d9e6414bba007","cutoff_hash":"0x2a675a93b0dbe7b876fae6e3017f86f23f490cd840510a75116de2c41470d09f"}},
+    {"window":"e","sequence":{"first":12205684,"last":12209439,"gaps":0,"missing":0,"reordered":0},"scored":{"first":12206454,"last":12209430,"start_hash":"0xad7e11455d3a4657af7a07776bbb6d2f01194a9e81591acafbc8754dc73d3882","cutoff_hash":"0x874801aa033ca76d8ac977e5a691d5a7d6801830e2512ba6dcf1bd0ec31710ee"}},
+    {"window":"f","sequence":{"first":12209288,"last":12213017,"gaps":0,"missing":0,"reordered":0},"scored":{"first":12210035,"last":12213006,"start_hash":"0x27f3cc97102ba44a40b6b127e2a7b4e1376cef6a2042f367cc43e52feab2ff6c","cutoff_hash":"0x8f21148d5298ae2882bf92fddce634bcdcbd8f6c104e4e5242b19e2113a4cdfb"}}
+  ],
+  "transport": {"connected_events_per_window":1,"coverage_closed_events_per_window":1,"reconnects":0,"connect_errors":0,"read_errors":0,"disconnect_errors":0,"scored_ranges_strictly_disjoint":true},
+  "aggregate_frozen_report": {
+    "bow":{"confirmed":3,"eligible":3,"latency_ns":{"p50":357000,"p95":650000,"p99":650000},"profile":{"zero_value":1,"payable":2},"entry_plans":3,"exit_plans":3,"detector_misses":0,"roundtrip_bps":9801},
+    "launchhood_v3":{"confirmed":12,"eligible":12,"latency_ns":{"p50":422000,"p95":13203000,"p99":13203000},"embedded":12,"entry_plans":12,"exit_plans":12,"detector_misses":0,"roundtrip_bps":9801},
+    "clanker":{"confirmed":13,"eligible":13,"latency_ns":{"p50":551000,"p95":1608000,"p99":1608000},"extensionless":0,"pinned_extension":13,"entry_plans":13,"exit_plans":13,"detector_misses":0,"roundtrip_bps":849},
+    "bankr":{"confirmed":54,"eligible":54,"latency_ns":{"p50":474000,"p95":1493000,"p99":1884000},"curve_ticks_v5":54,"erc7579":54,"other_profiles":0,"entry_plans":54,"exit_plans":54,"detector_misses":4,"roundtrip_bps":97},
+    "pons":{"confirmed":209,"eligible":2,"latency_ns":{"p50":368000,"p95":1298000,"p99":2109000},"entry_plans":2,"exit_plans":2,"detector_misses":2,"roundtrip_bps":9801},
+    "hood":{"confirmed":1,"raw_eligible":3,"latency_ns":{"p50":252000,"p95":252000,"p99":252000},"raw_current_curve":3,"entry_plans":1,"exit_plans":1,"raw_detector_misses":3,"roundtrip_bps":9801,"taxonomy_warning":"frozen_report_counts_non_launch_quote_rows_as_eligible_and_missed"}
+  },
+  "all_launchpads_common_errors": {"false_positives":0,"coverage_errors":0,"identity_mismatches":0,"direction_mismatches":0,"prediction_mismatches":0,"quote_mismatches":0},
+  "hood_supplemental_launch_only_analysis": {
+    "authority": "supplemental_not_emitted_by_frozen_tuple_not_promotion_proof",
+    "eligible_launches": 1,
+    "launch_detector_misses": 0,
+    "excluded_non_launch_buy_sell_rows": 2,
+    "separate_wrapped_or_migrated_trade_pending_classification": 1
+  },
+  "stonks_v3": {"exact_launcher_log_queries":6,"fresh_exact_launches":0,"observer_rows":0,"quote_rows":0,"finalized_plans":0,"suppression":"not_exercised_vacuous"},
+  "miss_forensics": {
+    "bankr":{"total":4,"new_entrypoint_v07_erc7579_reverse_v5_profile":3,"new_direct_airlock_fee100000_profile":1,"policy":"fail_closed"},
+    "pons":{
+      "total":2,
+      "generation":"current",
+      "event_factory":"0x0c37a24f5d23a486fa692d1500881d698b1f77a4",
+      "wrapper":"eip7702_self_batch",
+      "outer_signer_and_self_target":"0x3688367393cac5b914518d53dd06955119b25c71",
+      "outer_selector":"0x3f707e6b",
+      "authorization_nonces":[1,11],
+      "delegation_implementation":"0xdc44136e7ca3509a73fc6c22b6a6bd302bf9a1e2",
+      "designator_hash":"0x9bdfa4cdd2727209e60a7bbb51630848fd4abafc4f612d59fde7018262fa23f3",
+      "implementation_runtime_hash":"0x6d7379e6220b87ceeade4a4e069c6a5ca4636fc228a0c948a0c87177860f3baa",
+      "reviewed_profile":{"account":"0xfb3538b3fac2cc5ffc582446c55875a889abd146","authorization_nonce":15,"proof_transaction":"0x7a13c94f90ddaa7d35d639f046f30a44d1d9b5fe449550fd0b75e5e65a0fb4c6"},
+      "classification":"current_generation_rotating_eip7702_self_batch_outside_single_reviewed_proof_profile",
+      "policy":"fail_closed"
+    }
+  },
+  "combined_authoritative_outputs": {
+    "readiness_path":".runtime/post-bankr-pons-08546d5-20260717T142717Z/combined-6w/authoritative-readiness.jsonl",
+    "readiness_keccak256":"0xe9471383a5693e3b53b52b8105e4861dba78ff17b2a165318d2f9e0ada0cf8f7",
+    "report_path":".runtime/post-bankr-pons-08546d5-20260717T142717Z/combined-6w/launchpad-evidence-report.jsonl",
+    "report_keccak256":"0x0284df93578bbbd8e6dc950aee561e905b8e7b1de808f4fd875d8b67e642e4d2",
+    "byte_identical_regeneration":true
+  },
+  "supplemental_rpc_forensics": {
+    "path":"research/launchpads/POST_BANKR_PONS_SIX_WINDOW_CAMPAIGN_2026-07-17_08546D5_SUPPLEMENTAL_RPC_FORENSICS.json",
+    "sha256":"3d8d167cfb59c1e42c7f3469cc6e92bfc7cc23a049d719c83e521e1cea9d0640",
+    "keccak256":"0x4ac0a32ec8a6f915e30c8c3f19aa8697dd4c77008055883a91ce3224a4de60f1"
+  },
+  "readiness": {"paper_evidence_ready":false,"canary_ready":false,"execution_ready":false},
+  "conclusion": "retain_all_launchpads_in_paper_only_observation;_bankr_and_pons_misses_require_reviewed_profile_or_identity_work;_hood_taxonomy_requires_code_fix_and_new_evidence;_stonks_has_no_positive_fresh_sample"
+}

@@ -2,6 +2,11 @@
   "schema_version": 1,
   "captured_at": "2026-07-16T04:47:06Z",
   "hermes_baseline": "5c1827ec57a155e24c30bb32204ffa76352991ea",
+  "supersession": {
+    "scope": "vault_portal_implementation_only",
+    "evidence": "FLAP_VAULT_PORTAL_UPGRADE_PIN_EVIDENCE_2026-07-17.json",
+    "note": "Historical values below remain immutable evidence of the earlier snapshot."
+  },
   "chain": {
     "name": "Robinhood Chain",
     "chain_id": 4663,

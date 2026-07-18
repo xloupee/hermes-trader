@@ -2870,7 +2870,7 @@ mod tests {
     }
 
     #[test]
-    fn real_flap_direct_is_discovery_only_and_unverified_vault_selector_is_rejected() {
+    fn real_flap_direct_is_discovery_only_and_source_verified_vault_selector_is_rejected() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../tests/fixtures/flap-anchored-live-proofs.json"
         ))
@@ -3651,6 +3651,24 @@ mod tests {
 
         let (expected, mut observed) = startup();
         find_observed_mut(&mut observed.pins, crate::pons::PONS_CURRENT_LOCKER).code_bytes = None;
+        assert!(PaperLaunchpadObserver::from_startup_snapshots(expected, observed).is_err());
+    }
+
+    #[test]
+    fn vault_portal_current_pin_is_accepted_and_superseded_pin_is_rejected() {
+        let (expected, observed) = startup();
+        PaperLaunchpadObserver::from_startup_snapshots(expected, observed).unwrap();
+
+        let (expected, mut observed) = startup();
+        find_observed_mut(&mut observed.pins, FLAP_VAULT_PORTAL_PROXY).implementation = Some(
+            alloy_primitives::address!("2813cd0b6089f76f3407792f79276e5d4f80935a"),
+        );
+        assert!(PaperLaunchpadObserver::from_startup_snapshots(expected, observed).is_err());
+
+        let (expected, mut observed) = startup();
+        find_observed_mut(&mut observed.pins, FLAP_VAULT_PORTAL_IMPLEMENTATION).runtime_hash = alloy_primitives::b256!(
+            "4f096b230a8db270585d54fdd549982efda99462daad9c4b3e771a62e7071f56"
+        );
         assert!(PaperLaunchpadObserver::from_startup_snapshots(expected, observed).is_err());
     }
 

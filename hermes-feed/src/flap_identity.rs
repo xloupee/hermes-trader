@@ -11,7 +11,7 @@ pub const FLAP_PORTAL_IMPLEMENTATION: Address =
 pub const FLAP_VAULT_PORTAL_PROXY: Address =
     alloy_primitives::address!("e9f7ab7de8fb8756acbb6a1cd13316a43308197b");
 pub const FLAP_VAULT_PORTAL_IMPLEMENTATION: Address =
-    alloy_primitives::address!("2813cd0b6089f76f3407792f79276e5d4f80935a");
+    alloy_primitives::address!("e5789d9d5616dd8ec66de95bb31a29ac1c847769");
 
 pub const FLAP_PORTAL_PROXY_RUNTIME_KECCAK256: B256 =
     alloy_primitives::b256!("cecb292d9c022858199c9348abf0d5836f9ea4dab5cf03710e1dcf41fd9a4c35");
@@ -20,8 +20,11 @@ pub const FLAP_PORTAL_IMPLEMENTATION_RUNTIME_KECCAK256: B256 =
 pub const FLAP_VAULT_PORTAL_PROXY_RUNTIME_KECCAK256: B256 =
     alloy_primitives::b256!("e7109718479fd7c6d05b829ffc6a1469e4c949ae282497c15d179b2af4e5e3a9");
 pub const FLAP_VAULT_PORTAL_IMPLEMENTATION_RUNTIME_KECCAK256: B256 =
-    alloy_primitives::b256!("4f096b230a8db270585d54fdd549982efda99462daad9c4b3e771a62e7071f56");
+    alloy_primitives::b256!("8b4bcf2d4a81f646f500da41a331b01bed39065046a5058a333fb942c81c0464");
 pub const FLAP_PORTAL_VERSION: &str = "v5.14.16";
+/// On-chain and verified-source evidence. The startup snapshot schema does not
+/// collect version calls, so this is not presented as an enforced field.
+pub const FLAP_VAULT_PORTAL_VERSION: &str = "1.12.1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -59,10 +62,10 @@ impl FlapPortalVariant {
         }
     }
 
-    /// VaultPortal's current implementation source is not verified, so a
-    /// matching runtime identity permits observation but never execution.
+    /// Source verification is identity evidence only. It does not admit a
+    /// selector, candidate, quote, readiness, or execution path.
     pub const fn source_verified(self) -> bool {
-        matches!(self, Self::Portal)
+        true
     }
 }
 
@@ -139,11 +142,54 @@ mod tests {
     }
 
     #[test]
-    fn accepts_pinned_portal_and_observation_only_vault_portal() {
+    fn accepts_pinned_portal_and_source_verified_observation_only_vault_portal() {
         validate_flap_startup_identity(&fixture(FlapPortalVariant::Portal)).unwrap();
         validate_flap_startup_identity(&fixture(FlapPortalVariant::VaultPortal)).unwrap();
         assert!(FlapPortalVariant::Portal.source_verified());
-        assert!(!FlapPortalVariant::VaultPortal.source_verified());
+        assert!(FlapPortalVariant::VaultPortal.source_verified());
+        assert_eq!(FLAP_VAULT_PORTAL_VERSION, "1.12.1");
+    }
+
+    #[test]
+    fn vault_portal_rejects_superseded_implementation_address_and_runtime_hash() {
+        let mut vault = fixture(FlapPortalVariant::VaultPortal);
+        vault.implementation =
+            alloy_primitives::address!("2813cd0b6089f76f3407792f79276e5d4f80935a");
+        assert_eq!(
+            validate_flap_startup_identity(&vault),
+            Err(FlapIdentityError::ImplementationMismatch)
+        );
+
+        let mut vault = fixture(FlapPortalVariant::VaultPortal);
+        vault.implementation_runtime_hash = alloy_primitives::b256!(
+            "4f096b230a8db270585d54fdd549982efda99462daad9c4b3e771a62e7071f56"
+        );
+        assert_eq!(
+            validate_flap_startup_identity(&vault),
+            Err(FlapIdentityError::ImplementationRuntimeMismatch)
+        );
+    }
+
+    #[test]
+    fn vault_pin_update_does_not_change_portal_or_proxy_pins() {
+        assert_eq!(
+            FLAP_PORTAL_PROXY,
+            alloy_primitives::address!("26605f322f7ff986f381bb9a6e3f5dab0beaeb09")
+        );
+        assert_eq!(
+            FLAP_PORTAL_IMPLEMENTATION,
+            alloy_primitives::address!("d9c9981d784a3765d8264d6104650b901c4e36b1")
+        );
+        assert_eq!(
+            FLAP_VAULT_PORTAL_PROXY,
+            alloy_primitives::address!("e9f7ab7de8fb8756acbb6a1cd13316a43308197b")
+        );
+        assert_eq!(
+            FLAP_VAULT_PORTAL_PROXY_RUNTIME_KECCAK256,
+            alloy_primitives::b256!(
+                "e7109718479fd7c6d05b829ffc6a1469e4c949ae282497c15d179b2af4e5e3a9"
+            )
+        );
     }
 
     #[test]

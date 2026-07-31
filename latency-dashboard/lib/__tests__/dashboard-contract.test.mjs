@@ -122,6 +122,7 @@ describe("dashboard contract", () => {
     assert.equal(executionOutcomeForRow({ observedAction: "sell", decision: "sent" }), "ack_not_landed");
     assert.equal(executionOutcomeForRow({ observedAction: "sell" }), "unknown");
     assert.equal(executionOutcomeForRow({ observedAction: "sell", decision: "sent", sendSignature: "sell", copySlot: 21, buyStatus: "buyLanded" }), "landed");
+    assert.equal(executionOutcomeForRow({ observedAction: "sell", decision: "reconciled", sendSignature: "sell", buyStatus: "buyLanded", chainReport: { slot: 21 } }), "landed");
     assert.equal(executionOutcomeForRow({ observedAction: "buy", decision: "skip" }), "skipped");
     assert.equal(executionOutcomeForRow({ observedAction: "buy", decision: "error" }), "send_failed");
     assert.equal(executionOutcomeForRow({ observedAction: "buy", decision: "sent", buyStatus: "buyFailedOnChain", buyChainError: {} }), "failed_on_chain");
@@ -143,6 +144,8 @@ describe("dashboard contract", () => {
 
   test("outcome predicates are database-side and source filters omit execution-only fields", () => {
     assert.match(dashboardOutcomePredicate("landed"), /copy_slot\.not\.is\.null/);
+    assert.match(dashboardOutcomePredicate("landed"), /chain_report->>slot\.not\.is\.null/);
+    assert.match(dashboardOutcomePredicate("landed"), /chain_report->>err\.is\.null/);
     assert.match(dashboardOutcomePredicate("failed_on_chain"), /buyFailedOnChain/);
     const filters = parseExecutionFilters(new URLSearchParams("outcome=ack_not_landed"));
     assert.equal(filters.outcome, "ack_not_landed");

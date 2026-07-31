@@ -411,14 +411,14 @@ function submittedAutoSellStatus(row: RawLocalExecutionReport): string | null {
 function buyStatus(row: RawLocalExecutionReport): string | null {
   const report = chainReportValue(row);
   const status = stringValue(report?.buyStatus);
-  if (status) {
-    return status;
-  }
-  if (report?.err) {
+  if (status === "buyFailedOnChain" || report?.err) {
     return "buyFailedOnChain";
   }
   if (numberValue(report?.slot) !== null || Number.isFinite(row.copy_slot)) {
     return "buyLanded";
+  }
+  if (status) {
+    return status;
   }
   return submittedBuyStatus(row);
 }

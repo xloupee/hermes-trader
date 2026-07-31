@@ -204,7 +204,7 @@ export function executionOutcomeForRow(row) {
     return "failed_on_chain";
   }
 
-  const confirmedCopySlot = row.copySlot ?? row.blockPositionDiagnostics?.copySlot ?? null;
+  const confirmedCopySlot = row.copySlot ?? row.blockPositionDiagnostics?.copySlot ?? row.chainReport?.slot ?? null;
   if (row.buyStatus === "buyLanded" && row.sendSignature && confirmedCopySlot !== null) {
     return "landed";
   }
@@ -244,10 +244,10 @@ const SKIPPED_DB = "or(decision.in.(skip,skipped,simulated,wouldCopy,wouldBuy),d
 const NOT_SKIPPED_DB = "and(decision.not.in.(skip,skipped,simulated,wouldCopy,wouldBuy),dry_run.eq.false)";
 const SEND_FAILED_DB = "decision.in.(error,send_failed)";
 const NOT_SEND_FAILED_DB = "decision.not.in.(error,send_failed)";
-const CHAIN_FAILED_DB = "or(chain_report->>buyStatus.eq.buyFailedOnChain,chain_report->>status.eq.failedOnChain,chain_report->err.not.is.null)";
-const NOT_CHAIN_FAILED_DB = "and(or(chain_report->>buyStatus.is.null,chain_report->>buyStatus.neq.buyFailedOnChain),or(chain_report->>status.is.null,chain_report->>status.neq.failedOnChain),chain_report->err.is.null)";
-const LANDED_DB = "and(send_signature.not.is.null,copy_slot.not.is.null)";
-const NOT_LANDED_DB = "or(send_signature.is.null,copy_slot.is.null)";
+const CHAIN_FAILED_DB = "or(chain_report->>buyStatus.eq.buyFailedOnChain,chain_report->>status.eq.failedOnChain,chain_report->>err.not.is.null)";
+const NOT_CHAIN_FAILED_DB = "and(or(chain_report->>buyStatus.is.null,chain_report->>buyStatus.neq.buyFailedOnChain),or(chain_report->>status.is.null,chain_report->>status.neq.failedOnChain),chain_report->>err.is.null)";
+const LANDED_DB = "and(send_signature.not.is.null,or(copy_slot.not.is.null,chain_report->>slot.not.is.null))";
+const NOT_LANDED_DB = "or(send_signature.is.null,and(copy_slot.is.null,chain_report->>slot.is.null))";
 const ACK_DB = "or(send_signature.not.is.null,sent.eq.true,decision.eq.sent)";
 const NOT_ACK_DB = "and(send_signature.is.null,sent.eq.false,decision.neq.sent)";
 

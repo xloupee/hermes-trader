@@ -14,7 +14,7 @@ export type LandingComparison =
   | "no_target"
   | "unavailable";
 
-export type DashboardExecution = Omit<LocalExecutionReport, "observedWallet" | "copyWallet" | "rawExecution" | "chainReport"> & {
+export type DashboardExecution = Omit<LocalExecutionReport, "endpoint" | "observedWallet" | "copyWallet" | "rawExecution" | "chainReport"> & {
   observedWallet: string | null;
   copyWallet: string | null;
   outcome: ExecutionOutcome;

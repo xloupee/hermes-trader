@@ -64,6 +64,33 @@ describe("dashboard contract", () => {
     assert.equal(JSON.stringify(dto).includes("never-return"), false);
   });
 
+  test("public list and detail DTOs never expose endpoint credentials", () => {
+    const adversarialEndpoints = [
+      { endpoint: "https://rpc.example.test/?api-key=query-secret", secret: "query-secret" },
+      { endpoint: "https://basic-user:basic-secret@rpc.example.test/", secret: "basic-secret" },
+      { endpoint: "https://rpc.example.test/private/path-secret/send", secret: "path-secret" },
+      { endpoint: "https://rpc.example.test/#fragment-secret", secret: "fragment-secret" }
+    ];
+
+    for (const { endpoint, secret } of adversarialEndpoints) {
+      const publicDto = toDashboardExecution({
+        id: 1,
+        observedAtMs: 1,
+        endpoint,
+        observedWallet: "ObservedWalletFullAddress",
+        copyWallet: "CopyWalletFullAddress",
+        observedAction: "buy"
+      });
+      const listJson = JSON.stringify({ executions: [publicDto] });
+      const detailJson = JSON.stringify({ execution: publicDto });
+      assert.equal("endpoint" in publicDto, false);
+      assert.equal(listJson.includes("endpoint"), false);
+      assert.equal(detailJson.includes("endpoint"), false);
+      assert.equal(listJson.includes(secret), false);
+      assert.equal(detailJson.includes(secret), false);
+    }
+  });
+
   test("fixed from/to are inclusive, primary, and invalid dates fail with 400", () => {
     const filters = parseExecutionFilters(new URLSearchParams(
       "from=2026-07-01T00%3A00%3A00Z&to=1782950400000&since=1h&side=sell&action=buy"

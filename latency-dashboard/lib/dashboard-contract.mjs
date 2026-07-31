@@ -293,7 +293,7 @@ export function toDashboardExecution(row) {
     };
   }
 
-  const { rawExecution: _rawExecution, chainReport: _chainReport, ...safeRow } = row;
+  const { endpoint: _endpoint, rawExecution: _rawExecution, chainReport: _chainReport, ...safeRow } = row;
   for (const key of Object.keys(safeRow)) {
     if (/private.?key|secret.?key|keypair|mnemonic|seed|custody/i.test(key)) delete safeRow[key];
   }

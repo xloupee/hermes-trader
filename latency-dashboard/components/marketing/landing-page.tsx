@@ -1,5 +1,3 @@
-import Link from "next/link";
-
 import { LandingHeroInteractive } from "@/components/marketing/landing-hero-interactive";
 import styles from "@/components/marketing/landing-page.module.css";
 import tokens from "@/components/marketing/landing-tokens.module.css";
@@ -28,9 +26,9 @@ export function LandingPage() {
                 </a>
               </nav>
 
-              <Link className={styles.accessLink} href="/login">
+              <a className={styles.accessLink} href="#access">
                 Private access
-              </Link>
+              </a>
             </header>
 
             <LandingHeroInteractive />
@@ -42,13 +40,13 @@ export function LandingPage() {
                   Move when <em>they move.</em>
                 </h1>
                 <p className={styles.heroLead}>
-                  Follow proven wallets, then execute every move with speed, precision, and control.
+                  Follow proven wallets and execute every move with speed, precision, and control.
                 </p>
 
                 <div className={styles.heroActions}>
-                  <Link className={styles.primaryAction} href="/login">
+                  <a className={styles.primaryAction} href="#access">
                     Explore private access <span aria-hidden="true" />
-                  </Link>
+                  </a>
                   <a className={styles.textLink} href="#experience">
                     How Hermes Trader works
                   </a>
@@ -58,17 +56,17 @@ export function LandingPage() {
                   <div className={styles.dispatchItem}>
                     <span className={styles.dispatchIndex}>01</span>
                     <strong>Follow</strong>
-                    <p>Choose the signal.</p>
+                    <small>Choose the signal.</small>
                   </div>
                   <div className={styles.dispatchItem}>
                     <span className={styles.dispatchIndex}>02</span>
                     <strong>Execute</strong>
-                    <p>Act in the moment.</p>
+                    <small>Act in the moment.</small>
                   </div>
                   <div className={styles.dispatchItem}>
                     <span className={styles.dispatchIndex}>03</span>
                     <strong>Control</strong>
-                    <p>Stay in command.</p>
+                    <small>Stay in command.</small>
                   </div>
                 </div>
               </div>
@@ -80,48 +78,50 @@ export function LandingPage() {
           </section>
 
           <section className={styles.editorial} id="difference" aria-labelledby="difference-title">
-            <div className={styles.sectionLabel}>01 / The difference</div>
-            <div className={styles.editorialGrid}>
-              <div>
-                <h2 className={styles.editorialTitle} id="difference-title">
-                  Built for traders who refuse to arrive <em>late.</em>
-                </h2>
+            <div className={styles.editorialInner}>
+              <div className={styles.editorialGrid}>
+                <div>
+                  <p className={styles.sectionLabel}>01 / The difference</p>
+                  <h2 className={styles.editorialTitle} id="difference-title">
+                    Built for traders who refuse to arrive <em>late.</em>
+                  </h2>
+                </div>
+
+                <ul className={styles.benefitList}>
+                  <li className={styles.benefit}>
+                    <span className={styles.benefitNumber}>01</span>
+                    <div>
+                      <h3>Signal over noise</h3>
+                      <p>Follow the wallets you trust and leave the rest outside your strategy.</p>
+                    </div>
+                    <span className={styles.benefitArrow} aria-hidden="true" />
+                  </li>
+                  <li className={styles.benefit}>
+                    <span className={styles.benefitNumber}>02</span>
+                    <div>
+                      <h3>Speed without friction</h3>
+                      <p>Be ready when opportunity appears—not after the moment has passed.</p>
+                    </div>
+                    <span className={styles.benefitArrow} aria-hidden="true" />
+                  </li>
+                  <li className={styles.benefit}>
+                    <span className={styles.benefitNumber}>03</span>
+                    <div>
+                      <h3>Control stays yours</h3>
+                      <p>Choose who to follow, how to trade, and when to step away.</p>
+                    </div>
+                    <span className={styles.benefitArrow} aria-hidden="true" />
+                  </li>
+                </ul>
               </div>
 
-              <ul className={styles.benefitList}>
-                <li className={styles.benefit}>
-                  <span className={styles.benefitNumber}>01</span>
-                  <div>
-                    <h3>Signal over noise</h3>
-                    <p>Follow the wallets you trust and keep the rest outside your strategy.</p>
-                  </div>
-                  <span className={styles.benefitArrow} aria-hidden="true" />
-                </li>
-                <li className={styles.benefit}>
-                  <span className={styles.benefitNumber}>02</span>
-                  <div>
-                    <h3>Speed without friction</h3>
-                    <p>Be ready when opportunity appears, not after it has passed.</p>
-                  </div>
-                  <span className={styles.benefitArrow} aria-hidden="true" />
-                </li>
-                <li className={styles.benefit}>
-                  <span className={styles.benefitNumber}>03</span>
-                  <div>
-                    <h3>Control stays yours</h3>
-                    <p>Choose who to follow, how to trade, and when to step away.</p>
-                  </div>
-                  <span className={styles.benefitArrow} aria-hidden="true" />
-                </li>
-              </ul>
-            </div>
-
-            <div className={styles.accessNote} id="access">
-              <div>
-                <p>Private beta</p>
-                <h3 className={styles.accessTitle}>Access opens in small cohorts.</h3>
+              <div className={styles.accessNote} id="access">
+                <div>
+                  <p>Private beta</p>
+                  <h3 className={styles.accessTitle}>Access opens in small cohorts.</h3>
+                </div>
+                <span className={styles.accessStatus}>Applications opening soon</span>
               </div>
-              <span className={styles.accessStatus}>Applications opening soon</span>
             </div>
           </section>
         </section>

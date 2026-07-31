@@ -11,7 +11,7 @@
 .landing::before {
   background:
     linear-gradient(90deg, rgb(13 18 25 / 0.96) 0%, rgb(13 18 25 / 0.84) 37%, rgb(13 18 25 / 0.28) 69%, rgb(13 18 25 / 0.04) 100%),
-    url("/hermes/hermes-hero-mobile.webp") center / cover no-repeat;
+    url("/hermes/hermes-hero-desktop.webp") center / cover no-repeat;
   content: "";
   inset: 0;
   opacity: 0.96;
@@ -47,7 +47,7 @@
 .hero {
   min-height: 100vh;
   position: relative;
-  padding: 22px 1.25rem 0;
+  padding: 22px 30px 0;
 }
 
 .hero::before {
@@ -77,10 +77,10 @@
   border-bottom: 1px solid var(--line);
   display: grid;
   grid-template-columns: 1fr auto 1fr;
-  height: 72px;
-  left: clamp(1rem, 3.1vw, 3.75rem);
+  height: 76px;
+  left: clamp(1.25rem, 3.4vw, 3.75rem);
   position: absolute;
-  right: clamp(1rem, 3.1vw, 3.75rem);
+  right: clamp(1.25rem, 3.4vw, 3.75rem);
   top: 0;
   width: auto;
   z-index: 4;
@@ -98,9 +98,9 @@
 .brandWord {
   color: var(--marble);
   font-family: var(--font-display);
-  font-size: 1.35rem;
-  font-weight: 500;
-  letter-spacing: 0.14em;
+  font-size: 1.45rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
   line-height: 1;
   text-transform: uppercase;
 }
@@ -113,13 +113,13 @@
 .navLinks {
   align-items: center;
   display: flex;
-  gap: clamp(1rem, 2.8vw, 3rem);
+  gap: clamp(1.5rem, 3vw, 3.25rem);
 }
 
 .navLink,
 .accessLink {
   color: var(--soft);
-  font-size: 0.66rem;
+  font-size: 0.68rem;
   font-weight: 700;
   letter-spacing: 0.14em;
   position: relative;
@@ -156,14 +156,14 @@
   align-items: center;
   display: flex;
   min-height: calc(100vh - 22px);
-  padding: clamp(8.5rem, 17vh, 11rem) 0 clamp(4rem, 7vh, 6rem);
+  padding: clamp(8.5rem, 16vh, 11rem) clamp(0rem, 1.9vw, 2rem) clamp(4rem, 7vh, 6rem);
   position: relative;
   z-index: 3;
 }
 
 .heroCopy {
   max-width: 44rem;
-  width: min(100%, 44rem);
+  width: min(52vw, 44rem);
 }
 
 .eyebrow {
@@ -174,7 +174,7 @@
   font-weight: 750;
   gap: 0.9rem;
   letter-spacing: 0.2em;
-  margin: 0 0 clamp(1.5rem, 4vh, 2.5rem);
+  margin: 0 0 clamp(1.75rem, 4vh, 2.75rem);
   text-transform: uppercase;
 }
 
@@ -182,7 +182,7 @@
   background: var(--gold);
   content: "";
   height: 1px;
-  width: 2.15rem;
+  width: 2.25rem;
 }
 
 .heroTitle,
@@ -195,17 +195,24 @@
 }
 
 .heroTitle {
-  font-size: clamp(3.4rem, 16vw, 4.8rem);
+  font-size: clamp(4.5rem, 7.25vw, 7.4rem);
   line-height: 0.82;
-  margin-bottom: 1.65rem;
-  margin-left: -0.05em;
+  margin-bottom: clamp(1.75rem, 3vh, 2.5rem);
+  margin-left: -0.045em;
+  max-width: 7ch;
+}
+
+.heroTitle em {
+  color: var(--gold);
+  display: block;
+  font-weight: 400;
 }
 
 .heroLead {
   color: var(--soft);
   font-family: var(--font-display);
-  font-size: clamp(1.05rem, 1.45vw, 1.4rem);
-  line-height: 1.52;
+  font-size: clamp(1.15rem, 1.5vw, 1.4rem);
+  line-height: 1.55;
   margin-bottom: 2rem;
   max-width: 31rem;
 }
@@ -218,8 +225,7 @@
 .heroActions {
   align-items: center;
   display: flex;
-  gap: 1.25rem;
-  flex-wrap: wrap;
+  gap: 1.5rem;
 }
 
 .primaryAction {
@@ -229,14 +235,46 @@
   display: inline-flex;
   font-size: 0.7rem;
   font-weight: 800;
-  gap: 1.9rem;
+  gap: 2rem;
   justify-content: space-between;
   letter-spacing: 0.13em;
-  min-height: 3.2rem;
+  min-height: 3.25rem;
   min-width: 13rem;
-  padding: 0.26rem 1rem 0.2rem 1.2rem;
+  padding: 0.25rem 1.1rem 0.25rem 1.3rem;
   text-decoration: none;
   text-transform: uppercase;
+  transition: background-color 180ms linear, color 180ms linear, transform 180ms var(--ease-out);
+}
+
+.primaryAction span {
+  display: block;
+  flex: 0 0 1.2rem;
+  height: 0.75rem;
+  position: relative;
+  transition: transform 180ms var(--ease-out);
+  width: 1.2rem;
+}
+
+.primaryAction span::before {
+  background: currentColor;
+  content: "";
+  height: 1px;
+  left: 0;
+  position: absolute;
+  right: 0;
+  top: 50%;
+}
+
+.primaryAction span::after {
+  border-right: 1px solid currentColor;
+  border-top: 1px solid currentColor;
+  content: "";
+  height: 0.38rem;
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%) rotate(45deg);
+  width: 0.38rem;
 }
 
 .textLink {
@@ -259,14 +297,19 @@
   border-bottom: 1px solid var(--line);
   border-top: 1px solid var(--line);
   display: grid;
-  grid-template-columns: 1fr;
-  margin-top: clamp(1.8rem, 4.6vh, 3.5rem);
+  grid-template-columns: repeat(3, 1fr);
+  margin-top: clamp(2.5rem, 5vh, 4rem);
   max-width: 40rem;
 }
 
 .dispatchItem {
-  min-height: 5rem;
-  padding: 1rem 0;
+  min-height: 5.65rem;
+  padding: 1.15rem 1.1rem 1rem 0;
+}
+
+.dispatchItem + .dispatchItem {
+  border-left: 1px solid var(--line);
+  padding-left: 1.1rem;
 }
 
 .dispatchIndex {
@@ -286,10 +329,12 @@
   text-transform: uppercase;
 }
 
-.dispatchItem p {
+.dispatchItem small {
   color: var(--muted);
-  margin: 0;
-  max-width: 34rem;
+  display: block;
+  font-family: var(--font-display);
+  font-size: 0.9rem;
+  line-height: 1.35;
 }
 
 .heroFolio {
@@ -302,7 +347,7 @@
   gap: 0.75rem;
   letter-spacing: 0.18em;
   position: absolute;
-  right: clamp(1rem, 3.1vw, 3.75rem);
+  right: clamp(1.25rem, 3.4vw, 3.75rem);
   text-transform: uppercase;
   writing-mode: vertical-rl;
   z-index: 3;
@@ -311,20 +356,26 @@
 .heroFolio::before {
   background: currentColor;
   content: "";
-  height: 2.5rem;
+  height: 2.75rem;
   width: 1px;
 }
 
 .editorial {
   background: var(--marble);
   color: var(--obsidian);
-  padding: 5.5rem 1.25rem 3.5rem;
+  padding: clamp(5.5rem, 10vw, 10rem) clamp(1.5rem, 5vw, 5.5rem) clamp(3rem, 6vw, 6rem);
   position: relative;
+}
+
+.editorialInner {
+  margin: 0 auto;
+  max-width: 92rem;
 }
 
 .editorialGrid {
   display: grid;
-  gap: 3rem;
+  gap: clamp(3rem, 6vw, 7rem);
+  grid-template-columns: minmax(0, 1.1fr) minmax(21rem, 0.9fr);
 }
 
 .sectionLabel {
@@ -335,7 +386,7 @@
   font-weight: 800;
   gap: 1rem;
   letter-spacing: 0.17em;
-  margin-bottom: 2rem;
+  margin-bottom: clamp(2.5rem, 5vw, 5rem);
   text-transform: uppercase;
 }
 
@@ -348,8 +399,8 @@
 }
 
 .editorialTitle {
-  font-size: clamp(2.95rem, 6vw, 5rem);
-  line-height: 0.94;
+  font-size: clamp(3.35rem, 6.2vw, 6.5rem);
+  line-height: 0.91;
   max-width: 9ch;
 }
 
@@ -359,16 +410,17 @@
 }
 
 .benefitList {
-  border-top: 1px solid var(--ink-line);
+  align-self: end;
+  border-bottom: 1px solid var(--ink-line);
   margin-bottom: 0;
 }
 
 .benefit {
-  border-bottom: 1px solid var(--ink-line);
+  border-top: 1px solid var(--ink-line);
   display: grid;
-  gap: 1rem;
+  gap: 1.25rem;
   grid-template-columns: 2rem 1fr auto;
-  padding: 1.5rem 0;
+  padding: 1.65rem 0;
 }
 
 .benefitNumber {
@@ -381,7 +433,7 @@
 
 .benefit h3 {
   font-family: var(--font-display);
-  font-size: 1.7rem;
+  font-size: clamp(1.5rem, 2.1vw, 2.05rem);
   font-weight: 500;
   letter-spacing: -0.025em;
   line-height: 1;
@@ -390,7 +442,8 @@
 
 .benefit p {
   color: rgb(16 19 24 / 0.62);
-  line-height: 1.55;
+  font-size: 0.88rem;
+  line-height: 1.6;
   margin: 0;
 }
 
@@ -435,7 +488,7 @@
   display: grid;
   gap: 2rem;
   grid-template-columns: 1fr auto;
-  margin-top: clamp(4rem, 9vw, 9rem);
+  margin-top: clamp(5rem, 10vw, 10rem);
   padding-top: 2rem;
 }
 
@@ -449,7 +502,7 @@
 }
 
 .accessTitle {
-  font-size: clamp(2.1rem, 4.3vw, 4rem);
+  font-size: clamp(2.15rem, 4vw, 4.4rem);
   line-height: 0.95;
   max-width: 12ch;
 }
@@ -481,7 +534,7 @@
   font-weight: 750;
   justify-content: space-between;
   letter-spacing: 0.15em;
-  padding: 1.5rem 1.25rem 2rem;
+  padding: 1.5rem clamp(1.5rem, 5vw, 5.5rem) 2rem;
   position: relative;
   text-transform: uppercase;
 }
@@ -541,6 +594,10 @@
     transform: translateY(-2px);
   }
 
+  .primaryAction:hover span {
+    transform: translateX(4px);
+  }
+
   .textLink:hover::after {
     width: 100%;
   }
@@ -551,29 +608,7 @@
   }
 }
 
-@media (min-width: 390px) {
-  .hero {
-    padding-left: clamp(1.25rem, 4vw, 1.8rem);
-    padding-right: clamp(1.25rem, 4vw, 1.8rem);
-  }
-
-  .editorial {
-    padding-left: clamp(1.45rem, 5vw, 4.2rem);
-    padding-right: clamp(1.45rem, 5vw, 4.2rem);
-  }
-}
-
-@media (min-width: 768px) {
-  .landing::before {
-    background:
-      linear-gradient(90deg, rgb(13 18 25 / 0.96) 0%, rgb(13 18 25 / 0.84) 37%, rgb(13 18 25 / 0.28) 69%, rgb(13 18 25 / 0.04) 100%),
-      url("/hermes/hermes-hero-desktop.webp") center / cover no-repeat;
-  }
-
-  .hero {
-    padding: 22px 0 0;
-  }
-
+@media (max-width: 900px) {
   .masthead {
     grid-template-columns: 1fr auto;
   }
@@ -598,27 +633,13 @@
     display: none;
   }
 
-  .heroDispatch {
-    grid-template-columns: repeat(3, 1fr);
-  }
-
-  .dispatchItem {
-    border-left: 1px solid var(--line);
-    padding-left: 1rem;
-  }
-
-  .heroTitle {
-    font-size: clamp(3.5rem, 10vw, 5.8rem);
-    max-width: 7ch;
-  }
-
-  .heroLead {
-    max-width: 33rem;
-  }
-
   .editorialGrid {
     gap: 5rem;
-    grid-template-columns: minmax(0, 1.1fr) minmax(21rem, 0.95fr);
+    grid-template-columns: 1fr;
+  }
+
+  .editorialTitle {
+    max-width: 10ch;
   }
 
   .accessNote {
@@ -627,48 +648,21 @@
   }
 }
 
-@media (min-width: 1024px) {
-  .heroTitle {
-    margin-bottom: 2rem;
-  }
-
-  .benefit {
-    grid-template-columns: 2rem 1fr auto;
-  }
-}
-
-@media (min-width: 1440px) {
-  .landingInner {
-    max-width: 1600px;
-    margin: 0 auto;
-  }
-
-  .heroStage {
-    padding-top: 10rem;
-  }
-
-  .heroTitle {
-    font-size: 7.4rem;
-  }
-
-  .heroLead {
-    font-size: 1.38rem;
-  }
-
-  .editorial {
-    padding-top: 7rem;
-  }
-}
-
 @media (max-width: 640px) {
+  .landing::before {
+    display: none;
+  }
+
   .hero {
-    background: linear-gradient(
-      180deg,
-      rgb(13 18 25 / 0.02) 0,
-      rgb(13 18 25 / 0.08) 30svh,
-      rgb(13 18 25 / 0.82) 49svh,
-      #0d1219 64svh
-    );
+    background:
+      linear-gradient(
+        180deg,
+        rgb(13 18 25 / 0.02) 0,
+        rgb(13 18 25 / 0.08) 30svh,
+        rgb(13 18 25 / 0.82) 49svh,
+        #0d1219 64svh
+      ),
+      url("/hermes/hermes-hero-mobile.webp") 72% top / auto clamp(25rem, 58svh, 31rem) no-repeat;
     min-height: 0;
     padding-top: 0;
     padding-left: 1.25rem;
@@ -685,8 +679,53 @@
     background: linear-gradient(0deg, rgb(13 18 25 / 0.92), transparent 24svh);
   }
 
+  .masthead {
+    height: 68px;
+    left: 1.25rem;
+    right: 1.25rem;
+  }
+
+  .brandWord {
+    font-size: clamp(0.95rem, 4.5vw, 1.15rem);
+    letter-spacing: 0.12em;
+  }
+
+  .accessLink {
+    align-items: center;
+    border: 1px solid rgb(194 161 93 / 0.42);
+    display: inline-flex;
+    font-size: 0.56rem;
+    min-height: 2.75rem;
+    padding: 0 0.75rem;
+  }
+
+  .accessLink::after {
+    display: none;
+  }
+
+  .heroStage {
+    align-items: initial;
+    min-height: 0;
+    padding: min(29rem, 58svh) 0 2.5rem;
+  }
+
+  .heroCopy {
+    max-width: none;
+    width: 100%;
+  }
+
+  .eyebrow {
+    font-size: 0.55rem;
+    letter-spacing: 0.18em;
+    margin-bottom: 1.35rem;
+  }
+
+  .eyebrow::before {
+    width: 1.5rem;
+  }
+
   .heroTitle {
-    font-size: clamp(3rem, 15vw, 4.1rem);
+    font-size: clamp(3.35rem, 16.5vw, 4.15rem);
     line-height: 0.86;
     margin-bottom: 1.35rem;
   }
@@ -695,6 +734,7 @@
     font-size: 1rem;
     line-height: 1.5;
     margin-bottom: 1.6rem;
+    max-width: 25rem;
   }
 
   .heroActions {
@@ -703,9 +743,19 @@
     gap: 0.6rem;
   }
 
-  .primaryAction,
-  .textLink {
+  .primaryAction {
     width: 100%;
+  }
+
+  .primaryAction {
+    min-height: 3.65rem;
+  }
+
+  .textLink {
+    align-items: center;
+    display: inline-flex;
+    min-height: 2.75rem;
+    width: max-content;
   }
 
   .heroDispatch {
@@ -714,6 +764,9 @@
   }
 
   .dispatchItem {
+    align-items: center;
+    display: grid;
+    gap: 0.65rem;
     grid-template-columns: 1.5rem 4rem 1fr;
     min-height: 0;
     padding: 0.75rem 0;
@@ -727,6 +780,10 @@
 
   .dispatchIndex {
     margin-bottom: 0;
+  }
+
+  .dispatchItem small {
+    font-size: 0.8rem;
   }
 
   .dispatchItem strong {
@@ -767,9 +824,45 @@
     padding-top: 1.5rem;
   }
 
+  .accessTitle {
+    font-size: 2.3rem;
+    max-width: 10ch;
+  }
+
+  .accessStatus {
+    min-height: 2.75rem;
+  }
+
   .footer {
     align-items: flex-start;
     flex-direction: column;
     gap: 0.65rem;
+  }
+}
+
+@media (max-width: 640px) and (orientation: landscape) {
+  .hero {
+    background-position: 76% top;
+    background-size: auto 100svh;
+  }
+
+  .heroStage {
+    padding-top: 72svh;
+  }
+}
+
+@media (max-width: 360px) {
+  .brandWord {
+    font-size: 0.9rem;
+    letter-spacing: 0.09em;
+  }
+
+  .accessLink {
+    font-size: 0.51rem;
+    padding: 0 0.6rem;
+  }
+
+  .heroTitle {
+    font-size: 3.25rem;
   }
 }

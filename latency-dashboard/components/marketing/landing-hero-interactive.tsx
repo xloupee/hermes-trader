@@ -7,10 +7,12 @@ type PointerPoint = { x: number; y: number };
 
 export function LandingHeroInteractive() {
   const sceneRef = useRef<HTMLDivElement>(null);
+  const figureRef = useRef<HTMLImageElement>(null);
 
   useEffect(() => {
     const scene = sceneRef.current;
-    if (!scene) return;
+    const figure = figureRef.current;
+    if (!scene || !figure) return;
 
     const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const supportsPointer = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
@@ -19,6 +21,33 @@ export function LandingHeroInteractive() {
 
     let pointerFrame = 0;
     let currentPoint: PointerPoint | null = null;
+    const hitCanvas = document.createElement("canvas");
+    const hitContext = hitCanvas.getContext("2d", { willReadFrequently: true });
+    let hitPixels: Uint8ClampedArray | null = null;
+
+    const prepareHitMap = () => {
+      if (!hitContext || !figure.naturalWidth || !figure.naturalHeight) return;
+      hitCanvas.width = Math.ceil(figure.naturalWidth / 4);
+      hitCanvas.height = Math.ceil(figure.naturalHeight / 4);
+      hitContext.clearRect(0, 0, hitCanvas.width, hitCanvas.height);
+      hitContext.drawImage(figure, 0, 0, hitCanvas.width, hitCanvas.height);
+      hitPixels = hitContext.getImageData(0, 0, hitCanvas.width, hitCanvas.height).data;
+    };
+
+    const isNearHermes = (sampleX: number, sampleY: number) => {
+      if (!hitPixels) return false;
+      const radius = 16;
+      for (let y = -radius; y <= radius; y += 2) {
+        const checkY = sampleY + y;
+        if (checkY < 0 || checkY >= hitCanvas.height) continue;
+        for (let x = -radius; x <= radius; x += 2) {
+          const checkX = sampleX + x;
+          if (checkX < 0 || checkX >= hitCanvas.width) continue;
+          if (hitPixels[(checkY * hitCanvas.width + checkX) * 4 + 3] > 28) return true;
+        }
+      }
+      return false;
+    };
 
     const setSceneActive = (value: boolean) => {
       if (!scene || !hero) return;
@@ -34,20 +63,41 @@ export function LandingHeroInteractive() {
         return;
       }
 
-      const withinX = currentPoint.x >= heroRect.left && currentPoint.x <= heroRect.right;
-      const withinY = currentPoint.y >= heroRect.top && currentPoint.y <= heroRect.bottom;
-      const inside = withinX && withinY;
+      const localX = currentPoint.x - heroRect.left;
+      const localY = currentPoint.y - heroRect.top;
+      const imageScale = Math.max(heroRect.width / figure.naturalWidth, heroRect.height / figure.naturalHeight);
+      const renderedWidth = figure.naturalWidth * imageScale;
+      const renderedHeight = figure.naturalHeight * imageScale;
+      const imageX = (localX - (heroRect.width - renderedWidth) / 2) / imageScale;
+      const imageY = (localY - (heroRect.height - renderedHeight) / 2) / imageScale;
 
-      if (!inside) {
+      if (
+        !hitPixels ||
+        imageX < 0 ||
+        imageY < 0 ||
+        imageX >= figure.naturalWidth ||
+        imageY >= figure.naturalHeight
+      ) {
         setSceneActive(false);
         return;
       }
 
-      const offsetX = ((currentPoint.x - heroRect.left) / heroRect.width) * 100;
-      const offsetY = ((currentPoint.y - heroRect.top) / heroRect.height) * 100;
+      const sampleX = Math.min(
+        hitCanvas.width - 1,
+        Math.max(0, Math.floor((imageX / figure.naturalWidth) * hitCanvas.width)),
+      );
+      const sampleY = Math.min(
+        hitCanvas.height - 1,
+        Math.max(0, Math.floor((imageY / figure.naturalHeight) * hitCanvas.height)),
+      );
+      const isOverHermes = isNearHermes(sampleX, sampleY);
+      setSceneActive(isOverHermes);
+      if (!isOverHermes) return;
+
+      const offsetX = (localX / heroRect.width) * 100;
+      const offsetY = (localY / heroRect.height) * 100;
       scene.style.setProperty("--pointer-x", `${offsetX.toFixed(2)}%`);
       scene.style.setProperty("--pointer-y", `${offsetY.toFixed(2)}%`);
-      setSceneActive(true);
     };
 
     const onPointerMove = (event: PointerEvent) => {
@@ -62,10 +112,13 @@ export function LandingHeroInteractive() {
 
     hero.addEventListener("pointermove", onPointerMove);
     hero.addEventListener("pointerleave", onPointerLeave);
+    if (figure.complete) prepareHitMap();
+    else figure.addEventListener("load", prepareHitMap, { once: true });
 
     return () => {
       hero.removeEventListener("pointermove", onPointerMove);
       hero.removeEventListener("pointerleave", onPointerLeave);
+      figure.removeEventListener("load", prepareHitMap);
       if (pointerFrame) window.cancelAnimationFrame(pointerFrame);
       setSceneActive(false);
     };
@@ -73,19 +126,6 @@ export function LandingHeroInteractive() {
 
   return (
     <div className={styles.interactiveScene} ref={sceneRef} aria-hidden="true">
-      <picture>
-        <source type="image/avif" media="(max-width: 767px)" srcSet="/hermes/hermes-hero-mobile.avif" />
-        <source type="image/avif" media="(min-width: 768px)" srcSet="/hermes/hermes-hero-desktop.avif" />
-        <source type="image/webp" media="(max-width: 767px)" srcSet="/hermes/hermes-hero-mobile.webp" />
-        <img
-          className={styles.heroBase}
-          src="/hermes/hermes-hero-desktop.webp"
-          alt=""
-          width={1672}
-          height={941}
-        />
-      </picture>
-
       <span className={styles.heroGlow} />
 
       <picture>
@@ -94,6 +134,7 @@ export function LandingHeroInteractive() {
         <source type="image/webp" media="(max-width: 767px)" srcSet="/hermes/hermes-foreground-mobile.webp" />
         <img
           className={styles.heroForeground}
+          ref={figureRef}
           src="/hermes/hermes-foreground-desktop.webp"
           alt=""
           width={1672}

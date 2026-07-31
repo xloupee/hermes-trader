@@ -138,6 +138,7 @@ describe("dashboard contract", () => {
     const summary = summarizeExecutions(rows);
     assert.equal(summary.outcome.landed, 2);
     assert.equal(summary.outcome.ack_not_landed, 1);
+    assert.equal(summarizeExecutions([{ outcome: "landed", landingComparison: "no_target" }]).landed, 1);
     assert.equal(landingComparisonForRow({ targetSlot: 11, copySlot: 12 }), "cross_slot");
     assert.equal(landingComparisonForRow({}), "no_target");
   });

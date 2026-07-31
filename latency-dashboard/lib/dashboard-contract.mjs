@@ -314,8 +314,8 @@ export function summarizeExecutions(rows) {
   let landedCount = 0;
 
   for (const row of rows ?? []) {
-    const rowOutcome = executionOutcomeForRow(row);
-    const rowComparison = landingComparisonForRow(row);
+    const rowOutcome = row?.outcome ?? executionOutcomeForRow(row);
+    const rowComparison = row?.landingComparison ?? landingComparisonForRow(row);
     if (hasOwn(outcome, rowOutcome)) {
       outcome[rowOutcome] += 1;
     }

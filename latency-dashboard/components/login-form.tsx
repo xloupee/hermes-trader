@@ -27,7 +27,7 @@ export function LoginForm({ initialMessage = null }: { initialMessage?: string |
       return;
     }
 
-    window.location.assign("/");
+    window.location.assign("/dashboard");
   }
 
   return (
@@ -37,8 +37,8 @@ export function LoginForm({ initialMessage = null }: { initialMessage?: string |
         <input
           value={email}
           onChange={(event) => setEmail(event.target.value)}
-          type="text"
-          autoComplete="username"
+          type="email"
+          autoComplete="email"
           required
         />
       </label>
@@ -54,7 +54,7 @@ export function LoginForm({ initialMessage = null }: { initialMessage?: string |
       </label>
       <button className="primary-button" disabled={busy} type="submit">
         <ArrowRight size={16} />
-        {busy ? "Signing in" : "Sign in"}
+        {busy ? "Signing in" : "Open dashboard"}
       </button>
       {message ? <p className="form-message">{message}</p> : null}
     </form>

@@ -13,4 +13,3 @@ export default async function DashboardLayout({ children }: { children: React.Re
     redirect(status === 403 ? "/login?error=forbidden" : "/login");
   }
 }
-

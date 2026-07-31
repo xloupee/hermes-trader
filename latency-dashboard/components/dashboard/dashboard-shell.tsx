@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { DashboardshellClientSignOut } from "@/components/dashboard/dashboard-shell-client";
-import { DASHBOARD_NAV } from "./dashboard-contract";
+import { DASHBOARD_NAV } from "@/lib/dashboard-client";
 import styles from "@/components/dashboard/dashboard-shell.module.css";
 
 export function DashboardShell({
@@ -34,4 +34,3 @@ export function DashboardShell({
     </div>
   );
 }
-

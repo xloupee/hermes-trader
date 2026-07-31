@@ -1,6 +1,6 @@
 "use client";
 
-import { FILTER_OUTCOME_OPTIONS, type DashboardFilterState, type LandingPreset } from "./dashboard-contract";
+import { FILTER_OUTCOME_OPTIONS, type DashboardFilterState, type LandingPreset } from "@/lib/dashboard-client";
 
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
@@ -67,14 +67,14 @@ export function DashboardFiltersPanel({
           </select>
         </label>
         <label className={styles.filterItem}>
-          Target wallet
+          Observed wallet
           <input
-            value={filters.targetWallet}
-            onChange={(event) => onFiltersChange({ targetWallet: event.target.value })}
+            value={filters.observedWallet}
+            onChange={(event) => onFiltersChange({ observedWallet: event.target.value })}
             placeholder="wallet"
             type="text"
             disabled={disabled}
-            aria-label="Target wallet"
+            aria-label="Observed wallet"
           />
         </label>
         <label className={styles.filterItem}>
@@ -118,4 +118,3 @@ export function DashboardFiltersPanel({
     </section>
   );
 }
-

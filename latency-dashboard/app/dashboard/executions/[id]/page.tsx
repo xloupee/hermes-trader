@@ -6,4 +6,3 @@ export default async function DashboardExecutionDetailPage(
   const resolved = await params;
   return <ExecutionDetailDashboard id={resolved.id} />;
 }
-

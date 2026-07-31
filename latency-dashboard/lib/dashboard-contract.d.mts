@@ -34,6 +34,49 @@ export interface ExecutionSummary {
   totalExtraSpendSol: number;
 }
 
+export interface DashboardExecutionsResponse {
+  executions: DashboardExecution[];
+  summary: ExecutionSummary;
+  pagination: {
+    limit: number;
+    hasMore: boolean;
+    nextCursor: string | null;
+  };
+  filters: DashboardExecutionFilters;
+}
+
+export interface DashboardOverviewResponse {
+  summary: ExecutionSummary;
+  latestObservedAtMs: number | null;
+  sourcesObserved: number;
+  executions: DashboardExecution[];
+  filters: DashboardExecutionFilters;
+}
+
+export interface DashboardSource {
+  source: string;
+  provider: string;
+  count: number;
+  latestObservedAtMs: number;
+}
+
+export interface DashboardSourcesResponse {
+  sources: DashboardSource[];
+  filters: DashboardExecutionFilters;
+}
+
+export interface DashboardSystemResponse {
+  time: string;
+  tables: {
+    copytradeLocalExecutions: number | null;
+    copytradeSignalObservations: number | null;
+  };
+  environment: {
+    supabaseUrl: boolean;
+    hasServiceRole: boolean;
+  };
+}
+
 export function sanitizeWallet(address: unknown): string | null;
 export function parseExecutionFilters(searchParams: URLSearchParams): DashboardExecutionFilters;
 export function encodeExecutionCursor(cursor: DashboardExecutionCursor): string | null;

@@ -2,19 +2,19 @@
 
 import Link from "next/link";
 import {
-  type ExecutionListRow,
+  type DashboardExecution,
   formatMs,
   formatSlot,
   formatSol,
   landingSummary,
   shortText
-} from "./dashboard-contract";
+} from "@/lib/dashboard-client";
 import { CopyChip } from "@/components/dashboard/copy-chip";
 
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
 interface ExecutionTableProps {
-  rows: ExecutionListRow[];
+  rows: DashboardExecution[];
   emptyMessage: string;
   includeRowLinks?: boolean;
 }
@@ -30,7 +30,7 @@ function statusClass(status: string | null) {
   return styles.statusMuted;
 }
 
-function crossSlotText(row: ExecutionListRow): string {
+function crossSlotText(row: DashboardExecution): string {
   if (row.slotDelta === null || !Number.isFinite(row.slotDelta)) {
     return "cross-slot n/a";
   }

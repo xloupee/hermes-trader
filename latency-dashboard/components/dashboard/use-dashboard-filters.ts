@@ -3,7 +3,7 @@
 import { useCallback, useMemo } from "react";
 import type { Route } from "next";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { DEFAULT_FILTERS, type DashboardFilterState, parseDashboardFilters, type LandingPreset } from "./dashboard-contract";
+import { DEFAULT_FILTERS, type DashboardFilterState, parseDashboardFilters, type LandingPreset } from "@/lib/dashboard-client";
 
 export interface UseDashboardFiltersState {
   filters: DashboardFilterState;
@@ -39,8 +39,8 @@ export function useDashboardFilters(): UseDashboardFiltersState {
     if (nextFilters.provider.trim()) {
       params.set("provider", nextFilters.provider.trim());
     }
-    if (nextFilters.targetWallet.trim()) {
-      params.set("targetWallet", nextFilters.targetWallet.trim());
+    if (nextFilters.observedWallet.trim()) {
+      params.set("observedWallet", nextFilters.observedWallet.trim());
     }
     if (nextFilters.mint.trim()) {
       params.set("mint", nextFilters.mint.trim());
@@ -77,8 +77,8 @@ export function useDashboardFilters(): UseDashboardFiltersState {
     if (next.provider.trim()) {
       filtered.set("provider", next.provider.trim());
     }
-    if (next.targetWallet.trim()) {
-      filtered.set("targetWallet", next.targetWallet.trim());
+    if (next.observedWallet.trim()) {
+      filtered.set("observedWallet", next.observedWallet.trim());
     }
     if (next.mint.trim()) {
       filtered.set("mint", next.mint.trim());

@@ -13,7 +13,6 @@ interface DashboardRefreshToolbarProps {
   onRefresh: () => void;
   onTogglePause: (next: boolean) => void;
 }
-
 export function DashboardRefreshToolbar({
   loading,
   error,
@@ -54,4 +53,3 @@ export function DashboardRefreshToolbar({
     </div>
   );
 }
-

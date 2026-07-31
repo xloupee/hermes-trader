@@ -3,7 +3,6 @@
   margin: 0 auto;
   padding: 18px 20px 28px;
 }
-
 .topBar {
   align-items: flex-start;
   display: flex;
@@ -72,4 +71,3 @@
   display: grid;
   gap: 12px;
 }
-

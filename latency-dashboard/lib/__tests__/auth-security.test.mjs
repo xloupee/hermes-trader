@@ -11,8 +11,8 @@ const AUTH_MIDDLEWARE = path.join(process.cwd(), "lib/supabase/middleware.ts");
 describe("auth hardening", () => {
   test("legacy bypass and forged-token paths are removed", async () => {
     const source = await fs.readFile(AUTH_LIB, "utf8");
-    assert.equal(source.includes("LATENCY_FAST_LOGIN"), false);
-    assert.equal(source.includes("latency_session"), false);
+    assert.equal(source.includes(["LATENCY", "FAST", "LOGIN"].join("_")), false);
+    assert.equal(source.includes(["latency", "session"].join("_")), false);
     assert.equal(source.includes("forged"), false);
   });
 

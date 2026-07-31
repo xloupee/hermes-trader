@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Copy } from "lucide-react";
 
 import styles from "@/components/dashboard/dashboard-shared.module.css";
-import { shortText } from "./dashboard-contract";
+import { shortText } from "@/lib/dashboard-client";
 
 export function CopyChip({
   value,
@@ -47,4 +47,3 @@ export function CopyChip({
     </span>
   );
 }
-

@@ -2,16 +2,15 @@
 
 import { useAutoRefreshQuery } from "@/lib/use-auto-refresh-query";
 import {
-  type ExecutionResponse,
+  type DashboardExecutionsResponse,
   applyLandingPreset,
   formatCount,
   formatPercent,
-  type LandingPreset,
   hasNonLandedAttempt,
   isLandedBuy,
   isLandedSell,
   toQueryParams
-} from "./dashboard-contract";
+} from "@/lib/dashboard-client";
 import { useDashboardFilters } from "./use-dashboard-filters";
 import { DashboardFiltersPanel } from "@/components/dashboard/dashboard-filters";
 import { DashboardRefreshToolbar } from "@/components/dashboard/dashboard-refresh";
@@ -21,7 +20,7 @@ import styles from "@/components/dashboard/dashboard-shared.module.css";
 function buildQuery(filters: {
   since: string;
   provider: string;
-  targetWallet: string;
+  observedWallet: string;
   mint: string;
   action: string;
   route: string;
@@ -30,25 +29,24 @@ function buildQuery(filters: {
   return toQueryParams({
     since: filters.since,
     provider: filters.provider,
-    targetWallet: filters.targetWallet,
+    observedWallet: filters.observedWallet,
     mint: filters.mint,
     action: filters.action,
     route: filters.route,
-    source: filters.source,
-    outcome: "all" as LandingPreset
+    source: filters.source
   });
 }
 
 export function ExecutionsDashboard() {
   const { filters, setFilters, setOutcome } = useDashboardFilters();
-  const { data, loading, error, paused, autoPaused, setPaused, lastUpdated, refresh } = useAutoRefreshQuery<ExecutionResponse>(
-    async (): Promise<ExecutionResponse> => {
+  const { data, loading, error, paused, autoPaused, setPaused, lastUpdated, refresh } = useAutoRefreshQuery<DashboardExecutionsResponse>(
+    async (): Promise<DashboardExecutionsResponse> => {
       const query = buildQuery(filters);
-      const response = await fetch(`/api/signals/executions?${query}`);
+      const response = await fetch(`/api/dashboard/executions?${query}`);
       if (!response.ok) {
         throw new Error("Could not load executions");
       }
-      return response.json() as Promise<ExecutionResponse>;
+      return response.json() as Promise<DashboardExecutionsResponse>;
     },
     { intervalMs: 15000 }
   );

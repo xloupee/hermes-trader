@@ -40,4 +40,3 @@ These scenarios are for the new `/dashboard` UI paths introduced in this branch.
 7. Error and empty states
    - unreachable API returns an error message near toolbar/status
    - empty result returns “No ...” state with no broken table rows
-

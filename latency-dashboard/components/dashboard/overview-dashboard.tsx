@@ -2,66 +2,46 @@
 
 import { useAutoRefreshQuery } from "@/lib/use-auto-refresh-query";
 import {
-  type ExecutionResponse,
-  type SignalSummary,
+  type DashboardOverviewResponse,
   applyLandingPreset,
   formatCount,
   formatPercent,
-  type LandingPreset,
   hasNonLandedAttempt,
   isLandedBuy,
   isLandedSell,
   toQueryParams
-} from "./dashboard-contract";
+} from "@/lib/dashboard-client";
 import { useDashboardFilters } from "./use-dashboard-filters";
 import { DashboardFiltersPanel } from "@/components/dashboard/dashboard-filters";
 import { DashboardRefreshToolbar } from "@/components/dashboard/dashboard-refresh";
 import { ExecutionTable } from "@/components/dashboard/execution-table";
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
-interface OverviewPayload {
-  signals: { summary: SignalSummary };
-  executions: ExecutionResponse;
-}
-
-function buildQuery(filters: { since: string; provider: string; targetWallet: string; mint: string; action: string; route: string; source: string }) {
+function buildQuery(filters: { since: string; provider: string; observedWallet: string; mint: string; action: string; route: string; source: string }) {
   return toQueryParams({
     since: filters.since,
     provider: filters.provider,
-    targetWallet: filters.targetWallet,
+    observedWallet: filters.observedWallet,
     mint: filters.mint,
     action: filters.action,
     route: filters.route,
-    source: filters.source,
-    outcome: "all" as LandingPreset
+    source: filters.source
   });
 }
 
 export function OverviewDashboard() {
   const { filters, setFilters, setOutcome } = useDashboardFilters();
-  const { data, loading, error, paused, autoPaused, setPaused, lastUpdated, refresh } = useAutoRefreshQuery<OverviewPayload>(
-    async (): Promise<OverviewPayload> => {
+  const { data, loading, error, paused, autoPaused, setPaused, lastUpdated, refresh } = useAutoRefreshQuery<DashboardOverviewResponse>(
+    async (): Promise<DashboardOverviewResponse> => {
       const query = buildQuery(filters);
-      const [signalSummary, executions] = await Promise.all([
-        fetch(`/api/signals/summary?${query}`).then((response) => {
-          if (!response.ok) {
-            throw new Error("failed signals summary");
-          }
-          return response.json() as Promise<{ summary: SignalSummary }>;
-        }),
-        fetch(`/api/signals/executions?${query}`).then((response) => {
-          if (!response.ok) {
-            throw new Error("failed executions query");
-          }
-          return response.json() as Promise<ExecutionResponse>;
-        })
-      ]);
-      return { signals: signalSummary, executions };
+      const response = await fetch(`/api/dashboard/overview?${query}`);
+      if (!response.ok) throw new Error("Could not load dashboard overview");
+      return response.json() as Promise<DashboardOverviewResponse>;
     },
     { intervalMs: 15000 }
   );
 
-  const rows = applyLandingPreset(data?.executions.executions ?? [], filters.outcome);
+  const rows = applyLandingPreset(data?.executions ?? [], filters.outcome);
   const totalAttempts = rows.filter((row) => row.sent).length;
   const landedBuys = rows.filter((row) => isLandedBuy(row)).length;
   const landedSells = rows.filter((row) => isLandedSell(row)).length;
@@ -104,9 +84,9 @@ export function OverviewDashboard() {
         onTogglePause={setPaused}
       />
       <ExecutionTable rows={rows} includeRowLinks emptyMessage="No executions match this filter set." />
-      <h2 className={styles.paneTitle}>Source feed signal summary</h2>
+      <h2 className={styles.paneTitle}>Dashboard window</h2>
       <div className={styles.detailList}>
-        Total signals: {data?.signals.summary.total ?? 0} | buys / sells: {data?.signals.summary.buys ?? 0} / {data?.signals.summary.sells ?? 0} | copyable: {data?.signals.summary.copyable ?? 0}
+        Executions: {data?.summary.total ?? 0} | sources observed: {data?.sourcesObserved ?? 0} | latest: {data?.latestObservedAtMs ? new Date(data.latestObservedAtMs).toLocaleString() : "n/a"}
       </div>
     </section>
   );

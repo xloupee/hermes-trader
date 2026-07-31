@@ -6,6 +6,7 @@
 }
 
 .heroBase,
+.heroForeground,
 .heroGlow,
 .heroLightning {
   inset: 0;
@@ -16,10 +17,15 @@
   width: 100%;
 }
 
-.heroBase {
+.heroBase,
+.heroForeground {
   object-fit: cover;
   object-position: center;
   opacity: 1;
+}
+
+.heroForeground {
+  z-index: 1;
 }
 
 .heroGlow {
@@ -96,7 +102,8 @@
   opacity: 1;
 }
 
-.active .heroBase {
+.active .heroBase,
+.active .heroForeground {
   filter:
     brightness(1.08)
     drop-shadow(0 3px 7px rgb(194 161 93 / 0.2))

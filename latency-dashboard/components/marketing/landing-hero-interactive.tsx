@@ -14,7 +14,7 @@ export function LandingHeroInteractive() {
 
     const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const supportsPointer = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
-    const hero = document.querySelector("[data-landing-hero]");
+    const hero = document.querySelector<HTMLElement>("[data-landing-hero]");
     if (!hero || !supportsPointer || prefersReducedMotion) return;
 
     let pointerFrame = 0;
@@ -23,7 +23,7 @@ export function LandingHeroInteractive() {
     const setSceneActive = (value: boolean) => {
       if (!scene || !hero) return;
       scene.classList.toggle(styles.active, value);
-      (hero as HTMLElement).dataset.hermesActive = value ? "true" : "false";
+      hero.dataset.hermesActive = value ? "true" : "false";
     };
 
     const updateScene = () => {
@@ -89,9 +89,11 @@ export function LandingHeroInteractive() {
       <span className={styles.heroGlow} />
 
       <picture>
+        <source type="image/avif" media="(max-width: 767px)" srcSet="/hermes/hermes-foreground-mobile.avif" />
+        <source type="image/avif" media="(min-width: 768px)" srcSet="/hermes/hermes-foreground-desktop.avif" />
         <source type="image/webp" media="(max-width: 767px)" srcSet="/hermes/hermes-foreground-mobile.webp" />
         <img
-          className={styles.heroBase}
+          className={styles.heroForeground}
           src="/hermes/hermes-foreground-desktop.webp"
           alt=""
           width={1672}

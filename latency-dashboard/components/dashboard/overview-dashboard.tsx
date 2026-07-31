@@ -17,6 +17,7 @@ import { useDashboardFilters } from "./use-dashboard-filters";
 import { DashboardFiltersPanel } from "@/components/dashboard/dashboard-filters";
 import { DashboardRefreshToolbar } from "@/components/dashboard/dashboard-refresh";
 import { ExecutionTable } from "@/components/dashboard/execution-table";
+import styles from "@/components/dashboard/dashboard-shared.module.css";
 
 interface OverviewPayload {
   signals: { summary: SignalSummary };
@@ -69,20 +70,20 @@ export function OverviewDashboard() {
 
   return (
     <section>
-      <div className="dual-latency">
-        <div className="metric">
+      <div className={styles.dualLatency}>
+        <div className={styles.metric}>
           <span>landed buys</span>
           <strong>{formatCount(landedBuys)}</strong>
         </div>
-        <div className="metric">
+        <div className={styles.metric}>
           <span>landed sells</span>
           <strong>{formatCount(landedSells)}</strong>
         </div>
-        <div className="metric">
+        <div className={styles.metric}>
           <span>landing rate</span>
           <strong>{landingRate}</strong>
         </div>
-        <div className="metric">
+        <div className={styles.metric}>
           <span>non-landed attempts</span>
           <strong>{formatCount(nonLandedAttempts)}</strong>
         </div>
@@ -103,8 +104,8 @@ export function OverviewDashboard() {
         onTogglePause={setPaused}
       />
       <ExecutionTable rows={rows} includeRowLinks emptyMessage="No executions match this filter set." />
-      <h2 className="pane-title">Source feed signal summary</h2>
-      <div className="detail-list">
+      <h2 className={styles.paneTitle}>Source feed signal summary</h2>
+      <div className={styles.detailList}>
         Total signals: {data?.signals.summary.total ?? 0} | buys / sells: {data?.signals.summary.buys ?? 0} / {data?.signals.summary.sells ?? 0} | copyable: {data?.signals.summary.copyable ?? 0}
       </div>
     </section>

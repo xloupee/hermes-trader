@@ -137,20 +137,20 @@ export function SourcesDashboard() {
 
   return (
     <section>
-      <div className="metric-strip">
-        <div className="metric">
+      <div className={styles.metricStrip}>
+        <div className={styles.metric}>
           <span>sources</span>
           <strong>{sourceRows.length}</strong>
         </div>
-        <div className="metric">
+        <div className={styles.metric}>
           <span>signals</span>
           <strong>{data?.signals.signals.length ?? 0}</strong>
         </div>
-        <div className="metric">
+        <div className={styles.metric}>
           <span>executions</span>
           <strong>{data?.executions.summary.total ?? 0}</strong>
         </div>
-        <div className="metric">
+        <div className={styles.metric}>
           <span>buy / sell</span>
           <strong>{(data?.signals.signals.filter((signal) => signal.action === "buy").length ?? 0)} / {(data?.signals.signals.filter((signal) => signal.action === "sell").length ?? 0)}</strong>
         </div>

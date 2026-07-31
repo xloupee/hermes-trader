@@ -102,7 +102,7 @@ export function SystemDashboard() {
         onTogglePause={setPaused}
       />
 
-      <h2 className="pane-title">Endpoint health</h2>
+      <h2 className={styles.paneTitle}>Endpoint health</h2>
       <ul className={styles.healthList}>
         {endpointHealth.map((entry, index) => (
           <li key={`${entry.label}-${index}`}>

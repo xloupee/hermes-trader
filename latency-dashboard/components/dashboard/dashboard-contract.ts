@@ -1,3 +1,5 @@
+import type { Route } from "next";
+
 export type LandingPreset = "all" | "landed-buys" | "landed-sells" | "non-landed";
 
 export interface DashboardFilterState {
@@ -173,7 +175,7 @@ export interface MeResponse {
 }
 
 export interface RouteDefinition {
-  href: string;
+  href: Route;
   label: string;
 }
 
@@ -218,7 +220,7 @@ export function parseDashboardFilters(searchParams: URLSearchParams | null): Das
     action: searchParams?.get("action")?.trim() || DEFAULT_FILTERS.action,
     route: searchParams?.get("route")?.trim() || DEFAULT_FILTERS.route,
     source: searchParams?.get("source")?.trim() || DEFAULT_FILTERS.source,
-    outcome: normalizeOutcome(searchParams?.get("outcome")),
+    outcome: normalizeOutcome(searchParams?.get("outcome") ?? null),
   };
 }
 

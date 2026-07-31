@@ -113,7 +113,7 @@ export function ExecutionDetailDashboard({ id }: { id: string }) {
   return (
     <section>
       <div className={styles.toolbar}>
-        <p className="pane-title">Execution detail · {id}</p>
+        <p className={styles.paneTitle}>Execution detail · {id}</p>
         <Link href="/dashboard/executions">Back to executions</Link>
       </div>
       <DashboardRefreshToolbar

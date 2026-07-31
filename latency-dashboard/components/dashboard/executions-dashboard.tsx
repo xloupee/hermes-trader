@@ -16,6 +16,7 @@ import { useDashboardFilters } from "./use-dashboard-filters";
 import { DashboardFiltersPanel } from "@/components/dashboard/dashboard-filters";
 import { DashboardRefreshToolbar } from "@/components/dashboard/dashboard-refresh";
 import { ExecutionTable } from "@/components/dashboard/execution-table";
+import styles from "@/components/dashboard/dashboard-shared.module.css";
 
 function buildQuery(filters: {
   since: string;
@@ -61,20 +62,20 @@ export function ExecutionsDashboard() {
 
   return (
     <section>
-      <div className="dual-latency">
-        <div className="metric">
+      <div className={styles.dualLatency}>
+        <div className={styles.metric}>
           <span>landed buys</span>
           <strong>{formatCount(landedBuys)}</strong>
         </div>
-        <div className="metric">
+        <div className={styles.metric}>
           <span>landed sells</span>
           <strong>{formatCount(landedSells)}</strong>
         </div>
-        <div className="metric">
+        <div className={styles.metric}>
           <span>landing rate</span>
           <strong>{landingRate}</strong>
         </div>
-        <div className="metric">
+        <div className={styles.metric}>
           <span>non-landed attempts</span>
           <strong>{formatCount(nonLanded)}</strong>
         </div>

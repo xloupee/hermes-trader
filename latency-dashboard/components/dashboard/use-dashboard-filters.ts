@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useMemo } from "react";
+import type { Route } from "next";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { DEFAULT_FILTERS, type DashboardFilterState, parseDashboardFilters, type LandingPreset } from "./dashboard-contract";
 
@@ -16,6 +17,10 @@ function sanitizeOutcome(value: string): LandingPreset {
     return value;
   }
   return "all";
+}
+
+function dashboardRoute(pathname: string, query: string): Route {
+  return (query ? `${pathname}?${query}` : pathname) as Route;
 }
 
 export function useDashboardFilters(): UseDashboardFiltersState {
@@ -53,7 +58,7 @@ export function useDashboardFilters(): UseDashboardFiltersState {
       params.set("outcome", nextFilters.outcome);
     }
     const query = params.toString();
-    router.replace(query ? `${pathname}?${query}` : pathname);
+    router.replace(dashboardRoute(pathname, query));
   }, [filters, pathname, router]);
 
   const setOutcome = useCallback((outcome: LandingPreset) => {
@@ -91,7 +96,7 @@ export function useDashboardFilters(): UseDashboardFiltersState {
       filtered.set("outcome", safeOutcome);
     }
     const nextQuery = filtered.toString();
-    router.replace(nextQuery ? `${pathname}?${nextQuery}` : pathname);
+    router.replace(dashboardRoute(pathname, nextQuery));
   }, [filters, pathname, router, searchParams]);
 
   const resetFilters = useCallback(() => {
@@ -100,9 +105,8 @@ export function useDashboardFilters(): UseDashboardFiltersState {
       params.set("since", DEFAULT_FILTERS.since);
     }
     const query = params.toString();
-    router.replace(query ? `${pathname}?${query}` : pathname);
+    router.replace(dashboardRoute(pathname, query));
   }, [pathname, router]);
 
   return { filters, setFilters, setOutcome, resetFilters };
 }
-

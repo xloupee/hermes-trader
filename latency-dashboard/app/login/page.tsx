@@ -10,7 +10,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
       <section className="login-panel">
         <p className="eyebrow">Hermes Trader</p>
         <h1>Operator access</h1>
-        <p>Sign in with your approved Supabase account to open the private dashboard.</p>
+        <p>Use the operator credentials or an approved Supabase account to open the private dashboard.</p>
         <LoginForm initialMessage={message} />
         <Link href="/">Return to Hermes Trader</Link>
       </section>

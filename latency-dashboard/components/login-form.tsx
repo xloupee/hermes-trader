@@ -33,12 +33,12 @@ export function LoginForm({ initialMessage = null }: { initialMessage?: string |
   return (
     <form className="login-form" noValidate onSubmit={submit}>
       <label>
-        Email
+        Username or email
         <input
           value={email}
           onChange={(event) => setEmail(event.target.value)}
-          type="email"
-          autoComplete="email"
+          type="text"
+          autoComplete="username"
           required
         />
       </label>

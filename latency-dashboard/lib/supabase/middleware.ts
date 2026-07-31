@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { protectedRequestKind } from "@/lib/auth-redirect.mjs";
+import { OPERATOR_SESSION_COOKIE, verifyOperatorSessionToken } from "@/lib/operator-session.mjs";
 
 interface RefreshedCookie { name: string; value: string; options: CookieOptions }
 
@@ -17,6 +18,14 @@ export async function updateSession(request: NextRequest) {
   let response = NextResponse.next({ request });
   let refreshedCookies: RefreshedCookie[] = [];
   const protectedKind = protectedRequestKind(request.nextUrl.pathname);
+  const operatorToken = request.cookies.get(OPERATOR_SESSION_COOKIE)?.value;
+  if (
+    protectedKind !== "none" &&
+    await verifyOperatorSessionToken(operatorToken, process.env.HERMES_OPERATOR_SESSION_SECRET)
+  ) {
+    response.headers.set("Cache-Control", "private, no-store");
+    return response;
+  }
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 

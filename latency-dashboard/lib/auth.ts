@@ -1,6 +1,8 @@
+import { cookies } from "next/headers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { authFailure, resolveAdminAccess } from "@/lib/auth-contract.mjs";
+import { OPERATOR_SESSION_COOKIE, verifyOperatorSessionToken } from "@/lib/operator-session.mjs";
 
 interface AdminUser {
   id: string;
@@ -13,6 +15,12 @@ export interface AdminSession {
 }
 
 export async function requireAdmin(): Promise<AdminSession> {
+  const cookieStore = await cookies();
+  const operatorToken = cookieStore.get(OPERATOR_SESSION_COOKIE)?.value;
+  if (await verifyOperatorSessionToken(operatorToken, process.env.HERMES_OPERATOR_SESSION_SECRET)) {
+    return { user: { id: "local-operator", email: "123" }, email: "123" };
+  }
+
   const supabase = await createClient();
   const access = await resolveAdminAccess({
     getVerifiedUser: async () => {

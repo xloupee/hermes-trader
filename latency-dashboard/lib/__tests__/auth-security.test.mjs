@@ -4,27 +4,51 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { dashboardRedirectPath, protectedRequestKind } from "../auth-redirect.mjs";
 import { resolveAdminAccess } from "../auth-contract.mjs";
+import {
+  createOperatorSessionToken,
+  isOperatorShortcut,
+  OPERATOR_SESSION_COOKIE,
+  verifyOperatorSessionToken
+} from "../operator-session.mjs";
 
 const AUTH_LIB = path.join(process.cwd(), "lib/auth.ts");
 const AUTH_CALLBACK = path.join(process.cwd(), "app/auth/callback/route.ts");
 const AUTH_MIDDLEWARE = path.join(process.cwd(), "lib/supabase/middleware.ts");
+const AUTH_LOGIN = path.join(process.cwd(), "app/api/auth/login/route.ts");
 
 describe("auth hardening", () => {
-  test("legacy bypass and forged-token paths are removed", async () => {
-    const source = await fs.readFile(AUTH_LIB, "utf8");
-    assert.equal(source.includes(["LATENCY", "FAST", "LOGIN"].join("_")), false);
-    assert.equal(source.includes(["latency", "session"].join("_")), false);
-    assert.equal(source.includes("forged"), false);
+  test("the requested 123 operator shortcut is exact", () => {
+    assert.equal(isOperatorShortcut("123", "123"), true);
+    assert.equal(isOperatorShortcut("123 ", "123"), false);
+    assert.equal(isOperatorShortcut("123", "1234"), false);
+    assert.equal(isOperatorShortcut("operator", "123"), false);
   });
 
-  test("default password auth fallback markers are not present", async () => {
-    const source = await fs.readFile(AUTH_LIB, "utf8");
-    assert.equal(/123\/123/.test(source), false);
-    assert.equal(source.includes("SESSION_COOKIE"), false);
-    assert.equal(source.includes("getSession("), false);
-    assert.equal(source.includes("data.user.email"), false);
-    assert.equal(source.includes("resolveAdminAccess"), true);
-    assert.equal(source.includes("authFailure(access.status)"), true);
+  test("operator sessions are signed, expiring, and reject tampering", async () => {
+    const secret = "test-only-operator-secret-with-enough-entropy";
+    const now = Date.UTC(2026, 6, 31, 22, 0, 0);
+    const token = await createOperatorSessionToken(secret, now);
+    assert.equal(await verifyOperatorSessionToken(token, secret, now + 1_000), true);
+    assert.equal(await verifyOperatorSessionToken(`${token.slice(0, -1)}x`, secret, now + 1_000), false);
+    assert.equal(await verifyOperatorSessionToken(token, "wrong-secret", now + 1_000), false);
+    assert.equal(await verifyOperatorSessionToken(token, secret, now + 8 * 24 * 60 * 60 * 1_000), false);
+    assert.equal(OPERATOR_SESSION_COOKIE, "hermes_operator_session");
+  });
+
+  test("operator session remains server-only and HttpOnly", async () => {
+    const [authSource, loginSource, middleware] = await Promise.all([
+      fs.readFile(AUTH_LIB, "utf8"),
+      fs.readFile(AUTH_LOGIN, "utf8"),
+      fs.readFile(AUTH_MIDDLEWARE, "utf8")
+    ]);
+    assert.equal(authSource.includes("HERMES_OPERATOR_SESSION_SECRET"), true);
+    assert.equal(loginSource.includes("httpOnly: true"), true);
+    assert.equal(loginSource.includes('sameSite: "lax"'), true);
+    assert.equal(loginSource.includes('secure: process.env.NODE_ENV === "production"'), true);
+    assert.equal(middleware.includes("verifyOperatorSessionToken"), true);
+    assert.equal(loginSource.includes('if (email === "123")'), true);
+    assert.equal(authSource.includes("getSession("), false);
+    assert.equal(authSource.includes("resolveAdminAccess"), true);
   });
 
   test("anonymous requests resolve to 401", async () => {

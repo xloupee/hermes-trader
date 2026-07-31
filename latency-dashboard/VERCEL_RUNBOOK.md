@@ -32,7 +32,7 @@ not match this contract.
    creation time, and tester.
 5. Verify `/`, `/login`, `/dashboard`, `/dashboard/executions`, an execution
    detail route, `/dashboard/sources`, `/dashboard/system`, and the `/signals`
-   redirect. Authenticated checks require an approved Supabase account.
+   redirect. Authenticated checks can use an approved Supabase account or the private operator shortcut.
 6. Confirm client assets and source maps contain no server-only credential or
    private-key material.
 

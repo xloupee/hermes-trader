@@ -47,4 +47,4 @@ fee, and extra spend beyond the observed buy amount.
 ## Admin Access
 
 Add an authenticated Supabase user to `public.latency_admin_users` by email and, once known, `auth_user_id`.
-Sign in at `/login` with that user's Supabase email and password. There is no local or production shortcut credential path.
+Sign in at `/login` with that user's Supabase email and password, or use the private operator shortcut. The shortcut issues a signed, HTTP-only session cookie using `HERMES_OPERATOR_SESSION_SECRET`.

@@ -1,5 +1,6 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { authFailure, resolveAdminAccess } from "@/lib/auth-contract.mjs";
 
 interface AdminUser {
   id: string;
@@ -11,36 +12,29 @@ export interface AdminSession {
   email: string | null;
 }
 
-export async function currentUser(): Promise<AdminUser | null> {
-  const supabase = await createClient();
-  const { data, error } = await supabase.auth.getUser();
-  if (error || !data.user) {
-    return null;
-  }
-
-  const admin = createAdminClient();
-  const { data: adminUser, error: adminError } = await admin
-    .from("latency_admin_users")
-    .select("id,email,auth_user_id")
-    .eq("auth_user_id", data.user.id)
-    .maybeSingle();
-
-  if (adminError || !adminUser) {
-    return null;
-  }
-
-  return {
-    id: data.user.id,
-    email: adminUser.email ?? data.user.email ?? null
-  };
-}
-
 export async function requireAdmin(): Promise<AdminSession> {
-  const user = await currentUser();
-  if (!user) {
-    throw Object.assign(new Error("unauthenticated"), { status: 401 });
+  const supabase = await createClient();
+  const access = await resolveAdminAccess({
+    getVerifiedUser: async () => {
+      const { data, error } = await supabase.auth.getUser();
+      return { user: data.user ? { id: data.user.id } : null, error };
+    },
+    findAdminUser: async (authUserId) => {
+      const admin = createAdminClient();
+      const { data, error } = await admin
+        .from("latency_admin_users")
+        .select("email,auth_user_id")
+        .eq("auth_user_id", authUserId)
+        .maybeSingle();
+      return { adminUser: data, error };
+    }
+  });
+
+  if (access.state !== "authorized") {
+    throw authFailure(access.status);
   }
 
+  const user: AdminUser = access.user;
   return { user, email: user.email };
 }
 
@@ -50,12 +44,13 @@ export async function logoutSession(): Promise<void> {
 }
 
 export function authErrorResponse(error: unknown) {
-  const status =
+  const candidateStatus =
     typeof error === "object" && error !== null && "status" in error
       ? Number((error as { status?: unknown }).status)
       : 500;
+  const status = candidateStatus === 401 || candidateStatus === 403 ? candidateStatus : 500;
   return Response.json(
     { error: status === 401 ? "unauthenticated" : status === 403 ? "forbidden" : "server_error" },
-    { status: Number.isFinite(status) ? status : 500 }
+    { status }
   );
 }

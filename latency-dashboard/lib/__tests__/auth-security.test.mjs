@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { dashboardRedirectPath, protectedRequestKind } from "../auth-redirect.mjs";
+import { resolveAdminAccess } from "../auth-contract.mjs";
 
 const AUTH_LIB = path.join(process.cwd(), "lib/auth.ts");
 const AUTH_CALLBACK = path.join(process.cwd(), "app/auth/callback/route.ts");
@@ -20,6 +21,52 @@ describe("auth hardening", () => {
     const source = await fs.readFile(AUTH_LIB, "utf8");
     assert.equal(/123\/123/.test(source), false);
     assert.equal(source.includes("SESSION_COOKIE"), false);
+    assert.equal(source.includes("getSession("), false);
+    assert.equal(source.includes("data.user.email"), false);
+    assert.equal(source.includes("resolveAdminAccess"), true);
+    assert.equal(source.includes("authFailure(access.status)"), true);
+  });
+
+  test("anonymous requests resolve to 401", async () => {
+    const result = await resolveAdminAccess({
+      getVerifiedUser: async () => ({ user: null, error: null }),
+      findAdminUser: async () => assert.fail("anonymous requests must not query the allowlist")
+    });
+    assert.deepEqual(result, { state: "unauthenticated", status: 401, user: null });
+  });
+
+  test("forged or invalid users resolve to 401", async () => {
+    const result = await resolveAdminAccess({
+      getVerifiedUser: async () => ({ user: { id: "forged-user" }, error: new Error("invalid JWT") }),
+      findAdminUser: async () => assert.fail("invalid users must not query the allowlist")
+    });
+    assert.deepEqual(result, { state: "unauthenticated", status: 401, user: null });
+  });
+
+  test("verified but unlisted users resolve to 403", async () => {
+    const result = await resolveAdminAccess({
+      getVerifiedUser: async () => ({ user: { id: "verified-user" }, error: null }),
+      findAdminUser: async (authUserId) => {
+        assert.equal(authUserId, "verified-user");
+        return { adminUser: null, error: null };
+      }
+    });
+    assert.deepEqual(result, { state: "forbidden", status: 403, user: null });
+  });
+
+  test("listed users succeed with allowlist identity only", async () => {
+    const result = await resolveAdminAccess({
+      getVerifiedUser: async () => ({ user: { id: "listed-user", email: "untrusted@example.com" }, error: null }),
+      findAdminUser: async () => ({
+        adminUser: { auth_user_id: "listed-user", email: "operator@example.com" },
+        error: null
+      })
+    });
+    assert.deepEqual(result, {
+      state: "authorized",
+      status: 200,
+      user: { id: "listed-user", email: "operator@example.com" }
+    });
   });
 
   test("auth callback only permits relative dashboard destinations", () => {

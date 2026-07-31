@@ -18,6 +18,9 @@ describe("dashboard contract", () => {
     assert.equal(defaults.cursor, null);
     assert.equal(defaults.sinceObservedAtMs > 0, true);
 
+    const empty = parseExecutionFilters(new URLSearchParams("limit="));
+    assert.equal(empty.limit, 50);
+
     const capped = parseExecutionFilters(new URLSearchParams("limit=500"));
     assert.equal(capped.limit, 100);
 

@@ -55,9 +55,11 @@ export function sanitizeWallet(address) {
 export function parseExecutionFilters(searchParams) {
   const cursorRaw = optionalString(searchParams.get("cursor"));
   const cursor = decodeExecutionCursor(cursorRaw);
-  const limit = optionalString(searchParams.get("limit"));
-  const requestedLimit = Number(limit);
-  const finalLimit = isFiniteNumber(requestedLimit) ? Math.max(1, Math.min(requestedLimit, MAX_LIMIT)) : DEFAULT_LIMIT;
+  const limitRaw = optionalString(searchParams.get("limit"));
+  const requestedLimit = limitRaw === null ? null : Number(limitRaw);
+  const finalLimit = requestedLimit !== null && isFiniteNumber(requestedLimit)
+    ? Math.max(1, Math.min(Math.trunc(requestedLimit), MAX_LIMIT))
+    : DEFAULT_LIMIT;
 
   return {
     since: coerceDate(searchParams.get("since")),

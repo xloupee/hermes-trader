@@ -2,10 +2,11 @@ import { authErrorResponse, requireAdmin } from "@/lib/auth";
 import { toDashboardExecution } from "@/lib/dashboard-contract.mjs";
 import { getLocalExecution } from "@/lib/local-executions";
 
-export async function GET(_request: Request, { params }: { params: { id: string } }) {
+export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     await requireAdmin();
-    const id = Number(params.id);
+    const { id: idParam } = await params;
+    const id = Number(idParam);
     if (!Number.isFinite(id)) {
       return Response.json({ error: "invalid id" }, { status: 400 });
     }

@@ -1,4 +1,4 @@
-name: Deploy production
+name: CI safety checks
 
 on:
   push:
@@ -14,11 +14,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: Deploy main to VPS
+  safety:
+    name: Main branch safety gates
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: production
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,32 +31,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Typecheck
+        run: npm run check
+
       - name: Test
         run: npm test
 
-      - name: Configure SSH
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+      - name: Rust decoder checks
         run: |
-          set -euo pipefail
-          if [ -z "$VPS_SSH_PRIVATE_KEY" ]; then
-            echo "Missing required secret: VPS_SSH_PRIVATE_KEY" >&2
-            exit 1
-          fi
+          npm run shredstream-decoder:check
+          npm run shredstream-decoder:test
 
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-
-          host="${VPS_HOST:-root@207.154.228.222}"
-          host="${host#*@}"
-          ssh-keyscan -H "$host" >> ~/.ssh/known_hosts
-
-      - name: Deploy
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          APP_DIR: ${{ secrets.APP_DIR }}
-          SERVICE_NAME: ${{ secrets.SERVICE_NAME }}
-        run: npm run deploy
+      - name: Absence checks
+        run: node scripts/robinhood-absence-gate.mjs

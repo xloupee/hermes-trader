@@ -1,2 +1,0 @@
-{"record_type":"frame","source":"region-a","received_unix_ns":1000,"sequence_numbers":[10,11]}
-{"record_type":"frame","source":"region-a","received_unix_ns":3000,"sequence_numbers":[12]}

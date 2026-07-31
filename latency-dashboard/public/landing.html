@@ -1,0 +1,1334 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="description" content="Hermes Trader is a private Solana copy-execution platform for decisive traders.">
+  <link rel="icon" type="image/png" href="./assets/hermes-favicon.png">
+  <link rel="apple-touch-icon" href="./assets/hermes-logo.png">
+  <title>Hermes Trader | Move When They Move</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --obsidian: #101318;
+      --obsidian-2: #151b22;
+      --marble: #f4efe4;
+      --marble-deep: #e7decd;
+      --gold: #c2a15d;
+      --soft: rgba(244, 239, 228, 0.74);
+      --muted: rgba(244, 239, 228, 0.52);
+      --line: rgba(244, 239, 228, 0.22);
+      --ink-line: rgba(16, 19, 24, 0.18);
+      --font-display: "Bodoni 72", Didot, "Iowan Old Style", Georgia, serif;
+      --font-body: "Avenir Next", Avenir, "Helvetica Neue", sans-serif;
+      --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      background: var(--obsidian);
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--obsidian);
+      color: var(--marble);
+      font-family: var(--font-body);
+      font-kerning: normal;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a {
+      color: inherit;
+    }
+
+    a:focus-visible {
+      outline: 2px solid var(--gold);
+      outline-offset: 5px;
+    }
+
+    .skip-link {
+      background: var(--marble);
+      color: var(--obsidian);
+      left: 1rem;
+      padding: 0.75rem 1rem;
+      position: fixed;
+      top: 1rem;
+      transform: translateY(-180%);
+      transition: transform 180ms var(--ease-out);
+      z-index: 100;
+    }
+
+    .skip-link:focus {
+      transform: translateY(0);
+    }
+
+    .landing {
+      min-height: 100vh;
+      overflow: hidden;
+    }
+
+    .hero {
+      background:
+        linear-gradient(90deg, rgba(13, 18, 25, 0.96) 0%, rgba(13, 18, 25, 0.84) 37%, rgba(13, 18, 25, 0.28) 69%, rgba(13, 18, 25, 0.04) 100%),
+        url("./hermes-hero.png") center / cover no-repeat;
+      min-height: 100vh;
+      padding: 22px 30px 0;
+      position: relative;
+    }
+
+    .hero::before {
+      background:
+        linear-gradient(90deg, rgba(101, 215, 207, 0.24) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(244, 239, 228, 0.08) 1px, transparent 1px);
+      background-size: 46px 46px;
+      content: "";
+      inset: 0;
+      mask-image: linear-gradient(90deg, black 0%, rgba(0, 0, 0, 0.42) 54%, transparent 78%);
+      opacity: 0.35;
+      pointer-events: none;
+      position: absolute;
+    }
+
+    .hero::after {
+      background: linear-gradient(0deg, rgba(13, 18, 25, 0.74), transparent 28%);
+      content: "";
+      inset: 0;
+      pointer-events: none;
+      position: absolute;
+    }
+
+    .hermes-interactive {
+      --pointer-x: 78%;
+      --pointer-y: 42%;
+      contain: paint;
+      inset: 0;
+      overflow: hidden;
+      pointer-events: none;
+      position: absolute;
+      z-index: 2;
+    }
+
+    .hermes-figure,
+    .hermes-light,
+    .hermes-lightning {
+      height: 100%;
+      inset: 0;
+      position: absolute;
+      width: 100%;
+    }
+
+    .hermes-figure {
+      filter:
+        brightness(1.08)
+        drop-shadow(0 3px 7px rgba(194, 161, 93, 0.2))
+        drop-shadow(0 12px 24px rgba(4, 8, 12, 0.24));
+      object-fit: cover;
+      object-position: center;
+      opacity: 0;
+      transform: translate3d(0, 0, 0) scale(1);
+      transform-origin: 76% 48%;
+      transition: opacity 280ms var(--ease-out);
+    }
+
+    .hermes-light {
+      -webkit-mask-position: center;
+      -webkit-mask-repeat: no-repeat;
+      -webkit-mask-size: cover;
+      background: radial-gradient(
+        circle clamp(8rem, 15vw, 14rem) at var(--pointer-x) var(--pointer-y),
+        rgba(250, 231, 188, 0.38) 0%,
+        rgba(194, 161, 93, 0.13) 44%,
+        transparent 72%
+      );
+      mask-position: center;
+      mask-repeat: no-repeat;
+      mask-size: cover;
+      mix-blend-mode: screen;
+      opacity: 0;
+      transition: opacity 220ms var(--ease-out);
+    }
+
+    .hero.is-hermes-hovered .hermes-figure {
+      opacity: 0.22;
+      transform: translate3d(0, 0, 0) scale(1.002);
+      will-change: opacity, transform;
+    }
+
+    .hero.is-hermes-hovered .hermes-light {
+      opacity: 1;
+    }
+
+    .hermes-lightning {
+      opacity: 0;
+      overflow: visible;
+      transition: opacity 260ms var(--ease-out);
+    }
+
+    .lightning-strike {
+      opacity: 0;
+      transform-origin: 76% 48%;
+    }
+
+    .lightning-core,
+    .lightning-glow,
+    .lightning-branch {
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .lightning-glow {
+      filter: blur(2.2px);
+      opacity: 0.58;
+      stroke: rgba(194, 161, 93, 0.58);
+      stroke-width: 6;
+    }
+
+    .lightning-core {
+      filter: drop-shadow(0 0 2px rgba(255, 249, 232, 0.96));
+      stroke: rgba(255, 250, 238, 0.98);
+      stroke-width: 1.05;
+    }
+
+    .lightning-branch {
+      opacity: 0.76;
+      stroke: rgba(248, 225, 174, 0.9);
+      stroke-width: 0.72;
+    }
+
+    .lightning-strike:nth-child(1) {
+      --strike-delay: 0ms;
+      --strike-duration: 4600ms;
+    }
+
+    .lightning-strike:nth-child(2) {
+      --strike-delay: 420ms;
+      --strike-duration: 5200ms;
+    }
+
+    .lightning-strike:nth-child(3) {
+      --strike-delay: 860ms;
+      --strike-duration: 5900ms;
+    }
+
+    .lightning-strike:nth-child(4) {
+      --strike-delay: 1320ms;
+      --strike-duration: 4900ms;
+    }
+
+    .lightning-strike:nth-child(5) {
+      --strike-delay: 1780ms;
+      --strike-duration: 5600ms;
+    }
+
+    .hero.is-hermes-hovered .hermes-lightning {
+      opacity: 1;
+    }
+
+    .hero.is-hermes-hovered .lightning-strike {
+      animation: hermes-strike var(--strike-duration) linear var(--strike-delay) infinite;
+    }
+
+    @keyframes hermes-strike {
+      0% {
+        opacity: 0;
+        transform: scale(0.999);
+      }
+
+      1.2% {
+        opacity: 1;
+        transform: scale(1);
+      }
+
+      2.7% {
+        opacity: 0.12;
+      }
+
+      3.9% {
+        opacity: 0.88;
+      }
+
+      5.8% {
+        opacity: 0.2;
+      }
+
+      7.2% {
+        opacity: 0.72;
+      }
+
+      9.5%,
+      100% {
+        opacity: 0;
+        transform: scale(1.001);
+      }
+    }
+
+    .masthead {
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      height: 76px;
+      left: clamp(1.25rem, 3.4vw, 3.75rem);
+      position: absolute;
+      right: clamp(1.25rem, 3.4vw, 3.75rem);
+      top: 0;
+      z-index: 5;
+    }
+
+    .brand {
+      align-items: center;
+      display: inline-flex;
+      gap: 0.75rem;
+      justify-self: start;
+      text-decoration: none;
+    }
+
+    .brand-word {
+      font-family: var(--font-display);
+      font-size: 1.45rem;
+      font-weight: 600;
+      letter-spacing: 0.16em;
+      line-height: 1;
+    }
+
+    .nav-links {
+      align-items: center;
+      display: flex;
+      gap: clamp(1.5rem, 3vw, 3.25rem);
+    }
+
+    .nav-links a,
+    .access-link {
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      position: relative;
+      text-decoration: none;
+      text-transform: uppercase;
+    }
+
+    .nav-links a {
+      color: var(--soft);
+    }
+
+    .nav-links a::after,
+    .access-link::after,
+    .text-link::after {
+      background: currentColor;
+      bottom: -0.45rem;
+      content: "";
+      height: 1px;
+      left: 0;
+      position: absolute;
+      transform: scaleX(0);
+      transform-origin: right;
+      transition: transform 280ms var(--ease-out);
+      width: 100%;
+    }
+
+    .access-link {
+      color: var(--gold);
+      justify-self: end;
+    }
+
+    .access-link::after {
+      transform: scaleX(1);
+      transform-origin: left;
+    }
+
+    .hero-stage {
+      align-items: center;
+      display: flex;
+      min-height: calc(100vh - 22px);
+      padding: clamp(8.5rem, 16vh, 11rem) clamp(0rem, 1.9vw, 2rem) clamp(4rem, 7vh, 6rem);
+      position: relative;
+      z-index: 3;
+    }
+
+    .hero-copy {
+      max-width: 44rem;
+      width: min(52vw, 44rem);
+    }
+
+    .eyebrow {
+      align-items: center;
+      color: var(--soft);
+      display: flex;
+      font-size: 0.65rem;
+      font-weight: 750;
+      gap: 0.9rem;
+      letter-spacing: 0.2em;
+      margin: 0 0 clamp(1.75rem, 4vh, 2.75rem);
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      background: var(--gold);
+      content: "";
+      height: 1px;
+      width: 2.25rem;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin-top: 0;
+    }
+
+    h1 {
+      font-family: var(--font-display);
+      font-size: clamp(4.5rem, 7.25vw, 7.4rem);
+      font-weight: 400;
+      letter-spacing: -0.055em;
+      line-height: 0.82;
+      margin-bottom: clamp(1.75rem, 3vh, 2.5rem);
+      margin-left: -0.045em;
+      max-width: 7ch;
+    }
+
+    h1 em {
+      color: var(--gold);
+      display: block;
+      font-weight: 400;
+    }
+
+    .hero-lead {
+      color: var(--soft);
+      font-family: var(--font-display);
+      font-size: clamp(1.15rem, 1.5vw, 1.4rem);
+      line-height: 1.55;
+      margin-bottom: 2rem;
+      max-width: 31rem;
+    }
+
+    .hero-actions {
+      align-items: center;
+      display: flex;
+      gap: 1.5rem;
+    }
+
+    .primary-action {
+      align-items: center;
+      background: var(--marble);
+      color: var(--obsidian);
+      display: inline-flex;
+      font-size: 0.7rem;
+      font-weight: 800;
+      gap: 2rem;
+      justify-content: space-between;
+      letter-spacing: 0.13em;
+      min-height: 3.25rem;
+      min-width: 13rem;
+      padding: 0.25rem 1.1rem 0.25rem 1.3rem;
+      text-decoration: none;
+      text-transform: uppercase;
+      transition: background-color 180ms linear, color 180ms linear, transform 180ms var(--ease-out);
+    }
+
+    .primary-action span {
+      display: block;
+      flex: 0 0 1.2rem;
+      height: 0.75rem;
+      position: relative;
+      transition: transform 180ms var(--ease-out);
+      width: 1.2rem;
+    }
+
+    .primary-action span::before {
+      background: currentColor;
+      content: "";
+      height: 1px;
+      left: 0;
+      position: absolute;
+      right: 0;
+      top: 50%;
+    }
+
+    .primary-action span::after {
+      border-right: 1px solid currentColor;
+      border-top: 1px solid currentColor;
+      content: "";
+      height: 0.38rem;
+      position: absolute;
+      right: 0;
+      top: 50%;
+      transform: translateY(-50%) rotate(45deg);
+      width: 0.38rem;
+    }
+
+    .text-link {
+      color: var(--soft);
+      font-size: 0.7rem;
+      font-weight: 750;
+      letter-spacing: 0.12em;
+      position: relative;
+      text-decoration: none;
+      text-transform: uppercase;
+    }
+
+    .dispatch {
+      border-bottom: 1px solid var(--line);
+      border-top: 1px solid var(--line);
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      margin-top: clamp(2.5rem, 5vh, 4rem);
+      max-width: 40rem;
+    }
+
+    .dispatch-item {
+      min-height: 5.65rem;
+      padding: 1.15rem 1.1rem 1rem 0;
+    }
+
+    .dispatch-item + .dispatch-item {
+      border-left: 1px solid var(--line);
+      padding-left: 1.1rem;
+    }
+
+    .dispatch-index {
+      color: var(--gold);
+      display: block;
+      font-size: 0.58rem;
+      font-weight: 800;
+      letter-spacing: 0.15em;
+      margin-bottom: 0.6rem;
+    }
+
+    .dispatch-item strong {
+      display: block;
+      font-size: 0.7rem;
+      letter-spacing: 0.13em;
+      margin-bottom: 0.35rem;
+      text-transform: uppercase;
+    }
+
+    .dispatch-item small {
+      color: var(--muted);
+      display: block;
+      font-family: var(--font-display);
+      font-size: 0.9rem;
+      line-height: 1.35;
+    }
+
+    .hero-folio {
+      align-items: center;
+      bottom: 2rem;
+      color: rgba(244, 239, 228, 0.56);
+      display: flex;
+      font-size: 0.58rem;
+      font-weight: 700;
+      gap: 0.75rem;
+      letter-spacing: 0.18em;
+      position: absolute;
+      right: clamp(1.25rem, 3.4vw, 3.75rem);
+      text-transform: uppercase;
+      writing-mode: vertical-rl;
+      z-index: 3;
+    }
+
+    .hero-folio::before {
+      background: currentColor;
+      content: "";
+      height: 2.75rem;
+      width: 1px;
+    }
+
+    .editorial {
+      background: var(--marble);
+      color: var(--obsidian);
+      padding: clamp(5.5rem, 10vw, 10rem) clamp(1.5rem, 5vw, 5.5rem) clamp(3rem, 6vw, 6rem);
+      position: relative;
+    }
+
+    .editorial-inner {
+      margin: 0 auto;
+      max-width: 92rem;
+    }
+
+    .editorial-grid {
+      display: grid;
+      gap: clamp(3rem, 6vw, 7rem);
+      grid-template-columns: minmax(0, 1.1fr) minmax(21rem, 0.9fr);
+    }
+
+    .section-label {
+      align-items: center;
+      color: rgba(16, 19, 24, 0.56);
+      display: flex;
+      font-size: 0.64rem;
+      font-weight: 800;
+      gap: 1rem;
+      letter-spacing: 0.17em;
+      margin-bottom: clamp(2.5rem, 5vw, 5rem);
+      text-transform: uppercase;
+    }
+
+    .section-label::after {
+      background: var(--ink-line);
+      content: "";
+      height: 1px;
+      max-width: 8rem;
+      width: 12vw;
+    }
+
+    .editorial h2 {
+      font-family: var(--font-display);
+      font-size: clamp(3.35rem, 6.2vw, 6.5rem);
+      font-weight: 400;
+      letter-spacing: -0.052em;
+      line-height: 0.91;
+      margin: 0;
+      max-width: 9ch;
+    }
+
+    .editorial h2 em {
+      color: #8b6e35;
+      font-weight: 400;
+    }
+
+    .benefit-list {
+      align-self: end;
+      border-bottom: 1px solid var(--ink-line);
+    }
+
+    .benefit {
+      border-top: 1px solid var(--ink-line);
+      display: grid;
+      gap: 1.25rem;
+      grid-template-columns: 2rem 1fr auto;
+      padding: 1.65rem 0;
+    }
+
+    .benefit-number {
+      color: rgba(16, 19, 24, 0.46);
+      font-size: 0.6rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      padding-top: 0.35rem;
+    }
+
+    .benefit h3 {
+      font-family: var(--font-display);
+      font-size: clamp(1.5rem, 2.1vw, 2.05rem);
+      font-weight: 500;
+      letter-spacing: -0.025em;
+      line-height: 1;
+      margin-bottom: 0.55rem;
+    }
+
+    .benefit p {
+      color: rgba(16, 19, 24, 0.64);
+      font-size: 0.88rem;
+      line-height: 1.6;
+      margin-bottom: 0;
+      max-width: 34rem;
+    }
+
+    .benefit-arrow {
+      color: var(--obsidian);
+      display: block;
+      height: 1.15rem;
+      position: relative;
+      transition: transform 220ms var(--ease-out);
+      width: 1.15rem;
+    }
+
+    .benefit-arrow::before {
+      background: currentColor;
+      content: "";
+      height: 1px;
+      left: 0.08rem;
+      position: absolute;
+      top: 50%;
+      transform: rotate(-45deg);
+      transform-origin: center;
+      width: 1.15rem;
+    }
+
+    .benefit-arrow::after {
+      border-right: 1px solid currentColor;
+      border-top: 1px solid currentColor;
+      content: "";
+      height: 0.38rem;
+      position: absolute;
+      right: 0;
+      top: 0;
+      width: 0.38rem;
+    }
+
+    .access-note {
+      align-items: end;
+      border-top: 1px solid var(--ink-line);
+      display: grid;
+      gap: 2rem;
+      grid-template-columns: 1fr auto;
+      margin-top: clamp(5rem, 10vw, 10rem);
+      padding-top: 2rem;
+    }
+
+    .access-note p {
+      color: rgba(16, 19, 24, 0.58);
+      font-size: 0.65rem;
+      font-weight: 800;
+      letter-spacing: 0.18em;
+      margin-bottom: 0.85rem;
+      text-transform: uppercase;
+    }
+
+    .access-note h3 {
+      font-family: var(--font-display);
+      font-size: clamp(2.15rem, 4vw, 4.4rem);
+      font-weight: 400;
+      letter-spacing: -0.04em;
+      line-height: 0.95;
+      margin: 0;
+    }
+
+    .access-status {
+      align-items: center;
+      display: inline-flex;
+      font-size: 0.65rem;
+      font-weight: 800;
+      gap: 0.7rem;
+      letter-spacing: 0.14em;
+      padding-bottom: 0.45rem;
+      text-transform: uppercase;
+    }
+
+    .access-status::before {
+      background: #8b6e35;
+      border-radius: 50%;
+      content: "";
+      height: 0.45rem;
+      width: 0.45rem;
+    }
+
+    .footer {
+      align-items: center;
+      background: var(--marble);
+      color: rgba(16, 19, 24, 0.55);
+      display: flex;
+      font-size: 0.58rem;
+      font-weight: 750;
+      justify-content: space-between;
+      letter-spacing: 0.15em;
+      padding: 1.5rem clamp(1.5rem, 5vw, 5.5rem) 2rem;
+      text-transform: uppercase;
+    }
+
+    .hero-copy > *,
+    .dispatch {
+      animation: rise-in 720ms var(--ease-out) both;
+    }
+
+    .hero-copy .eyebrow {
+      animation-delay: 60ms;
+    }
+
+    .hero-copy h1 {
+      animation-delay: 130ms;
+    }
+
+    .hero-copy .hero-lead {
+      animation-delay: 210ms;
+    }
+
+    .hero-copy .hero-actions {
+      animation-delay: 280ms;
+    }
+
+    .hero-copy .dispatch {
+      animation-delay: 350ms;
+    }
+
+    @keyframes rise-in {
+      from {
+        opacity: 0;
+        transform: translateY(14px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @media (hover: hover) {
+      .nav-links a:hover::after,
+      .access-link:hover::after,
+      .text-link:hover::after {
+        transform: scaleX(1);
+        transform-origin: left;
+      }
+
+      .access-link:hover::after {
+        transform-origin: right;
+        transform: scaleX(0);
+      }
+
+      .primary-action:hover {
+        background: var(--gold);
+        transform: translateY(-2px);
+      }
+
+      .primary-action:hover span {
+        transform: translateX(4px);
+      }
+
+      .benefit:hover .benefit-arrow {
+        transform: translate(4px, -4px);
+      }
+    }
+
+    @media (max-width: 900px) {
+      .masthead {
+        grid-template-columns: 1fr auto;
+      }
+
+      .nav-links {
+        display: none;
+      }
+
+      .hero-stage {
+        align-items: flex-end;
+        min-height: calc(100svh - 22px);
+        padding-bottom: 3.5rem;
+        padding-top: 8rem;
+      }
+
+      .hero-copy {
+        max-width: 38rem;
+        width: min(78vw, 38rem);
+      }
+
+      .hero-folio {
+        display: none;
+      }
+
+      .editorial-grid {
+        gap: 5rem;
+        grid-template-columns: 1fr;
+      }
+
+      .editorial h2 {
+        max-width: 10ch;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .hero {
+        background:
+          linear-gradient(
+            180deg,
+            rgba(13, 18, 25, 0.02) 0,
+            rgba(13, 18, 25, 0.08) 30svh,
+            rgba(13, 18, 25, 0.82) 49svh,
+            #0d1219 64svh
+          ),
+          url("./hermes-hero.png") 72% top / auto clamp(25rem, 58svh, 31rem) no-repeat;
+        min-height: 0;
+        padding-top: 0;
+        padding-left: 20px;
+        padding-right: 20px;
+      }
+
+      .hero::before {
+        background-size: 38px 38px;
+        mask-image: linear-gradient(180deg, black 0%, rgba(0, 0, 0, 0.25) 42svh, transparent 64svh);
+        opacity: 0.22;
+      }
+
+      .hero::after {
+        background: linear-gradient(0deg, rgba(13, 18, 25, 0.92), transparent 24svh);
+      }
+
+      .masthead {
+        height: 68px;
+        left: 1.25rem;
+        right: 1.25rem;
+      }
+
+      .brand-word {
+        font-size: clamp(0.95rem, 4.5vw, 1.15rem);
+        letter-spacing: 0.12em;
+      }
+
+      .access-link {
+        align-items: center;
+        border: 1px solid rgba(194, 161, 93, 0.42);
+        display: inline-flex;
+        font-size: 0.56rem;
+        min-height: 2.75rem;
+        padding: 0 0.75rem;
+      }
+
+      .access-link::after {
+        display: none;
+      }
+
+      .hero-stage {
+        align-items: initial;
+        min-height: 0;
+        padding: min(29rem, 58svh) 0 2.5rem;
+      }
+
+      .hero-copy {
+        max-width: none;
+        width: 100%;
+      }
+
+      .eyebrow {
+        font-size: 0.55rem;
+        letter-spacing: 0.18em;
+        margin-bottom: 1.35rem;
+      }
+
+      .eyebrow::before {
+        width: 1.5rem;
+      }
+
+      h1 {
+        font-size: clamp(3.35rem, 16.5vw, 4.15rem);
+        line-height: 0.86;
+        margin-bottom: 1.35rem;
+        max-width: none;
+      }
+
+      .hero-lead {
+        font-size: 1rem;
+        line-height: 1.5;
+        margin-bottom: 1.6rem;
+        max-width: 25rem;
+      }
+
+      .hero-actions {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 0.65rem;
+      }
+
+      .primary-action {
+        min-height: 3.65rem;
+        min-width: 100%;
+      }
+
+      .text-link {
+        align-items: center;
+        display: inline-flex;
+        min-height: 2.75rem;
+        width: max-content;
+      }
+
+      .dispatch {
+        grid-template-columns: 1fr;
+        margin-top: 1.5rem;
+      }
+
+      .dispatch-item {
+        display: grid;
+        align-items: center;
+        gap: 0.65rem;
+        grid-template-columns: 1.5rem 4rem 1fr;
+        min-height: 0;
+        padding: 0.75rem 0;
+      }
+
+      .dispatch-item + .dispatch-item {
+        border-left: 0;
+        border-top: 1px solid var(--line);
+        padding-left: 0;
+      }
+
+      .dispatch-index,
+      .dispatch-item strong {
+        margin-bottom: 0;
+      }
+
+      .dispatch-item small {
+        font-size: 0.8rem;
+      }
+
+      .editorial {
+        padding: 4.5rem 1.25rem 3rem;
+      }
+
+      .section-label {
+        margin-bottom: 2rem;
+      }
+
+      .editorial h2 {
+        font-size: clamp(2.9rem, 14vw, 3.7rem);
+        line-height: 0.94;
+        max-width: 9ch;
+      }
+
+      .editorial-grid {
+        gap: 3rem;
+      }
+
+      .benefit {
+        gap: 0.7rem;
+        grid-template-columns: 1.25rem 1fr auto;
+        padding: 1.25rem 0;
+      }
+
+      .benefit h3 {
+        font-size: 1.4rem;
+      }
+
+      .benefit p {
+        font-size: 0.84rem;
+        line-height: 1.5;
+      }
+
+      .access-note {
+        align-items: start;
+        grid-template-columns: 1fr;
+        margin-top: 4rem;
+        padding-top: 1.5rem;
+      }
+
+      .access-note h3 {
+        font-size: 2.3rem;
+        max-width: 10ch;
+      }
+
+      .access-status {
+        min-height: 2.75rem;
+      }
+
+      .footer {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.65rem;
+        padding: 1.5rem 1.25rem 2rem;
+      }
+    }
+
+    @media (max-width: 640px) and (orientation: landscape) {
+      .hero {
+        background-position: 76% top;
+        background-size: auto 100svh;
+      }
+
+      .hero-stage {
+        padding-top: 72svh;
+      }
+    }
+
+    @media (max-width: 360px) {
+      .brand-word {
+        font-size: 0.9rem;
+        letter-spacing: 0.09em;
+      }
+
+      .access-link {
+        font-size: 0.51rem;
+        padding: 0 0.6rem;
+      }
+
+      h1 {
+        font-size: 3.25rem;
+      }
+    }
+
+    @media (hover: none), (pointer: coarse) {
+      .hermes-interactive {
+        display: none;
+      }
+    }
+
+    @media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+      .hermes-light {
+        -webkit-mask-image: url("./assets/hermes-foreground-v1.png");
+        mask-image: url("./assets/hermes-foreground-v1.png");
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+
+      *,
+      *::before,
+      *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+
+      .hermes-interactive {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+
+  <main class="landing" id="main-content">
+    <section class="hero" id="top" aria-labelledby="hero-title">
+      <header class="masthead">
+        <a class="brand" href="#top" aria-label="Hermes Trader home">
+          <span class="brand-word">HERMES TRADER</span>
+        </a>
+
+        <nav class="nav-links" aria-label="Primary navigation">
+          <a href="#difference">The difference</a>
+          <a href="#experience">How it works</a>
+        </nav>
+
+        <a class="access-link" href="#access">Private access</a>
+      </header>
+
+      <div class="hermes-interactive" aria-hidden="true">
+        <img
+          class="hermes-figure"
+          data-src="./assets/hermes-foreground-v1.png"
+          alt=""
+          width="1672"
+          height="941"
+          decoding="async"
+        >
+        <span class="hermes-light"></span>
+        <svg
+          class="hermes-lightning"
+          viewBox="0 0 1672 941"
+          preserveAspectRatio="xMidYMid slice"
+          focusable="false"
+        >
+          <g class="lightning-strike">
+            <path class="lightning-glow" d="M1017 24 1023 57 1012 83 1030 111 1018 139 1036 171 1024 202 1047 231 1036 267 1052 298 1042 332 1059 365"></path>
+            <path class="lightning-core" d="M1017 24 1023 57 1012 83 1030 111 1018 139 1036 171 1024 202 1047 231 1036 267 1052 298 1042 332 1059 365"></path>
+            <path class="lightning-branch" d="M1030 111 1051 99 1062 78 M1047 231 1012 242 995 261"></path>
+          </g>
+          <g class="lightning-strike">
+            <path class="lightning-glow" d="M1398 62 1379 91 1390 113 1364 140 1385 161 1357 190 1380 214 1351 245 1375 272"></path>
+            <path class="lightning-core" d="M1398 62 1379 91 1390 113 1364 140 1385 161 1357 190 1380 214 1351 245 1375 272"></path>
+            <path class="lightning-branch" d="M1385 161 1414 151 1431 130 M1380 214 1408 228 1426 251"></path>
+          </g>
+          <g class="lightning-strike">
+            <path class="lightning-glow" d="M1278 215 1290 244 1275 267 1302 291 1285 318 1312 346 1296 372 1324 401"></path>
+            <path class="lightning-core" d="M1278 215 1290 244 1275 267 1302 291 1285 318 1312 346 1296 372 1324 401"></path>
+            <path class="lightning-branch" d="M1302 291 1334 280 1352 259 M1285 318 1254 335 1239 360"></path>
+          </g>
+          <g class="lightning-strike">
+            <path class="lightning-glow" d="M1169 365 1184 397 1165 422 1193 450 1175 482 1207 512 1186 543 1216 577 1196 610 1225 646"></path>
+            <path class="lightning-core" d="M1169 365 1184 397 1165 422 1193 450 1175 482 1207 512 1186 543 1216 577 1196 610 1225 646"></path>
+            <path class="lightning-branch" d="M1193 450 1222 438 1241 416 M1207 512 1240 526 1260 549"></path>
+          </g>
+          <g class="lightning-strike">
+            <path class="lightning-glow" d="M1339 522 1355 552 1338 578 1362 604 1345 631 1374 658 1357 688 1387 716 1369 747 1400 781"></path>
+            <path class="lightning-core" d="M1339 522 1355 552 1338 578 1362 604 1345 631 1374 658 1357 688 1387 716 1369 747 1400 781"></path>
+            <path class="lightning-branch" d="M1362 604 1392 593 1411 572 M1374 658 1342 673 1324 697"></path>
+          </g>
+        </svg>
+      </div>
+
+      <div class="hero-stage">
+        <div class="hero-copy">
+          <p class="eyebrow">Private execution · Solana</p>
+          <h1 id="hero-title">Move when <em>they move.</em></h1>
+          <p class="hero-lead">Follow proven wallets and execute every move with speed, precision, and control.</p>
+
+          <div class="hero-actions">
+            <a class="primary-action" href="#access">Explore private access <span aria-hidden="true"></span></a>
+            <a class="text-link" href="#experience">How Hermes Trader works</a>
+          </div>
+
+          <div class="dispatch" id="experience" aria-label="How Hermes Trader works">
+            <div class="dispatch-item">
+              <span class="dispatch-index">01</span>
+              <strong>Follow</strong>
+              <small>Choose the signal.</small>
+            </div>
+            <div class="dispatch-item">
+              <span class="dispatch-index">02</span>
+              <strong>Execute</strong>
+              <small>Act in the moment.</small>
+            </div>
+            <div class="dispatch-item">
+              <span class="dispatch-index">03</span>
+              <strong>Control</strong>
+              <small>Stay in command.</small>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="hero-folio" aria-hidden="true">Edition 01 · Solana</div>
+    </section>
+
+    <section class="editorial" id="difference" aria-labelledby="difference-title">
+      <div class="editorial-inner">
+        <div class="editorial-grid">
+          <div>
+            <p class="section-label">01 / The difference</p>
+            <h2 id="difference-title">Built for traders who refuse to arrive <em>late.</em></h2>
+          </div>
+
+          <div class="benefit-list">
+            <article class="benefit">
+              <span class="benefit-number">01</span>
+              <div>
+                <h3>Signal over noise</h3>
+                <p>Follow the wallets you trust and leave the rest outside your strategy.</p>
+              </div>
+              <span class="benefit-arrow" aria-hidden="true"></span>
+            </article>
+
+            <article class="benefit">
+              <span class="benefit-number">02</span>
+              <div>
+                <h3>Speed without friction</h3>
+                <p>Be ready when opportunity appears—not after the moment has passed.</p>
+              </div>
+              <span class="benefit-arrow" aria-hidden="true"></span>
+            </article>
+
+            <article class="benefit">
+              <span class="benefit-number">03</span>
+              <div>
+                <h3>Control stays yours</h3>
+                <p>Choose who to follow, how to trade, and when to step away.</p>
+              </div>
+              <span class="benefit-arrow" aria-hidden="true"></span>
+            </article>
+          </div>
+        </div>
+
+        <div class="access-note" id="access">
+          <div>
+            <p>Private beta</p>
+            <h3>Access opens in small cohorts.</h3>
+          </div>
+          <span class="access-status">Applications opening soon</span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>Hermes Trader · Private Solana execution</span>
+    <span>Move with intent</span>
+  </footer>
+
+  <script>
+    const hero = document.querySelector(".hero");
+    const hermesInteractive = document.querySelector(".hermes-interactive");
+    const hermesFigure = document.querySelector(".hermes-figure");
+    const precisePointer = window.matchMedia("(hover: hover) and (pointer: fine)");
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+    if (hero && hermesInteractive && hermesFigure && precisePointer.matches && !reducedMotion.matches) {
+      const hitCanvas = document.createElement("canvas");
+      const hitContext = hitCanvas.getContext("2d", { willReadFrequently: true });
+      let hitMapReady = false;
+      let hitPixels = null;
+      let pointerFrame = 0;
+      let latestPointer = null;
+
+      function prepareHitMap() {
+        if (!hitContext || !hermesFigure.naturalWidth || !hermesFigure.naturalHeight) return;
+
+        hitCanvas.width = Math.ceil(hermesFigure.naturalWidth / 4);
+        hitCanvas.height = Math.ceil(hermesFigure.naturalHeight / 4);
+        hitContext.clearRect(0, 0, hitCanvas.width, hitCanvas.height);
+        hitContext.drawImage(hermesFigure, 0, 0, hitCanvas.width, hitCanvas.height);
+        hitPixels = hitContext.getImageData(0, 0, hitCanvas.width, hitCanvas.height).data;
+        hitMapReady = true;
+      }
+
+      function isNearHermes(sampleX, sampleY) {
+        if (!hitPixels) return false;
+
+        const radius = 16;
+        for (let y = -radius; y <= radius; y += 2) {
+          const checkY = sampleY + y;
+          if (checkY < 0 || checkY >= hitCanvas.height) continue;
+
+          for (let x = -radius; x <= radius; x += 2) {
+            const checkX = sampleX + x;
+            if (checkX < 0 || checkX >= hitCanvas.width) continue;
+
+            const alphaIndex = (checkY * hitCanvas.width + checkX) * 4 + 3;
+            if (hitPixels[alphaIndex] > 28) return true;
+          }
+        }
+
+        return false;
+      }
+
+      function updateHermesHover() {
+        pointerFrame = 0;
+        if (!latestPointer || !hitMapReady || !hitContext) return;
+
+        const bounds = hero.getBoundingClientRect();
+        const localX = latestPointer.clientX - bounds.left;
+        const localY = latestPointer.clientY - bounds.top;
+        const imageScale = Math.max(
+          bounds.width / hermesFigure.naturalWidth,
+          bounds.height / hermesFigure.naturalHeight
+        );
+        const renderedWidth = hermesFigure.naturalWidth * imageScale;
+        const renderedHeight = hermesFigure.naturalHeight * imageScale;
+        const imageX = (localX - (bounds.width - renderedWidth) / 2) / imageScale;
+        const imageY = (localY - (bounds.height - renderedHeight) / 2) / imageScale;
+
+        let isOverHermes = false;
+        if (
+          imageX >= 0 &&
+          imageY >= 0 &&
+          imageX < hermesFigure.naturalWidth &&
+          imageY < hermesFigure.naturalHeight
+        ) {
+          const sampleX = Math.min(
+            hitCanvas.width - 1,
+            Math.max(0, Math.floor((imageX / hermesFigure.naturalWidth) * hitCanvas.width))
+          );
+          const sampleY = Math.min(
+            hitCanvas.height - 1,
+            Math.max(0, Math.floor((imageY / hermesFigure.naturalHeight) * hitCanvas.height))
+          );
+          isOverHermes = isNearHermes(sampleX, sampleY);
+        }
+
+        hero.classList.toggle("is-hermes-hovered", isOverHermes);
+
+        if (isOverHermes) {
+          const normalizedX = localX / bounds.width;
+          const normalizedY = localY / bounds.height;
+
+          hermesInteractive.style.setProperty("--pointer-x", `${(normalizedX * 100).toFixed(2)}%`);
+          hermesInteractive.style.setProperty("--pointer-y", `${(normalizedY * 100).toFixed(2)}%`);
+        }
+      }
+
+      function queueHermesHover(event) {
+        latestPointer = event;
+        if (!pointerFrame) pointerFrame = window.requestAnimationFrame(updateHermesHover);
+      }
+
+      if (hermesFigure.dataset.src) hermesFigure.src = hermesFigure.dataset.src;
+
+      if (hermesFigure.complete) prepareHitMap();
+      else hermesFigure.addEventListener("load", prepareHitMap, { once: true });
+
+      hero.addEventListener("pointermove", queueHermesHover, { passive: true });
+      hero.addEventListener("pointerleave", () => {
+        latestPointer = null;
+        hero.classList.remove("is-hermes-hovered");
+      });
+    }
+  </script>
+</body>
+</html>

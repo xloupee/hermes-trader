@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { dashboardRedirectPath } from "../auth-redirect.mjs";
+import { dashboardRedirectPath, protectedRequestKind } from "../auth-redirect.mjs";
 
 const AUTH_LIB = path.join(process.cwd(), "lib/auth.ts");
 const AUTH_CALLBACK = path.join(process.cwd(), "app/auth/callback/route.ts");
@@ -44,5 +44,15 @@ describe("auth hardening", () => {
     assert.match(middleware, /request\.cookies\.set\(name, value\)/);
     assert.match(middleware, /response\.cookies\.set\(name, value, options\)/);
     assert.match(middleware, /Cache-Control.*private, no-store/);
+    assert.match(middleware, /NextResponse\.json\(\{ error: "unauthenticated" \}, \{ status: 401 \}\)/);
+    assert.match(middleware, /NextResponse\.redirect/);
+  });
+
+  test("middleware protection covers dashboard pages and APIs", () => {
+    assert.equal(protectedRequestKind("/dashboard"), "dashboard_page");
+    assert.equal(protectedRequestKind("/dashboard/executions"), "dashboard_page");
+    assert.equal(protectedRequestKind("/api/dashboard/overview"), "dashboard_api");
+    assert.equal(protectedRequestKind("/api/me"), "dashboard_api");
+    assert.equal(protectedRequestKind("/api/signals/summary"), "none");
   });
 });

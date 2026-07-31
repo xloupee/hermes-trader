@@ -18,3 +18,9 @@ export function dashboardRedirectPath(value) {
     return DEFAULT_DASHBOARD_DESTINATION;
   }
 }
+
+export function protectedRequestKind(pathname) {
+  if (pathname === "/dashboard" || pathname.startsWith("/dashboard/")) return "dashboard_page";
+  if (pathname === "/api/dashboard" || pathname.startsWith("/api/dashboard/") || pathname === "/api/me" || pathname.startsWith("/api/me/")) return "dashboard_api";
+  return "none";
+}

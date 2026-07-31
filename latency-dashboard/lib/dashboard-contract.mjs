@@ -11,6 +11,8 @@ function hasOwn(obj, key) {
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
+const SKIPPED_DECISIONS = new Set(["skip", "skipped", "simulated", "wouldCopy", "wouldBuy"]);
+const SEND_FAILED_DECISIONS = new Set(["error", "send_failed"]);
 
 function isFiniteNumber(value) {
   return Number.isFinite(value);
@@ -72,8 +74,32 @@ export function parseExecutionFilters(searchParams) {
     copyWallet: optionalString(searchParams.get("copyWallet")),
     mint: optionalString(searchParams.get("mint")),
     route: optionalString(searchParams.get("route")),
+    action: optionalString(searchParams.get("action")),
+    outcome: optionalEnum(searchParams.get("outcome"), EXECUTION_OUTCOMES)
+  };
+}
+
+function optionalEnum(value, allowed) {
+  const candidate = optionalString(value);
+  return candidate && allowed.includes(candidate) ? candidate : null;
+}
+
+export function parseSourceFilters(searchParams) {
+  const since = coerceDate(searchParams.get("since"));
+  return {
+    since,
+    sinceObservedAtMs: new Date(since).getTime(),
+    provider: optionalString(searchParams.get("provider")),
+    source: optionalString(searchParams.get("source")),
+    observedWallet: optionalString(searchParams.get("observedWallet")),
+    mint: optionalString(searchParams.get("mint")),
+    route: optionalString(searchParams.get("route")),
     action: optionalString(searchParams.get("action"))
   };
+}
+
+export function unsupportedSourceFilters(searchParams) {
+  return ["copyWallet", "cursor", "limit", "outcome"].filter((name) => optionalString(searchParams.get(name)) !== null);
 }
 
 export function encodeExecutionCursor({ observedAtMs, id }) {
@@ -106,32 +132,25 @@ export function executionOutcomeForRow(row) {
     return "unknown";
   }
 
-  if (row.observedAction === "sell") {
-    return row.decision === "skip" || row.decision === "skipped" ? "skipped" : "landed";
-  }
-
-  if (row.decision === "skip" || row.decision === "skipped") {
+  if (SKIPPED_DECISIONS.has(row.decision) || row.dryRun === true || row.sendEnabled === false && row.decision === "simulated") {
     return "skipped";
   }
 
-  if (row.buyChainError || row.autoSellStatus === "autoSellFailedOnChain") {
+  if (SEND_FAILED_DECISIONS.has(row.decision)) {
+    return "send_failed";
+  }
+
+  if (row.buyChainError || row.buyStatus === "buyFailedOnChain") {
     return "failed_on_chain";
   }
 
-  if (row.buyStatus === "buyLanded") {
+  const confirmedCopySlot = row.copySlot ?? row.blockPositionDiagnostics?.copySlot ?? null;
+  if (row.buyStatus === "buyLanded" && row.sendSignature && confirmedCopySlot !== null) {
     return "landed";
   }
 
-  if (row.buyStatus === "buyFailedOnChain") {
-    return "failed_on_chain";
-  }
-
-  if (row.buyStatus === "buySubmitted" || row.sendSignature || row.sent) {
+  if (row.buyStatus === "buySubmitted" || row.sendSignature || row.sent || row.decision === "sent") {
     return "ack_not_landed";
-  }
-
-  if (row.decision === "error" || row.autoSellStatus === "autoSellSubmitted" || row.decision === "send_failed") {
-    return "send_failed";
   }
 
   return "unknown";
@@ -143,7 +162,11 @@ export function landingComparisonForRow(row) {
     return "unavailable";
   }
 
-  const targetSlot = diagnostics?.targetSlot ?? row?.targetSlot ?? null;
+  if (row?.observedAction === "sell" && row?.targetSlot == null && diagnostics?.status !== "found") {
+    return "no_target";
+  }
+
+  const targetSlot = row?.targetSlot ?? diagnostics?.targetSlot ?? null;
   const copySlot = diagnostics?.copySlot ?? row?.copySlot ?? null;
 
   if (targetSlot == null && copySlot == null) {
@@ -155,6 +178,47 @@ export function landingComparisonForRow(row) {
   }
 
   return "no_target";
+}
+
+const SKIPPED_DB = "or(decision.in.(skip,skipped,simulated,wouldCopy,wouldBuy),dry_run.eq.true)";
+const NOT_SKIPPED_DB = "and(decision.not.in.(skip,skipped,simulated,wouldCopy,wouldBuy),dry_run.eq.false)";
+const SEND_FAILED_DB = "decision.in.(error,send_failed)";
+const NOT_SEND_FAILED_DB = "decision.not.in.(error,send_failed)";
+const CHAIN_FAILED_DB = "or(chain_report->>buyStatus.eq.buyFailedOnChain,chain_report->>status.eq.failedOnChain,chain_report->err.not.is.null)";
+const NOT_CHAIN_FAILED_DB = "and(or(chain_report->>buyStatus.is.null,chain_report->>buyStatus.neq.buyFailedOnChain),or(chain_report->>status.is.null,chain_report->>status.neq.failedOnChain),chain_report->err.is.null)";
+const LANDED_DB = "and(send_signature.not.is.null,copy_slot.not.is.null)";
+const NOT_LANDED_DB = "or(send_signature.is.null,copy_slot.is.null)";
+const ACK_DB = "or(send_signature.not.is.null,sent.eq.true,decision.eq.sent)";
+const NOT_ACK_DB = "and(send_signature.is.null,sent.eq.false,decision.neq.sent)";
+
+export function dashboardOutcomePredicate(outcome) {
+  switch (outcome) {
+    case "skipped":
+      return SKIPPED_DB;
+    case "send_failed":
+      return `and(${NOT_SKIPPED_DB},${SEND_FAILED_DB})`;
+    case "failed_on_chain":
+      return `and(${NOT_SKIPPED_DB},${NOT_SEND_FAILED_DB},${CHAIN_FAILED_DB})`;
+    case "landed":
+      return `and(${NOT_SKIPPED_DB},${NOT_SEND_FAILED_DB},${NOT_CHAIN_FAILED_DB},${LANDED_DB})`;
+    case "ack_not_landed":
+      return `and(${NOT_SKIPPED_DB},${NOT_SEND_FAILED_DB},${NOT_CHAIN_FAILED_DB},${NOT_LANDED_DB},${ACK_DB})`;
+    case "unknown":
+      return `and(${NOT_SKIPPED_DB},${NOT_SEND_FAILED_DB},${NOT_CHAIN_FAILED_DB},${NOT_LANDED_DB},${NOT_ACK_DB})`;
+    default:
+      return null;
+  }
+}
+
+export function pageExecutionRows(rows, limit) {
+  return {
+    items: rows.slice(0, limit),
+    hasMore: rows.length > limit
+  };
+}
+
+export function isExecutionBeforeCursor(row, cursor) {
+  return row.observedAtMs < cursor.observedAtMs || row.observedAtMs === cursor.observedAtMs && row.id < cursor.id;
 }
 
 export function toDashboardExecution(row) {

@@ -1,4 +1,5 @@
 import { createAdminClient } from "@/lib/supabase/admin";
+import { dashboardOutcomePredicate } from "@/lib/dashboard-contract.mjs";
 import type { SignalFilters } from "@/lib/signals";
 
 export interface BlockPositionDiagnostics {
@@ -155,6 +156,8 @@ export interface DashboardExecutionCursor {
   id: number;
 }
 
+export type DashboardExecutionOutcome = "landed" | "failed_on_chain" | "ack_not_landed" | "send_failed" | "skipped" | "unknown";
+
 export interface DashboardExecutionFilters {
   since: string;
   sinceObservedAtMs: number;
@@ -167,6 +170,14 @@ export interface DashboardExecutionFilters {
   mint?: string | null;
   route?: string | null;
   action?: string | null;
+  outcome?: DashboardExecutionOutcome | null;
+}
+
+export interface DashboardOverviewSummary {
+  total: number;
+  landed: number;
+  outcome: Record<DashboardExecutionOutcome, number>;
+  side: { buy: number; sell: number; other: number };
 }
 
 interface RawLocalExecutionReport {
@@ -675,37 +686,28 @@ function buildDashboardCursorWhere(cursor: DashboardExecutionCursor) {
   return `observed_at_ms.lt.${cursor.observedAtMs},and(observed_at_ms.eq.${cursor.observedAtMs},id.lt.${cursor.id})`;
 }
 
-export async function listDashboardExecutions(filters: DashboardExecutionFilters): Promise<LocalExecutionReport[]> {
-  const supabase = createAdminClient();
-  let query = supabase
+function filteredDashboardExecutionQuery(filters: DashboardExecutionFilters, columns: string, exactCount = false) {
+  let query = createAdminClient()
     .from("copytrade_local_executions")
-    .select(LOCAL_EXECUTION_SELECT)
-    .gte("observed_at_ms", filters.sinceObservedAtMs)
+    .select(columns, exactCount ? { count: "exact", head: true } : undefined)
+    .gte("observed_at_ms", filters.sinceObservedAtMs);
+
+  if (filters.provider) query = query.eq("provider", filters.provider);
+  if (filters.source) query = query.ilike("source", `%${filters.source}%`);
+  if (filters.observedWallet) query = query.ilike("observed_wallet", `%${filters.observedWallet}%`);
+  if (filters.copyWallet) query = query.ilike("copy_wallet", `%${filters.copyWallet}%`);
+  if (filters.mint) query = query.ilike("mint", `%${filters.mint}%`);
+  if (filters.route) query = query.eq("selected_route", filters.route);
+  if (filters.action) query = query.eq("observed_action", filters.action);
+  if (filters.outcome) query = query.or(dashboardOutcomePredicate(filters.outcome));
+  return query;
+}
+
+export async function listDashboardExecutions(filters: DashboardExecutionFilters): Promise<LocalExecutionReport[]> {
+  let query = filteredDashboardExecutionQuery(filters, LOCAL_EXECUTION_SELECT)
     .order("observed_at_ms", { ascending: false })
     .order("id", { ascending: false })
-    .limit(filters.limit);
-
-  if (filters.provider) {
-    query = query.eq("provider", filters.provider);
-  }
-  if (filters.source) {
-    query = query.ilike("source", `%${filters.source}%`);
-  }
-  if (filters.observedWallet) {
-    query = query.ilike("observed_wallet", `%${filters.observedWallet}%`);
-  }
-  if (filters.copyWallet) {
-    query = query.ilike("copy_wallet", `%${filters.copyWallet}%`);
-  }
-  if (filters.mint) {
-    query = query.ilike("mint", `%${filters.mint}%`);
-  }
-  if (filters.route) {
-    query = query.eq("selected_route", filters.route);
-  }
-  if (filters.action) {
-    query = query.eq("observed_action", filters.action);
-  }
+    .limit(filters.limit + 1);
 
   if (filters.cursor) {
     query = query.or(buildDashboardCursorWhere(filters.cursor));
@@ -720,6 +722,30 @@ export async function listDashboardExecutions(filters: DashboardExecutionFilters
   }
 
   return (((data as unknown) as RawLocalExecutionReport[] | null) || []).map(normalizeReport);
+}
+
+async function exactDashboardExecutionCount(filters: DashboardExecutionFilters): Promise<number> {
+  const { count, error } = await filteredDashboardExecutionQuery(filters, "id", true);
+  if (missingTableError(error)) return 0;
+  if (error) throw error;
+  return count ?? 0;
+}
+
+export async function dashboardOverviewSummary(filters: DashboardExecutionFilters): Promise<DashboardOverviewSummary> {
+  const outcomes: DashboardExecutionOutcome[] = ["landed", "failed_on_chain", "ack_not_landed", "send_failed", "skipped", "unknown"];
+  const countForOutcome = (outcome: DashboardExecutionOutcome) =>
+    filters.outcome && filters.outcome !== outcome ? Promise.resolve(0) : exactDashboardExecutionCount({ ...filters, outcome });
+  const countForSide = (action: "buy" | "sell") =>
+    filters.action && filters.action !== action ? Promise.resolve(0) : exactDashboardExecutionCount({ ...filters, action });
+
+  const [total, outcomeCounts, buy, sell] = await Promise.all([
+    exactDashboardExecutionCount(filters),
+    Promise.all(outcomes.map(countForOutcome)),
+    countForSide("buy"),
+    countForSide("sell")
+  ]);
+  const outcome = Object.fromEntries(outcomes.map((name, index) => [name, outcomeCounts[index]])) as Record<DashboardExecutionOutcome, number>;
+  return { total, landed: outcome.landed, outcome, side: { buy, sell, other: Math.max(0, total - buy - sell) } };
 }
 
 export async function getLocalExecution(id: number): Promise<LocalExecutionReport | null> {

@@ -1,16 +1,12 @@
 import type {
+  DashboardExecutionOutcome,
   DashboardExecutionCursor,
   DashboardExecutionFilters,
+  DashboardOverviewSummary,
   LocalExecutionReport
 } from "./local-executions";
 
-export type ExecutionOutcome =
-  | "landed"
-  | "failed_on_chain"
-  | "ack_not_landed"
-  | "send_failed"
-  | "skipped"
-  | "unknown";
+export type ExecutionOutcome = DashboardExecutionOutcome;
 
 export type LandingComparison =
   | "same_slot"
@@ -46,10 +42,7 @@ export interface DashboardExecutionsResponse {
 }
 
 export interface DashboardOverviewResponse {
-  summary: ExecutionSummary;
-  latestObservedAtMs: number | null;
-  sourcesObserved: number;
-  executions: DashboardExecution[];
+  summary: DashboardOverviewSummary;
   filters: DashboardExecutionFilters;
 }
 
@@ -62,7 +55,7 @@ export interface DashboardSource {
 
 export interface DashboardSourcesResponse {
   sources: DashboardSource[];
-  filters: DashboardExecutionFilters;
+  filters: DashboardSourceFilters;
 }
 
 export interface DashboardSystemResponse {
@@ -75,10 +68,21 @@ export interface DashboardSystemResponse {
     supabaseUrl: boolean;
     hasServiceRole: boolean;
   };
+export interface DashboardSourceFilters {
+  since: string;
+  sinceObservedAtMs: number;
+  provider: string | null;
+  source: string | null;
+  observedWallet: string | null;
+  mint: string | null;
+  route: string | null;
+  action: string | null;
 }
 
 export function sanitizeWallet(address: unknown): string | null;
 export function parseExecutionFilters(searchParams: URLSearchParams): DashboardExecutionFilters;
+export function parseSourceFilters(searchParams: URLSearchParams): DashboardSourceFilters;
+export function unsupportedSourceFilters(searchParams: URLSearchParams): string[];
 export function encodeExecutionCursor(cursor: DashboardExecutionCursor): string | null;
 export function decodeExecutionCursor(cursor: string | null | undefined): DashboardExecutionCursor | null;
 export function executionOutcomeForRow(row: Partial<LocalExecutionReport> | null | undefined): ExecutionOutcome;
@@ -87,6 +91,12 @@ export function toDashboardExecution(row: LocalExecutionReport): DashboardExecut
 export function summarizeExecutions(
   rows: Array<Partial<LocalExecutionReport> | DashboardExecution>
 ): ExecutionSummary;
+export function dashboardOutcomePredicate(outcome: ExecutionOutcome): string;
+export function pageExecutionRows<T>(rows: T[], limit: number): { items: T[]; hasMore: boolean };
+export function isExecutionBeforeCursor(
+  row: DashboardExecutionCursor,
+  cursor: DashboardExecutionCursor
+): boolean;
 
 export const dashboardContractSchema: {
   outcomes: ExecutionOutcome[];

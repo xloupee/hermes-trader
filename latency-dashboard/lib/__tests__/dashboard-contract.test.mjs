@@ -187,6 +187,7 @@ describe("dashboard contract", () => {
     assert.equal(filterBuilder >= 0 && filterBuilder < listQuery && listQuery < limit, true);
     assert.match(source, /\.gte\("observed_at_ms", filters\.fromObservedAtMs\)\s*\.lte\("observed_at_ms", filters\.toObservedAtMs\)/);
     assert.match(source, /observed_wallet\.eq\.\$\{filters\.wallet\},copy_wallet\.eq\.\$\{filters\.wallet\}/);
+    assert.match(source, /filteredDashboardExecutionQuery\(filters, DASHBOARD_EXECUTION_SELECT\)/);
     assert.match(source, /exactDashboardExecutionCount[\s\S]*filteredDashboardExecutionQuery\(filters, "id", true\)/);
   });
 });

@@ -362,6 +362,10 @@ const LOCAL_EXECUTION_BASE_COLUMNS = [
 ];
 
 const LOCAL_EXECUTION_SELECT = LOCAL_EXECUTION_BASE_COLUMNS.join(",");
+const DASHBOARD_EXECUTION_SELECT = [
+  ...LOCAL_EXECUTION_BASE_COLUMNS,
+  "chain_report"
+].join(",");
 const LOCAL_EXECUTION_DETAIL_SELECT = [
   ...LOCAL_EXECUTION_BASE_COLUMNS,
   "raw_execution",
@@ -705,7 +709,7 @@ function filteredDashboardExecutionQuery(filters: DashboardExecutionFilters, col
 }
 
 export async function listDashboardExecutions(filters: DashboardExecutionFilters): Promise<LocalExecutionReport[]> {
-  let query = filteredDashboardExecutionQuery(filters, LOCAL_EXECUTION_SELECT)
+  let query = filteredDashboardExecutionQuery(filters, DASHBOARD_EXECUTION_SELECT)
     .order("observed_at_ms", { ascending: false })
     .order("id", { ascending: false })
     .limit(filters.limit + 1);

@@ -74,7 +74,7 @@ export function parseExecutionFilters(searchParams) {
     copyWallet: optionalString(searchParams.get("copyWallet")),
     mint: optionalString(searchParams.get("mint")),
     route: optionalString(searchParams.get("route")),
-    action: optionalString(searchParams.get("action")),
+    action: optionalString(searchParams.get("side")) ?? optionalString(searchParams.get("action")),
     outcome: optionalEnum(searchParams.get("outcome"), EXECUTION_OUTCOMES)
   };
 }
@@ -94,7 +94,7 @@ export function parseSourceFilters(searchParams) {
     observedWallet: optionalString(searchParams.get("observedWallet")),
     mint: optionalString(searchParams.get("mint")),
     route: optionalString(searchParams.get("route")),
-    action: optionalString(searchParams.get("action"))
+    action: optionalString(searchParams.get("side")) ?? optionalString(searchParams.get("action"))
   };
 }
 

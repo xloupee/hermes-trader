@@ -15,7 +15,7 @@ export type {
   DashboardSystemResponse
 };
 
-export type LandingPreset = "all" | "landed-buys" | "landed-sells" | "non-landed";
+export type LandingPreset = "all" | "landed-buys" | "landed-sells";
 
 export interface DashboardFilterState {
   since: string;
@@ -55,12 +55,13 @@ export const DEFAULT_FILTERS: DashboardFilterState = {
 export const FILTER_OUTCOME_OPTIONS: Array<{ value: LandingPreset; label: string }> = [
   { value: "all", label: "All" },
   { value: "landed-buys", label: "Landed Buys" },
-  { value: "landed-sells", label: "Landed Sells" },
-  { value: "non-landed", label: "Non-landed Attempts" }
+  { value: "landed-sells", label: "Landed Sells" }
 ];
 
-function normalizeOutcome(value: string | null): LandingPreset {
-  return value === "landed-buys" || value === "landed-sells" || value === "non-landed" ? value : "all";
+function normalizeOutcome(side: string | null, outcome: string | null): LandingPreset {
+  if (outcome === "landed" && side === "buy") return "landed-buys";
+  if (outcome === "landed" && side === "sell") return "landed-sells";
+  return "all";
 }
 
 export function parseDashboardFilters(searchParams: URLSearchParams | null): DashboardFilterState {
@@ -69,14 +70,17 @@ export function parseDashboardFilters(searchParams: URLSearchParams | null): Das
     provider: searchParams?.get("provider")?.trim() || "",
     observedWallet: searchParams?.get("observedWallet")?.trim() || "",
     mint: searchParams?.get("mint")?.trim() || "",
-    action: searchParams?.get("action")?.trim() || "",
+    action: searchParams?.get("side")?.trim() || searchParams?.get("action")?.trim() || "",
     route: searchParams?.get("route")?.trim() || "",
     source: searchParams?.get("source")?.trim() || "",
-    outcome: normalizeOutcome(searchParams?.get("outcome") ?? null)
+    outcome: normalizeOutcome(
+      searchParams?.get("side") ?? searchParams?.get("action") ?? null,
+      searchParams?.get("outcome") ?? null
+    )
   };
 }
 
-export function toQueryParams(filters: Partial<DashboardFilterState>): string {
+export function toQueryParams(filters: Partial<DashboardFilterState>, includeOutcome = false): string {
   const normalized = { ...DEFAULT_FILTERS, ...filters };
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries({
@@ -84,11 +88,19 @@ export function toQueryParams(filters: Partial<DashboardFilterState>): string {
     provider: normalized.provider,
     observedWallet: normalized.observedWallet,
     mint: normalized.mint,
-    action: normalized.action,
+    side: normalized.action,
     route: normalized.route,
     source: normalized.source
   })) {
     if (value.trim()) params.set(key, value.trim());
+  }
+  if (includeOutcome && normalized.outcome === "landed-buys") {
+    params.set("side", "buy");
+    params.set("outcome", "landed");
+  }
+  if (includeOutcome && normalized.outcome === "landed-sells") {
+    params.set("side", "sell");
+    params.set("outcome", "landed");
   }
   return params.toString();
 }
@@ -113,9 +125,52 @@ export function applyLandingPreset(rows: DashboardExecution[], preset: LandingPr
 }
 
 export function landingSummary(row: DashboardExecution): string {
-  if (isLandedBuy(row)) return "Buy landed";
-  if (isLandedSell(row)) return "Sell landed";
-  return row.outcome.replaceAll("_", " ");
+  if (row.outcome === "landed") {
+    const copySlot = row.copySlot ?? "n/a";
+    return row.landingComparison === "no_target"
+      ? `Landed · slot ${copySlot} · no target comparison`
+      : `Landed · slot ${copySlot}`;
+  }
+  const labels = {
+    failed_on_chain: "Failed on chain",
+    ack_not_landed: "ACKed · not landed",
+    send_failed: "Send failed",
+    skipped: "Skipped",
+    unknown: "Unknown"
+  } as const;
+  return labels[row.outcome];
+}
+
+export function landingComparisonSummary(row: DashboardExecution): string {
+  if (row.landingComparison === "no_target") return "no target comparison";
+  if (row.landingComparison === "unavailable") return "comparison unavailable";
+  if (row.landingComparison === "same_slot") {
+    return `same-slot · slot ${row.copySlot ?? "n/a"} · ${row.sameSlotTxDelta ?? "n/a"} tx`;
+  }
+  return `cross-slot · ${formatSlot(row.slotDelta)} · ${row.txDelta ?? "n/a"} tx`;
+}
+
+export interface OverviewMetricValues {
+  landedBuys: number;
+  landedSells: number;
+  landingRate: string;
+  nonLandedAttempts: number;
+}
+
+export function overviewMetricValues(
+  summary: DashboardOverviewResponse["summary"],
+  landedBuySummary: DashboardOverviewResponse["summary"],
+  landedSellSummary: DashboardOverviewResponse["summary"]
+): OverviewMetricValues {
+  const nonLandedAttempts = summary.outcome.failed_on_chain
+    + summary.outcome.ack_not_landed
+    + summary.outcome.send_failed;
+  return {
+    landedBuys: landedBuySummary.outcome.landed,
+    landedSells: landedSellSummary.outcome.landed,
+    landingRate: formatPercent(summary.outcome.landed, summary.outcome.landed + nonLandedAttempts),
+    nonLandedAttempts
+  };
 }
 
 export function formatCount(value: number | null | undefined): string {

@@ -79,6 +79,11 @@ describe("dashboard contract", () => {
     assert.equal(sourceFilters.observedWallet, "abc");
     assert.equal("copyWallet" in sourceFilters, false);
     assert.equal("outcome" in sourceFilters, false);
+
+    const sideFilters = parseExecutionFilters(new URLSearchParams("side=buy&outcome=landed"));
+    assert.equal(sideFilters.action, "buy");
+    assert.equal(sideFilters.outcome, "landed");
+    assert.equal(parseSourceFilters(new URLSearchParams("side=sell")).action, "sell");
   });
 
   test("sentinel pagination preserves tied timestamp keysets across pages", () => {

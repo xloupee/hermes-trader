@@ -15,8 +15,8 @@ const newsreader = Newsreader({
 });
 
 export const metadata: Metadata = {
-  title: "Copy Latency",
-  description: "Copy-trade latency inspector"
+  title: "Hermes Trader",
+  description: "Private Solana execution intelligence for operators"
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

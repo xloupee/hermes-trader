@@ -1,0 +1,75 @@
+.dashboardShell {
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 18px 20px 28px;
+}
+
+.topBar {
+  align-items: flex-start;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.brand {
+  min-width: 0;
+}
+
+.eyebrow {
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  margin: 0 0 6px;
+  text-transform: uppercase;
+}
+
+.title {
+  font-size: clamp(26px, 4vw, 40px);
+  margin: 0;
+}
+
+.subtitle {
+  margin: 0;
+  color: var(--muted);
+}
+
+.userTools {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+.userPill {
+  border: 1px solid var(--ink);
+  display: inline-flex;
+  padding: 8px 11px;
+}
+
+.nav {
+  border: 1px solid var(--ink);
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 14px;
+}
+
+.nav a {
+  align-items: center;
+  background: var(--panel);
+  border-right: 1px solid var(--ink);
+  display: inline-flex;
+  min-height: 44px;
+  padding: 0 14px;
+  text-decoration: none;
+}
+
+.nav a:last-child {
+  border-right: 0;
+}
+
+.mainContent {
+  display: grid;
+  gap: 12px;
+}
+

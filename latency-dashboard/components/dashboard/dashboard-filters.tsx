@@ -4,23 +4,31 @@ import { FILTER_OUTCOME_OPTIONS, type DashboardFilterState, type LandingPreset }
 
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
+type DashboardFilterField = Exclude<keyof DashboardFilterState, "outcome">;
+
 interface DashboardFiltersProps {
   filters: DashboardFilterState;
   onFiltersChange: (filters: Partial<DashboardFilterState>) => void;
   onOutcomeChange: (outcome: LandingPreset) => void;
   disabled?: boolean;
+  visibleFields?: readonly DashboardFilterField[];
+  showOutcomePresets?: boolean;
 }
 
 export function DashboardFiltersPanel({
   filters,
   onFiltersChange,
   onOutcomeChange,
-  disabled
+  disabled,
+  visibleFields,
+  showOutcomePresets = true
 }: DashboardFiltersProps) {
+  const showField = (field: DashboardFilterField) => !visibleFields || visibleFields.includes(field);
+
   return (
     <section className={styles.filterWrap} aria-label="Dashboard filters">
       <div className={styles.filterRow}>
-        <label className={styles.filterItem}>
+        {showField("since") ? <label className={styles.filterItem}>
           Since
           <input
             value={filters.since}
@@ -30,8 +38,8 @@ export function DashboardFiltersPanel({
             disabled={disabled}
             aria-label="Since"
           />
-        </label>
-        <label className={styles.filterItem}>
+        </label> : null}
+        {showField("provider") ? <label className={styles.filterItem}>
           Provider
           <input
             value={filters.provider}
@@ -41,8 +49,8 @@ export function DashboardFiltersPanel({
             disabled={disabled}
             aria-label="Provider"
           />
-        </label>
-        <label className={styles.filterItem}>
+        </label> : null}
+        {showField("route") ? <label className={styles.filterItem}>
           Route
           <input
             value={filters.route}
@@ -52,8 +60,8 @@ export function DashboardFiltersPanel({
             disabled={disabled}
             aria-label="Route"
           />
-        </label>
-        <label className={styles.filterItem}>
+        </label> : null}
+        {showField("action") ? <label className={styles.filterItem}>
           Action
           <select
             value={filters.action}
@@ -65,8 +73,8 @@ export function DashboardFiltersPanel({
             <option value="buy">buy</option>
             <option value="sell">sell</option>
           </select>
-        </label>
-        <label className={styles.filterItem}>
+        </label> : null}
+        {showField("observedWallet") ? <label className={styles.filterItem}>
           Observed wallet
           <input
             value={filters.observedWallet}
@@ -76,8 +84,8 @@ export function DashboardFiltersPanel({
             disabled={disabled}
             aria-label="Observed wallet"
           />
-        </label>
-        <label className={styles.filterItem}>
+        </label> : null}
+        {showField("mint") ? <label className={styles.filterItem}>
           CA
           <input
             value={filters.mint}
@@ -87,8 +95,8 @@ export function DashboardFiltersPanel({
             disabled={disabled}
             aria-label="Mint filter"
           />
-        </label>
-        <label className={styles.filterItem}>
+        </label> : null}
+        {showField("source") ? <label className={styles.filterItem}>
           Source
           <input
             value={filters.source}
@@ -98,9 +106,9 @@ export function DashboardFiltersPanel({
             disabled={disabled}
             aria-label="Source filter"
           />
-        </label>
+        </label> : null}
       </div>
-      <div className={styles.presetWrap} role="radiogroup" aria-label="Landed preset">
+      {showOutcomePresets ? <div className={styles.presetWrap} role="radiogroup" aria-label="Landed preset">
         {FILTER_OUTCOME_OPTIONS.map((preset) => (
           <button
             className={filters.outcome === preset.value ? styles.presetActive : styles.presetButton}
@@ -114,7 +122,7 @@ export function DashboardFiltersPanel({
             {preset.label}
           </button>
         ))}
-      </div>
+      </div> : null}
     </section>
   );
 }

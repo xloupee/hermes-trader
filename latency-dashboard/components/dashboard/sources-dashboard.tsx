@@ -8,6 +8,16 @@ import { DashboardFiltersPanel } from "@/components/dashboard/dashboard-filters"
 import { DashboardRefreshToolbar } from "@/components/dashboard/dashboard-refresh";
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
+const SOURCE_FILTER_FIELDS = [
+  "since",
+  "provider",
+  "source",
+  "observedWallet",
+  "mint",
+  "route",
+  "action"
+] as const;
+
 export function SourcesDashboard() {
   const { filters, setFilters, setOutcome } = useDashboardFilters();
   const query = useAutoRefreshQuery<DashboardSourcesResponse>(async () => {
@@ -24,7 +34,13 @@ export function SourcesDashboard() {
       <div className={styles.metric}><span>observations</span><strong>{observations}</strong></div>
       <div className={styles.metric}><span>providers</span><strong>{new Set(rows.map((row) => row.provider)).size}</strong></div>
     </div>
-    <DashboardFiltersPanel filters={filters} onFiltersChange={setFilters} onOutcomeChange={setOutcome} />
+    <DashboardFiltersPanel
+      filters={filters}
+      onFiltersChange={setFilters}
+      onOutcomeChange={setOutcome}
+      visibleFields={SOURCE_FILTER_FIELDS}
+      showOutcomePresets={false}
+    />
     <DashboardRefreshToolbar loading={query.loading} error={query.error} paused={query.paused} autoPaused={query.autoPaused} lastUpdated={query.lastUpdated} onRefresh={query.refresh} onTogglePause={query.setPaused} />
     <div className={styles.dataSection}><div className={styles.desktopTableWrap}><table className={styles.dataTable}>
       <thead><tr><th>Source</th><th>Provider</th><th>Observations</th><th>Latest</th></tr></thead>

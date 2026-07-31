@@ -43,7 +43,14 @@ export function CopyChip({
       >
         <Copy size={13} />
       </button>
-      {feedback ? <em className={styles.copyToast}>{feedback}</em> : null}
+      <em
+        className={styles.copyToast}
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {feedback ?? ""}
+      </em>
     </span>
   );
 }

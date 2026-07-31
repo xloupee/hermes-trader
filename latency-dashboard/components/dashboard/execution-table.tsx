@@ -78,14 +78,14 @@ export function ExecutionTable({
                   <div className={styles.meta}>{formatMs(row.observedToSignatureReturnedMs)}</div>
                 </td>
                 <td>{crossSlotText(row)}</td>
-                <td>
-                  <CopyChip value={row.observedSignature} label="signature" />
-                </td>
                 <td className={styles.signCell}>
+                  <CopyChip value={row.observedSignature} label="signature" />
                   {includeRowLinks ? (
-                    <Link href={`/dashboard/executions/${row.id}`}>Open detail</Link>
+                    <div className={styles.meta}>
+                      <Link href={`/dashboard/executions/${row.id}`}>Open detail</Link>
+                    </div>
                   ) : (
-                    <span>{shortText(row.sendSignature || row.observedSignature, 7)}</span>
+                    <div className={styles.meta}>copy {shortText(row.sendSignature || row.observedSignature, 7)}</div>
                   )}
                 </td>
               </tr>

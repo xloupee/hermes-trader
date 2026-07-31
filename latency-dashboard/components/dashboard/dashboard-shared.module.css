@@ -170,11 +170,15 @@
 }
 
 .copyButton {
+  align-items: center;
   background: var(--panel);
   border: 1px solid var(--ink);
   color: var(--ink);
-  min-height: 28px;
-  padding: 4px 8px;
+  display: inline-flex;
+  justify-content: center;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 8px;
 }
 
 .copyToast {
@@ -214,12 +218,13 @@
 }
 
 .statusGood {
-  color: var(--green);
+  background: color-mix(in srgb, var(--green) 12%, var(--panel));
+  color: var(--ink);
   border: 1px solid currentColor;
   font-weight: 800;
-  padding: 2px 8px;
+  padding: 3px 8px;
   text-transform: uppercase;
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .statusBad {

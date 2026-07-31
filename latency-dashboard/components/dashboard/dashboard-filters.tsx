@@ -28,15 +28,26 @@ export function DashboardFiltersPanel({
   return (
     <section className={styles.filterWrap} aria-label="Dashboard filters">
       <div className={styles.filterRow}>
-        {showField("since") ? <label className={styles.filterItem}>
-          Since
+        {showField("from") ? <label className={styles.filterItem}>
+          From
           <input
-            value={filters.since}
-            onChange={(event) => onFiltersChange({ since: event.target.value })}
-            placeholder="24h, 7d, 2026-07-31"
+            value={filters.from}
+            onChange={(event) => onFiltersChange({ from: event.target.value })}
+            placeholder="RFC3339 or epoch ms"
             type="text"
             disabled={disabled}
-            aria-label="Since"
+            aria-label="From"
+          />
+        </label> : null}
+        {showField("to") ? <label className={styles.filterItem}>
+          To
+          <input
+            value={filters.to}
+            onChange={(event) => onFiltersChange({ to: event.target.value })}
+            placeholder="RFC3339 or epoch ms"
+            type="text"
+            disabled={disabled}
+            aria-label="To"
           />
         </label> : null}
         {showField("provider") ? <label className={styles.filterItem}>
@@ -61,28 +72,28 @@ export function DashboardFiltersPanel({
             aria-label="Route"
           />
         </label> : null}
-        {showField("action") ? <label className={styles.filterItem}>
-          Action
+        {showField("side") ? <label className={styles.filterItem}>
+          Side
           <select
-            value={filters.action}
-            onChange={(event) => onFiltersChange({ action: event.target.value })}
+            value={filters.side}
+            onChange={(event) => onFiltersChange({ side: event.target.value })}
             disabled={disabled}
-            aria-label="Action filter"
+            aria-label="Side filter"
           >
             <option value="">all</option>
             <option value="buy">buy</option>
             <option value="sell">sell</option>
           </select>
         </label> : null}
-        {showField("observedWallet") ? <label className={styles.filterItem}>
-          Observed wallet
+        {showField("wallet") ? <label className={styles.filterItem}>
+          Wallet
           <input
-            value={filters.observedWallet}
-            onChange={(event) => onFiltersChange({ observedWallet: event.target.value })}
+            value={filters.wallet}
+            onChange={(event) => onFiltersChange({ wallet: event.target.value })}
             placeholder="wallet"
             type="text"
             disabled={disabled}
-            aria-label="Observed wallet"
+            aria-label="Wallet"
           />
         </label> : null}
         {showField("mint") ? <label className={styles.filterItem}>

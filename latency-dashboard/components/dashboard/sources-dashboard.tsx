@@ -9,13 +9,14 @@ import { DashboardRefreshToolbar } from "@/components/dashboard/dashboard-refres
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
 const SOURCE_FILTER_FIELDS = [
-  "since",
+  "from",
+  "to",
   "provider",
   "source",
-  "observedWallet",
+  "wallet",
   "mint",
   "route",
-  "action"
+  "side"
 ] as const;
 
 export function SourcesDashboard() {

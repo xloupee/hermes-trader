@@ -61,9 +61,9 @@ export function ExecutionDetailDashboard({ id }: { id: string }) {
     <div className={styles.toolbar}><p className={styles.paneTitle}>Execution detail · {id}</p><Link href="/dashboard/executions">Back to executions</Link></div>
     <DashboardRefreshToolbar loading={query.loading} error={query.error} paused={query.paused} autoPaused={query.autoPaused} lastUpdated={query.lastUpdated} onRefresh={query.refresh} onTogglePause={query.setPaused} />
     {row ? <>
-      <header className={styles.detailTop}><div><h1>{row.observedAction.toUpperCase()} {row.mint}</h1><p>Route: {row.selectedRoute || "n/a"}</p><p>Observed: {new Date(row.observedAtMs).toLocaleString()}</p></div><div className={styles.detailTopPill}><span>Execution ID: </span><CopyChip value={String(row.id)} label="execution id" /></div></header>
+      <header className={styles.detailTop}><div><h1>{row.observedAction.toUpperCase()} {row.mint}</h1><p>Route: {row.selectedRoute || "n/a"}</p><p>Observed: {new Date(row.observedAtMs).toLocaleString()}</p><p>Observed wallet: <CopyChip value={row.observedWallet} label="observed wallet" /></p><p>Copy wallet: <CopyChip value={row.copyWallet} label="copy wallet" /></p></div><div className={styles.detailTopPill}><span>Execution ID: </span><CopyChip value={String(row.id)} label="execution id" /></div></header>
       <GroupedDiagnostics row={row} />
-      <section className={styles.rawSection}><h3>Read-only execution snapshot</h3><details><summary>Execution JSON</summary><pre>{JSON.stringify(row, null, 2)}</pre></details></section>
+      <section className={styles.rawSection}><h3>Sanitized normalized diagnostics</h3><details><summary>Normalized execution JSON</summary><pre>{JSON.stringify(row, null, 2)}</pre></details></section>
     </> : <div className={styles.emptyState}>{query.error || "No detail row loaded yet."}</div>}
   </section>;
 }

@@ -12,7 +12,7 @@ These scenarios are for the new `/dashboard` UI paths introduced in this branch.
 
 ## Acceptance checks
 1. URL filters are preserved after refresh
-   - start with `/dashboard/executions?since=24h&provider=...`
+   - start with `/dashboard/executions?from=2026-07-30T00%3A00%3A00Z&to=2026-07-31T00%3A00%3A00Z&provider=...`
    - change any input and confirm route query string updates
    - hard refresh keeps the same result set
 

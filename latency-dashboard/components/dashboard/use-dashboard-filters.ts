@@ -34,7 +34,7 @@ export function useDashboardFilters(): UseDashboardFiltersState {
 
   const setOutcome = useCallback((outcome: LandingPreset) => {
     const clearPresetSide = outcome === "all" && filters.outcome !== "all";
-    const next = { ...filters, action: clearPresetSide ? "" : filters.action, outcome };
+    const next = { ...filters, side: clearPresetSide ? "" : filters.side, outcome };
     router.replace(dashboardRoute(pathname, toQueryParams(next, true)));
   }, [filters, pathname, router]);
 

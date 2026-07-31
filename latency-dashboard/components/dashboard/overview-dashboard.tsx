@@ -36,10 +36,10 @@ export function OverviewDashboard() {
       const tableQuery = toQueryParams(filters, true);
       const summaryFilters: DashboardFilterState = filters.outcome === "all"
         ? filters
-        : { ...filters, action: "", outcome: "all" };
+        : { ...filters, side: "", outcome: "all" };
       const overviewQuery = toQueryParams(summaryFilters, true);
-      const landedBuyQuery = toQueryParams({ ...summaryFilters, action: "buy", outcome: "landed-buys" }, true);
-      const landedSellQuery = toQueryParams({ ...summaryFilters, action: "sell", outcome: "landed-sells" }, true);
+      const landedBuyQuery = toQueryParams({ ...summaryFilters, side: "buy", outcome: "landed-buys" }, true);
+      const landedSellQuery = toQueryParams({ ...summaryFilters, side: "sell", outcome: "landed-sells" }, true);
       const [overview, landedBuys, landedSells, executions] = await Promise.all([
         fetchOverview(overviewQuery),
         fetchOverview(landedBuyQuery),

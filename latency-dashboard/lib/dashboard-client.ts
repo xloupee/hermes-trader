@@ -18,11 +18,12 @@ export type {
 export type LandingPreset = "all" | "landed-buys" | "landed-sells";
 
 export interface DashboardFilterState {
-  since: string;
+  from: string;
+  to: string;
   provider: string;
-  observedWallet: string;
+  wallet: string;
   mint: string;
-  action: string;
+  side: string;
   route: string;
   source: string;
   outcome: LandingPreset;
@@ -42,11 +43,12 @@ export const DASHBOARD_NAV: Array<{ href: Route; label: string }> = [
 ];
 
 export const DEFAULT_FILTERS: DashboardFilterState = {
-  since: "24h",
+  from: "",
+  to: "",
   provider: "",
-  observedWallet: "",
+  wallet: "",
   mint: "",
-  action: "",
+  side: "",
   route: "",
   source: "",
   outcome: "all"
@@ -66,15 +68,16 @@ function normalizeOutcome(side: string | null, outcome: string | null): LandingP
 
 export function parseDashboardFilters(searchParams: URLSearchParams | null): DashboardFilterState {
   return {
-    since: searchParams?.get("since")?.trim() || DEFAULT_FILTERS.since,
+    from: searchParams?.get("from")?.trim() || "",
+    to: searchParams?.get("to")?.trim() || "",
     provider: searchParams?.get("provider")?.trim() || "",
-    observedWallet: searchParams?.get("observedWallet")?.trim() || "",
+    wallet: searchParams?.get("wallet")?.trim() || "",
     mint: searchParams?.get("mint")?.trim() || "",
-    action: searchParams?.get("side")?.trim() || searchParams?.get("action")?.trim() || "",
+    side: searchParams?.get("side")?.trim() || "",
     route: searchParams?.get("route")?.trim() || "",
     source: searchParams?.get("source")?.trim() || "",
     outcome: normalizeOutcome(
-      searchParams?.get("side") ?? searchParams?.get("action") ?? null,
+      searchParams?.get("side") ?? null,
       searchParams?.get("outcome") ?? null
     )
   };
@@ -84,11 +87,12 @@ export function toQueryParams(filters: Partial<DashboardFilterState>, includeOut
   const normalized = { ...DEFAULT_FILTERS, ...filters };
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries({
-    since: normalized.since,
+    from: normalized.from,
+    to: normalized.to,
     provider: normalized.provider,
-    observedWallet: normalized.observedWallet,
+    wallet: normalized.wallet,
     mint: normalized.mint,
-    side: normalized.action,
+    side: normalized.side,
     route: normalized.route,
     source: normalized.source
   })) {
@@ -126,9 +130,17 @@ export function applyLandingPreset(rows: DashboardExecution[], preset: LandingPr
 export function landingSummary(row: DashboardExecution): string {
   if (row.outcome === "landed") {
     const copySlot = row.copySlot ?? "n/a";
-    return row.landingComparison === "no_target"
-      ? `Landed · slot ${copySlot} · no target comparison`
-      : `Landed · slot ${copySlot}`;
+    if (row.landingComparison === "no_target") return `Landed · slot ${copySlot} · no target comparison`;
+    if (row.landingComparison === "same_slot") {
+      return `Landed · same slot · ${sameSlotTransactionPosition(row.sameSlotTxDelta)}`;
+    }
+    if (row.landingComparison === "cross_slot") {
+      const slotDelta = typeof row.slotDelta === "number" && Number.isFinite(row.slotDelta)
+        ? formatSlot(row.slotDelta)
+        : "slot delta unavailable";
+      return `Landed · ${slotDelta} · copy slot ${copySlot}`;
+    }
+    return `Landed · slot ${copySlot} · comparison unavailable`;
   }
   const labels = {
     failed_on_chain: "Failed on chain",
@@ -138,6 +150,13 @@ export function landingSummary(row: DashboardExecution): string {
     unknown: "Unknown"
   } as const;
   return labels[row.outcome];
+}
+
+function sameSlotTransactionPosition(txDelta: number | null): string {
+  if (typeof txDelta !== "number" || !Number.isFinite(txDelta)) return "tx delta unavailable";
+  if (txDelta > 0) return `${txDelta} tx after target`;
+  if (txDelta < 0) return `${Math.abs(txDelta)} tx before target`;
+  return "at target transaction";
 }
 
 export function landingComparisonSummary(row: DashboardExecution): string {

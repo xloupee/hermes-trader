@@ -28,6 +28,7 @@ const args = [
   '--',
   ':(exclude)hermes-feed/**',
   ':(exclude)node_modules/**',
+  ':(exclude)scripts/robinhood-absence-gate.mjs',
   '.'
 ];
 

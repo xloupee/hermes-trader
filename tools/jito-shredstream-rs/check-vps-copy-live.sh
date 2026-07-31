@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VPS_HOST="${JITO_COPY_TEST_VPS_HOST:-root@207.154.228.222}"
+VPS_HOST="${JITO_COPY_TEST_VPS_HOST:?JITO_COPY_TEST_VPS_HOST is required. Historical fallback removed.}"
 
 ssh -o BatchMode=yes -o ConnectTimeout=10 "$VPS_HOST" 'bash -s' <<'REMOTE'
 set -euo pipefail

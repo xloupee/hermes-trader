@@ -15,7 +15,7 @@ The deploy job is guarded with `github.ref == 'refs/heads/main'`, so a manual wo
 Configure these repository secrets before relying on automatic production deploys:
 
 - `VPS_SSH_PRIVATE_KEY`: private SSH key allowed to connect to the VPS user.
-- `VPS_HOST`: SSH target, for example `root@207.154.228.222`. If omitted, `scripts/deploy.sh` defaults to `root@207.154.228.222`.
+- `VPS_HOST`: SSH target host (for example `root@${HOST}`).
 
 Optional repository secrets:
 

@@ -68,6 +68,8 @@ export interface DashboardSystemResponse {
     supabaseUrl: boolean;
     hasServiceRole: boolean;
   };
+}
+
 export interface DashboardSourceFilters {
   since: string;
   sinceObservedAtMs: number;

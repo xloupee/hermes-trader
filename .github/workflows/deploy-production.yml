@@ -70,7 +70,7 @@ jobs:
         run: npm ci
 
       - name: Test
-        run: npm test --if-present
+        run: npm test
 
       - name: Typecheck
         run: npm run check

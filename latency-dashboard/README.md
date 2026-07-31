@@ -7,9 +7,19 @@ Admin-only Next.js dashboard for inspecting copy-trade latency across subscriber
 Set these in local `.env.local` and Vercel Project Settings:
 
 - `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`
 
-The service-role key is used only by server route handlers. The browser never receives it.
+`NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` are required by
+the Supabase SSR browser, server, and middleware clients. They identify the
+public Supabase project and are intentionally available to browser code.
+
+`SUPABASE_SERVICE_ROLE_KEY` is a separate server-only credential used by
+authenticated route handlers. It must never be exposed through a `NEXT_PUBLIC_`
+name, client component, browser bundle, build log, or Vercel preview output.
+
+See [VERCEL_RUNBOOK.md](./VERCEL_RUNBOOK.md) for preview, exact-artifact
+promotion, and frontend-only rollback policy.
 
 ## Run
 

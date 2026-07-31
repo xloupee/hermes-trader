@@ -2,6 +2,7 @@
 
 import { useAutoRefreshQuery } from "@/lib/use-auto-refresh-query";
 import {
+  type DashboardExecutionsResponse,
   type DashboardOverviewResponse,
   applyLandingPreset,
   formatCount,
@@ -29,19 +30,31 @@ function buildQuery(filters: { since: string; provider: string; observedWallet: 
   });
 }
 
+interface OverviewPayload {
+  overview: DashboardOverviewResponse;
+  executions: DashboardExecutionsResponse;
+}
+
 export function OverviewDashboard() {
   const { filters, setFilters, setOutcome } = useDashboardFilters();
-  const { data, loading, error, paused, autoPaused, setPaused, lastUpdated, refresh } = useAutoRefreshQuery<DashboardOverviewResponse>(
-    async (): Promise<DashboardOverviewResponse> => {
+  const { data, loading, error, paused, autoPaused, setPaused, lastUpdated, refresh } = useAutoRefreshQuery<OverviewPayload>(
+    async (): Promise<OverviewPayload> => {
       const query = buildQuery(filters);
-      const response = await fetch(`/api/dashboard/overview?${query}`);
-      if (!response.ok) throw new Error("Could not load dashboard overview");
-      return response.json() as Promise<DashboardOverviewResponse>;
+      const [overviewResponse, executionsResponse] = await Promise.all([
+        fetch(`/api/dashboard/overview?${query}`),
+        fetch(`/api/dashboard/executions?${query}`)
+      ]);
+      if (!overviewResponse.ok || !executionsResponse.ok) throw new Error("Could not load dashboard overview");
+      const [overview, executions] = await Promise.all([
+        overviewResponse.json() as Promise<DashboardOverviewResponse>,
+        executionsResponse.json() as Promise<DashboardExecutionsResponse>
+      ]);
+      return { overview, executions };
     },
     { intervalMs: 15000 }
   );
 
-  const rows = applyLandingPreset(data?.executions ?? [], filters.outcome);
+  const rows = applyLandingPreset(data?.executions.executions ?? [], filters.outcome);
   const totalAttempts = rows.filter((row) => row.sent).length;
   const landedBuys = rows.filter((row) => isLandedBuy(row)).length;
   const landedSells = rows.filter((row) => isLandedSell(row)).length;
@@ -86,7 +99,7 @@ export function OverviewDashboard() {
       <ExecutionTable rows={rows} includeRowLinks emptyMessage="No executions match this filter set." />
       <h2 className={styles.paneTitle}>Dashboard window</h2>
       <div className={styles.detailList}>
-        Executions: {data?.summary.total ?? 0} | sources observed: {data?.sourcesObserved ?? 0} | latest: {data?.latestObservedAtMs ? new Date(data.latestObservedAtMs).toLocaleString() : "n/a"}
+        Executions: {data?.overview.summary.total ?? 0} | buys / sells: {data?.overview.summary.side.buy ?? 0} / {data?.overview.summary.side.sell ?? 0} | landed: {data?.overview.summary.landed ?? 0}
       </div>
     </section>
   );

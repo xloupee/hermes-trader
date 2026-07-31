@@ -120,7 +120,6 @@ export function hasNonLandedAttempt(row: DashboardExecution): boolean {
 export function applyLandingPreset(rows: DashboardExecution[], preset: LandingPreset): DashboardExecution[] {
   if (preset === "landed-buys") return rows.filter(isLandedBuy);
   if (preset === "landed-sells") return rows.filter(isLandedSell);
-  if (preset === "non-landed") return rows.filter(hasNonLandedAttempt);
   return rows;
 }
 

@@ -14,7 +14,7 @@ export type LandingComparison =
   | "no_target"
   | "unavailable";
 
-export type DashboardExecution = Omit<LocalExecutionReport, "observedWallet" | "copyWallet"> & {
+export type DashboardExecution = Omit<LocalExecutionReport, "observedWallet" | "copyWallet" | "rawExecution" | "chainReport"> & {
   observedWallet: string | null;
   copyWallet: string | null;
   outcome: ExecutionOutcome;
@@ -71,19 +71,23 @@ export interface DashboardSystemResponse {
 }
 
 export interface DashboardSourceFilters {
-  since: string;
-  sinceObservedAtMs: number;
+  from: string;
+  to: string;
+  fromObservedAtMs: number;
+  toObservedAtMs: number;
   provider: string | null;
   source: string | null;
-  observedWallet: string | null;
+  wallet: string | null;
   mint: string | null;
   route: string | null;
-  action: string | null;
+  side: "buy" | "sell" | null;
 }
 
+export class DashboardFilterError extends Error { status: 400 }
+
 export function sanitizeWallet(address: unknown): string | null;
-export function parseExecutionFilters(searchParams: URLSearchParams): DashboardExecutionFilters;
-export function parseSourceFilters(searchParams: URLSearchParams): DashboardSourceFilters;
+export function parseExecutionFilters(searchParams: URLSearchParams, nowMs?: number): DashboardExecutionFilters;
+export function parseSourceFilters(searchParams: URLSearchParams, nowMs?: number): DashboardSourceFilters;
 export function unsupportedSourceFilters(searchParams: URLSearchParams): string[];
 export function encodeExecutionCursor(cursor: DashboardExecutionCursor): string | null;
 export function decodeExecutionCursor(cursor: string | null | undefined): DashboardExecutionCursor | null;
@@ -99,10 +103,19 @@ export function isExecutionBeforeCursor(
   row: DashboardExecutionCursor,
   cursor: DashboardExecutionCursor
 ): boolean;
+export function isObservedAtWithinRange(observedAtMs: number, filters: { fromObservedAtMs: number; toObservedAtMs: number }): boolean;
+export function executionMatchesWallet(row: { observedWallet?: string | null; copyWallet?: string | null }, wallet: string | null): boolean;
 
 export const dashboardContractSchema: {
   outcomes: ExecutionOutcome[];
   landingComparisons: LandingComparison[];
   defaultLimit: 50;
   maxLimit: 100;
+  filters: {
+    fixed: string[];
+    legacyFallbacks: { since: "from"; action: "side" };
+    time: { formats: string[]; boundaries: "inclusive" };
+    executionWallet: { match: "exact"; columns: string[] };
+    sourceWallet: { match: "exact"; columns: string[] };
+  };
 };

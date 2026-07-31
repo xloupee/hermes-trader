@@ -29,17 +29,18 @@ export async function listDashboardSources(filters: DashboardSourceFilters): Pro
     let query = createAdminClient()
       .from("copytrade_signal_observations")
       .select("id,observed_at_ms,source,provider", { count: "exact" })
-      .gte("observed_at_ms", filters.sinceObservedAtMs)
+      .gte("observed_at_ms", filters.fromObservedAtMs)
+      .lte("observed_at_ms", filters.toObservedAtMs)
       .order("observed_at_ms", { ascending: false })
       .order("id", { ascending: false })
       .limit(PAGE_SIZE);
 
     if (filters.provider) query = query.eq("provider", filters.provider);
     if (filters.source) query = query.ilike("source", `%${filters.source}%`);
-    if (filters.observedWallet) query = query.ilike("target_wallet", `%${filters.observedWallet}%`);
+    if (filters.wallet) query = query.eq("target_wallet", filters.wallet);
     if (filters.mint) query = query.ilike("mint", `%${filters.mint}%`);
     if (filters.route) query = query.eq("route", filters.route);
-    if (filters.action) query = query.eq("action", filters.action);
+    if (filters.side) query = query.eq("action", filters.side);
     if (cursor) query = query.or(sourceCursorWhere(cursor));
 
     const { data, error, count } = await query;

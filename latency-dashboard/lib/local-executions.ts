@@ -159,17 +159,18 @@ export interface DashboardExecutionCursor {
 export type DashboardExecutionOutcome = "landed" | "failed_on_chain" | "ack_not_landed" | "send_failed" | "skipped" | "unknown";
 
 export interface DashboardExecutionFilters {
-  since: string;
-  sinceObservedAtMs: number;
+  from: string;
+  to: string;
+  fromObservedAtMs: number;
+  toObservedAtMs: number;
   limit: number;
   cursor: DashboardExecutionCursor | null;
   provider?: string | null;
   source?: string | null;
-  observedWallet?: string | null;
-  copyWallet?: string | null;
+  wallet?: string | null;
   mint?: string | null;
   route?: string | null;
-  action?: string | null;
+  side?: "buy" | "sell" | null;
   outcome?: DashboardExecutionOutcome | null;
 }
 
@@ -690,15 +691,15 @@ function filteredDashboardExecutionQuery(filters: DashboardExecutionFilters, col
   let query = createAdminClient()
     .from("copytrade_local_executions")
     .select(columns, exactCount ? { count: "exact", head: true } : undefined)
-    .gte("observed_at_ms", filters.sinceObservedAtMs);
+    .gte("observed_at_ms", filters.fromObservedAtMs)
+    .lte("observed_at_ms", filters.toObservedAtMs);
 
   if (filters.provider) query = query.eq("provider", filters.provider);
   if (filters.source) query = query.ilike("source", `%${filters.source}%`);
-  if (filters.observedWallet) query = query.ilike("observed_wallet", `%${filters.observedWallet}%`);
-  if (filters.copyWallet) query = query.ilike("copy_wallet", `%${filters.copyWallet}%`);
+  if (filters.wallet) query = query.or(`observed_wallet.eq.${filters.wallet},copy_wallet.eq.${filters.wallet}`);
   if (filters.mint) query = query.ilike("mint", `%${filters.mint}%`);
   if (filters.route) query = query.eq("selected_route", filters.route);
-  if (filters.action) query = query.eq("observed_action", filters.action);
+  if (filters.side) query = query.eq("observed_action", filters.side);
   if (filters.outcome) query = query.or(dashboardOutcomePredicate(filters.outcome));
   return query;
 }
@@ -736,7 +737,7 @@ export async function dashboardOverviewSummary(filters: DashboardExecutionFilter
   const countForOutcome = (outcome: DashboardExecutionOutcome) =>
     filters.outcome && filters.outcome !== outcome ? Promise.resolve(0) : exactDashboardExecutionCount({ ...filters, outcome });
   const countForSide = (action: "buy" | "sell") =>
-    filters.action && filters.action !== action ? Promise.resolve(0) : exactDashboardExecutionCount({ ...filters, action });
+    filters.side && filters.side !== action ? Promise.resolve(0) : exactDashboardExecutionCount({ ...filters, side: action });
 
   const [total, outcomeCounts, buy, sell] = await Promise.all([
     exactDashboardExecutionCount(filters),

@@ -48,9 +48,9 @@ export function authErrorResponse(error: unknown) {
     typeof error === "object" && error !== null && "status" in error
       ? Number((error as { status?: unknown }).status)
       : 500;
-  const status = candidateStatus === 401 || candidateStatus === 403 ? candidateStatus : 500;
+  const status = candidateStatus === 400 || candidateStatus === 401 || candidateStatus === 403 ? candidateStatus : 500;
   return Response.json(
-    { error: status === 401 ? "unauthenticated" : status === 403 ? "forbidden" : "server_error" },
+    { error: status === 400 ? "invalid_request" : status === 401 ? "unauthenticated" : status === 403 ? "forbidden" : "server_error" },
     { status }
   );
 }

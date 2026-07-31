@@ -26,18 +26,61 @@ function optionalString(value) {
   return trimmed ? trimmed : null;
 }
 
-function coerceDate(value) {
-  const trimmed = optionalString(value) ?? "24h";
-  const match = trimmed.match(/^(\d+)(h|d|m)$/);
+export class DashboardFilterError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "DashboardFilterError";
+    this.status = 400;
+  }
+}
+
+const RFC3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|([+-])(\d{2}):(\d{2}))$/;
+
+function parseAbsoluteTime(value, name) {
+  const trimmed = optionalString(value);
+  if (trimmed === null) return null;
+  const match = trimmed.match(RFC3339);
+  if (match) {
+    const [, year, month, day, hour, minute, second, , offsetHour = "00", offsetMinute = "00"] = match;
+    const daysInMonth = new Date(Date.UTC(Number(year), Number(month), 0)).getUTCDate();
+    if (Number(month) < 1 || Number(month) > 12 || Number(day) < 1 || Number(day) > daysInMonth || Number(hour) > 23 || Number(minute) > 59 || Number(second) > 59 || Number(offsetHour) > 23 || Number(offsetMinute) > 59) {
+      throw new DashboardFilterError(`${name} is not a valid RFC3339 calendar timestamp`);
+    }
+  }
+  const timestamp = /^\d{1,15}$/.test(trimmed) ? Number(trimmed) : match ? Date.parse(trimmed) : Number.NaN;
+  if (!Number.isSafeInteger(timestamp) || timestamp < 0 || !Number.isFinite(new Date(timestamp).getTime())) {
+    throw new DashboardFilterError(`${name} must be RFC3339 or Unix epoch milliseconds`);
+  }
+  return timestamp;
+}
+
+function parseLegacySince(value, nowMs) {
+  const trimmed = optionalString(value);
+  if (trimmed === null) return null;
+  const match = trimmed.match(/^(\d+)(m|h|d)$/);
   if (match) {
     const amount = Number(match[1]);
-    const unit = match[2];
-    const ms = unit === "h" ? amount * 60 * 60 * 1000 : unit === "d" ? amount * 24 * 60 * 60 * 1000 : amount * 60 * 1000;
-    return new Date(Date.now() - ms).toISOString();
+    if (!Number.isSafeInteger(amount) || amount <= 0) throw new DashboardFilterError("since duration must be positive");
+    const unitMs = match[2] === "m" ? 60_000 : match[2] === "h" ? 3_600_000 : 86_400_000;
+    const timestamp = nowMs - amount * unitMs;
+    if (!Number.isSafeInteger(timestamp) || timestamp < 0) throw new DashboardFilterError("since duration is outside the supported time range");
+    return timestamp;
   }
+  return parseAbsoluteTime(trimmed, "since");
+}
 
-  const date = new Date(trimmed);
-  return Number.isNaN(date.getTime()) ? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString() : date.toISOString();
+function parseTimeRange(searchParams, nowMs) {
+  const fixedFrom = parseAbsoluteTime(searchParams.get("from"), "from");
+  const fixedTo = parseAbsoluteTime(searchParams.get("to"), "to");
+  const fromObservedAtMs = fixedFrom ?? parseLegacySince(searchParams.get("since"), nowMs) ?? nowMs - 86_400_000;
+  const toObservedAtMs = fixedTo ?? nowMs;
+  if (fromObservedAtMs > toObservedAtMs) throw new DashboardFilterError("from must be less than or equal to to");
+  return {
+    from: new Date(fromObservedAtMs).toISOString(),
+    to: new Date(toObservedAtMs).toISOString(),
+    fromObservedAtMs,
+    toObservedAtMs
+  };
 }
 
 export function sanitizeWallet(address) {
@@ -48,58 +91,75 @@ export function sanitizeWallet(address) {
   if (!trimmed) {
     return null;
   }
-  if (trimmed.length <= 8) {
-    return `${"*".repeat(trimmed.length)}`;
-  }
-  return `${trimmed.slice(0, 6)}...${trimmed.slice(-4)}`;
+  return trimmed;
 }
 
-export function parseExecutionFilters(searchParams) {
+function parseWallet(value) {
+  const wallet = optionalString(value);
+  if (wallet !== null && (!/^[A-Za-z0-9]+$/.test(wallet) || wallet.length > 128)) {
+    throw new DashboardFilterError("wallet must be an alphanumeric address");
+  }
+  return wallet;
+}
+
+function strictEnum(value, allowed, name) {
+  const candidate = optionalString(value);
+  if (candidate !== null && !allowed.includes(candidate)) throw new DashboardFilterError(`${name} is invalid`);
+  return candidate;
+}
+
+export function parseExecutionFilters(searchParams, nowMs = Date.now()) {
+  const timeRange = parseTimeRange(searchParams, nowMs);
   const cursorRaw = optionalString(searchParams.get("cursor"));
   const cursor = decodeExecutionCursor(cursorRaw);
+  if (cursorRaw && !cursor) throw new DashboardFilterError("cursor is invalid");
   const limitRaw = optionalString(searchParams.get("limit"));
   const requestedLimit = limitRaw === null ? null : Number(limitRaw);
+  if (requestedLimit !== null && (!isFiniteNumber(requestedLimit) || requestedLimit <= 0)) {
+    throw new DashboardFilterError("limit must be a positive number");
+  }
   const finalLimit = requestedLimit !== null && isFiniteNumber(requestedLimit)
     ? Math.max(1, Math.min(Math.trunc(requestedLimit), MAX_LIMIT))
     : DEFAULT_LIMIT;
+  const sideValue = optionalString(searchParams.get("side")) ?? optionalString(searchParams.get("action"));
 
   return {
-    since: coerceDate(searchParams.get("since")),
-    sinceObservedAtMs: new Date(coerceDate(searchParams.get("since"))).getTime(),
+    ...timeRange,
     limit: finalLimit,
     cursor,
     provider: optionalString(searchParams.get("provider")),
     source: optionalString(searchParams.get("source")),
-    observedWallet: optionalString(searchParams.get("observedWallet")),
-    copyWallet: optionalString(searchParams.get("copyWallet")),
+    wallet: parseWallet(searchParams.get("wallet")),
     mint: optionalString(searchParams.get("mint")),
     route: optionalString(searchParams.get("route")),
-    action: optionalString(searchParams.get("side")) ?? optionalString(searchParams.get("action")),
-    outcome: optionalEnum(searchParams.get("outcome"), EXECUTION_OUTCOMES)
+    side: strictEnum(sideValue, ["buy", "sell"], "side"),
+    outcome: strictEnum(searchParams.get("outcome"), EXECUTION_OUTCOMES, "outcome")
   };
 }
 
-function optionalEnum(value, allowed) {
-  const candidate = optionalString(value);
-  return candidate && allowed.includes(candidate) ? candidate : null;
-}
-
-export function parseSourceFilters(searchParams) {
-  const since = coerceDate(searchParams.get("since"));
+export function parseSourceFilters(searchParams, nowMs = Date.now()) {
+  const sideValue = optionalString(searchParams.get("side")) ?? optionalString(searchParams.get("action"));
   return {
-    since,
-    sinceObservedAtMs: new Date(since).getTime(),
+    ...parseTimeRange(searchParams, nowMs),
     provider: optionalString(searchParams.get("provider")),
     source: optionalString(searchParams.get("source")),
-    observedWallet: optionalString(searchParams.get("observedWallet")),
+    wallet: parseWallet(searchParams.get("wallet")),
     mint: optionalString(searchParams.get("mint")),
     route: optionalString(searchParams.get("route")),
-    action: optionalString(searchParams.get("side")) ?? optionalString(searchParams.get("action"))
+    side: strictEnum(sideValue, ["buy", "sell"], "side")
   };
 }
 
 export function unsupportedSourceFilters(searchParams) {
-  return ["copyWallet", "cursor", "limit", "outcome"].filter((name) => optionalString(searchParams.get(name)) !== null);
+  return ["copyWallet", "observedWallet", "cursor", "limit", "outcome"].filter((name) => optionalString(searchParams.get(name)) !== null);
+}
+
+export function isObservedAtWithinRange(observedAtMs, filters) {
+  return observedAtMs >= filters.fromObservedAtMs && observedAtMs <= filters.toObservedAtMs;
+}
+
+export function executionMatchesWallet(row, wallet) {
+  return wallet === null || row?.observedWallet === wallet || row?.copyWallet === wallet;
 }
 
 export function encodeExecutionCursor({ observedAtMs, id }) {
@@ -233,8 +293,12 @@ export function toDashboardExecution(row) {
     };
   }
 
+  const { rawExecution: _rawExecution, chainReport: _chainReport, ...safeRow } = row;
+  for (const key of Object.keys(safeRow)) {
+    if (/private.?key|secret.?key|keypair|mnemonic|seed|custody/i.test(key)) delete safeRow[key];
+  }
   return {
-    ...row,
+    ...safeRow,
     observedWallet: sanitizeWallet(row.observedWallet),
     copyWallet: sanitizeWallet(row.copyWallet),
     outcome,
@@ -283,5 +347,12 @@ export const dashboardContractSchema = {
   outcomes: EXECUTION_OUTCOMES,
   landingComparisons: LANDING_COMPARISONS,
   defaultLimit: DEFAULT_LIMIT,
-  maxLimit: MAX_LIMIT
+  maxLimit: MAX_LIMIT,
+  filters: {
+    fixed: ["from", "to", "wallet", "side", "outcome", "mint", "route", "provider"],
+    legacyFallbacks: { since: "from", action: "side" },
+    time: { formats: ["RFC3339", "unix_epoch_milliseconds"], boundaries: "inclusive" },
+    executionWallet: { match: "exact", columns: ["observed_wallet", "copy_wallet"] },
+    sourceWallet: { match: "exact", columns: ["target_wallet"] }
+  }
 };

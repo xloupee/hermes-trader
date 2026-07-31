@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start",
     "check": "tsc --noEmit",
+    "test": "node --test lib/__tests__/**/*.test.mjs",
     "sync:copy-executions": "node scripts/sync-copy-executions.mjs"
   },
   "dependencies": {

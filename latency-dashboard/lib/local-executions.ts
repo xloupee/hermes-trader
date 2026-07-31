@@ -150,6 +150,25 @@ export interface SendLaneAttribution {
   allAttempts: SendLaneAttempt[];
 }
 
+export interface DashboardExecutionCursor {
+  observedAtMs: number;
+  id: number;
+}
+
+export interface DashboardExecutionFilters {
+  since: string;
+  sinceObservedAtMs: number;
+  limit: number;
+  cursor: DashboardExecutionCursor | null;
+  provider?: string | null;
+  source?: string | null;
+  observedWallet?: string | null;
+  copyWallet?: string | null;
+  mint?: string | null;
+  route?: string | null;
+  action?: string | null;
+}
+
 interface RawLocalExecutionReport {
   id: number;
   created_at: string;
@@ -639,6 +658,57 @@ export async function listLocalExecutions(filters: SignalFilters): Promise<Local
   }
   if (filters.route) {
     query = query.eq("selected_route", filters.route);
+  }
+
+  const { data, error } = await query;
+  if (missingTableError(error)) {
+    return [];
+  }
+  if (error) {
+    throw error;
+  }
+
+  return (((data as unknown) as RawLocalExecutionReport[] | null) || []).map(normalizeReport);
+}
+
+function buildDashboardCursorWhere(cursor: DashboardExecutionCursor) {
+  return `observed_at_ms.lt.${cursor.observedAtMs},and(observed_at_ms.eq.${cursor.observedAtMs},id.lt.${cursor.id})`;
+}
+
+export async function listDashboardExecutions(filters: DashboardExecutionFilters): Promise<LocalExecutionReport[]> {
+  const supabase = createAdminClient();
+  let query = supabase
+    .from("copytrade_local_executions")
+    .select(LOCAL_EXECUTION_SELECT)
+    .gte("observed_at_ms", filters.sinceObservedAtMs)
+    .order("observed_at_ms", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(filters.limit);
+
+  if (filters.provider) {
+    query = query.eq("provider", filters.provider);
+  }
+  if (filters.source) {
+    query = query.ilike("source", `%${filters.source}%`);
+  }
+  if (filters.observedWallet) {
+    query = query.ilike("observed_wallet", `%${filters.observedWallet}%`);
+  }
+  if (filters.copyWallet) {
+    query = query.ilike("copy_wallet", `%${filters.copyWallet}%`);
+  }
+  if (filters.mint) {
+    query = query.ilike("mint", `%${filters.mint}%`);
+  }
+  if (filters.route) {
+    query = query.eq("selected_route", filters.route);
+  }
+  if (filters.action) {
+    query = query.eq("observed_action", filters.action);
+  }
+
+  if (filters.cursor) {
+    query = query.or(buildDashboardCursorWhere(filters.cursor));
   }
 
   const { data, error } = await query;

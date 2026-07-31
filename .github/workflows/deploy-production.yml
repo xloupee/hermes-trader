@@ -20,7 +20,7 @@ concurrency:
 jobs:
   safety:
     name: Main branch safety gates
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -51,7 +51,7 @@ jobs:
 
   frontend:
     name: Frontend safety gates
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -68,6 +68,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Test
+        run: npm test --if-present
 
       - name: Typecheck
         run: npm run check

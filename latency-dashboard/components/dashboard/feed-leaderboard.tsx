@@ -1,5 +1,5 @@
 import type { DashboardExecution } from "@/lib/dashboard-client";
-import { feedLeaderboard, type FeedKey } from "@/lib/feed-winners";
+import { feedLeaderboard, isLandedBuy, type FeedKey } from "@/lib/feed-winners";
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
 const FEED_TONES: Record<FeedKey, string> = {
@@ -14,17 +14,17 @@ const FEED_TONES: Record<FeedKey, string> = {
 };
 
 export function FeedLeaderboard({ rows }: { rows: DashboardExecution[] }) {
-  const buys = rows.filter((row) => row.observedAction.toLowerCase() === "buy");
-  const standings = feedLeaderboard(buys.map((row) => row.source));
+  const landedBuys = rows.filter(isLandedBuy);
+  const standings = feedLeaderboard(landedBuys.map((row) => row.source));
 
   return (
     <section className={styles.feedLeaderboard} aria-label="Feed winner leaderboard">
       <header className={styles.feedLeaderboardHeading}>
         <div>
-          <span>Inbound buy race</span>
+          <span>Landed buy race</span>
           <h2>Feed leaderboard</h2>
         </div>
-        <small>{buys.length} visible buy{buys.length === 1 ? "" : "s"}</small>
+        <small>{landedBuys.length} landed buy{landedBuys.length === 1 ? "" : "s"}</small>
       </header>
       <div className={styles.feedStandings}>
         {standings.length > 0 ? standings.map((standing, index) => (
@@ -41,7 +41,7 @@ export function FeedLeaderboard({ rows }: { rows: DashboardExecution[] }) {
             <b>{standing.wins}</b>
             <span className={styles.feedShare}>{standing.share.toFixed(1)}%</span>
           </div>
-        )) : <p className={styles.feedEmpty}>No buy execution winners in the current view.</p>}
+        )) : <p className={styles.feedEmpty}>No landed buy winners in the current view.</p>}
       </div>
     </section>
   );

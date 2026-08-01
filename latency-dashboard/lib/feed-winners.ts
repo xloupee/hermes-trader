@@ -18,6 +18,10 @@ export interface FeedStanding extends FeedIdentity {
   share: number;
 }
 
+export function isLandedBuy(row: { observedAction?: string | null; outcome?: string | null }): boolean {
+  return row.observedAction?.toLowerCase() === "buy" && row.outcome === "landed";
+}
+
 const FEED_LABELS: Record<FeedKey, string> = {
   vortex: "Vortex",
   jito: "Jito",

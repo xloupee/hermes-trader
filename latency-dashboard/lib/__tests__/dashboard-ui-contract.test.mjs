@@ -10,7 +10,7 @@ import {
   shortText,
   toQueryParams
 } from "../dashboard-client.ts";
-import { executionFeed, feedIdentity, feedLeaderboard, feedTransportLabel } from "../feed-winners.ts";
+import { executionFeed, feedIdentity, feedLeaderboard, feedTransportLabel, isLandedBuy } from "../feed-winners.ts";
 import { formatUserDate, formatUserDateTime, formatUserTime, userTimeZoneLabel } from "../user-time.ts";
 
 const outcomeCounts = (values = {}) => ({
@@ -144,6 +144,10 @@ describe("dashboard UI contract", () => {
   });
 
   test("feed leaderboard ranks visible buy winners with stable shares and colors", () => {
+    assert.equal(isLandedBuy({ observedAction: "buy", outcome: "landed" }), true);
+    assert.equal(isLandedBuy({ observedAction: "buy", outcome: "skipped" }), false);
+    assert.equal(isLandedBuy({ observedAction: "buy", outcome: "failed_on_chain" }), false);
+    assert.equal(isLandedBuy({ observedAction: "sell", outcome: "landed" }), false);
     assert.deepEqual(feedLeaderboard(["jito-primary", "vortex-fra", "vortex-iad", "jito-backup"]), [
       { key: "vortex", label: "Vortex", wins: 2, share: 50 },
       { key: "jito", label: "Jito", wins: 2, share: 50 }
@@ -156,8 +160,9 @@ describe("dashboard UI contract", () => {
     const leaderboard = readFileSync(new URL("../../components/dashboard/feed-leaderboard.tsx", import.meta.url), "utf8");
     const styles = readFileSync(new URL("../../components/dashboard/dashboard-shared.module.css", import.meta.url), "utf8");
     assert.match(overview, /<FeedLeaderboard rows=\{data\?\.executions \?\? \[\]\} \/>/);
-    assert.match(leaderboard, /row\.observedAction\.toLowerCase\(\) === "buy"/);
-    assert.match(leaderboard, /Inbound buy race/);
+    assert.match(leaderboard, /rows\.filter\(isLandedBuy\)/);
+    assert.match(leaderboard, /Landed buy race/);
+    assert.match(leaderboard, /landed buy/);
     assert.match(leaderboard, /Feed leaderboard/);
     assert.match(readFileSync(new URL("../../components/dashboard/execution-table.tsx", import.meta.url), "utf8"), /feedTransportLabel/);
     assert.match(styles, /\.feedLeaderboard\s*\{[^}]*block-size:\s*auto;/s);

@@ -48,6 +48,17 @@ function landingParts(row: DashboardExecution): { primary: string; secondary: st
   return { primary: pieces.slice(0, 2).join(" · "), secondary: pieces.slice(2).join(" · ") };
 }
 
+function transactionDistance(row: DashboardExecution, landing: ReturnType<typeof landingParts>): string {
+  if (
+    row.outcome !== "landed"
+    || (row.landingComparison !== "same_slot" && row.landingComparison !== "cross_slot")
+  ) {
+    return "n/a";
+  }
+
+  return landing.secondary || "n/a";
+}
+
 function sideClass(side: string) {
   return side.toLowerCase() === "sell" ? styles.sideSell : styles.sideBuy;
 }
@@ -85,6 +96,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
               <th title={timeZone}>Time · {timeZoneLabel}</th>
               <th>Act</th>
               <th>Result / placement</th>
+              <th>TX after</th>
               <th>Leader</th>
               <th>Feed / route</th>
               <th>Lane / ACK</th>
@@ -106,8 +118,9 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
                 <td><span className={sideClass(row.observedAction)}>{row.observedAction}</span></td>
                 <td>
                   <span className={placementClass(row)}>{landing.primary}</span>
-                  <div className={styles.meta}>{landing.secondary}</div>
+                  {row.outcome !== "landed" ? <div className={styles.meta}>{landing.secondary}</div> : null}
                 </td>
+                <td className={styles.txDistance}>{transactionDistance(row, landing)}</td>
                 <td className={styles.leaderCell} title={leaderTitle(row)}>
                   <strong>{leaderSummary(row)}</strong>
                   <span className={styles.meta}>{leaderContext(row)}</span>
@@ -144,9 +157,10 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
             </header>
             <div className={styles.cardOutcome}>
               <span className={placementClass(row)}>{landing.primary}</span>
-              <p>{landing.secondary}</p>
+              {row.outcome !== "landed" ? <p>{landing.secondary}</p> : null}
             </div>
             <div className={styles.cardMeta}>
+              <span>TX after<strong className={styles.txDistance}>{transactionDistance(row, landing)}</strong></span>
               <span>Leader<strong title={leaderTitle(row)}>{leaderSummary(row)}</strong><small className={styles.meta}>{leaderContext(row)}</small></span>
               <span>Feed<strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong>{transport ? <small className={styles.meta}>{transport}</small> : null}</span>
               <span>Route<strong>{row.selectedRoute || "n/a"}</strong></span>

@@ -347,7 +347,7 @@
 
 .dataTable {
   border-collapse: collapse;
-  min-width: 1180px;
+  min-width: 1280px;
   width: 100%;
 }
 
@@ -386,12 +386,18 @@
 }
 
 .timeCell,
+.txDistance,
 .leaderCell,
 .assetCell,
 .signCell,
 .ackCell {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-variant-numeric: tabular-nums;
+}
+
+.txDistance {
+  color: var(--ink);
+  white-space: nowrap;
 }
 
 .timeCell strong,

@@ -12,7 +12,7 @@ import {
   shortText
 } from "@/lib/dashboard-client";
 import { CopyChip } from "@/components/dashboard/copy-chip";
-import { executionFeed, feedTransportLabel, type FeedKey } from "@/lib/feed-winners";
+import { executionFeed, type FeedKey } from "@/lib/feed-winners";
 import { formatUserDate, formatUserTime, userTimeZoneLabel } from "@/lib/user-time";
 import { useUserTimeZone } from "@/lib/use-user-time-zone";
 import styles from "@/components/dashboard/dashboard-shared.module.css";
@@ -98,7 +98,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
               <th>Result / placement</th>
               <th>TX after</th>
               <th>Leader</th>
-              <th>Feed / route</th>
+              <th>Feed</th>
               <th>Lane / ACK</th>
               <th>Asset</th>
               <th>Wallet</th>
@@ -110,7 +110,6 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
             {rows.map((row) => {
               const landing = landingParts(row);
               const feed = executionFeed(row.source, row.provider);
-              const transport = feedTransportLabel(row.source, row.provider);
               return <tr key={row.id}>
                 <td className={styles.timeCell}>
                   <strong>{formatUserTime(row.observedAtMs, timeZone)}</strong>
@@ -126,7 +125,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
                   <strong>{leaderSummary(row)}</strong>
                   <span className={styles.meta}>{leaderContext(row)}</span>
                 </td>
-                <td><strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong><div className={styles.meta}>{transport ? `${transport} · ` : ""}{row.selectedRoute || "route unavailable"}</div></td>
+                <td><strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></td>
                 <td className={styles.ackCell}>
                   <strong className={styles.ackLane} title={row.firstAckLane || undefined}>{ackLaneLabel(row.firstAckLane)}</strong>
                   <span className={styles.meta}>{formatMs(row.observedToSignatureReturnedMs)} ACK</span>
@@ -151,7 +150,6 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
         {rows.map((row) => {
           const landing = landingParts(row);
           const feed = executionFeed(row.source, row.provider);
-          const transport = feedTransportLabel(row.source, row.provider);
           return <article key={row.id} className={styles.card}>
             <header className={styles.cardHeader}>
               <div><span className={sideClass(row.observedAction)}>{row.observedAction}</span><strong>{shortText(row.mint, 5)}</strong></div>
@@ -164,8 +162,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
             <div className={styles.cardMeta}>
               <span>TX after<strong className={styles.txDistance}>{transactionDistance(row, landing)}</strong></span>
               <span>Leader<strong title={leaderTitle(row)}>{leaderSummary(row)}</strong><small className={styles.meta}>{leaderContext(row)}</small></span>
-              <span>Feed<strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong>{transport ? <small className={styles.meta}>{transport}</small> : null}</span>
-              <span>Route<strong>{row.selectedRoute || "n/a"}</strong></span>
+              <span>Feed<strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></span>
               <span>Lane / ACK<strong className={styles.ackLane} title={row.firstAckLane || undefined}>{ackLaneLabel(row.firstAckLane)}</strong><small className={styles.meta}>{formatMs(row.observedToSignatureReturnedMs)} ACK</small></span>
             </div>
             <div className={styles.cardCopies}>

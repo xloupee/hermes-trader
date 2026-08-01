@@ -145,12 +145,12 @@ describe("dashboard UI contract", () => {
     assert.ok(table.indexOf("<th>Act</th>") < table.indexOf("<th>Result / placement</th>"));
     assert.ok(table.indexOf("<th>Result / placement</th>") < table.indexOf("<th>TX after</th>"));
     assert.ok(table.indexOf("<th>TX after</th>") < table.indexOf("<th>Leader</th>"));
-    assert.ok(table.indexOf("<th>Leader</th>") < table.indexOf("<th>Feed / route</th>"));
-    assert.ok(table.indexOf("<th>Feed / route</th>") < table.indexOf("<th>Lane / ACK</th>"));
+    assert.ok(table.indexOf("<th>Leader</th>") < table.indexOf("<th>Feed</th>"));
+    assert.ok(table.indexOf("<th>Feed</th>") < table.indexOf("<th>Lane / ACK</th>"));
     assert.ok(table.indexOf("<th>Lane / ACK</th>") < table.indexOf("<th>Asset</th>"));
     assert.ok(table.indexOf("<th>Wallet</th>") < table.indexOf("<th>Telegram ID</th>"));
     assert.ok(table.indexOf("<th>Telegram ID</th>") < table.indexOf("<th>Transaction</th>"));
-    assert.match(table, /row\.selectedRoute \|\| "route unavailable"/);
+    assert.doesNotMatch(table, /feedTransportLabel|row\.selectedRoute/);
     assert.match(table, /ackLaneLabel\(row\.firstAckLane\)/);
     assert.match(table, /title=\{row\.firstAckLane \|\| undefined\}/);
     assert.match(table, /placementClass\(row\)/);
@@ -205,7 +205,7 @@ describe("dashboard UI contract", () => {
     assert.match(leaderboard, /Landed buy race/);
     assert.match(leaderboard, /landed buy/);
     assert.match(leaderboard, /Feed leaderboard/);
-    assert.match(readFileSync(new URL("../../components/dashboard/execution-table.tsx", import.meta.url), "utf8"), /feedTransportLabel/);
+    assert.doesNotMatch(readFileSync(new URL("../../components/dashboard/execution-table.tsx", import.meta.url), "utf8"), /feedTransportLabel/);
     assert.match(styles, /\.feedLeaderboard\s*\{[^}]*block-size:\s*auto;/s);
     assert.match(styles, /\.feedStandings\s*\{[^}]*max-block-size:\s*132px;/s);
   });

@@ -8,6 +8,8 @@ import { DashboardRefreshToolbar } from "@/components/dashboard/dashboard-refres
 import { CopyChip } from "@/components/dashboard/copy-chip";
 import { ms, us } from "@/lib/benchmark-format";
 import { firstNumber } from "@/lib/benchmark-position";
+import { formatUserDateTime } from "@/lib/user-time";
+import { useUserTimeZone } from "@/lib/use-user-time-zone";
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
 function DetailList({ rows }: { rows: Array<{ label: string; value: string }> }) {
@@ -45,9 +47,9 @@ function LatencyBreakdown({ row }: { row: DashboardExecution }) {
   </article>;
 }
 
-function GroupedDiagnostics({ row }: { row: DashboardExecution }) {
+function GroupedDiagnostics({ row, timeZone }: { row: DashboardExecution; timeZone: string }) {
   const timingRows = [
-    { label: "Observed", value: new Date(row.observedAtMs).toLocaleString() },
+    { label: "Observed", value: formatUserDateTime(row.observedAtMs, timeZone) },
     { label: "Outcome", value: landingSummary(row) },
     { label: "Observed to signature", value: formatMs(row.observedToSignatureReturnedMs) },
     { label: "Observed to send", value: formatMs(row.observedToSendSubmittedMs) }
@@ -83,6 +85,7 @@ function GroupedDiagnostics({ row }: { row: DashboardExecution }) {
 }
 
 export function ExecutionDetailDashboard({ id }: { id: string }) {
+  const timeZone = useUserTimeZone();
   const query = useAutoRefreshQuery<{ execution: DashboardExecution }>(async () => {
     const response = await fetch(`/api/dashboard/executions/${encodeURIComponent(id)}`);
     if (!response.ok) throw new Error(response.status === 404 ? "Execution not found" : "Could not load execution detail");
@@ -94,9 +97,9 @@ export function ExecutionDetailDashboard({ id }: { id: string }) {
     <div className={styles.toolbar}><p className={styles.paneTitle}>Execution detail · {id}</p><Link href="/dashboard/executions">Back to executions</Link></div>
     <DashboardRefreshToolbar loading={query.loading} error={query.error} paused={query.paused} autoPaused={query.autoPaused} lastUpdated={query.lastUpdated} onRefresh={query.refresh} onTogglePause={query.setPaused} />
     {row ? <>
-      <header className={styles.detailTop}><div><h1>{row.observedAction.toUpperCase()} {row.mint}</h1><p>Route: {row.selectedRoute || "n/a"}</p><p>Observed: {new Date(row.observedAtMs).toLocaleString()}</p><p>Observed wallet: <CopyChip value={row.observedWallet} label="observed wallet" /></p><p>Copy wallet: <CopyChip value={row.copyWallet} label="copy wallet" /></p></div><div className={styles.detailTopPill}><span>Execution ID: </span><CopyChip value={String(row.id)} label="execution id" /></div></header>
+      <header className={styles.detailTop}><div><h1>{row.observedAction.toUpperCase()} {row.mint}</h1><p>Route: {row.selectedRoute || "n/a"}</p><p>Observed: {formatUserDateTime(row.observedAtMs, timeZone)} ({timeZone})</p><p>Observed wallet: <CopyChip value={row.observedWallet} label="observed wallet" /></p><p>Copy wallet: <CopyChip value={row.copyWallet} label="copy wallet" /></p></div><div className={styles.detailTopPill}><span>Execution ID: </span><CopyChip value={String(row.id)} label="execution id" /></div></header>
       <LatencyBreakdown row={row} />
-      <GroupedDiagnostics row={row} />
+      <GroupedDiagnostics row={row} timeZone={timeZone} />
       <section className={styles.rawSection}><h3>Sanitized normalized diagnostics</h3><details><summary>Normalized execution JSON</summary><pre>{JSON.stringify(row, null, 2)}</pre></details></section>
     </> : <div className={styles.emptyState}>{query.error || "No detail row loaded yet."}</div>}
   </section>;

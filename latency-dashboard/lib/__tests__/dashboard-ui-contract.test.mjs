@@ -11,6 +11,7 @@ import {
   toQueryParams
 } from "../dashboard-client.ts";
 import { executionFeed, feedIdentity, feedLeaderboard } from "../feed-winners.ts";
+import { formatUserDate, formatUserDateTime, formatUserTime, userTimeZoneLabel } from "../user-time.ts";
 
 const outcomeCounts = (values = {}) => ({
   landed: 0,
@@ -111,17 +112,25 @@ describe("dashboard UI contract", () => {
   test("execution table remains accessible with eight columns", () => {
     const table = readFileSync(new URL("../../components/dashboard/execution-table.tsx", import.meta.url), "utf8");
     const styles = readFileSync(new URL("../../components/dashboard/dashboard-shared.module.css", import.meta.url), "utf8");
-    assert.equal((table.match(/<th>/g) || []).length, 8);
+    assert.equal((table.match(/<th(?:\s|>)/g) || []).length, 8);
     assert.match(table, /aria-label="Execution results"/);
     assert.ok(table.indexOf("<th>Result / placement</th>") < table.indexOf("<th>Feed / route</th>"));
     assert.ok(table.indexOf("<th>Feed / route</th>") < table.indexOf("<th>Act</th>"));
     assert.match(table, /row\.selectedRoute \|\| "route unavailable"/);
     assert.match(table, /ackLaneLabel\(row\.firstAckLane\)/);
     assert.match(table, /title=\{row\.firstAckLane \|\| undefined\}/);
-    assert.match(table, /hour12:\s*true/);
-    assert.doesNotMatch(table, /hour12:\s*false/);
+    assert.match(table, /useUserTimeZone\(\)/);
+    assert.match(table, /Time · \{timeZoneLabel\}/);
     assert.match(styles, /\.sideBuy\s*\{\s*color:\s*var\(--green\);\s*\}/);
     assert.match(styles, /\.sideSell\s*\{\s*color:\s*var\(--red\);\s*\}/);
+  });
+
+  test("timestamps use an explicit user timezone and 12-hour clock", () => {
+    const timestamp = Date.UTC(2026, 6, 31, 12, 5, 9);
+    assert.equal(formatUserTime(timestamp, "America/Los_Angeles", "en-US"), "5:05:09 AM");
+    assert.equal(formatUserDate(timestamp, "America/Los_Angeles", "en-US"), "Jul 31");
+    assert.match(formatUserDateTime(timestamp, "America/Los_Angeles", "en-US"), /5:05:09 AM/);
+    assert.equal(userTimeZoneLabel("America/Los_Angeles", timestamp, "en-US"), "PDT");
   });
 
   test("feed identity preserves inbound source attribution and transport fallback", () => {

@@ -1,6 +1,8 @@
 "use client";
 
 import { Pause, Play, RefreshCcw } from "lucide-react";
+import { formatUserTime, userTimeZoneLabel } from "@/lib/user-time";
+import { useUserTimeZone } from "@/lib/use-user-time-zone";
 
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
@@ -22,6 +24,7 @@ export function DashboardRefreshToolbar({
   onRefresh,
   onTogglePause
 }: DashboardRefreshToolbarProps) {
+  const timeZone = useUserTimeZone();
   return (
     <div className={styles.toolbar}>
       <div className={styles.toolbarStatus}>
@@ -29,7 +32,7 @@ export function DashboardRefreshToolbar({
           <i aria-hidden="true" />
           {error ? "Feed interrupted" : loading && !lastUpdated ? "Connecting to execution feed" : paused || autoPaused ? "Refresh paused" : "Live feed"}
         </span>
-        <span className={styles.muted}>{error || (lastUpdated ? `Synced ${lastUpdated.toLocaleTimeString()}` : "Waiting for first response")}</span>
+        <span className={styles.muted}>{error || (lastUpdated ? `Synced ${formatUserTime(lastUpdated, timeZone)} ${userTimeZoneLabel(timeZone, lastUpdated)}` : "Waiting for first response")}</span>
       </div>
       <div className={styles.toolbarButtons}>
         <button

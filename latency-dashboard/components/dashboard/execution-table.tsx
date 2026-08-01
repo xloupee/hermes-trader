@@ -4,8 +4,6 @@ import Link from "next/link";
 import {
   type DashboardExecution,
   formatMs,
-  formatSol,
-  landingComparisonSummary,
   landingSummary,
   shortText
 } from "@/lib/dashboard-client";
@@ -18,11 +16,29 @@ interface ExecutionTableProps {
   includeRowLinks?: boolean;
 }
 
-function statusClass(status: string | null) {
-  const lowered = (status || "").toLowerCase();
-  if (lowered.includes("landed") || lowered.includes("submitted")) return styles.statusGood;
-  if (lowered.includes("failed") || lowered.includes("error") || lowered.includes("forbidden")) return styles.statusBad;
+function statusClass(outcome: DashboardExecution["outcome"]) {
+  if (outcome === "landed") return styles.statusGood;
+  if (outcome === "failed_on_chain" || outcome === "send_failed") return styles.statusBad;
   return styles.statusMuted;
+}
+
+function landingParts(row: DashboardExecution): { primary: string; secondary: string } {
+  const summary = landingSummary(row);
+  const pieces = summary.split(" · ");
+  if (row.outcome !== "landed") {
+    return { primary: pieces[0], secondary: row.reason || "No additional landing context" };
+  }
+  if (row.landingComparison === "same_slot") {
+    return { primary: pieces.slice(0, 2).join(" · "), secondary: pieces.slice(2).join(" · ") };
+  }
+  if (row.landingComparison === "cross_slot") {
+    return { primary: pieces.slice(0, 2).join(" · "), secondary: pieces.slice(2).join(" · ") };
+  }
+  return { primary: pieces.slice(0, 2).join(" · "), secondary: pieces.slice(2).join(" · ") };
+}
+
+function sideClass(side: string) {
+  return side.toLowerCase() === "sell" ? styles.sideSell : styles.sideBuy;
 }
 
 export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: ExecutionTableProps) {
@@ -31,65 +47,75 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
   }
 
   return (
-    <section className={styles.dataSection}>
+    <section className={styles.dataSection} aria-label="Live execution tape">
       <div className={styles.desktopTableWrap}>
         <table className={styles.dataTable} aria-label="Execution results">
           <thead>
             <tr>
-              <th>Seen</th>
-              <th>Action</th>
+              <th>Time</th>
+              <th>Act</th>
+              <th>Asset</th>
+              <th>Wallet</th>
+              <th>Result / placement</th>
               <th>Route</th>
-              <th>Provider</th>
-              <th>Target wallet</th>
-              <th>Landing status</th>
-              <th>Cross-slot</th>
+              <th>Ack</th>
               <th>Transaction</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
-              <tr key={row.id}>
-                <td>{new Date(row.observedAtMs).toLocaleTimeString()}</td>
-                <td>{row.observedAction}</td>
-                <td>{row.selectedRoute || "n/a"}</td>
-                <td>{row.provider || "n/a"}</td>
-                <td><CopyChip value={row.observedWallet} label="target wallet" /></td>
-                <td>
-                  <span className={statusClass(landingSummary(row))}>{landingSummary(row)}</span>
-                  <div className={styles.meta}>{formatMs(row.observedToSignatureReturnedMs)}</div>
+            {rows.map((row) => {
+              const landing = landingParts(row);
+              return <tr key={row.id}>
+                <td className={styles.timeCell}>
+                  <strong>{new Date(row.observedAtMs).toLocaleTimeString([], { hour12: false })}</strong>
+                  <span>{new Date(row.observedAtMs).toLocaleDateString([], { month: "short", day: "numeric" })}</span>
                 </td>
-                <td>{landingComparisonSummary(row)}</td>
+                <td><span className={sideClass(row.observedAction)}>{row.observedAction}</span></td>
+                <td className={styles.assetCell}><CopyChip value={row.mint} label="mint address" /></td>
+                <td><CopyChip value={row.observedWallet} label="watched wallet" /></td>
+                <td>
+                  <span className={statusClass(row.outcome)}>{landing.primary}</span>
+                  <div className={styles.meta}>{landing.secondary}</div>
+                </td>
+                <td><strong>{row.selectedRoute || "n/a"}</strong><div className={styles.meta}>{row.provider || "provider unavailable"}</div></td>
+                <td className={styles.ackCell}>{formatMs(row.observedToSignatureReturnedMs)}</td>
                 <td className={styles.signCell}>
-                  <CopyChip value={row.observedSignature} label="signature" />
+                  <CopyChip value={row.sendSignature || row.observedSignature} label="transaction signature" />
                   {includeRowLinks ? (
-                    <div className={styles.meta}><Link href={`/dashboard/executions/${row.id}`}>Open detail</Link></div>
+                    <div className={styles.meta}><Link className={styles.detailLink} href={`/dashboard/executions/${row.id}`}>Inspect →</Link></div>
                   ) : (
                     <div className={styles.meta}>copy {shortText(row.sendSignature || row.observedSignature, 7)}</div>
                   )}
                 </td>
-              </tr>
-            ))}
+              </tr>;
+            })}
           </tbody>
         </table>
       </div>
       <div className={styles.mobileCards}>
-        {rows.map((row) => (
-          <article key={row.id} className={styles.card}>
-            <header>
-              <h3>{row.observedAction} · {row.selectedRoute || "n/a"}</h3>
-              <span className={statusClass(landingSummary(row))}>{landingSummary(row)}</span>
+        {rows.map((row) => {
+          const landing = landingParts(row);
+          return <article key={row.id} className={styles.card}>
+            <header className={styles.cardHeader}>
+              <div><span className={sideClass(row.observedAction)}>{row.observedAction}</span><strong>{shortText(row.mint, 5)}</strong></div>
+              <time>{new Date(row.observedAtMs).toLocaleTimeString([], { hour12: false })}</time>
             </header>
-            <p>Provider: {row.provider || "n/a"}</p>
-            <p>Seen: {new Date(row.observedAtMs).toLocaleString()}</p>
-            <p>Target wallet: <CopyChip value={row.observedWallet} label="target wallet" /></p>
-            <p>Target Tx: <CopyChip value={row.observedSignature} label="target signature" /></p>
-            <p>Copy slot: {row.copySlot ?? "n/a"}</p>
-            <p>Copy metrics: {row.sent ? formatSol(row.grossCopySpendSol) : "not sent"}</p>
-            <p>Copy slot delta: {row.slotDeltaFromObserved ?? "n/a"}</p>
-            <p>Cross-slot: {landingComparisonSummary(row)}</p>
-            {includeRowLinks ? <Link href={`/dashboard/executions/${row.id}`}>Open execution detail</Link> : null}
-          </article>
-        ))}
+            <div className={styles.cardOutcome}>
+              <span className={statusClass(row.outcome)}>{landing.primary}</span>
+              <p>{landing.secondary}</p>
+            </div>
+            <div className={styles.cardMeta}>
+              <span>Route<strong>{row.selectedRoute || "n/a"}</strong></span>
+              <span>Provider<strong>{row.provider || "n/a"}</strong></span>
+              <span>Ack<strong>{formatMs(row.observedToSignatureReturnedMs)}</strong></span>
+            </div>
+            <div className={styles.cardCopies}>
+              <span>Wallet <CopyChip value={row.observedWallet} label="watched wallet" /></span>
+              <span>Tx <CopyChip value={row.sendSignature || row.observedSignature} label="transaction signature" /></span>
+            </div>
+            {includeRowLinks ? <Link className={styles.mobileDetailLink} href={`/dashboard/executions/${row.id}`}>Inspect execution <span aria-hidden="true">→</span></Link> : null}
+          </article>;
+        })}
       </div>
     </section>
   );

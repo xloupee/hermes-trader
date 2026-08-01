@@ -1,6 +1,5 @@
-import Link from "next/link";
 import { DashboardshellClientSignOut } from "@/components/dashboard/dashboard-shell-client";
-import { DASHBOARD_NAV } from "@/lib/dashboard-client";
+import { DashboardNav } from "@/components/dashboard/dashboard-nav";
 import styles from "@/components/dashboard/dashboard-shell.module.css";
 
 export function DashboardShell({
@@ -13,23 +12,20 @@ export function DashboardShell({
   return (
     <div className={styles.dashboardShell}>
       <header className={styles.topBar}>
-        <div className={styles.brand}>
-          <p className={styles.eyebrow}>Operator Desk</p>
-          <h1 className={styles.title}>Hermes Dashboard</h1>
-          <p className={styles.subtitle}>Latency, execution, and source observability</p>
+        <div className={styles.brandRow}>
+          <div className={styles.brandMark} aria-hidden="true">H</div>
+          <div className={styles.brand}>
+            <p className={styles.eyebrow}>HERMES / OPS</p>
+            <p className={styles.subtitle}>Solana execution intelligence</p>
+          </div>
         </div>
+        <DashboardNav />
         <div className={styles.userTools}>
-          <span className={styles.userPill}>admin: {adminEmail || "unknown"}</span>
+          <span className={styles.liveState}><i aria-hidden="true" /> operator online</span>
+          <span className={styles.userPill}>{adminEmail || "operator"}</span>
           <DashboardshellClientSignOut />
         </div>
       </header>
-      <nav className={styles.nav} aria-label="Dashboard navigation">
-        {DASHBOARD_NAV.map((route) => (
-          <Link key={route.href} href={route.href}>
-            {route.label}
-          </Link>
-        ))}
-      </nav>
       <main className={styles.mainContent}>{children}</main>
     </div>
   );

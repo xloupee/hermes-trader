@@ -1,14 +1,53 @@
 .dashboardShell {
-  max-width: 1320px;
-  margin: 0 auto;
-  padding: 18px 20px 28px;
+  --paper: oklch(14.5% 0.018 245);
+  --panel: oklch(18.5% 0.019 245);
+  --ink: oklch(92% 0.014 88);
+  --muted: oklch(65% 0.02 245);
+  --line: oklch(28% 0.018 245);
+  --green: oklch(73% 0.105 157);
+  --red: oklch(70% 0.13 28);
+  --blue: oklch(76% 0.078 245);
+  --amber: oklch(72% 0.09 83);
+  background: var(--paper);
+  color: var(--ink);
+  min-height: 100vh;
+  padding: 0 28px 32px;
+  width: 100%;
 }
+
 .topBar {
-  align-items: flex-start;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 24px;
+  grid-template-columns: minmax(190px, 0.8fr) auto minmax(250px, 0.8fr);
+  min-height: 76px;
+  margin: 0 auto;
+  max-width: 1600px;
+}
+
+.brandRow,
+.userTools,
+.nav {
+  align-items: center;
   display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 14px;
+}
+
+.brandRow {
+  gap: 11px;
+}
+
+.brandMark {
+  align-items: center;
+  border: 1px solid var(--amber);
+  color: var(--amber);
+  display: flex;
+  font-family: var(--font-newsreader), Georgia, serif;
+  font-size: 21px;
+  height: 34px;
+  justify-content: center;
+  line-height: 1;
+  width: 34px;
 }
 
 .brand {
@@ -16,58 +55,186 @@
 }
 
 .eyebrow {
-  color: var(--blue);
-  font-size: 11px;
+  color: var(--ink);
+  font-size: 12px;
   font-weight: 800;
-  letter-spacing: 0.12em;
-  margin: 0 0 6px;
-  text-transform: uppercase;
-}
-
-.title {
-  font-size: clamp(26px, 4vw, 40px);
-  margin: 0;
+  letter-spacing: 0.14em;
+  margin: 0 0 2px;
 }
 
 .subtitle {
-  margin: 0;
   color: var(--muted);
-}
-
-.userTools {
-  align-items: center;
-  display: flex;
-  gap: 10px;
-}
-
-.userPill {
-  border: 1px solid var(--ink);
-  display: inline-flex;
-  padding: 8px 11px;
+  font-size: 11px;
+  margin: 0;
+  white-space: nowrap;
 }
 
 .nav {
-  border: 1px solid var(--ink);
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  margin-bottom: 14px;
+  align-self: stretch;
+  justify-content: center;
 }
 
 .nav a {
   align-items: center;
-  background: var(--panel);
-  border-right: 1px solid var(--ink);
-  display: inline-flex;
-  min-height: 44px;
-  padding: 0 14px;
+  color: var(--muted);
+  display: flex;
+  font-size: 12px;
+  font-weight: 700;
+  height: 100%;
+  letter-spacing: 0.03em;
+  padding: 0 17px;
+  position: relative;
   text-decoration: none;
 }
 
-.nav a:last-child {
-  border-right: 0;
+.nav a:hover,
+.nav a:focus-visible,
+.nav .navActive {
+  color: var(--ink);
+}
+
+.nav .navActive::after {
+  background: var(--amber);
+  bottom: -1px;
+  content: "";
+  height: 2px;
+  left: 17px;
+  position: absolute;
+  right: 17px;
+}
+
+.userTools {
+  gap: 9px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.liveState {
+  align-items: center;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 10px;
+  font-weight: 800;
+  gap: 6px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.liveState i {
+  background: var(--green);
+  border-radius: 50%;
+  height: 6px;
+  width: 6px;
+}
+
+.userPill {
+  color: var(--muted);
+  font-size: 11px;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboardShell :global(.admin-button),
+.dashboardShell :global(.icon-button) {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 11px;
+  gap: 7px;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 11px;
+}
+
+.dashboardShell :global(.icon-button) {
+  min-width: 44px;
+  padding: 0;
+}
+
+.dashboardShell :global(.admin-button:hover),
+.dashboardShell :global(.icon-button:hover) {
+  border-color: var(--amber);
+  color: var(--ink);
+}
+
+.dashboardShell a:focus-visible,
+.dashboardShell button:focus-visible,
+.dashboardShell input:focus-visible,
+.dashboardShell select:focus-visible,
+.dashboardShell summary:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 3px;
 }
 
 .mainContent {
-  display: grid;
-  gap: 12px;
+  margin: 0 auto;
+  max-width: 1600px;
+  padding-top: 28px;
+}
+
+@media (max-width: 980px) {
+  .dashboardShell {
+    padding-inline: 18px;
+  }
+
+  .topBar {
+    gap: 12px;
+    grid-template-columns: 1fr auto;
+    padding: 12px 0 0;
+  }
+
+  .nav {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-content: flex-start;
+    min-height: 44px;
+    overflow-x: auto;
+  }
+
+  .nav a {
+    flex: 0 0 auto;
+  }
+
+  .liveState,
+  .userPill {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .dashboardShell {
+    padding-inline: 14px;
+  }
+
+  .subtitle {
+    display: none;
+  }
+
+  .eyebrow {
+    font-size: 11px;
+  }
+
+  .dashboardShell :global(.admin-button) {
+    font-size: 0;
+    min-width: 44px;
+    padding: 0;
+  }
+
+  .mainContent {
+    padding-top: 20px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dashboardShell *,
+  .dashboardShell *::before,
+  .dashboardShell *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }

@@ -59,12 +59,16 @@ export function OverviewDashboard() {
     : null;
 
   return (
-    <section>
+    <section className={styles.tapePage}>
+      <header className={styles.pageHeader}>
+        <div><p>Realtime operator view</p><h1>Execution tape</h1></div>
+        <span>{data?.executions.summary.total ?? 0} results in window</span>
+      </header>
       <div className={styles.dualLatency}>
-        <div className={styles.metric}><span>landed buys</span><strong>{formatCount(metrics?.landedBuys)}</strong></div>
-        <div className={styles.metric}><span>landed sells</span><strong>{formatCount(metrics?.landedSells)}</strong></div>
-        <div className={styles.metric}><span>landing rate</span><strong>{metrics?.landingRate ?? "n/a"}</strong></div>
-        <div className={styles.metric}><span>non-landed attempts</span><strong>{formatCount(metrics?.nonLandedAttempts)}</strong></div>
+        <div className={styles.metric}><span>Landed buys</span><strong>{formatCount(metrics?.landedBuys)}</strong><i>BUY</i></div>
+        <div className={styles.metric}><span>Landed sells</span><strong>{formatCount(metrics?.landedSells)}</strong><i>SELL</i></div>
+        <div className={styles.metric}><span>Landing rate</span><strong>{metrics?.landingRate ?? "n/a"}</strong><i>24H</i></div>
+        <div className={styles.metric}><span>Non-landed</span><strong>{formatCount(metrics?.nonLandedAttempts)}</strong><i>ATTEMPTS</i></div>
       </div>
       <DashboardFiltersPanel filters={filters} onFiltersChange={setFilters} onOutcomeChange={setOutcome} />
       <DashboardRefreshToolbar
@@ -76,7 +80,7 @@ export function OverviewDashboard() {
         onRefresh={refresh}
         onTogglePause={setPaused}
       />
-      <ExecutionTable rows={data?.executions.executions ?? []} includeRowLinks emptyMessage="No executions match this filter set." />
+      <ExecutionTable rows={data?.executions.executions ?? []} includeRowLinks emptyMessage="No executions match these filters. Clear a filter or choose All tape." />
     </section>
   );
 }

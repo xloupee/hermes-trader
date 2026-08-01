@@ -1,6 +1,6 @@
 "use client";
 
-import { CirclePause, CirclePlay, RefreshCcw } from "lucide-react";
+import { Pause, Play, RefreshCcw } from "lucide-react";
 
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
@@ -25,10 +25,11 @@ export function DashboardRefreshToolbar({
   return (
     <div className={styles.toolbar}>
       <div className={styles.toolbarStatus}>
-        <span className={styles.badge}>{loading ? "loading..." : "ready"}</span>
-        <span className={styles.muted}>
-          {!error ? `updated ${lastUpdated ? lastUpdated.toLocaleTimeString() : "never"}` : `error: ${error}`}
+        <span className={error ? styles.syncError : loading ? styles.syncLoading : styles.syncReady}>
+          <i aria-hidden="true" />
+          {error ? "Feed interrupted" : loading && !lastUpdated ? "Connecting to execution feed" : paused || autoPaused ? "Refresh paused" : "Live feed"}
         </span>
+        <span className={styles.muted}>{error || (lastUpdated ? `Synced ${lastUpdated.toLocaleTimeString()}` : "Waiting for first response")}</span>
       </div>
       <div className={styles.toolbarButtons}>
         <button
@@ -38,7 +39,7 @@ export function DashboardRefreshToolbar({
           title="Refresh now"
           aria-label="Refresh now"
         >
-          <RefreshCcw size={16} />
+          <RefreshCcw size={15} aria-hidden="true" />
         </button>
         <button
           className="icon-button"
@@ -47,7 +48,7 @@ export function DashboardRefreshToolbar({
           title={paused || autoPaused ? "Resume 15-second refresh" : "Pause refresh"}
           aria-label={paused || autoPaused ? "Resume refresh" : "Pause refresh"}
         >
-          {paused || autoPaused ? <CirclePlay size={16} /> : <CirclePause size={16} />}
+          {paused || autoPaused ? <Play size={15} aria-hidden="true" /> : <Pause size={15} aria-hidden="true" />}
         </button>
       </div>
     </div>

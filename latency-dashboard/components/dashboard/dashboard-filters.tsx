@@ -27,7 +27,24 @@ export function DashboardFiltersPanel({
 
   return (
     <section className={styles.filterWrap} aria-label="Dashboard filters">
-      <div className={styles.filterRow}>
+      {showOutcomePresets ? <div className={styles.presetWrap} role="radiogroup" aria-label="Execution preset">
+        {FILTER_OUTCOME_OPTIONS.map((preset) => (
+          <button
+            className={filters.outcome === preset.value ? styles.presetActive : styles.presetButton}
+            key={preset.value}
+            onClick={() => onOutcomeChange(preset.value)}
+            type="button"
+            role="radio"
+            aria-checked={filters.outcome === preset.value}
+            disabled={disabled}
+          >
+            {preset.value === "all" ? "All tape" : preset.label}
+          </button>
+        ))}
+      </div> : null}
+      <details className={styles.advancedFilters} open={!showOutcomePresets}>
+        <summary>Advanced filters</summary>
+        <div className={styles.filterRow}>
         {showField("from") ? <label className={styles.filterItem}>
           From
           <input
@@ -118,22 +135,8 @@ export function DashboardFiltersPanel({
             aria-label="Source filter"
           />
         </label> : null}
-      </div>
-      {showOutcomePresets ? <div className={styles.presetWrap} role="radiogroup" aria-label="Landed preset">
-        {FILTER_OUTCOME_OPTIONS.map((preset) => (
-          <button
-            className={filters.outcome === preset.value ? styles.presetActive : styles.presetButton}
-            key={preset.value}
-            onClick={() => onOutcomeChange(preset.value)}
-            type="button"
-            role="radio"
-            aria-checked={filters.outcome === preset.value}
-            disabled={disabled}
-          >
-            {preset.label}
-          </button>
-        ))}
-      </div> : null}
+        </div>
+      </details>
     </section>
   );
 }

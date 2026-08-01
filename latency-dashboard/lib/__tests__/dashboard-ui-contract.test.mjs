@@ -97,6 +97,12 @@ describe("dashboard UI contract", () => {
     assert.match(detailRoute, /toDashboardExecution\(execution\)/);
     assert.match(detail, /<details><summary>Normalized execution JSON<\/summary>/);
     assert.match(detail, /JSON\.stringify\(row, null, 2\)/);
+    assert.match(detail, /Latency breakdown/);
+    assert.match(detail, /localDetectUs\(row\)/);
+    assert.match(detail, /row\.entryDecodeUs, row\.feedReceivedToEntriesReadyUs, row\.feedReceivedToDecodedUs/);
+    assert.match(detail, /row\.txParseUs\).*row\.routeParseUs/s);
+    assert.match(detail, /row\.unsignedBuildUs\).*row\.signUs/s);
+    assert.match(detail, /ackDurationMs\(row\)/);
     assert.doesNotMatch(detail, /rawExecution|chainReport|privateKey|keypair|mnemonic|seed|custody/);
   });
 

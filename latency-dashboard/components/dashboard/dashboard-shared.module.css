@@ -649,6 +649,54 @@
 .detailTop p { color: var(--muted); margin: 5px 0; }
 .detailTopPill { align-items: center; color: var(--muted); display: flex; font-size: 11px; gap: 8px; }
 
+.latencyBreakdown {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  margin-bottom: 1px;
+}
+
+.latencyBreakdown > header {
+  align-items: flex-end;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  padding: 16px 18px 13px;
+}
+
+.latencyBreakdown h2 {
+  color: var(--ink);
+  font-family: var(--font-newsreader), Georgia, serif;
+  font-size: 24px;
+  font-weight: 500;
+  margin: 0;
+}
+
+.latencyBreakdown header p,
+.latencyBreakdown header > span {
+  color: var(--muted);
+  font-size: 9px;
+  letter-spacing: 0.07em;
+  margin: 3px 0 0;
+  text-transform: uppercase;
+}
+
+.latencyStages {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  margin: 0;
+}
+
+.latencyStages > div {
+  border-right: 1px solid var(--line);
+  min-width: 0;
+  padding: 15px 18px 17px;
+}
+
+.latencyStages > div:last-child { border-right: 0; }
+.latencyStages dt { color: var(--muted); font-size: 9px; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase; }
+.latencyStages dd { color: var(--ink); font-size: clamp(15px, 1.3vw, 20px); font-variant-numeric: tabular-nums; font-weight: 700; margin: 8px 0 2px; white-space: nowrap; }
+.latencyStages small { color: var(--muted); font-size: 9px; text-transform: uppercase; }
+
 .rawSection {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -665,6 +713,9 @@
   .advancedFilters summary { width: max-content; }
   .filterRow { grid-template-columns: repeat(2, minmax(0, 1fr)); min-width: 0; }
   .systemGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .latencyStages { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .latencyStages > div:nth-child(3) { border-right: 0; }
+  .latencyStages > div:nth-child(-n + 3) { border-bottom: 1px solid var(--line); }
 }
 
 @media (max-width: 760px) {
@@ -681,6 +732,12 @@
   .detailGrid { grid-template-columns: 1fr; }
   .detailTop { display: block; }
   .detailTopPill { margin-top: 14px; }
+  .latencyBreakdown > header { align-items: flex-start; display: block; }
+  .latencyBreakdown header > span { display: block; margin-top: 8px; }
+  .latencyStages { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .latencyStages > div:nth-child(3) { border-right: 1px solid var(--line); }
+  .latencyStages > div:nth-child(even) { border-right: 0; }
+  .latencyStages > div:nth-child(-n + 4) { border-bottom: 1px solid var(--line); }
 }
 
 @media (max-width: 500px) {

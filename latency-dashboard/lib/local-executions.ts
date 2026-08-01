@@ -84,6 +84,8 @@ export interface LocalExecutionReport {
   matchedAtMs: number | null;
   plannedAtMs: number | null;
   builtAtMs: number | null;
+  feedReceivedToEntriesReadyUs: number | null;
+  entryDecodeUs: number | null;
   feedReceivedToDecodedUs: number | null;
   decodedToMatchedUs: number | null;
   matchedToPlannedMs: number | null;
@@ -601,6 +603,8 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     matchedAtMs: firstNumber(row.matched_at_ms, rawNumber("matchedAtMs")),
     plannedAtMs: firstNumber(row.planned_at_ms, rawNumber("plannedAtMs")),
     builtAtMs: firstNumber(row.built_at_ms, rawNumber("builtAtMs")),
+    feedReceivedToEntriesReadyUs: rawNumber("feedReceivedToEntriesReadyUs"),
+    entryDecodeUs: rawNumber("entryDecodeUs"),
     feedReceivedToDecodedUs: firstNumber(row.feed_received_to_decoded_us, rawNumber("feedReceivedToDecodedUs")),
     decodedToMatchedUs: firstNumber(row.decoded_to_matched_us, rawNumber("decodedToMatchedUs")),
     matchedToPlannedMs: firstNumber(row.matched_to_planned_ms, rawNumber("matchedToPlannedMs")),

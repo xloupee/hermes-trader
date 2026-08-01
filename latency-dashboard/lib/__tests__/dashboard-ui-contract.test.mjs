@@ -154,7 +154,10 @@ describe("dashboard UI contract", () => {
     assert.match(table, /ackLaneLabel\(row\.firstAckLane\)/);
     assert.match(table, /title=\{row\.firstAckLane \|\| undefined\}/);
     assert.match(table, /placementClass\(row\)/);
-    assert.match(table, /transactionDistance\(row, landing\)/);
+    assert.match(table, /transactionDistance\(row\)/);
+    assert.match(table, /row\.sameSlotTxDelta/);
+    assert.match(table, /crossSlotPositionSummary\?\.crossSlotTxDelta/);
+    assert.doesNotMatch(table, /return landing\.secondary/);
     assert.match(table, /className=\{styles\.txDistance\}/);
     assert.match(table, /row\.telegramSubscriberId/);
     assert.match(table, /label="Telegram subscriber ID"/);

@@ -48,7 +48,7 @@ function landingParts(row: DashboardExecution): { primary: string; secondary: st
   return { primary: pieces.slice(0, 2).join(" · "), secondary: pieces.slice(2).join(" · ") };
 }
 
-function transactionDistance(row: DashboardExecution, landing: ReturnType<typeof landingParts>): string {
+function transactionDistance(row: DashboardExecution): string {
   if (
     row.outcome !== "landed"
     || (row.landingComparison !== "same_slot" && row.landingComparison !== "cross_slot")
@@ -56,7 +56,15 @@ function transactionDistance(row: DashboardExecution, landing: ReturnType<typeof
     return "n/a";
   }
 
-  return landing.secondary || "n/a";
+  const candidates = row.landingComparison === "same_slot"
+    ? [row.sameSlotTxDelta, row.blockPositionDiagnostics?.sameSlotTxDelta]
+    : [
+        row.txDelta,
+        row.blockPositionDiagnostics?.txDelta,
+        row.blockPositionDiagnostics?.crossSlotPositionSummary?.crossSlotTxDelta
+      ];
+  const distance = candidates.find((value) => typeof value === "number" && Number.isFinite(value));
+  return typeof distance === "number" ? String(distance) : "n/a";
 }
 
 function sideClass(side: string) {
@@ -120,7 +128,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
                   <span className={placementClass(row)}>{landing.primary}</span>
                   {row.outcome !== "landed" ? <div className={styles.meta}>{landing.secondary}</div> : null}
                 </td>
-                <td className={styles.txDistance}>{transactionDistance(row, landing)}</td>
+                <td className={styles.txDistance}>{transactionDistance(row)}</td>
                 <td className={styles.leaderCell} title={leaderTitle(row)}>
                   <strong>{leaderSummary(row)}</strong>
                   <span className={styles.meta}>{leaderContext(row)}</span>
@@ -160,7 +168,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
               {row.outcome !== "landed" ? <p>{landing.secondary}</p> : null}
             </div>
             <div className={styles.cardMeta}>
-              <span>TX after<strong className={styles.txDistance}>{transactionDistance(row, landing)}</strong></span>
+              <span>TX after<strong className={styles.txDistance}>{transactionDistance(row)}</strong></span>
               <span>Leader<strong title={leaderTitle(row)}>{leaderSummary(row)}</strong><small className={styles.meta}>{leaderContext(row)}</small></span>
               <span>Feed<strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></span>
               <span>Lane / ACK<strong className={styles.ackLane} title={row.firstAckLane || undefined}>{ackLaneLabel(row.firstAckLane)}</strong><small className={styles.meta}>{formatMs(row.observedToSignatureReturnedMs)} ACK</small></span>

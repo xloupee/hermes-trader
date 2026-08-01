@@ -644,6 +644,7 @@
   font-size: 34px;
   font-weight: 500;
   margin: 0 0 12px;
+  overflow-wrap: anywhere;
 }
 
 .detailTop p { color: var(--muted); margin: 5px 0; }

@@ -1,7 +1,8 @@
 import { authErrorResponse, requireAdmin } from "@/lib/auth";
-import { encodeExecutionCursor, pageExecutionRows, parseExecutionFilters, summarizeExecutions, toDashboardExecution } from "@/lib/dashboard-contract.mjs";
+import { attachTelegramSubscriberIds, encodeExecutionCursor, pageExecutionRows, parseExecutionFilters, summarizeExecutions, toDashboardExecution } from "@/lib/dashboard-contract.mjs";
 import { listDashboardExecutions } from "@/lib/local-executions";
 import { enrichExecutionsWithLeaderDiagnostics } from "@/lib/leader-diagnostics";
+import { listTelegramSubscribersByCopyWallet } from "@/lib/telegram-subscribers";
 
 export async function GET(request: Request) {
   try {
@@ -9,7 +10,12 @@ export async function GET(request: Request) {
     const filters = parseExecutionFilters(new URL(request.url).searchParams);
     const fetchedRows = await listDashboardExecutions(filters);
     const page = pageExecutionRows(fetchedRows, filters.limit);
-    const executions = await enrichExecutionsWithLeaderDiagnostics(page.items.map(toDashboardExecution));
+    const sanitizedRows = page.items.map(toDashboardExecution);
+    const [rowsWithLeaders, subscriberByCopyWallet] = await Promise.all([
+      enrichExecutionsWithLeaderDiagnostics(sanitizedRows),
+      listTelegramSubscribersByCopyWallet(sanitizedRows)
+    ]);
+    const executions = attachTelegramSubscriberIds(rowsWithLeaders, subscriberByCopyWallet);
     const lastExecution = executions[executions.length - 1];
     const nextCursor = lastExecution ? encodeExecutionCursor(lastExecution) : null;
 

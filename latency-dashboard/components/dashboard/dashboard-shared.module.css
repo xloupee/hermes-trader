@@ -347,7 +347,7 @@
 
 .dataTable {
   border-collapse: collapse;
-  min-width: 1280px;
+  min-width: 1390px;
   width: 100%;
 }
 
@@ -389,6 +389,7 @@
 .txDistance,
 .leaderCell,
 .assetCell,
+.subscriberCell,
 .signCell,
 .ackCell {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;

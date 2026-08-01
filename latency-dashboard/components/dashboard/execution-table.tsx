@@ -102,6 +102,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
               <th>Lane / ACK</th>
               <th>Asset</th>
               <th>Wallet</th>
+              <th>Telegram ID</th>
               <th>Transaction</th>
             </tr>
           </thead>
@@ -132,6 +133,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
                 </td>
                 <td className={styles.assetCell}><CopyChip value={row.mint} label="mint address" /></td>
                 <td><CopyChip value={row.observedWallet} label="watched wallet" /></td>
+                <td className={styles.subscriberCell}><CopyChip value={row.telegramSubscriberId} label="Telegram subscriber ID" /></td>
                 <td className={styles.signCell}>
                   <CopyChip value={row.sendSignature || row.observedSignature} label="transaction signature" />
                   {includeRowLinks ? (
@@ -168,6 +170,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
             </div>
             <div className={styles.cardCopies}>
               <span>Wallet <CopyChip value={row.observedWallet} label="watched wallet" /></span>
+              <span>Telegram <CopyChip value={row.telegramSubscriberId} label="Telegram subscriber ID" /></span>
               <span>Tx <CopyChip value={row.sendSignature || row.observedSignature} label="transaction signature" /></span>
             </div>
             {includeRowLinks ? <Link className={styles.mobileDetailLink} href={`/dashboard/executions/${row.id}`}>Inspect execution <span aria-hidden="true">→</span></Link> : null}

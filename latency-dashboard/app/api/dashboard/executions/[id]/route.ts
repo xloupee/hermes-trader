@@ -1,6 +1,7 @@
 import { authErrorResponse, requireAdmin } from "@/lib/auth";
-import { toDashboardExecution } from "@/lib/dashboard-contract.mjs";
+import { attachTelegramSubscriberIds, toDashboardExecution } from "@/lib/dashboard-contract.mjs";
 import { getLocalExecution } from "@/lib/local-executions";
+import { listTelegramSubscribersByCopyWallet } from "@/lib/telegram-subscribers";
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -16,7 +17,8 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       return Response.json({ error: "execution not found" }, { status: 404 });
     }
 
-    const sanitized = toDashboardExecution(execution);
+    const subscriberByCopyWallet = await listTelegramSubscribersByCopyWallet([execution]);
+    const [sanitized] = attachTelegramSubscriberIds([toDashboardExecution(execution)], subscriberByCopyWallet);
     return Response.json({ execution: sanitized });
   } catch (error) {
     return authErrorResponse(error);

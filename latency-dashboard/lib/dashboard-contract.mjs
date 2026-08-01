@@ -289,7 +289,8 @@ export function toDashboardExecution(row) {
       outcome: "unknown",
       landingComparison: "unavailable",
       observedWallet: sanitizeWallet(row?.observedWallet),
-      copyWallet: sanitizeWallet(row?.copyWallet)
+      copyWallet: sanitizeWallet(row?.copyWallet),
+      telegramSubscriberId: null
     };
   }
 
@@ -321,8 +322,18 @@ export function toDashboardExecution(row) {
     slotDelta,
     txDelta,
     outcome,
-    landingComparison
+    landingComparison,
+    telegramSubscriberId: null
   };
+}
+
+export function attachTelegramSubscriberIds(rows, subscriberByCopyWallet) {
+  return rows.map((row) => ({
+    ...row,
+    telegramSubscriberId: row.copyWallet
+      ? subscriberByCopyWallet.get(row.copyWallet) ?? null
+      : null
+  }));
 }
 
 export function summarizeExecutions(rows) {

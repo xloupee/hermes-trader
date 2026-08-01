@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 import {
+  attachTelegramSubscriberIds,
   DashboardFilterError,
   decodeExecutionCursor,
   dashboardOutcomePredicate,
@@ -59,10 +60,28 @@ describe("dashboard contract", () => {
     });
     assert.equal(dto.observedWallet, "ObservedWalletFullAddress");
     assert.equal(dto.copyWallet, "CopyWalletFullAddress");
+    assert.equal(dto.telegramSubscriberId, null);
     assert.equal("rawExecution" in dto, false);
     assert.equal("chainReport" in dto, false);
     assert.equal("privateKey" in dto, false);
     assert.equal(JSON.stringify(dto).includes("never-return"), false);
+  });
+
+  test("Telegram subscriber IDs attach by exact copy-wallet match", () => {
+    const rows = [
+      toDashboardExecution({ id: 1, observedAction: "buy", observedWallet: "watched1", copyWallet: "copy1" }),
+      toDashboardExecution({ id: 2, observedAction: "sell", observedWallet: "watched2", copyWallet: "copy2" }),
+      toDashboardExecution({ id: 3, observedAction: "buy", observedWallet: "watched3", copyWallet: null })
+    ];
+    const enriched = attachTelegramSubscriberIds(rows, new Map([
+      ["copy1", "123456789"],
+      ["unrelated", "987654321"]
+    ]));
+
+    assert.equal(enriched[0].telegramSubscriberId, "123456789");
+    assert.equal(enriched[1].telegramSubscriberId, null);
+    assert.equal(enriched[2].telegramSubscriberId, null);
+    assert.equal(enriched[0].copyWallet, "copy1");
   });
 
   test("dashboard execution queries preserve first ACK lane attribution", () => {

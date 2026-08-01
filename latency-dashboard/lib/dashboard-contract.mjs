@@ -308,6 +308,10 @@ export function toDashboardExecution(row) {
   const slotDelta = row.slotDelta
     ?? diagnostics?.slotDelta
     ?? (Number.isFinite(copySlot) && Number.isFinite(targetSlot) ? copySlot - targetSlot : null);
+  const reportedCrossSlotTxDelta = diagnostics?.crossSlotPositionSummary?.crossSlotTxDelta;
+  const txDelta = row.txDelta
+    ?? diagnostics?.txDelta
+    ?? (typeof reportedCrossSlotTxDelta === "number" && Number.isFinite(reportedCrossSlotTxDelta) ? reportedCrossSlotTxDelta : null);
   return {
     ...safeRow,
     observedWallet: sanitizeWallet(row.observedWallet),
@@ -315,6 +319,7 @@ export function toDashboardExecution(row) {
     copySlot,
     targetSlot,
     slotDelta,
+    txDelta,
     outcome,
     landingComparison
   };

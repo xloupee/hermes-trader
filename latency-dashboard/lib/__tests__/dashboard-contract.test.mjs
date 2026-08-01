@@ -166,6 +166,31 @@ describe("dashboard contract", () => {
     assert.equal(positioned.slotDelta, 3);
   });
 
+  test("normalized DTO promotes cross-slot transaction distance", () => {
+    const row = toDashboardExecution({
+      id: 5111272,
+      observedAtMs: 1,
+      observedAction: "buy",
+      observedWallet: "watched",
+      copyWallet: "copy",
+      sendSignature: "copy-signature",
+      buyStatus: "buyLanded",
+      targetSlot: 436402707,
+      copySlot: 436402708,
+      slotDelta: 1,
+      txDelta: null,
+      blockPositionDiagnostics: {
+        targetSlot: 436402707,
+        copySlot: 436402708,
+        slotDelta: 1,
+        txDelta: null,
+        crossSlotPositionSummary: { crossSlotTxDelta: 730 }
+      }
+    });
+    assert.equal(row.landingComparison, "cross_slot");
+    assert.equal(row.txDelta, 730);
+  });
+
   test("landing comparison and summary counts", () => {
     const rows = [
       toDashboardExecution({ observedAtMs: 1, id: 1, observedAction: "buy", sendSignature: "abc", observedWallet: "obs1", copyWallet: null, buyStatus: "buySubmitted" }),

@@ -75,12 +75,12 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
           <thead>
             <tr>
               <th title={timeZone}>Time · {timeZoneLabel}</th>
+              <th>Act</th>
               <th>Result / placement</th>
               <th>Feed / route</th>
-              <th>Act</th>
+              <th>Lane / ACK</th>
               <th>Asset</th>
               <th>Wallet</th>
-              <th>Ack</th>
               <th>Transaction</th>
             </tr>
           </thead>
@@ -94,18 +94,18 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
                   <strong>{formatUserTime(row.observedAtMs, timeZone)}</strong>
                   <span>{formatUserDate(row.observedAtMs, timeZone)}</span>
                 </td>
+                <td><span className={sideClass(row.observedAction)}>{row.observedAction}</span></td>
                 <td>
                   <span className={statusClass(row.outcome)}>{landing.primary}</span>
                   <div className={styles.meta}>{landing.secondary}</div>
                 </td>
                 <td><strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong><div className={styles.meta}>{transport ? `${transport} · ` : ""}{row.selectedRoute || "route unavailable"}</div></td>
-                <td><span className={sideClass(row.observedAction)}>{row.observedAction}</span></td>
+                <td className={styles.ackCell}>
+                  <strong className={styles.ackLane} title={row.firstAckLane || undefined}>{ackLaneLabel(row.firstAckLane)}</strong>
+                  <span className={styles.meta}>{formatMs(row.observedToSignatureReturnedMs)} ACK</span>
+                </td>
                 <td className={styles.assetCell}><CopyChip value={row.mint} label="mint address" /></td>
                 <td><CopyChip value={row.observedWallet} label="watched wallet" /></td>
-                <td className={styles.ackCell}>
-                  <strong>{formatMs(row.observedToSignatureReturnedMs)}</strong>
-                  <span className={styles.ackLane} title={row.firstAckLane || undefined}>{ackLaneLabel(row.firstAckLane)}</span>
-                </td>
                 <td className={styles.signCell}>
                   <CopyChip value={row.sendSignature || row.observedSignature} label="transaction signature" />
                   {includeRowLinks ? (
@@ -136,7 +136,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
             <div className={styles.cardMeta}>
               <span>Feed<strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong>{transport ? <small className={styles.meta}>{transport}</small> : null}</span>
               <span>Route<strong>{row.selectedRoute || "n/a"}</strong></span>
-              <span>Ack<strong>{formatMs(row.observedToSignatureReturnedMs)}</strong><small className={styles.ackLane} title={row.firstAckLane || undefined}>{ackLaneLabel(row.firstAckLane)}</small></span>
+              <span>Lane / ACK<strong className={styles.ackLane} title={row.firstAckLane || undefined}>{ackLaneLabel(row.firstAckLane)}</strong><small className={styles.meta}>{formatMs(row.observedToSignatureReturnedMs)} ACK</small></span>
             </div>
             <div className={styles.cardCopies}>
               <span>Wallet <CopyChip value={row.observedWallet} label="watched wallet" /></span>

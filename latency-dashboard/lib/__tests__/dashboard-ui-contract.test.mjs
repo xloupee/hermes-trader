@@ -114,11 +114,14 @@ describe("dashboard UI contract", () => {
     const styles = readFileSync(new URL("../../components/dashboard/dashboard-shared.module.css", import.meta.url), "utf8");
     assert.equal((table.match(/<th(?:\s|>)/g) || []).length, 8);
     assert.match(table, /aria-label="Execution results"/);
+    assert.ok(table.indexOf("<th>Act</th>") < table.indexOf("<th>Result / placement</th>"));
     assert.ok(table.indexOf("<th>Result / placement</th>") < table.indexOf("<th>Feed / route</th>"));
-    assert.ok(table.indexOf("<th>Feed / route</th>") < table.indexOf("<th>Act</th>"));
+    assert.ok(table.indexOf("<th>Feed / route</th>") < table.indexOf("<th>Lane / ACK</th>"));
+    assert.ok(table.indexOf("<th>Lane / ACK</th>") < table.indexOf("<th>Asset</th>"));
     assert.match(table, /row\.selectedRoute \|\| "route unavailable"/);
     assert.match(table, /ackLaneLabel\(row\.firstAckLane\)/);
     assert.match(table, /title=\{row\.firstAckLane \|\| undefined\}/);
+    assert.match(table, /className=\{styles\.ackCell\}[\s\S]*ackLaneLabel\(row\.firstAckLane\)[\s\S]*formatMs\(row\.observedToSignatureReturnedMs\)/);
     assert.match(table, /useUserTimeZone\(\)/);
     assert.match(table, /Time · \{timeZoneLabel\}/);
     assert.match(styles, /\.sideBuy\s*\{\s*color:\s*var\(--green\);\s*\}/);

@@ -147,9 +147,12 @@ describe("dashboard UI contract", () => {
     ]);
     const overview = readFileSync(new URL("../../components/dashboard/overview-dashboard.tsx", import.meta.url), "utf8");
     const leaderboard = readFileSync(new URL("../../components/dashboard/feed-leaderboard.tsx", import.meta.url), "utf8");
+    const styles = readFileSync(new URL("../../components/dashboard/dashboard-shared.module.css", import.meta.url), "utf8");
     assert.match(overview, /<FeedLeaderboard rows=\{data\?\.executions \?\? \[\]\} \/>/);
     assert.match(leaderboard, /row\.observedAction\.toLowerCase\(\) === "buy"/);
     assert.match(leaderboard, /Inbound buy race/);
     assert.match(leaderboard, /Feed leaderboard/);
+    assert.match(styles, /\.feedLeaderboard\s*\{[^}]*block-size:\s*auto;/s);
+    assert.match(styles, /\.feedStandings\s*\{[^}]*max-block-size:\s*132px;/s);
   });
 });

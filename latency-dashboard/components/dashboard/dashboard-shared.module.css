@@ -102,11 +102,11 @@
 .feedUnknown { color: var(--muted); }
 
 .feedLeaderboard {
-  block-size: 94px;
+  block-size: auto;
   border: 1px solid var(--line);
   display: grid;
   grid-template-columns: minmax(205px, 0.48fr) minmax(0, 2fr);
-  margin-bottom: 12px;
+  margin-bottom: 16px;
   min-height: 94px;
 }
 
@@ -142,7 +142,7 @@
 .feedStandings {
   align-content: center;
   display: grid;
-  max-block-size: 92px;
+  max-block-size: 132px;
   min-width: 0;
   overflow-y: auto;
 }

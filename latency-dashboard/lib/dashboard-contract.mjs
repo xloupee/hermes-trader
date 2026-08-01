@@ -297,10 +297,24 @@ export function toDashboardExecution(row) {
   for (const key of Object.keys(safeRow)) {
     if (/private.?key|secret.?key|keypair|mnemonic|seed|custody/i.test(key)) delete safeRow[key];
   }
+  const diagnostics = row.blockPositionDiagnostics;
+  const reportedSlot = typeof row.chainReport === "object" && row.chainReport !== null
+    ? Number(row.chainReport.slot)
+    : Number.NaN;
+  const copySlot = row.copySlot
+    ?? diagnostics?.copySlot
+    ?? (Number.isFinite(reportedSlot) ? reportedSlot : null);
+  const targetSlot = row.targetSlot ?? diagnostics?.targetSlot ?? null;
+  const slotDelta = row.slotDelta
+    ?? diagnostics?.slotDelta
+    ?? (Number.isFinite(copySlot) && Number.isFinite(targetSlot) ? copySlot - targetSlot : null);
   return {
     ...safeRow,
     observedWallet: sanitizeWallet(row.observedWallet),
     copyWallet: sanitizeWallet(row.copyWallet),
+    copySlot,
+    targetSlot,
+    slotDelta,
     outcome,
     landingComparison
   };

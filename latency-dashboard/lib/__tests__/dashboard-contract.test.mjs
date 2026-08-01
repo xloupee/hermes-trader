@@ -129,6 +129,35 @@ describe("dashboard contract", () => {
     assert.equal(executionOutcomeForRow({ observedAction: "buy", decision: "sent", sendSignature: "buy", copySlot: 22, buyStatus: "buyLanded", buyChainError: null }), "landed");
   });
 
+  test("normalized DTO surfaces confirmed landing slots without exposing chain reports", () => {
+    const reconciledSell = toDashboardExecution({
+      observedAction: "sell",
+      sendSignature: "sell",
+      buyStatus: "buyLanded",
+      chainReport: { slot: 33, seed: "never-return" }
+    });
+    assert.equal(reconciledSell.outcome, "landed");
+    assert.equal(reconciledSell.landingComparison, "no_target");
+    assert.equal(reconciledSell.copySlot, 33);
+    assert.equal("chainReport" in reconciledSell, false);
+
+    const positioned = toDashboardExecution({
+      observedAction: "buy",
+      sendSignature: "buy",
+      buyStatus: "buyLanded",
+      blockPositionDiagnostics: {
+        status: "found",
+        targetSlot: 40,
+        copySlot: 43,
+        slotDelta: null
+      }
+    });
+    assert.equal(positioned.landingComparison, "cross_slot");
+    assert.equal(positioned.targetSlot, 40);
+    assert.equal(positioned.copySlot, 43);
+    assert.equal(positioned.slotDelta, 3);
+  });
+
   test("landing comparison and summary counts", () => {
     const rows = [
       toDashboardExecution({ observedAtMs: 1, id: 1, observedAction: "buy", sendSignature: "abc", observedWallet: "obs1", copyWallet: null, buyStatus: "buySubmitted" }),

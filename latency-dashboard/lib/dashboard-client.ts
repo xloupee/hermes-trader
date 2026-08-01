@@ -156,6 +156,38 @@ export function landingSummary(row: DashboardExecution): string {
   return labels[row.outcome];
 }
 
+export function isDelayedLanding(row: Pick<DashboardExecution, "outcome" | "slotDelta">): boolean {
+  return row.outcome === "landed"
+    && typeof row.slotDelta === "number"
+    && Number.isFinite(row.slotDelta)
+    && row.slotDelta >= 1;
+}
+
+export function leaderSummary(row: Pick<DashboardExecution, "leaderDiagnostics">): string {
+  const diagnostics = row.leaderDiagnostics;
+  if (!diagnostics) return "n/a";
+  const copyRegion = diagnostics.copyLeader?.broadRegion || diagnostics.copyLeader?.location;
+  const targetRegion = diagnostics.targetLeader?.broadRegion || diagnostics.targetLeader?.location;
+  const region = copyRegion || targetRegion;
+  if (!region) {
+    return diagnostics.copyLeader?.shortIdentity || diagnostics.targetLeader?.shortIdentity || "n/a";
+  }
+  return diagnostics.leaderChanged ? `${region} changed` : region;
+}
+
+export function leaderTitle(row: Pick<DashboardExecution, "leaderDiagnostics">): string | undefined {
+  const diagnostics = row.leaderDiagnostics;
+  if (!diagnostics) return undefined;
+  const target = diagnostics.targetLeader;
+  const copy = diagnostics.copyLeader;
+  const leader = (value: typeof target) => [value?.shortIdentity, value?.location, value?.network].filter(Boolean).join(" · ") || "n/a";
+  return [
+    `Target slot ${diagnostics.targetSlot ?? "n/a"}: ${leader(target)}`,
+    `Copy slot ${diagnostics.copySlot ?? "n/a"}: ${leader(copy)}`,
+    `Leader changed: ${diagnostics.leaderChanged === null ? "n/a" : diagnostics.leaderChanged ? "yes" : "no"}`
+  ].join("\n");
+}
+
 function firstFiniteNumber(...values: Array<number | null | undefined>): number | null {
   return values.find((value): value is number => typeof value === "number" && Number.isFinite(value)) ?? null;
 }

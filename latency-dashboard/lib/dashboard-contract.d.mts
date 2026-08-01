@@ -19,6 +19,7 @@ export type DashboardExecution = Omit<LocalExecutionReport, "endpoint" | "observ
   copyWallet: string | null;
   outcome: ExecutionOutcome;
   landingComparison: LandingComparison;
+  leaderDiagnostics?: import("./leader-diagnostics").LeaderDiagnostics | null;
 };
 
 export interface ExecutionSummary {

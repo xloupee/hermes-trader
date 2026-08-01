@@ -4,7 +4,10 @@ import Link from "next/link";
 import {
   type DashboardExecution,
   formatMs,
+  isDelayedLanding,
   landingSummary,
+  leaderSummary,
+  leaderTitle,
   shortText
 } from "@/lib/dashboard-client";
 import { CopyChip } from "@/components/dashboard/copy-chip";
@@ -23,6 +26,10 @@ function statusClass(outcome: DashboardExecution["outcome"]) {
   if (outcome === "landed") return styles.statusGood;
   if (outcome === "failed_on_chain" || outcome === "send_failed") return styles.statusBad;
   return styles.statusMuted;
+}
+
+function placementClass(row: DashboardExecution) {
+  return isDelayedLanding(row) ? styles.statusBad : statusClass(row.outcome);
 }
 
 function landingParts(row: DashboardExecution): { primary: string; secondary: string } {
@@ -77,6 +84,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
               <th title={timeZone}>Time · {timeZoneLabel}</th>
               <th>Act</th>
               <th>Result / placement</th>
+              <th>Leader</th>
               <th>Feed / route</th>
               <th>Lane / ACK</th>
               <th>Asset</th>
@@ -96,8 +104,12 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
                 </td>
                 <td><span className={sideClass(row.observedAction)}>{row.observedAction}</span></td>
                 <td>
-                  <span className={statusClass(row.outcome)}>{landing.primary}</span>
+                  <span className={placementClass(row)}>{landing.primary}</span>
                   <div className={styles.meta}>{landing.secondary}</div>
+                </td>
+                <td className={styles.leaderCell} title={leaderTitle(row)}>
+                  <strong>{leaderSummary(row)}</strong>
+                  <span className={styles.meta}>{row.leaderDiagnostics?.regionPath || "validator location"}</span>
                 </td>
                 <td><strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong><div className={styles.meta}>{transport ? `${transport} · ` : ""}{row.selectedRoute || "route unavailable"}</div></td>
                 <td className={styles.ackCell}>
@@ -130,10 +142,11 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
               <time title={timeZone}>{formatUserTime(row.observedAtMs, timeZone)} {timeZoneLabel}</time>
             </header>
             <div className={styles.cardOutcome}>
-              <span className={statusClass(row.outcome)}>{landing.primary}</span>
+              <span className={placementClass(row)}>{landing.primary}</span>
               <p>{landing.secondary}</p>
             </div>
             <div className={styles.cardMeta}>
+              <span>Leader<strong title={leaderTitle(row)}>{leaderSummary(row)}</strong><small className={styles.meta}>{row.leaderDiagnostics?.regionPath || "validator location"}</small></span>
               <span>Feed<strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong>{transport ? <small className={styles.meta}>{transport}</small> : null}</span>
               <span>Route<strong>{row.selectedRoute || "n/a"}</strong></span>
               <span>Lane / ACK<strong className={styles.ackLane} title={row.firstAckLane || undefined}>{ackLaneLabel(row.firstAckLane)}</strong><small className={styles.meta}>{formatMs(row.observedToSignatureReturnedMs)} ACK</small></span>

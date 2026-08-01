@@ -5,6 +5,8 @@ import { describe, test } from "node:test";
 import {
   landingComparisonSummary,
   landingSummary,
+  isDelayedLanding,
+  leaderSummary,
   overviewMetricValues,
   parseDashboardFilters,
   shortText,
@@ -76,6 +78,19 @@ describe("dashboard UI contract", () => {
     assert.equal(landingSummary({ outcome: "landed", landingComparison: "cross_slot", copySlot: 1355697768, slotDelta: 2 }), "Landed · +2 slots · tx delta unavailable");
     assert.doesNotMatch(landingSummary({ outcome: "landed", landingComparison: "unavailable", copySlot: 1355697768 }), /copy slot/i);
     assert.equal(landingComparisonSummary({ landingComparison: "same_slot", copySlot: 44, sameSlotTxDelta: 2 }), "same-slot · slot 44 · 2 tx");
+    assert.equal(isDelayedLanding({ outcome: "landed", slotDelta: 1 }), true);
+    assert.equal(isDelayedLanding({ outcome: "landed", slotDelta: 2 }), true);
+    assert.equal(isDelayedLanding({ outcome: "landed", slotDelta: 0 }), false);
+    assert.equal(isDelayedLanding({ outcome: "failed_on_chain", slotDelta: 2 }), false);
+  });
+
+  test("validator leader summaries prefer copy location and mark leader changes", () => {
+    assert.equal(leaderSummary({ leaderDiagnostics: null }), "n/a");
+    assert.equal(leaderSummary({ leaderDiagnostics: {
+      copyLeader: { broadRegion: "Europe", location: "DE:Hesse:Frankfurt", shortIdentity: "copy" },
+      targetLeader: { broadRegion: "North America", location: "US:Virginia", shortIdentity: "target" },
+      leaderChanged: true
+    } }), "Europe changed");
   });
 
   test("CopyChip abbreviates display text and copies the full API value", () => {
@@ -109,18 +124,21 @@ describe("dashboard UI contract", () => {
     assert.doesNotMatch(detail, /rawExecution|chainReport|privateKey|keypair|mnemonic|seed|custody/);
   });
 
-  test("execution table remains accessible with eight columns", () => {
+  test("execution table remains accessible with nine columns", () => {
     const table = readFileSync(new URL("../../components/dashboard/execution-table.tsx", import.meta.url), "utf8");
     const styles = readFileSync(new URL("../../components/dashboard/dashboard-shared.module.css", import.meta.url), "utf8");
-    assert.equal((table.match(/<th(?:\s|>)/g) || []).length, 8);
+    assert.equal((table.match(/<th(?:\s|>)/g) || []).length, 9);
     assert.match(table, /aria-label="Execution results"/);
     assert.ok(table.indexOf("<th>Act</th>") < table.indexOf("<th>Result / placement</th>"));
-    assert.ok(table.indexOf("<th>Result / placement</th>") < table.indexOf("<th>Feed / route</th>"));
+    assert.ok(table.indexOf("<th>Result / placement</th>") < table.indexOf("<th>Leader</th>"));
+    assert.ok(table.indexOf("<th>Leader</th>") < table.indexOf("<th>Feed / route</th>"));
     assert.ok(table.indexOf("<th>Feed / route</th>") < table.indexOf("<th>Lane / ACK</th>"));
     assert.ok(table.indexOf("<th>Lane / ACK</th>") < table.indexOf("<th>Asset</th>"));
     assert.match(table, /row\.selectedRoute \|\| "route unavailable"/);
     assert.match(table, /ackLaneLabel\(row\.firstAckLane\)/);
     assert.match(table, /title=\{row\.firstAckLane \|\| undefined\}/);
+    assert.match(table, /placementClass\(row\)/);
+    assert.match(table, /leaderSummary\(row\)/);
     assert.match(table, /className=\{styles\.ackCell\}[\s\S]*ackLaneLabel\(row\.firstAckLane\)[\s\S]*formatMs\(row\.observedToSignatureReturnedMs\)/);
     assert.match(table, /useUserTimeZone\(\)/);
     assert.match(table, /Time · \{timeZoneLabel\}/);

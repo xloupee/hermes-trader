@@ -347,7 +347,7 @@
 
 .dataTable {
   border-collapse: collapse;
-  min-width: 1060px;
+  min-width: 1180px;
   width: 100%;
 }
 
@@ -386,6 +386,7 @@
 }
 
 .timeCell,
+.leaderCell,
 .assetCell,
 .signCell,
 .ackCell {
@@ -431,6 +432,18 @@
 
 .ackCell .meta {
   display: block;
+}
+
+.leaderCell strong,
+.leaderCell span {
+  display: block;
+}
+
+.leaderCell strong {
+  color: var(--ink);
+  font-family: "Instrument Sans", sans-serif;
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .sideBuy,
@@ -581,7 +594,7 @@
 .cardMeta {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .cardMeta span {

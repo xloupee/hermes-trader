@@ -6,7 +6,6 @@ const FEED_TONES: Record<FeedKey, string> = {
   vortex: styles.feedVortex,
   jito: styles.feedJito,
   erpc: styles.feedErpc,
-  shredstream: styles.feedShredstream,
   "shred-union": styles.feedUnion,
   everstake: styles.feedEverstake,
   doublezero: styles.feedDoublezero,

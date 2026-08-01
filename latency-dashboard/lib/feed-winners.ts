@@ -2,7 +2,6 @@ export type FeedKey =
   | "vortex"
   | "jito"
   | "erpc"
-  | "shredstream"
   | "shred-union"
   | "everstake"
   | "doublezero"
@@ -23,7 +22,6 @@ const FEED_LABELS: Record<FeedKey, string> = {
   vortex: "Vortex",
   jito: "Jito",
   erpc: "eRPC",
-  shredstream: "ShredStream",
   "shred-union": "Shred union",
   everstake: "Everstake",
   doublezero: "DoubleZero",
@@ -35,7 +33,6 @@ const FEED_ORDER: FeedKey[] = [
   "vortex",
   "jito",
   "erpc",
-  "shredstream",
   "shred-union",
   "everstake",
   "doublezero",
@@ -49,14 +46,21 @@ export function feedIdentity(value: string | null | undefined): FeedIdentity {
 
   if (normalized.includes("vortex")) key = "vortex";
   else if (normalized.includes("erpc")) key = "erpc";
-  else if (normalized.includes("jito")) key = "jito";
   else if (normalized.includes("shred-union") || normalized.includes("raw-union")) key = "shred-union";
-  else if (normalized.includes("shredstream")) key = "shredstream";
+  else if (normalized.includes("jito") || normalized.includes("shredstream")) key = "jito";
   else if (normalized.includes("everstake")) key = "everstake";
   else if (normalized.includes("doublezero")) key = "doublezero";
   else if (normalized.includes("on_chain") || normalized.includes("confirmed_rpc")) key = "on-chain";
 
   return { key, label: FEED_LABELS[key] };
+}
+
+export function feedTransportLabel(
+  source: string | null | undefined,
+  provider: string | null | undefined
+): string | null {
+  const normalized = `${source || ""} ${provider || ""}`.toLowerCase();
+  return normalized.includes("jito") || normalized.includes("shredstream") ? "ShredStream" : null;
 }
 
 export function executionFeed(

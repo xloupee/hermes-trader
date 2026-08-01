@@ -10,7 +10,7 @@ import {
   shortText,
   toQueryParams
 } from "../dashboard-client.ts";
-import { executionFeed, feedIdentity, feedLeaderboard } from "../feed-winners.ts";
+import { executionFeed, feedIdentity, feedLeaderboard, feedTransportLabel } from "../feed-winners.ts";
 import { formatUserDate, formatUserDateTime, formatUserTime, userTimeZoneLabel } from "../user-time.ts";
 
 const outcomeCounts = (values = {}) => ({
@@ -136,14 +136,21 @@ describe("dashboard UI contract", () => {
   test("feed identity preserves inbound source attribution and transport fallback", () => {
     assert.deepEqual(feedIdentity("vortex-fra"), { key: "vortex", label: "Vortex" });
     assert.deepEqual(feedIdentity("jito-primary"), { key: "jito", label: "Jito" });
+    assert.deepEqual(feedIdentity("shredstream"), { key: "jito", label: "Jito" });
     assert.deepEqual(feedIdentity("erpc-direct-fra"), { key: "erpc", label: "eRPC" });
-    assert.deepEqual(executionFeed("profit-target-monitor", "shredstream"), { key: "shredstream", label: "ShredStream" });
+    assert.deepEqual(executionFeed("profit-target-monitor", "shredstream"), { key: "jito", label: "Jito" });
+    assert.equal(feedTransportLabel("jito-primary", null), "ShredStream");
+    assert.equal(feedTransportLabel("stable-ingress-active", "shredstream"), "ShredStream");
   });
 
   test("feed leaderboard ranks visible buy winners with stable shares and colors", () => {
     assert.deepEqual(feedLeaderboard(["jito-primary", "vortex-fra", "vortex-iad", "jito-backup"]), [
       { key: "vortex", label: "Vortex", wins: 2, share: 50 },
       { key: "jito", label: "Jito", wins: 2, share: 50 }
+    ]);
+    assert.deepEqual(feedLeaderboard(["jito-primary", "shredstream", "vortex-fra"]), [
+      { key: "jito", label: "Jito", wins: 2, share: (2 / 3) * 100 },
+      { key: "vortex", label: "Vortex", wins: 1, share: (1 / 3) * 100 }
     ]);
     const overview = readFileSync(new URL("../../components/dashboard/overview-dashboard.tsx", import.meta.url), "utf8");
     const leaderboard = readFileSync(new URL("../../components/dashboard/feed-leaderboard.tsx", import.meta.url), "utf8");
@@ -152,6 +159,7 @@ describe("dashboard UI contract", () => {
     assert.match(leaderboard, /row\.observedAction\.toLowerCase\(\) === "buy"/);
     assert.match(leaderboard, /Inbound buy race/);
     assert.match(leaderboard, /Feed leaderboard/);
+    assert.match(readFileSync(new URL("../../components/dashboard/execution-table.tsx", import.meta.url), "utf8"), /feedTransportLabel/);
     assert.match(styles, /\.feedLeaderboard\s*\{[^}]*block-size:\s*auto;/s);
     assert.match(styles, /\.feedStandings\s*\{[^}]*max-block-size:\s*132px;/s);
   });

@@ -24,7 +24,7 @@ body {
     var(--paper);
   background-size: 34px 34px;
   color: var(--ink);
-  font-family: ui-sans-serif, "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  font-family: var(--font-instrument), "Avenir Next", "Segoe UI", sans-serif;
   letter-spacing: 0;
 }
 
@@ -57,6 +57,7 @@ select {
 }
 
 h1 {
+  font-family: var(--font-newsreader), "Iowan Old Style", Georgia, serif;
   font-size: clamp(30px, 5vw, 54px);
   line-height: 0.94;
   margin: 0;

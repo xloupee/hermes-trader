@@ -1,0 +1,14 @@
+.landingTokens {
+  --obsidian: #101318;
+  --obsidian-deep: #151b22;
+  --marble: #f4efe4;
+  --marble-deep: #e7decd;
+  --gold: #c2a15d;
+  --soft: rgb(244 239 228 / 0.74);
+  --muted: rgb(244 239 228 / 0.52);
+  --line: rgb(244 239 228 / 0.22);
+  --ink-line: rgb(16 19 24 / 0.2);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --font-display: "Bodoni 72", Didot, "Iowan Old Style", Georgia, serif;
+  --font-body: "Avenir Next", Avenir, "Helvetica Neue", sans-serif;
+}

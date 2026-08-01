@@ -27,13 +27,13 @@ export function LoginForm({ initialMessage = null }: { initialMessage?: string |
       return;
     }
 
-    window.location.assign("/");
+    window.location.assign("/dashboard");
   }
 
   return (
     <form className="login-form" noValidate onSubmit={submit}>
       <label>
-        Email
+        Username or email
         <input
           value={email}
           onChange={(event) => setEmail(event.target.value)}
@@ -54,7 +54,7 @@ export function LoginForm({ initialMessage = null }: { initialMessage?: string |
       </label>
       <button className="primary-button" disabled={busy} type="submit">
         <ArrowRight size={16} />
-        {busy ? "Signing in" : "Sign in"}
+        {busy ? "Signing in" : "Open dashboard"}
       </button>
       {message ? <p className="form-message">{message}</p> : null}
     </form>

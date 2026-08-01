@@ -1,0 +1,182 @@
+.interactiveScene {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 2;
+}
+
+.heroForeground,
+.heroGlow,
+.heroLightning {
+  inset: 0;
+  height: 100%;
+  opacity: 0;
+  position: absolute;
+  transition: opacity 220ms var(--ease-out);
+  width: 100%;
+}
+
+.heroForeground {
+  object-fit: cover;
+  object-position: center;
+  opacity: 0;
+}
+
+.heroForeground {
+  filter:
+    brightness(1.08)
+    drop-shadow(0 3px 7px rgb(194 161 93 / 0.2))
+    drop-shadow(0 12px 24px rgb(4 8 12 / 0.24));
+  transform: translate3d(0, 0, 0) scale(1);
+  transform-origin: 76% 48%;
+  z-index: 1;
+}
+
+.heroGlow {
+  -webkit-mask-image: url("/hermes/hermes-foreground-desktop.webp");
+  -webkit-mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size: cover;
+  background: radial-gradient(
+    circle clamp(8rem, 16vw, 14rem) at var(--pointer-x, 78%) var(--pointer-y, 42%),
+    rgb(250 231 188 / 0.34) 0%,
+    rgb(194 161 93 / 0.14) 42%,
+    transparent 72%
+  );
+  mix-blend-mode: screen;
+  mask-image: url("/hermes/hermes-foreground-desktop.webp");
+  mask-position: center;
+  mask-repeat: no-repeat;
+  mask-size: cover;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.heroLightning {
+  overflow: visible;
+}
+
+.heroStrike {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  opacity: 0;
+  stroke: rgb(248 225 174 / 0.92);
+}
+
+.heroStrike path {
+  stroke: rgb(248 225 174 / 0.92);
+}
+
+.heroStrike:nth-child(1) {
+  animation-delay: 0ms;
+}
+
+.heroStrike:nth-child(2) {
+  animation-delay: 420ms;
+}
+
+.heroStrike:nth-child(3) {
+  animation-delay: 860ms;
+}
+
+.heroStrike:nth-child(4) {
+  animation-delay: 1320ms;
+}
+
+.heroStrike:nth-child(5) {
+  animation-delay: 1780ms;
+}
+
+.heroStrikeOne {
+  --strike-delay: 4600ms;
+}
+
+.heroStrikeTwo {
+  --strike-delay: 5200ms;
+}
+
+.heroStrikeThree {
+  --strike-delay: 5900ms;
+}
+
+.heroStrikeFour {
+  --strike-delay: 4900ms;
+}
+
+.heroStrikeFive {
+  --strike-delay: 5600ms;
+}
+
+.active .heroGlow,
+.active .heroLightning {
+  opacity: 1;
+}
+
+.active .heroForeground {
+  opacity: 0.22;
+  transform: translate3d(0, 0, 0) scale(1.002);
+}
+
+.active .heroStrike {
+  animation: heroStrike 5.2s linear var(--strike-delay) infinite;
+}
+
+.active .heroStrike path {
+  stroke-width: 1;
+}
+
+.heroStrike path:first-child {
+  stroke: rgb(255 249 228 / 0.98);
+}
+
+.heroStrike path:last-child {
+  stroke: rgba(194, 161, 93, 0.8);
+}
+
+@keyframes heroStrike {
+  0% {
+    opacity: 0;
+    transform: scale(0.999);
+  }
+
+  1.2% {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  2.7% {
+    opacity: 0.12;
+  }
+
+  4% {
+    opacity: 0.88;
+  }
+
+  6% {
+    opacity: 0.2;
+  }
+
+  7% {
+    opacity: 0;
+    transform: scale(1.001);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.001);
+  }
+}
+
+@media (hover: none), (pointer: coarse) {
+  .interactiveScene {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .interactiveScene {
+    display: none;
+  }
+}

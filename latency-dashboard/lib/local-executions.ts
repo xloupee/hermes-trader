@@ -1,4 +1,5 @@
 import { createAdminClient } from "@/lib/supabase/admin";
+import { dashboardOutcomePredicate } from "@/lib/dashboard-contract.mjs";
 import type { SignalFilters } from "@/lib/signals";
 
 export interface BlockPositionDiagnostics {
@@ -148,6 +149,36 @@ export interface SendLaneAttribution {
   firstAckLane: string | null;
   firstAckAtMs: number | null;
   allAttempts: SendLaneAttempt[];
+}
+
+export interface DashboardExecutionCursor {
+  observedAtMs: number;
+  id: number;
+}
+
+export type DashboardExecutionOutcome = "landed" | "failed_on_chain" | "ack_not_landed" | "send_failed" | "skipped" | "unknown";
+
+export interface DashboardExecutionFilters {
+  from: string;
+  to: string;
+  fromObservedAtMs: number;
+  toObservedAtMs: number;
+  limit: number;
+  cursor: DashboardExecutionCursor | null;
+  provider?: string | null;
+  source?: string | null;
+  wallet?: string | null;
+  mint?: string | null;
+  route?: string | null;
+  side?: "buy" | "sell" | null;
+  outcome?: DashboardExecutionOutcome | null;
+}
+
+export interface DashboardOverviewSummary {
+  total: number;
+  landed: number;
+  outcome: Record<DashboardExecutionOutcome, number>;
+  side: { buy: number; sell: number; other: number };
 }
 
 interface RawLocalExecutionReport {
@@ -331,6 +362,10 @@ const LOCAL_EXECUTION_BASE_COLUMNS = [
 ];
 
 const LOCAL_EXECUTION_SELECT = LOCAL_EXECUTION_BASE_COLUMNS.join(",");
+const DASHBOARD_EXECUTION_SELECT = [
+  ...LOCAL_EXECUTION_BASE_COLUMNS,
+  "chain_report"
+].join(",");
 const LOCAL_EXECUTION_DETAIL_SELECT = [
   ...LOCAL_EXECUTION_BASE_COLUMNS,
   "raw_execution",
@@ -380,14 +415,14 @@ function submittedAutoSellStatus(row: RawLocalExecutionReport): string | null {
 function buyStatus(row: RawLocalExecutionReport): string | null {
   const report = chainReportValue(row);
   const status = stringValue(report?.buyStatus);
-  if (status) {
-    return status;
-  }
-  if (report?.err) {
+  if (status === "buyFailedOnChain" || report?.err) {
     return "buyFailedOnChain";
   }
   if (numberValue(report?.slot) !== null || Number.isFinite(row.copy_slot)) {
     return "buyLanded";
+  }
+  if (status) {
+    return status;
   }
   return submittedBuyStatus(row);
 }
@@ -650,6 +685,72 @@ export async function listLocalExecutions(filters: SignalFilters): Promise<Local
   }
 
   return (((data as unknown) as RawLocalExecutionReport[] | null) || []).map(normalizeReport);
+}
+
+function buildDashboardCursorWhere(cursor: DashboardExecutionCursor) {
+  return `observed_at_ms.lt.${cursor.observedAtMs},and(observed_at_ms.eq.${cursor.observedAtMs},id.lt.${cursor.id})`;
+}
+
+function filteredDashboardExecutionQuery(filters: DashboardExecutionFilters, columns: string, exactCount = false) {
+  let query = createAdminClient()
+    .from("copytrade_local_executions")
+    .select(columns, exactCount ? { count: "exact", head: true } : undefined)
+    .gte("observed_at_ms", filters.fromObservedAtMs)
+    .lte("observed_at_ms", filters.toObservedAtMs);
+
+  if (filters.provider) query = query.eq("provider", filters.provider);
+  if (filters.source) query = query.ilike("source", `%${filters.source}%`);
+  if (filters.wallet) query = query.or(`observed_wallet.eq.${filters.wallet},copy_wallet.eq.${filters.wallet}`);
+  if (filters.mint) query = query.ilike("mint", `%${filters.mint}%`);
+  if (filters.route) query = query.eq("selected_route", filters.route);
+  if (filters.side) query = query.eq("observed_action", filters.side);
+  if (filters.outcome) query = query.or(dashboardOutcomePredicate(filters.outcome));
+  return query;
+}
+
+export async function listDashboardExecutions(filters: DashboardExecutionFilters): Promise<LocalExecutionReport[]> {
+  let query = filteredDashboardExecutionQuery(filters, DASHBOARD_EXECUTION_SELECT)
+    .order("observed_at_ms", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(filters.limit + 1);
+
+  if (filters.cursor) {
+    query = query.or(buildDashboardCursorWhere(filters.cursor));
+  }
+
+  const { data, error } = await query;
+  if (missingTableError(error)) {
+    return [];
+  }
+  if (error) {
+    throw error;
+  }
+
+  return (((data as unknown) as RawLocalExecutionReport[] | null) || []).map(normalizeReport);
+}
+
+async function exactDashboardExecutionCount(filters: DashboardExecutionFilters): Promise<number> {
+  const { count, error } = await filteredDashboardExecutionQuery(filters, "id", true);
+  if (missingTableError(error)) return 0;
+  if (error) throw error;
+  return count ?? 0;
+}
+
+export async function dashboardOverviewSummary(filters: DashboardExecutionFilters): Promise<DashboardOverviewSummary> {
+  const outcomes: DashboardExecutionOutcome[] = ["landed", "failed_on_chain", "ack_not_landed", "send_failed", "skipped", "unknown"];
+  const countForOutcome = (outcome: DashboardExecutionOutcome) =>
+    filters.outcome && filters.outcome !== outcome ? Promise.resolve(0) : exactDashboardExecutionCount({ ...filters, outcome });
+  const countForSide = (action: "buy" | "sell") =>
+    filters.side && filters.side !== action ? Promise.resolve(0) : exactDashboardExecutionCount({ ...filters, side: action });
+
+  const [total, outcomeCounts, buy, sell] = await Promise.all([
+    exactDashboardExecutionCount(filters),
+    Promise.all(outcomes.map(countForOutcome)),
+    countForSide("buy"),
+    countForSide("sell")
+  ]);
+  const outcome = Object.fromEntries(outcomes.map((name, index) => [name, outcomeCounts[index]])) as Record<DashboardExecutionOutcome, number>;
+  return { total, landed: outcome.landed, outcome, side: { buy, sell, other: Math.max(0, total - buy - sell) } };
 }
 
 export async function getLocalExecution(id: number): Promise<LocalExecutionReport | null> {

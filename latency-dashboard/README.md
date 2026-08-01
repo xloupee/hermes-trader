@@ -7,10 +7,19 @@ Admin-only Next.js dashboard for inspecting copy-trade latency across subscriber
 Set these in local `.env.local` and Vercel Project Settings:
 
 - `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`
-- `LATENCY_FAST_LOGIN` - set to `1` to enable the shortcut login in production. It is enabled automatically during local development.
 
-The service-role key is used only by server route handlers. The browser never receives it.
+`NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` are required by
+the Supabase SSR browser, server, and middleware clients. They identify the
+public Supabase project and are intentionally available to browser code.
+
+`SUPABASE_SERVICE_ROLE_KEY` is a separate server-only credential used by
+authenticated route handlers. It must never be exposed through a `NEXT_PUBLIC_`
+name, client component, browser bundle, build log, or Vercel preview output.
+
+See [VERCEL_RUNBOOK.md](./VERCEL_RUNBOOK.md) for preview, exact-artifact
+promotion, and frontend-only rollback policy.
 
 ## Run
 
@@ -21,8 +30,8 @@ npm run dev
 
 ## Local Copy Execution Reports
 
-The `/signals` page can show Rust one-shot copy execution reports next to each
-observed signal when `public.copytrade_local_executions` has rows. Sync the
+The `/dashboard/executions` page shows Rust one-shot copy execution reports when
+`public.copytrade_local_executions` has rows. Sync the
 local JSONL send log after a test run:
 
 ```bash
@@ -38,5 +47,4 @@ fee, and extra spend beyond the observed buy amount.
 ## Admin Access
 
 Add an authenticated Supabase user to `public.latency_admin_users` by email and, once known, `auth_user_id`.
-
-For local development, sign in with email `123` and password `123` to skip Supabase auth. The same shortcut only works in production if `LATENCY_FAST_LOGIN=1` is set.
+Sign in at `/login` with that user's Supabase email and password, or use the private operator shortcut. The shortcut issues a signed, HTTP-only session cookie using `HERMES_OPERATOR_SESSION_SECRET`.

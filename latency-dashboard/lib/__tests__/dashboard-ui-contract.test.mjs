@@ -10,7 +10,7 @@ import {
   shortText,
   toQueryParams
 } from "../dashboard-client.ts";
-import { executionFeed, feedIdentity, feedLeaderboard } from "../feed-winners.ts";
+import { executionFeed, feedIdentity } from "../feed-winners.ts";
 
 const outcomeCounts = (values = {}) => ({
   landed: 0,
@@ -89,7 +89,8 @@ describe("dashboard UI contract", () => {
     const executions = readFileSync(new URL("../../components/dashboard/executions-dashboard.tsx", import.meta.url), "utf8");
     const detail = readFileSync(new URL("../../components/dashboard/execution-detail-dashboard.tsx", import.meta.url), "utf8");
     const detailRoute = readFileSync(new URL("../../app/api/dashboard/executions/[id]/route.ts", import.meta.url), "utf8");
-    assert.match(overview, /\/api\/dashboard\/overview/);
+    assert.match(overview, /\/api\/dashboard\/executions/);
+    assert.doesNotMatch(overview, /\/api\/dashboard\/overview/);
     assert.match(executions, /\/api\/dashboard\/executions/);
     assert.doesNotMatch(overview, /applyLandingPreset|\.filter\(/);
     assert.doesNotMatch(executions, /applyLandingPreset|\.filter\(/);
@@ -108,14 +109,10 @@ describe("dashboard UI contract", () => {
     assert.match(table, /row\.selectedRoute \|\| "route unavailable"/);
   });
 
-  test("feed identity and leaderboard preserve inbound race attribution", () => {
+  test("feed identity preserves inbound source attribution and transport fallback", () => {
     assert.deepEqual(feedIdentity("vortex-fra"), { key: "vortex", label: "Vortex" });
     assert.deepEqual(feedIdentity("jito-primary"), { key: "jito", label: "Jito" });
     assert.deepEqual(feedIdentity("erpc-direct-fra"), { key: "erpc", label: "eRPC" });
     assert.deepEqual(executionFeed("profit-target-monitor", "shredstream"), { key: "shredstream", label: "ShredStream" });
-    assert.deepEqual(feedLeaderboard(["vortex-fra", "jito-primary", "vortex-fra"]).map(({ key, wins, share }) => ({ key, wins, share: share.toFixed(1) })), [
-      { key: "vortex", wins: 2, share: "66.7" },
-      { key: "jito", wins: 1, share: "33.3" }
-    ]);
   });
 });

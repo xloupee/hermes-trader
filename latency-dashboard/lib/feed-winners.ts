@@ -14,11 +14,6 @@ export interface FeedIdentity {
   label: string;
 }
 
-export interface FeedStanding extends FeedIdentity {
-  wins: number;
-  share: number;
-}
-
 const FEED_LABELS: Record<FeedKey, string> = {
   vortex: "Vortex",
   jito: "Jito",
@@ -30,18 +25,6 @@ const FEED_LABELS: Record<FeedKey, string> = {
   "on-chain": "On-chain",
   unknown: "Unknown"
 };
-
-const FEED_ORDER: FeedKey[] = [
-  "vortex",
-  "jito",
-  "erpc",
-  "shredstream",
-  "shred-union",
-  "everstake",
-  "doublezero",
-  "on-chain",
-  "unknown"
-];
 
 export function feedIdentity(value: string | null | undefined): FeedIdentity {
   const normalized = value?.trim().toLowerCase() || "";
@@ -65,22 +48,4 @@ export function executionFeed(
 ): FeedIdentity {
   const sourceFeed = feedIdentity(source);
   return sourceFeed.key !== "unknown" ? sourceFeed : feedIdentity(provider);
-}
-
-export function feedLeaderboard(sources: Array<string | null | undefined>): FeedStanding[] {
-  const counts = new Map<FeedKey, number>();
-  for (const source of sources) {
-    const feed = feedIdentity(source);
-    counts.set(feed.key, (counts.get(feed.key) || 0) + 1);
-  }
-
-  const total = sources.length;
-  return [...counts.entries()]
-    .map(([key, wins]) => ({
-      key,
-      label: FEED_LABELS[key],
-      wins,
-      share: total === 0 ? 0 : (wins / total) * 100
-    }))
-    .sort((left, right) => right.wins - left.wins || FEED_ORDER.indexOf(left.key) - FEED_ORDER.indexOf(right.key));
 }

@@ -13,7 +13,8 @@ import {
   shortText,
   toQueryParams
 } from "../dashboard-client.ts";
-import { executionFeed, feedIdentity, feedLeaderboard, feedTransportLabel, isLandedBuy } from "../feed-winners.ts";
+import { executionEvidenceCounts, executionFeed, feedIdentity, feedLeaderboard, feedTransportLabel, isLandedBuy } from "../feed-winners.ts";
+import { sendLaneIdentity } from "../send-lanes.ts";
 import { formatUserDate, formatUserDateTime, formatUserTime, userTimeZoneLabel } from "../user-time.ts";
 
 const outcomeCounts = (values = {}) => ({
@@ -151,8 +152,8 @@ describe("dashboard UI contract", () => {
     assert.ok(table.indexOf("<th>Wallet</th>") < table.indexOf("<th>Telegram ID</th>"));
     assert.ok(table.indexOf("<th>Telegram ID</th>") < table.indexOf("<th>Transaction</th>"));
     assert.doesNotMatch(table, /feedTransportLabel|row\.selectedRoute/);
-    assert.match(table, /ackLaneLabel\(row\.firstAckLane\)/);
-    assert.match(table, /title=\{row\.firstAckLane \|\| undefined\}/);
+    assert.match(table, /sendLaneIdentity\(row\.firstAckLane\)/);
+    assert.match(table, /title=\{lane\.raw \|\| undefined\}/);
     assert.match(table, /placementClass\(row\)/);
     assert.match(table, /transactionDistance\(row\)/);
     assert.match(table, /row\.sameSlotTxDelta/);
@@ -162,7 +163,7 @@ describe("dashboard UI contract", () => {
     assert.match(table, /row\.telegramSubscriberId/);
     assert.match(table, /label="Telegram subscriber ID"/);
     assert.match(table, /leaderSummary\(row\)/);
-    assert.match(table, /className=\{styles\.ackCell\}[\s\S]*ackLaneLabel\(row\.firstAckLane\)[\s\S]*formatMs\(row\.observedToSignatureReturnedMs\)/);
+    assert.match(table, /className=\{styles\.ackCell\}[\s\S]*lane\.label[\s\S]*formatMs\(row\.observedToSignatureReturnedMs\)/);
     assert.match(table, /useUserTimeZone\(\)/);
     assert.match(table, /Time · \{timeZoneLabel\}/);
     assert.match(styles, /\.sideBuy\s*\{\s*color:\s*var\(--green\);\s*\}/);
@@ -182,9 +183,22 @@ describe("dashboard UI contract", () => {
     assert.deepEqual(feedIdentity("jito-primary"), { key: "jito", label: "Jito" });
     assert.deepEqual(feedIdentity("shredstream"), { key: "jito", label: "Jito" });
     assert.deepEqual(feedIdentity("erpc-direct-fra"), { key: "erpc", label: "eRPC" });
+    assert.deepEqual(feedIdentity("doublezero-edge"), { key: "doublezero", label: "DoubleZero Edge" });
     assert.deepEqual(executionFeed("profit-target-monitor", "shredstream"), { key: "jito", label: "Jito" });
     assert.equal(feedTransportLabel("jito-primary", null), "ShredStream");
     assert.equal(feedTransportLabel("stable-ingress-active", "shredstream"), "ShredStream");
+  });
+
+  test("outbound ACK lanes use stable operator labels without losing raw attribution", () => {
+    assert.deepEqual(sendLaneIdentity("helius-sender-fast:sender.helius-rpc.com"), {
+      key: "helius-sender",
+      label: "Helius Sender",
+      raw: "helius-sender-fast:sender.helius-rpc.com"
+    });
+    assert.equal(sendLaneIdentity("nozomi-fra-1:nozomi.example").label, "Nozomi");
+    assert.equal(sendLaneIdentity("jito-1:frankfurt.mainnet.block-engine.jito.wtf").label, "Jito");
+    assert.equal(sendLaneIdentity("rpc-primary:mainnet.helius-rpc.com").label, "RPC");
+    assert.equal(sendLaneIdentity(null).label, "Lane n/a");
   });
 
   test("feed leaderboard ranks visible buy winners with stable shares and colors", () => {
@@ -200,6 +214,10 @@ describe("dashboard UI contract", () => {
       { key: "jito", label: "Jito", wins: 2, share: (2 / 3) * 100 },
       { key: "vortex", label: "Vortex", wins: 1, share: (1 / 3) * 100 }
     ]);
+    assert.deepEqual([...executionEvidenceCounts(["jito-primary", "vortex-fra", "jito-backup"])], [
+      ["jito", 2],
+      ["vortex", 1]
+    ]);
     const overview = readFileSync(new URL("../../components/dashboard/overview-dashboard.tsx", import.meta.url), "utf8");
     const leaderboard = readFileSync(new URL("../../components/dashboard/feed-leaderboard.tsx", import.meta.url), "utf8");
     const styles = readFileSync(new URL("../../components/dashboard/dashboard-shared.module.css", import.meta.url), "utf8");
@@ -207,6 +225,8 @@ describe("dashboard UI contract", () => {
     assert.match(leaderboard, /rows\.filter\(isLandedBuy\)/);
     assert.match(leaderboard, /Landed buy race/);
     assert.match(leaderboard, /landed buy/);
+    assert.match(leaderboard, /execution evidence only/);
+    assert.match(leaderboard, /\["jito", "vortex", "doublezero"\]/);
     assert.match(leaderboard, /Feed leaderboard/);
     assert.doesNotMatch(readFileSync(new URL("../../components/dashboard/execution-table.tsx", import.meta.url), "utf8"), /feedTransportLabel/);
     assert.match(styles, /\.feedLeaderboard\s*\{[^}]*block-size:\s*auto;/s);

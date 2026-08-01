@@ -13,6 +13,7 @@ import {
 } from "@/lib/dashboard-client";
 import { CopyChip } from "@/components/dashboard/copy-chip";
 import { executionFeed, type FeedKey } from "@/lib/feed-winners";
+import { sendLaneIdentity, type SendLaneKey } from "@/lib/send-lanes";
 import { formatUserDate, formatUserTime, userTimeZoneLabel } from "@/lib/user-time";
 import { useUserTimeZone } from "@/lib/use-user-time-zone";
 import styles from "@/components/dashboard/dashboard-shared.module.css";
@@ -71,11 +72,6 @@ function sideClass(side: string) {
   return side.toLowerCase() === "sell" ? styles.sideSell : styles.sideBuy;
 }
 
-function ackLaneLabel(lane: string | null): string {
-  if (!lane) return "lane n/a";
-  return lane.split(":", 1)[0] || "lane n/a";
-}
-
 const FEED_CLASSES: Record<FeedKey, string> = {
   vortex: styles.feedVortex,
   jito: styles.feedJito,
@@ -85,6 +81,21 @@ const FEED_CLASSES: Record<FeedKey, string> = {
   doublezero: styles.feedDoublezero,
   "on-chain": styles.feedOnChain,
   unknown: styles.feedUnknown
+};
+
+const LANE_CLASSES: Record<SendLaneKey, string> = {
+  "helius-sender": styles.laneHelius,
+  nozomi: styles.laneNozomi,
+  jito: styles.laneJito,
+  erpc: styles.laneErpc,
+  astralane: styles.laneAstralane,
+  lunar: styles.laneLunar,
+  circular: styles.laneCircular,
+  bloxroute: styles.laneBloxroute,
+  "zero-slot": styles.laneZeroSlot,
+  tpu: styles.laneTpu,
+  rpc: styles.laneRpc,
+  unknown: styles.laneUnknown
 };
 
 export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: ExecutionTableProps) {
@@ -118,6 +129,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
             {rows.map((row) => {
               const landing = landingParts(row);
               const feed = executionFeed(row.source, row.provider);
+              const lane = sendLaneIdentity(row.firstAckLane);
               return <tr key={row.id}>
                 <td className={styles.timeCell}>
                   <strong>{formatUserTime(row.observedAtMs, timeZone)}</strong>
@@ -135,7 +147,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
                 </td>
                 <td><strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></td>
                 <td className={styles.ackCell}>
-                  <strong className={styles.ackLane} title={row.firstAckLane || undefined}>{ackLaneLabel(row.firstAckLane)}</strong>
+                  <strong className={`${styles.ackLane} ${LANE_CLASSES[lane.key]}`} title={lane.raw || undefined}>{lane.label}</strong>
                   <span className={styles.meta}>{formatMs(row.observedToSignatureReturnedMs)} ACK</span>
                 </td>
                 <td className={styles.assetCell}><CopyChip value={row.mint} label="mint address" /></td>
@@ -158,6 +170,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
         {rows.map((row) => {
           const landing = landingParts(row);
           const feed = executionFeed(row.source, row.provider);
+          const lane = sendLaneIdentity(row.firstAckLane);
           return <article key={row.id} className={styles.card}>
             <header className={styles.cardHeader}>
               <div><span className={sideClass(row.observedAction)}>{row.observedAction}</span><strong>{shortText(row.mint, 5)}</strong></div>
@@ -171,7 +184,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
               <span>TX after<strong className={styles.txDistance}>{transactionDistance(row)}</strong></span>
               <span>Leader<strong title={leaderTitle(row)}>{leaderSummary(row)}</strong><small className={styles.meta}>{leaderContext(row)}</small></span>
               <span>Feed<strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></span>
-              <span>Lane / ACK<strong className={styles.ackLane} title={row.firstAckLane || undefined}>{ackLaneLabel(row.firstAckLane)}</strong><small className={styles.meta}>{formatMs(row.observedToSignatureReturnedMs)} ACK</small></span>
+              <span>Lane / ACK<strong className={`${styles.ackLane} ${LANE_CLASSES[lane.key]}`} title={lane.raw || undefined}>{lane.label}</strong><small className={styles.meta}>{formatMs(row.observedToSignatureReturnedMs)} ACK</small></span>
             </div>
             <div className={styles.cardCopies}>
               <span>Wallet <CopyChip value={row.observedWallet} label="watched wallet" /></span>

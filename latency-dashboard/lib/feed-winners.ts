@@ -28,7 +28,7 @@ const FEED_LABELS: Record<FeedKey, string> = {
   erpc: "eRPC",
   "shred-union": "Shred union",
   everstake: "Everstake",
-  doublezero: "DoubleZero",
+  doublezero: "DoubleZero Edge",
   "on-chain": "On-chain",
   unknown: "Unknown"
 };
@@ -91,4 +91,15 @@ export function feedLeaderboard(sources: Array<string | null | undefined>): Feed
       share: total === 0 ? 0 : (wins / total) * 100
     }))
     .sort((left, right) => right.wins - left.wins || FEED_ORDER.indexOf(left.key) - FEED_ORDER.indexOf(right.key));
+}
+
+export function executionEvidenceCounts(
+  sources: Array<string | null | undefined>
+): Map<FeedKey, number> {
+  const counts = new Map<FeedKey, number>();
+  for (const source of sources) {
+    const feed = feedIdentity(source);
+    counts.set(feed.key, (counts.get(feed.key) || 0) + 1);
+  }
+  return counts;
 }

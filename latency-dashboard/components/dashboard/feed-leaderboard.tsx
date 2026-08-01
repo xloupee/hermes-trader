@@ -1,5 +1,5 @@
 import type { DashboardExecution } from "@/lib/dashboard-client";
-import { feedLeaderboard, isLandedBuy, type FeedKey } from "@/lib/feed-winners";
+import { executionEvidenceCounts, feedLeaderboard, isLandedBuy, type FeedKey, type FeedStanding } from "@/lib/feed-winners";
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
 const FEED_TONES: Record<FeedKey, string> = {
@@ -15,7 +15,21 @@ const FEED_TONES: Record<FeedKey, string> = {
 
 export function FeedLeaderboard({ rows }: { rows: DashboardExecution[] }) {
   const landedBuys = rows.filter(isLandedBuy);
-  const standings = feedLeaderboard(landedBuys.map((row) => row.source));
+  const winnerStandings = feedLeaderboard(landedBuys.map((row) => row.source));
+  const evidence = executionEvidenceCounts(rows.map((row) => row.source));
+  const standingByKey = new Map(winnerStandings.map((standing) => [standing.key, standing]));
+  const trackedFeeds: FeedStanding[] = (["jito", "vortex", "doublezero"] as const).map((key) => (
+    standingByKey.get(key) || {
+      key,
+      label: key === "jito" ? "Jito" : key === "vortex" ? "Vortex" : "DoubleZero Edge",
+      wins: 0,
+      share: 0
+    }
+  ));
+  const standings = [
+    ...winnerStandings,
+    ...trackedFeeds.filter((standing) => !standingByKey.has(standing.key))
+  ];
 
   return (
     <section className={styles.feedLeaderboard} aria-label="Feed winner leaderboard">
@@ -24,13 +38,16 @@ export function FeedLeaderboard({ rows }: { rows: DashboardExecution[] }) {
           <span>Landed buy race</span>
           <h2>Feed leaderboard</h2>
         </div>
-        <small>{landedBuys.length} landed buy{landedBuys.length === 1 ? "" : "s"}</small>
+        <small>{landedBuys.length} landed buy{landedBuys.length === 1 ? "" : "s"} · execution evidence only</small>
       </header>
       <div className={styles.feedStandings}>
         {standings.length > 0 ? standings.map((standing, index) => (
           <div className={styles.feedStanding} key={standing.key}>
             <span className={styles.feedRank}>{String(index + 1).padStart(2, "0")}</span>
-            <strong className={FEED_TONES[standing.key]}>{standing.label}</strong>
+            <div className={styles.feedIdentity}>
+              <strong className={FEED_TONES[standing.key]}>{standing.label}</strong>
+              <small>{evidence.get(standing.key) || 0} row{(evidence.get(standing.key) || 0) === 1 ? "" : "s"} in view</small>
+            </div>
             <div
               className={styles.feedShareTrack}
               aria-label={`${standing.label}: ${standing.wins} wins, ${standing.share.toFixed(1)} percent`}
@@ -41,7 +58,7 @@ export function FeedLeaderboard({ rows }: { rows: DashboardExecution[] }) {
             <b>{standing.wins}</b>
             <span className={styles.feedShare}>{standing.share.toFixed(1)}%</span>
           </div>
-        )) : <p className={styles.feedEmpty}>No landed buy winners in the current view.</p>}
+        )) : <p className={styles.feedEmpty}>No feed evidence in the current view.</p>}
       </div>
     </section>
   );

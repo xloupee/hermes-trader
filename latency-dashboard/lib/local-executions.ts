@@ -250,6 +250,8 @@ interface RawLocalExecutionReport {
   wallet_match_us: number | null;
   route_parse_us: number | null;
   send_lane_ms: number | null;
+  first_ack_lane: string | null;
+  send_rpc_winner: string | null;
   fee_profile_name: string | null;
   selected_priority_fee_micro_lamports: number | null;
   selected_helius_tip_lamports: number | null;
@@ -341,6 +343,8 @@ const LOCAL_EXECUTION_BASE_COLUMNS = [
   "wallet_match_us",
   "route_parse_us",
   "send_lane_ms",
+  "first_ack_lane",
+  "send_rpc_winner",
   "fee_profile_name",
   "selected_priority_fee_micro_lamports",
   "selected_helius_tip_lamports",
@@ -615,7 +619,10 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     routeParseUs: firstNumber(row.route_parse_us, rawNumber("routeParseUs")),
     sendLaneMs: firstNumber(row.send_lane_ms, rawNumber("sendLaneMs")),
     sendLaneMode: sendLaneAttribution?.sendLaneMode ?? stringValue(rawExecution?.sendLaneMode),
-    firstAckLane: sendLaneAttribution?.firstAckLane ?? stringValue(rawExecution?.sendRpcWinner),
+    firstAckLane: row.first_ack_lane
+      ?? sendLaneAttribution?.firstAckLane
+      ?? row.send_rpc_winner
+      ?? stringValue(rawExecution?.sendRpcWinner),
     sendLaneAttempts: sendLaneAttribution?.allAttempts ?? [],
     feeProfileName: row.fee_profile_name ?? stringValue(rawExecution?.feeProfileName),
     selectedPriorityFeeMicroLamports: firstNumber(

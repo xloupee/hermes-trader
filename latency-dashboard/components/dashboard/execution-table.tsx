@@ -42,6 +42,11 @@ function sideClass(side: string) {
   return side.toLowerCase() === "sell" ? styles.sideSell : styles.sideBuy;
 }
 
+function ackLaneLabel(lane: string | null): string {
+  if (!lane) return "lane n/a";
+  return lane.split(":", 1)[0] || "lane n/a";
+}
+
 const FEED_CLASSES: Record<FeedKey, string> = {
   vortex: styles.feedVortex,
   jito: styles.feedJito,
@@ -92,7 +97,10 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
                 <td><span className={sideClass(row.observedAction)}>{row.observedAction}</span></td>
                 <td className={styles.assetCell}><CopyChip value={row.mint} label="mint address" /></td>
                 <td><CopyChip value={row.observedWallet} label="watched wallet" /></td>
-                <td className={styles.ackCell}>{formatMs(row.observedToSignatureReturnedMs)}</td>
+                <td className={styles.ackCell}>
+                  <strong>{formatMs(row.observedToSignatureReturnedMs)}</strong>
+                  <span className={styles.ackLane} title={row.firstAckLane || undefined}>{ackLaneLabel(row.firstAckLane)}</span>
+                </td>
                 <td className={styles.signCell}>
                   <CopyChip value={row.sendSignature || row.observedSignature} label="transaction signature" />
                   {includeRowLinks ? (
@@ -122,7 +130,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
             <div className={styles.cardMeta}>
               <span>Feed<strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></span>
               <span>Route<strong>{row.selectedRoute || "n/a"}</strong></span>
-              <span>Ack<strong>{formatMs(row.observedToSignatureReturnedMs)}</strong></span>
+              <span>Ack<strong>{formatMs(row.observedToSignatureReturnedMs)}</strong><small className={styles.ackLane} title={row.firstAckLane || undefined}>{ackLaneLabel(row.firstAckLane)}</small></span>
             </div>
             <div className={styles.cardCopies}>
               <span>Wallet <CopyChip value={row.observedWallet} label="watched wallet" /></span>

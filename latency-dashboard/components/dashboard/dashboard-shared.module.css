@@ -332,6 +332,25 @@
   display: block;
 }
 
+.ackCell strong,
+.ackLane {
+  display: block;
+}
+
+.ackLane {
+  color: var(--muted);
+  font-family: "Instrument Sans", sans-serif;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin-top: 4px;
+  max-width: 13ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .timeCell strong {
   color: var(--ink);
   font-size: 12px;

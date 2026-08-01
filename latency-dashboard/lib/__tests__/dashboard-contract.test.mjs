@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 import {
   DashboardFilterError,
@@ -62,6 +63,13 @@ describe("dashboard contract", () => {
     assert.equal("chainReport" in dto, false);
     assert.equal("privateKey" in dto, false);
     assert.equal(JSON.stringify(dto).includes("never-return"), false);
+  });
+
+  test("dashboard execution queries preserve first ACK lane attribution", () => {
+    const source = readFileSync(new URL("../local-executions.ts", import.meta.url), "utf8");
+    assert.match(source, /"first_ack_lane"/);
+    assert.match(source, /"send_rpc_winner"/);
+    assert.match(source, /firstAckLane:\s*row\.first_ack_lane[\s\S]*?row\.send_rpc_winner/);
   });
 
   test("public list and detail DTOs never expose endpoint credentials", () => {

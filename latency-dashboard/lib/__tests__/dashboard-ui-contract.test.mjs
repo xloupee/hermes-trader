@@ -108,6 +108,8 @@ describe("dashboard UI contract", () => {
     assert.ok(table.indexOf("<th>Result / placement</th>") < table.indexOf("<th>Feed / route</th>"));
     assert.ok(table.indexOf("<th>Feed / route</th>") < table.indexOf("<th>Act</th>"));
     assert.match(table, /row\.selectedRoute \|\| "route unavailable"/);
+    assert.match(table, /ackLaneLabel\(row\.firstAckLane\)/);
+    assert.match(table, /title=\{row\.firstAckLane \|\| undefined\}/);
     assert.match(styles, /\.sideBuy\s*\{\s*color:\s*var\(--green\);\s*\}/);
     assert.match(styles, /\.sideSell\s*\{\s*color:\s*var\(--red\);\s*\}/);
   });

@@ -65,14 +65,15 @@ describe("dashboard UI contract", () => {
   });
 
   test("primary landing labels preserve canonical no-target, same-slot, and cross-slot wording", () => {
-    assert.equal(landingSummary({ outcome: "landed", landingComparison: "no_target", copySlot: 1355697770 }), "Landed · slot 1355697770 · no target comparison");
+    assert.equal(landingSummary({ outcome: "landed", landingComparison: "no_target", copySlot: 1355697770 }), "Landed · no target comparison");
     assert.equal(landingSummary({ outcome: "landed", landingComparison: "same_slot", copySlot: 1355697770, sameSlotTxDelta: 42 }), "Landed · same slot · 42 tx after target");
     assert.equal(landingSummary({ outcome: "landed", landingComparison: "same_slot", copySlot: 1355697770, sameSlotTxDelta: -3 }), "Landed · same slot · 3 tx before target");
     assert.equal(landingSummary({ outcome: "landed", landingComparison: "same_slot", copySlot: 1355697770, sameSlotTxDelta: 0 }), "Landed · same slot · at target transaction");
     assert.equal(landingSummary({ outcome: "landed", landingComparison: "same_slot", copySlot: 1355697770, sameSlotTxDelta: null }), "Landed · same slot · tx delta unavailable");
-    assert.equal(landingSummary({ outcome: "landed", landingComparison: "cross_slot", copySlot: 1355697770, slotDelta: 1, txDelta: 730 }), "Landed · +1 slot · 730 tx after target · copy slot 1355697770");
-    assert.equal(landingSummary({ outcome: "landed", landingComparison: "cross_slot", copySlot: 1355697768, slotDelta: -2, blockPositionDiagnostics: { crossSlotPositionSummary: { crossSlotTxDelta: -19 } } }), "Landed · -2 slots · 19 tx before target · copy slot 1355697768");
-    assert.equal(landingSummary({ outcome: "landed", landingComparison: "cross_slot", copySlot: 1355697768, slotDelta: 2 }), "Landed · +2 slots · tx delta unavailable · copy slot 1355697768");
+    assert.equal(landingSummary({ outcome: "landed", landingComparison: "cross_slot", copySlot: 1355697770, slotDelta: 1, txDelta: 730 }), "Landed · +1 slot · 730 tx after target");
+    assert.equal(landingSummary({ outcome: "landed", landingComparison: "cross_slot", copySlot: 1355697768, slotDelta: -2, blockPositionDiagnostics: { crossSlotPositionSummary: { crossSlotTxDelta: -19 } } }), "Landed · -2 slots · 19 tx before target");
+    assert.equal(landingSummary({ outcome: "landed", landingComparison: "cross_slot", copySlot: 1355697768, slotDelta: 2 }), "Landed · +2 slots · tx delta unavailable");
+    assert.doesNotMatch(landingSummary({ outcome: "landed", landingComparison: "unavailable", copySlot: 1355697768 }), /copy slot/i);
     assert.equal(landingComparisonSummary({ landingComparison: "same_slot", copySlot: 44, sameSlotTxDelta: 2 }), "same-slot · slot 44 · 2 tx");
   });
 

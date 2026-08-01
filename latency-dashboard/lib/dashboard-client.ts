@@ -129,8 +129,7 @@ export function applyLandingPreset(rows: DashboardExecution[], preset: LandingPr
 
 export function landingSummary(row: DashboardExecution): string {
   if (row.outcome === "landed") {
-    const copySlot = row.copySlot ?? "n/a";
-    if (row.landingComparison === "no_target") return `Landed · slot ${copySlot} · no target comparison`;
+    if (row.landingComparison === "no_target") return "Landed · no target comparison";
     if (row.landingComparison === "same_slot") {
       return `Landed · same slot · ${transactionPosition(row.sameSlotTxDelta)}`;
     }
@@ -143,9 +142,9 @@ export function landingSummary(row: DashboardExecution): string {
         row.blockPositionDiagnostics?.txDelta,
         row.blockPositionDiagnostics?.crossSlotPositionSummary?.crossSlotTxDelta
       );
-      return `Landed · ${slotDelta} · ${transactionPosition(crossSlotTxDelta)} · copy slot ${copySlot}`;
+      return `Landed · ${slotDelta} · ${transactionPosition(crossSlotTxDelta)}`;
     }
-    return `Landed · slot ${copySlot} · comparison unavailable`;
+    return "Landed · comparison unavailable";
   }
   const labels = {
     failed_on_chain: "Failed on chain",

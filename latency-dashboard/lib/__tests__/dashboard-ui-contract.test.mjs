@@ -147,7 +147,7 @@ describe("dashboard UI contract", () => {
     assert.ok(table.indexOf("<th>TX after</th>") < table.indexOf("<th>Leader</th>"));
     assert.ok(table.indexOf("<th>Leader</th>") < table.indexOf("<th>Feed</th>"));
     assert.ok(table.indexOf("<th>Feed</th>") < table.indexOf("<th>Lane / ACK</th>"));
-    assert.ok(table.indexOf("<th>Lane / ACK</th>") < table.indexOf("<th>Asset</th>"));
+    assert.ok(table.indexOf("<th>Lane / ACK</th>") < table.indexOf("<th>CA</th>"));
     assert.ok(table.indexOf("<th>Wallet</th>") < table.indexOf("<th>Telegram ID</th>"));
     assert.ok(table.indexOf("<th>Telegram ID</th>") < table.indexOf("<th>Transaction</th>"));
     assert.doesNotMatch(table, /feedTransportLabel|row\.selectedRoute/);

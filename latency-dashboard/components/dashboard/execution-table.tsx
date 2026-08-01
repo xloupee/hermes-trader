@@ -108,7 +108,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
               <th>Leader</th>
               <th>Feed</th>
               <th>Lane / ACK</th>
-              <th>Asset</th>
+              <th>CA</th>
               <th>Wallet</th>
               <th>Telegram ID</th>
               <th>Transaction</th>

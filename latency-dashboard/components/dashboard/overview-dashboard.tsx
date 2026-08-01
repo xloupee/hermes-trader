@@ -9,6 +9,7 @@ import { useDashboardFilters } from "./use-dashboard-filters";
 import { DashboardFiltersPanel } from "@/components/dashboard/dashboard-filters";
 import { DashboardRefreshToolbar } from "@/components/dashboard/dashboard-refresh";
 import { ExecutionTable } from "@/components/dashboard/execution-table";
+import { FeedLeaderboard } from "@/components/dashboard/feed-leaderboard";
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
 export function OverviewDashboard() {
@@ -25,6 +26,7 @@ export function OverviewDashboard() {
 
   return (
     <section className={`${styles.tapePage} ${styles.compactTapePage}`}>
+      <FeedLeaderboard rows={data?.executions ?? []} />
       <DashboardFiltersPanel filters={filters} onFiltersChange={setFilters} onOutcomeChange={setOutcome} />
       <DashboardRefreshToolbar
         loading={loading}

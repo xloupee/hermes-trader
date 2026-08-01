@@ -10,7 +10,7 @@ import {
   shortText,
   toQueryParams
 } from "../dashboard-client.ts";
-import { executionFeed, feedIdentity } from "../feed-winners.ts";
+import { executionFeed, feedIdentity, feedLeaderboard } from "../feed-winners.ts";
 
 const outcomeCounts = (values = {}) => ({
   landed: 0,
@@ -129,5 +129,18 @@ describe("dashboard UI contract", () => {
     assert.deepEqual(feedIdentity("jito-primary"), { key: "jito", label: "Jito" });
     assert.deepEqual(feedIdentity("erpc-direct-fra"), { key: "erpc", label: "eRPC" });
     assert.deepEqual(executionFeed("profit-target-monitor", "shredstream"), { key: "shredstream", label: "ShredStream" });
+  });
+
+  test("feed leaderboard ranks visible buy winners with stable shares and colors", () => {
+    assert.deepEqual(feedLeaderboard(["jito-primary", "vortex-fra", "vortex-iad", "jito-backup"]), [
+      { key: "vortex", label: "Vortex", wins: 2, share: 50 },
+      { key: "jito", label: "Jito", wins: 2, share: 50 }
+    ]);
+    const overview = readFileSync(new URL("../../components/dashboard/overview-dashboard.tsx", import.meta.url), "utf8");
+    const leaderboard = readFileSync(new URL("../../components/dashboard/feed-leaderboard.tsx", import.meta.url), "utf8");
+    assert.match(overview, /<FeedLeaderboard rows=\{data\?\.executions \?\? \[\]\} \/>/);
+    assert.match(leaderboard, /row\.observedAction\.toLowerCase\(\) === "buy"/);
+    assert.match(leaderboard, /Inbound buy race/);
+    assert.match(leaderboard, /Feed leaderboard/);
   });
 });

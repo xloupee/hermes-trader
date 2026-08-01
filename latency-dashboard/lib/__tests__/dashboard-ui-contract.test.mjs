@@ -116,6 +116,8 @@ describe("dashboard UI contract", () => {
     assert.match(table, /row\.selectedRoute \|\| "route unavailable"/);
     assert.match(table, /ackLaneLabel\(row\.firstAckLane\)/);
     assert.match(table, /title=\{row\.firstAckLane \|\| undefined\}/);
+    assert.match(table, /hour12:\s*true/);
+    assert.doesNotMatch(table, /hour12:\s*false/);
     assert.match(styles, /\.sideBuy\s*\{\s*color:\s*var\(--green\);\s*\}/);
     assert.match(styles, /\.sideSell\s*\{\s*color:\s*var\(--red\);\s*\}/);
   });

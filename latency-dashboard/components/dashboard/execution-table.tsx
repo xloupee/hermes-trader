@@ -47,6 +47,15 @@ function ackLaneLabel(lane: string | null): string {
   return lane.split(":", 1)[0] || "lane n/a";
 }
 
+function executionTime(observedAtMs: number): string {
+  return new Date(observedAtMs).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true
+  });
+}
+
 const FEED_CLASSES: Record<FeedKey, string> = {
   vortex: styles.feedVortex,
   jito: styles.feedJito,
@@ -86,7 +95,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
               const feed = executionFeed(row.source, row.provider);
               return <tr key={row.id}>
                 <td className={styles.timeCell}>
-                  <strong>{new Date(row.observedAtMs).toLocaleTimeString([], { hour12: false })}</strong>
+                  <strong>{executionTime(row.observedAtMs)}</strong>
                   <span>{new Date(row.observedAtMs).toLocaleDateString([], { month: "short", day: "numeric" })}</span>
                 </td>
                 <td>
@@ -121,7 +130,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
           return <article key={row.id} className={styles.card}>
             <header className={styles.cardHeader}>
               <div><span className={sideClass(row.observedAction)}>{row.observedAction}</span><strong>{shortText(row.mint, 5)}</strong></div>
-              <time>{new Date(row.observedAtMs).toLocaleTimeString([], { hour12: false })}</time>
+              <time>{executionTime(row.observedAtMs)}</time>
             </header>
             <div className={styles.cardOutcome}>
               <span className={statusClass(row.outcome)}>{landing.primary}</span>

@@ -102,11 +102,14 @@ describe("dashboard UI contract", () => {
 
   test("execution table remains accessible with eight columns", () => {
     const table = readFileSync(new URL("../../components/dashboard/execution-table.tsx", import.meta.url), "utf8");
+    const styles = readFileSync(new URL("../../components/dashboard/dashboard-shared.module.css", import.meta.url), "utf8");
     assert.equal((table.match(/<th>/g) || []).length, 8);
     assert.match(table, /aria-label="Execution results"/);
     assert.ok(table.indexOf("<th>Result / placement</th>") < table.indexOf("<th>Feed / route</th>"));
     assert.ok(table.indexOf("<th>Feed / route</th>") < table.indexOf("<th>Act</th>"));
     assert.match(table, /row\.selectedRoute \|\| "route unavailable"/);
+    assert.match(styles, /\.sideBuy\s*\{\s*color:\s*var\(--green\);\s*\}/);
+    assert.match(styles, /\.sideSell\s*\{\s*color:\s*var\(--red\);\s*\}/);
   });
 
   test("feed identity preserves inbound source attribution and transport fallback", () => {

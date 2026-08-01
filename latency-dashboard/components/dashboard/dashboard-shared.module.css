@@ -357,7 +357,7 @@
 }
 
 .sideBuy { color: var(--green); }
-.sideSell { color: oklch(76% 0.09 250); }
+.sideSell { color: var(--red); }
 
 .statusGood,
 .statusBad,

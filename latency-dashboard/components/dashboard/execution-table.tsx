@@ -6,6 +6,7 @@ import {
   formatMs,
   isDelayedLanding,
   landingSummary,
+  leaderContext,
   leaderSummary,
   leaderTitle,
   shortText
@@ -109,7 +110,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
                 </td>
                 <td className={styles.leaderCell} title={leaderTitle(row)}>
                   <strong>{leaderSummary(row)}</strong>
-                  <span className={styles.meta}>{row.leaderDiagnostics?.regionPath || "validator location"}</span>
+                  <span className={styles.meta}>{leaderContext(row)}</span>
                 </td>
                 <td><strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong><div className={styles.meta}>{transport ? `${transport} · ` : ""}{row.selectedRoute || "route unavailable"}</div></td>
                 <td className={styles.ackCell}>
@@ -146,7 +147,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
               <p>{landing.secondary}</p>
             </div>
             <div className={styles.cardMeta}>
-              <span>Leader<strong title={leaderTitle(row)}>{leaderSummary(row)}</strong><small className={styles.meta}>{row.leaderDiagnostics?.regionPath || "validator location"}</small></span>
+              <span>Leader<strong title={leaderTitle(row)}>{leaderSummary(row)}</strong><small className={styles.meta}>{leaderContext(row)}</small></span>
               <span>Feed<strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong>{transport ? <small className={styles.meta}>{transport}</small> : null}</span>
               <span>Route<strong>{row.selectedRoute || "n/a"}</strong></span>
               <span>Lane / ACK<strong className={styles.ackLane} title={row.firstAckLane || undefined}>{ackLaneLabel(row.firstAckLane)}</strong><small className={styles.meta}>{formatMs(row.observedToSignatureReturnedMs)} ACK</small></span>

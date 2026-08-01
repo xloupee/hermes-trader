@@ -188,6 +188,13 @@ export function leaderTitle(row: Pick<DashboardExecution, "leaderDiagnostics">):
   ].join("\n");
 }
 
+export function leaderContext(row: Pick<DashboardExecution, "leaderDiagnostics">): string {
+  const diagnostics = row.leaderDiagnostics;
+  if (!diagnostics) return "validator location";
+  if (diagnostics.leaderChanged && diagnostics.regionPath) return diagnostics.regionPath;
+  return diagnostics.copyLeader?.shortIdentity || diagnostics.targetLeader?.shortIdentity || "validator location";
+}
+
 function firstFiniteNumber(...values: Array<number | null | undefined>): number | null {
   return values.find((value): value is number => typeof value === "number" && Number.isFinite(value)) ?? null;
 }

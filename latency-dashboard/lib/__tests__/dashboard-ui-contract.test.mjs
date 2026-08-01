@@ -6,6 +6,7 @@ import {
   landingComparisonSummary,
   landingSummary,
   isDelayedLanding,
+  leaderContext,
   leaderSummary,
   overviewMetricValues,
   parseDashboardFilters,
@@ -91,6 +92,18 @@ describe("dashboard UI contract", () => {
       targetLeader: { broadRegion: "North America", location: "US:Virginia", shortIdentity: "target" },
       leaderChanged: true
     } }), "Europe changed");
+    assert.equal(leaderContext({ leaderDiagnostics: {
+      copyLeader: { shortIdentity: "copy...leader", broadRegion: "Europe" },
+      targetLeader: { shortIdentity: "copy...leader", broadRegion: "Europe" },
+      leaderChanged: false,
+      regionPath: "Europe"
+    } }), "copy...leader");
+    assert.equal(leaderContext({ leaderDiagnostics: {
+      copyLeader: { shortIdentity: "copy", broadRegion: "North America" },
+      targetLeader: { shortIdentity: "target", broadRegion: "Europe" },
+      leaderChanged: true,
+      regionPath: "Europe -> North America"
+    } }), "Europe -> North America");
   });
 
   test("CopyChip abbreviates display text and copies the full API value", () => {

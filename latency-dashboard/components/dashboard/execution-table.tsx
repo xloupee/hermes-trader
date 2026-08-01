@@ -8,6 +8,7 @@ import {
   shortText
 } from "@/lib/dashboard-client";
 import { CopyChip } from "@/components/dashboard/copy-chip";
+import { executionFeed, type FeedKey } from "@/lib/feed-winners";
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
 interface ExecutionTableProps {
@@ -41,6 +42,18 @@ function sideClass(side: string) {
   return side.toLowerCase() === "sell" ? styles.sideSell : styles.sideBuy;
 }
 
+const FEED_CLASSES: Record<FeedKey, string> = {
+  vortex: styles.feedVortex,
+  jito: styles.feedJito,
+  erpc: styles.feedErpc,
+  shredstream: styles.feedShredstream,
+  "shred-union": styles.feedUnion,
+  everstake: styles.feedEverstake,
+  doublezero: styles.feedDoublezero,
+  "on-chain": styles.feedOnChain,
+  unknown: styles.feedUnknown
+};
+
 export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: ExecutionTableProps) {
   if (rows.length === 0) {
     return <div className={styles.emptyState} role="status">{emptyMessage}</div>;
@@ -53,11 +66,11 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
           <thead>
             <tr>
               <th>Time</th>
+              <th>Result / placement</th>
+              <th>Feed / route</th>
               <th>Act</th>
               <th>Asset</th>
               <th>Wallet</th>
-              <th>Result / placement</th>
-              <th>Route</th>
               <th>Ack</th>
               <th>Transaction</th>
             </tr>
@@ -65,19 +78,20 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
           <tbody>
             {rows.map((row) => {
               const landing = landingParts(row);
+              const feed = executionFeed(row.source, row.provider);
               return <tr key={row.id}>
                 <td className={styles.timeCell}>
                   <strong>{new Date(row.observedAtMs).toLocaleTimeString([], { hour12: false })}</strong>
                   <span>{new Date(row.observedAtMs).toLocaleDateString([], { month: "short", day: "numeric" })}</span>
                 </td>
-                <td><span className={sideClass(row.observedAction)}>{row.observedAction}</span></td>
-                <td className={styles.assetCell}><CopyChip value={row.mint} label="mint address" /></td>
-                <td><CopyChip value={row.observedWallet} label="watched wallet" /></td>
                 <td>
                   <span className={statusClass(row.outcome)}>{landing.primary}</span>
                   <div className={styles.meta}>{landing.secondary}</div>
                 </td>
-                <td><strong>{row.selectedRoute || "n/a"}</strong><div className={styles.meta}>{row.provider || "provider unavailable"}</div></td>
+                <td><strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong><div className={styles.meta}>{row.selectedRoute || "route unavailable"}</div></td>
+                <td><span className={sideClass(row.observedAction)}>{row.observedAction}</span></td>
+                <td className={styles.assetCell}><CopyChip value={row.mint} label="mint address" /></td>
+                <td><CopyChip value={row.observedWallet} label="watched wallet" /></td>
                 <td className={styles.ackCell}>{formatMs(row.observedToSignatureReturnedMs)}</td>
                 <td className={styles.signCell}>
                   <CopyChip value={row.sendSignature || row.observedSignature} label="transaction signature" />
@@ -95,6 +109,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
       <div className={styles.mobileCards}>
         {rows.map((row) => {
           const landing = landingParts(row);
+          const feed = executionFeed(row.source, row.provider);
           return <article key={row.id} className={styles.card}>
             <header className={styles.cardHeader}>
               <div><span className={sideClass(row.observedAction)}>{row.observedAction}</span><strong>{shortText(row.mint, 5)}</strong></div>
@@ -105,8 +120,8 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
               <p>{landing.secondary}</p>
             </div>
             <div className={styles.cardMeta}>
+              <span>Feed<strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></span>
               <span>Route<strong>{row.selectedRoute || "n/a"}</strong></span>
-              <span>Provider<strong>{row.provider || "n/a"}</strong></span>
               <span>Ack<strong>{formatMs(row.observedToSignatureReturnedMs)}</strong></span>
             </div>
             <div className={styles.cardCopies}>

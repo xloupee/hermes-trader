@@ -10,6 +10,7 @@ import {
   shortText,
   toQueryParams
 } from "../dashboard-client.ts";
+import { executionFeed, feedIdentity, feedLeaderboard } from "../feed-winners.ts";
 
 const outcomeCounts = (values = {}) => ({
   landed: 0,
@@ -102,5 +103,19 @@ describe("dashboard UI contract", () => {
     const table = readFileSync(new URL("../../components/dashboard/execution-table.tsx", import.meta.url), "utf8");
     assert.equal((table.match(/<th>/g) || []).length, 8);
     assert.match(table, /aria-label="Execution results"/);
+    assert.ok(table.indexOf("<th>Result / placement</th>") < table.indexOf("<th>Feed / route</th>"));
+    assert.ok(table.indexOf("<th>Feed / route</th>") < table.indexOf("<th>Act</th>"));
+    assert.match(table, /row\.selectedRoute \|\| "route unavailable"/);
+  });
+
+  test("feed identity and leaderboard preserve inbound race attribution", () => {
+    assert.deepEqual(feedIdentity("vortex-fra"), { key: "vortex", label: "Vortex" });
+    assert.deepEqual(feedIdentity("jito-primary"), { key: "jito", label: "Jito" });
+    assert.deepEqual(feedIdentity("erpc-direct-fra"), { key: "erpc", label: "eRPC" });
+    assert.deepEqual(executionFeed("profit-target-monitor", "shredstream"), { key: "shredstream", label: "ShredStream" });
+    assert.deepEqual(feedLeaderboard(["vortex-fra", "jito-primary", "vortex-fra"]).map(({ key, wins, share }) => ({ key, wins, share: share.toFixed(1) })), [
+      { key: "vortex", wins: 2, share: "66.7" },
+      { key: "jito", wins: 1, share: "33.3" }
+    ]);
   });
 });

@@ -13,6 +13,7 @@ import { useDashboardFilters } from "./use-dashboard-filters";
 import { DashboardFiltersPanel } from "@/components/dashboard/dashboard-filters";
 import { DashboardRefreshToolbar } from "@/components/dashboard/dashboard-refresh";
 import { ExecutionTable } from "@/components/dashboard/execution-table";
+import { FeedLeaderboard } from "@/components/dashboard/feed-leaderboard";
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
 interface OverviewPayload {
@@ -70,6 +71,7 @@ export function OverviewDashboard() {
         <div className={styles.metric}><span>Landing rate</span><strong>{metrics?.landingRate ?? "n/a"}</strong><i>24H</i></div>
         <div className={styles.metric}><span>Non-landed</span><strong>{formatCount(metrics?.nonLandedAttempts)}</strong><i>ATTEMPTS</i></div>
       </div>
+      <FeedLeaderboard rows={data?.executions.executions ?? []} />
       <DashboardFiltersPanel filters={filters} onFiltersChange={setFilters} onOutcomeChange={setOutcome} />
       <DashboardRefreshToolbar
         loading={loading}

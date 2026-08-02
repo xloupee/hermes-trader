@@ -1,11 +1,18 @@
 import type { DashboardSourceFilters } from "@/lib/dashboard-contract.mjs";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { dashboardInboundSourcePredicate, normalizeInboundFeedAttribution } from "@/lib/feed-winners";
 
 interface RawSourceRow {
   id: number;
   observed_at_ms: number;
   source: string;
   provider: string;
+  observed_wallet: string;
+  copy_wallet: string | null;
+  selected_route: string;
+  observed_action: string;
+  raw_execution: unknown;
+  chain_report: unknown;
 }
 
 export interface DashboardSourceRow {
@@ -27,8 +34,8 @@ export async function listDashboardSources(filters: DashboardSourceFilters): Pro
 
   while (true) {
     let query = createAdminClient()
-      .from("copytrade_signal_observations")
-      .select("id,observed_at_ms,source,provider", { count: "exact" })
+      .from("copytrade_local_executions")
+      .select("id,observed_at_ms,source,provider,observed_wallet,copy_wallet,selected_route,observed_action,raw_execution,chain_report", { count: "exact" })
       .gte("observed_at_ms", filters.fromObservedAtMs)
       .lte("observed_at_ms", filters.toObservedAtMs)
       .order("observed_at_ms", { ascending: false })
@@ -36,11 +43,11 @@ export async function listDashboardSources(filters: DashboardSourceFilters): Pro
       .limit(PAGE_SIZE);
 
     if (filters.provider) query = query.eq("provider", filters.provider);
-    if (filters.source) query = query.ilike("source", `%${filters.source}%`);
-    if (filters.wallet) query = query.eq("target_wallet", filters.wallet);
+    if (filters.source) query = query.or(dashboardInboundSourcePredicate(filters.source));
+    if (filters.wallet) query = query.or(`observed_wallet.eq.${filters.wallet},copy_wallet.eq.${filters.wallet}`);
     if (filters.mint) query = query.ilike("mint", `%${filters.mint}%`);
-    if (filters.route) query = query.eq("route", filters.route);
-    if (filters.side) query = query.eq("action", filters.side);
+    if (filters.route) query = query.eq("selected_route", filters.route);
+    if (filters.side) query = query.eq("observed_action", filters.side);
     if (cursor) query = query.or(sourceCursorWhere(cursor));
 
     const { data, error, count } = await query;
@@ -48,10 +55,11 @@ export async function listDashboardSources(filters: DashboardSourceFilters): Pro
     const rows = (((data as unknown) as RawSourceRow[] | null) || []);
 
     for (const row of rows) {
-      const key = `${row.source}:${row.provider}`;
+      const inboundSource = normalizeInboundFeedAttribution(row.raw_execution, row.chain_report, row.source).inboundSource ?? "unknown";
+      const key = `${inboundSource}:${row.provider}`;
       const current = grouped.get(key);
       if (!current) {
-        grouped.set(key, { source: row.source, provider: row.provider, count: 1, latestObservedAtMs: row.observed_at_ms });
+        grouped.set(key, { source: inboundSource, provider: row.provider, count: 1, latestObservedAtMs: row.observed_at_ms });
       } else {
         current.count += 1;
         current.latestObservedAtMs = Math.max(current.latestObservedAtMs, row.observed_at_ms);

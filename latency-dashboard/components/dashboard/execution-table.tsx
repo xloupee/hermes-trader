@@ -73,13 +73,10 @@ function sideClass(side: string) {
 }
 
 const FEED_CLASSES: Record<FeedKey, string> = {
-  vortex: styles.feedVortex,
-  jito: styles.feedJito,
-  erpc: styles.feedErpc,
-  "shred-union": styles.feedUnion,
-  everstake: styles.feedEverstake,
-  doublezero: styles.feedDoublezero,
-  "on-chain": styles.feedOnChain,
+  "vortex-fra": styles.feedVortex,
+  "jito-primary": styles.feedJito,
+  "doublezero-leader": styles.feedDoublezero,
+  "doublezero-retransmit-eu": styles.feedDoublezero,
   unknown: styles.feedUnknown
 };
 
@@ -128,7 +125,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
           <tbody>
             {rows.map((row) => {
               const landing = landingParts(row);
-              const feed = executionFeed(row.source, row.provider);
+              const feed = executionFeed(row.inboundSource);
               const lane = sendLaneIdentity(row.firstAckLane);
               return <tr key={row.id}>
                 <td className={styles.timeCell}>
@@ -169,7 +166,7 @@ export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: 
       <div className={styles.mobileCards}>
         {rows.map((row) => {
           const landing = landingParts(row);
-          const feed = executionFeed(row.source, row.provider);
+          const feed = executionFeed(row.inboundSource);
           const lane = sendLaneIdentity(row.firstAckLane);
           return <article key={row.id} className={styles.card}>
             <header className={styles.cardHeader}>

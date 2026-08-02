@@ -3,25 +3,22 @@ import { executionEvidenceCounts, feedLeaderboard, isLandedBuy, type FeedKey, ty
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
 const FEED_TONES: Record<FeedKey, string> = {
-  vortex: styles.feedVortex,
-  jito: styles.feedJito,
-  erpc: styles.feedErpc,
-  "shred-union": styles.feedUnion,
-  everstake: styles.feedEverstake,
-  doublezero: styles.feedDoublezero,
-  "on-chain": styles.feedOnChain,
+  "vortex-fra": styles.feedVortex,
+  "jito-primary": styles.feedJito,
+  "doublezero-leader": styles.feedDoublezero,
+  "doublezero-retransmit-eu": styles.feedDoublezero,
   unknown: styles.feedUnknown
 };
 
 export function FeedLeaderboard({ rows }: { rows: DashboardExecution[] }) {
   const landedBuys = rows.filter(isLandedBuy);
-  const winnerStandings = feedLeaderboard(landedBuys.map((row) => row.source));
-  const evidence = executionEvidenceCounts(rows.map((row) => row.source));
+  const winnerStandings = feedLeaderboard(landedBuys.map((row) => row.inboundSource));
+  const evidence = executionEvidenceCounts(rows.map((row) => row.inboundSource));
   const standingByKey = new Map(winnerStandings.map((standing) => [standing.key, standing]));
-  const trackedFeeds: FeedStanding[] = (["jito", "vortex", "doublezero"] as const).map((key) => (
+  const trackedFeeds: FeedStanding[] = (["jito-primary", "doublezero-leader", "doublezero-retransmit-eu", "vortex-fra"] as const).map((key) => (
     standingByKey.get(key) || {
       key,
-      label: key === "jito" ? "Jito" : key === "vortex" ? "Vortex" : "DoubleZero Edge",
+      label: key === "jito-primary" ? "Jito primary" : key === "vortex-fra" ? "Vortex FRA" : key === "doublezero-leader" ? "DoubleZero leader" : "DoubleZero retransmit EU",
       wins: 0,
       share: 0
     }

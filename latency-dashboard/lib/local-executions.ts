@@ -1,5 +1,9 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { dashboardOutcomePredicate } from "@/lib/dashboard-contract.mjs";
+import {
+  dashboardInboundSourcePredicate,
+  normalizeInboundFeedAttribution,
+} from "@/lib/feed-winners";
 import type { SignalFilters } from "@/lib/signals";
 
 export interface BlockPositionDiagnostics {
@@ -36,6 +40,9 @@ export interface LocalExecutionReport {
   observedAtMs: number;
   provider: string;
   source: string;
+  inboundSource: string | null;
+  inboundContributors: string[];
+  inboundSelectionGeneration: number | null;
   endpoint: string | null;
   observedWallet: string;
   copyWallet: string | null;
@@ -370,6 +377,7 @@ const LOCAL_EXECUTION_BASE_COLUMNS = [
 const LOCAL_EXECUTION_SELECT = LOCAL_EXECUTION_BASE_COLUMNS.join(",");
 const DASHBOARD_EXECUTION_SELECT = [
   ...LOCAL_EXECUTION_BASE_COLUMNS,
+  "raw_execution",
   "chain_report"
 ].join(",");
 const LOCAL_EXECUTION_DETAIL_SELECT = [
@@ -538,6 +546,7 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
   const rawExecution = objectValue(row.raw_execution);
   const chainReport = chainReportValue(row);
   const sendLaneAttribution = normalizeSendLaneAttribution(rawExecution);
+  const inbound = normalizeInboundFeedAttribution(row.raw_execution, row.chain_report, row.source);
   const rawNumber = (key: string) => numberValue(rawExecution?.[key]);
   const firstNumber = (...values: Array<unknown>): number | null => {
     for (const value of values) {
@@ -555,6 +564,9 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     observedAtMs: row.observed_at_ms,
     provider: row.provider,
     source: row.source,
+    inboundSource: inbound.inboundSource,
+    inboundContributors: inbound.inboundContributors,
+    inboundSelectionGeneration: inbound.inboundSelectionGeneration,
     endpoint: row.endpoint,
     observedWallet: row.observed_wallet,
     copyWallet: row.copy_wallet,
@@ -710,7 +722,7 @@ function filteredDashboardExecutionQuery(filters: DashboardExecutionFilters, col
     .lte("observed_at_ms", filters.toObservedAtMs);
 
   if (filters.provider) query = query.eq("provider", filters.provider);
-  if (filters.source) query = query.ilike("source", `%${filters.source}%`);
+  if (filters.source) query = query.or(dashboardInboundSourcePredicate(filters.source));
   if (filters.wallet) query = query.or(`observed_wallet.eq.${filters.wallet},copy_wallet.eq.${filters.wallet}`);
   if (filters.mint) query = query.ilike("mint", `%${filters.mint}%`);
   if (filters.route) query = query.eq("selected_route", filters.route);

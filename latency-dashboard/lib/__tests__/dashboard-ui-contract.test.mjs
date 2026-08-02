@@ -13,7 +13,7 @@ import {
   shortText,
   toQueryParams
 } from "../dashboard-client.ts";
-import { executionEvidenceCounts, executionFeed, feedIdentity, feedLeaderboard, feedTransportLabel, isLandedBuy } from "../feed-winners.ts";
+import { dashboardInboundSourcePredicate, executionEvidenceCounts, executionFeed, feedIdentity, feedLeaderboard, feedTransportLabel, isLandedBuy, normalizeInboundFeedAttribution } from "../feed-winners.ts";
 import { sendLaneIdentity } from "../send-lanes.ts";
 import { formatUserDate, formatUserDateTime, formatUserTime, userTimeZoneLabel } from "../user-time.ts";
 
@@ -135,6 +135,9 @@ describe("dashboard UI contract", () => {
     assert.match(detail, /row\.txParseUs\).*row\.routeParseUs/s);
     assert.match(detail, /row\.unsignedBuildUs\).*row\.signUs/s);
     assert.match(detail, /ackDurationMs\(row\)/);
+    assert.match(detail, /executionFeed\(row\.inboundSource\)/);
+    assert.match(detail, /row\.inboundContributors/);
+    assert.match(detail, /row\.inboundSelectionGeneration/);
     assert.doesNotMatch(detail, /rawExecution|chainReport|privateKey|keypair|mnemonic|seed|custody/);
   });
 
@@ -152,6 +155,7 @@ describe("dashboard UI contract", () => {
     assert.ok(table.indexOf("<th>Wallet</th>") < table.indexOf("<th>Telegram ID</th>"));
     assert.ok(table.indexOf("<th>Telegram ID</th>") < table.indexOf("<th>Transaction</th>"));
     assert.doesNotMatch(table, /feedTransportLabel|row\.selectedRoute/);
+    assert.match(table, /executionFeed\(row\.inboundSource\)/);
     assert.match(table, /sendLaneIdentity\(row\.firstAckLane\)/);
     assert.match(table, /title=\{lane\.raw \|\| undefined\}/);
     assert.match(table, /placementClass\(row\)/);
@@ -178,15 +182,47 @@ describe("dashboard UI contract", () => {
     assert.equal(userTimeZoneLabel("America/Los_Angeles", timestamp, "en-US"), "PDT");
   });
 
-  test("feed identity preserves inbound source attribution and transport fallback", () => {
-    assert.deepEqual(feedIdentity("vortex-fra"), { key: "vortex", label: "Vortex" });
-    assert.deepEqual(feedIdentity("jito-primary"), { key: "jito", label: "Jito" });
-    assert.deepEqual(feedIdentity("shredstream"), { key: "jito", label: "Jito" });
-    assert.deepEqual(feedIdentity("erpc-direct-fra"), { key: "erpc", label: "eRPC" });
-    assert.deepEqual(feedIdentity("doublezero-edge"), { key: "doublezero", label: "DoubleZero Edge" });
-    assert.deepEqual(executionFeed("profit-target-monitor", "shredstream"), { key: "jito", label: "Jito" });
+  test("feed identity accepts only typed inbound winners and keeps transport separate", () => {
+    assert.deepEqual(feedIdentity("vortex-fra"), { key: "vortex-fra", label: "Vortex FRA" });
+    assert.deepEqual(feedIdentity("jito-primary"), { key: "jito-primary", label: "Jito primary" });
+    assert.deepEqual(feedIdentity("doublezero-leader"), { key: "doublezero-leader", label: "DoubleZero leader" });
+    assert.deepEqual(feedIdentity("doublezero-retransmit-eu"), { key: "doublezero-retransmit-eu", label: "DoubleZero retransmit EU" });
+    assert.deepEqual(feedIdentity("shredstream"), { key: "unknown", label: "Unknown" });
+    assert.deepEqual(feedIdentity("stable-ingress-active"), { key: "unknown", label: "Unknown" });
+    assert.deepEqual(feedIdentity("confirmed_rpc"), { key: "unknown", label: "Unknown" });
+    assert.deepEqual(executionFeed(null, "shredstream"), { key: "unknown", label: "Unknown" });
     assert.equal(feedTransportLabel("jito-primary", null), "ShredStream");
     assert.equal(feedTransportLabel("stable-ingress-active", "shredstream"), "ShredStream");
+  });
+
+  test("typed inbound normalization follows durable path priority and fail-closed legacy rules", () => {
+    for (const selectedSource of ["jito-primary", "doublezero-leader", "doublezero-retransmit-eu", "vortex-fra"]) {
+      assert.equal(normalizeInboundFeedAttribution({ executionTelemetry: { inbound: { selectedSource } } }, null, "shredstream").inboundSource, selectedSource);
+    }
+
+    assert.deepEqual(normalizeInboundFeedAttribution({
+      executionTelemetry: { inbound: { selectedSource: "vortex-fra", contributors: ["vortex-fra", "jito-primary", "VORTEX-FRA", "raw-union-eu"], selectionGeneration: 17 } },
+      rustTransactionConfirmation: { executionTelemetry: { inbound: { selectedSource: "jito-primary", selectionGeneration: 16 } } }
+    }, { executionTelemetry: { inbound: { selectedSource: "doublezero-leader" } } }, "jito-primary"), {
+      inboundSource: "vortex-fra",
+      inboundContributors: ["vortex-fra", "jito-primary", "unknown"],
+      inboundSelectionGeneration: 17
+    });
+
+    assert.equal(normalizeInboundFeedAttribution({ rustTransactionConfirmation: { executionTelemetry: { inbound: { selectedSource: "doublezero-retransmit-eu" } } } }, null, null).inboundSource, "doublezero-retransmit-eu");
+    assert.equal(normalizeInboundFeedAttribution(null, { executionTelemetry: { inbound: { selectedSource: "doublezero-leader" } } }, null).inboundSource, "doublezero-leader");
+    assert.equal(normalizeInboundFeedAttribution(null, null, "jito-primary").inboundSource, "jito-primary");
+    assert.equal(normalizeInboundFeedAttribution(null, null, "shredstream").inboundSource, null);
+    assert.equal(normalizeInboundFeedAttribution({ executionTelemetry: { inbound: "shredstream" }, rustTransactionConfirmation: { executionTelemetry: { inbound: { selectedSource: "jito-primary" } } } }, null, "jito-primary").inboundSource, null);
+
+    const jitoFilter = dashboardInboundSourcePredicate("jito-primary");
+    assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->>selectedSource\.ilike\.jito-primary/);
+    assert.match(jitoFilter, /raw_execution->rustTransactionConfirmation->executionTelemetry->inbound->>selectedSource\.ilike\.jito-primary/);
+    assert.match(jitoFilter, /chain_report->executionTelemetry->inbound->>selectedSource\.ilike\.jito-primary/);
+    assert.match(jitoFilter, /source\.ilike\.jito-primary/);
+    assert.doesNotMatch(jitoFilter, /provider|shredstream/);
+    assert.match(dashboardInboundSourcePredicate("unknown"), /source\.not\.in\.\(jito-primary,doublezero-leader,doublezero-retransmit-eu,vortex-fra\)/);
+    assert.equal(dashboardInboundSourcePredicate("shredstream"), "source.eq.__no_typed_feed_match__");
   });
 
   test("outbound ACK lanes use stable operator labels without losing raw attribution", () => {
@@ -206,17 +242,21 @@ describe("dashboard UI contract", () => {
     assert.equal(isLandedBuy({ observedAction: "buy", outcome: "skipped" }), false);
     assert.equal(isLandedBuy({ observedAction: "buy", outcome: "failed_on_chain" }), false);
     assert.equal(isLandedBuy({ observedAction: "sell", outcome: "landed" }), false);
-    assert.deepEqual(feedLeaderboard(["jito-primary", "vortex-fra", "vortex-iad", "jito-backup"]), [
-      { key: "vortex", label: "Vortex", wins: 2, share: 50 },
-      { key: "jito", label: "Jito", wins: 2, share: 50 }
+    assert.deepEqual(feedLeaderboard(["jito-primary", "vortex-fra", "doublezero-leader", "doublezero-retransmit-eu"]), [
+      { key: "jito-primary", label: "Jito primary", wins: 1, share: 25 },
+      { key: "doublezero-leader", label: "DoubleZero leader", wins: 1, share: 25 },
+      { key: "doublezero-retransmit-eu", label: "DoubleZero retransmit EU", wins: 1, share: 25 },
+      { key: "vortex-fra", label: "Vortex FRA", wins: 1, share: 25 }
     ]);
     assert.deepEqual(feedLeaderboard(["jito-primary", "shredstream", "vortex-fra"]), [
-      { key: "jito", label: "Jito", wins: 2, share: (2 / 3) * 100 },
-      { key: "vortex", label: "Vortex", wins: 1, share: (1 / 3) * 100 }
+      { key: "jito-primary", label: "Jito primary", wins: 1, share: (1 / 3) * 100 },
+      { key: "vortex-fra", label: "Vortex FRA", wins: 1, share: (1 / 3) * 100 },
+      { key: "unknown", label: "Unknown", wins: 1, share: (1 / 3) * 100 }
     ]);
     assert.deepEqual([...executionEvidenceCounts(["jito-primary", "vortex-fra", "jito-backup"])], [
-      ["jito", 2],
-      ["vortex", 1]
+      ["jito-primary", 1],
+      ["vortex-fra", 1],
+      ["unknown", 1]
     ]);
     const overview = readFileSync(new URL("../../components/dashboard/overview-dashboard.tsx", import.meta.url), "utf8");
     const leaderboard = readFileSync(new URL("../../components/dashboard/feed-leaderboard.tsx", import.meta.url), "utf8");
@@ -226,7 +266,7 @@ describe("dashboard UI contract", () => {
     assert.match(leaderboard, /Landed buy race/);
     assert.match(leaderboard, /landed buy/);
     assert.match(leaderboard, /execution evidence only/);
-    assert.match(leaderboard, /\["jito", "vortex", "doublezero"\]/);
+    assert.match(leaderboard, /\["jito-primary", "doublezero-leader", "doublezero-retransmit-eu", "vortex-fra"\]/);
     assert.match(leaderboard, /Feed leaderboard/);
     assert.doesNotMatch(readFileSync(new URL("../../components/dashboard/execution-table.tsx", import.meta.url), "utf8"), /feedTransportLabel/);
     assert.match(styles, /\.feedLeaderboard\s*\{[^}]*block-size:\s*auto;/s);

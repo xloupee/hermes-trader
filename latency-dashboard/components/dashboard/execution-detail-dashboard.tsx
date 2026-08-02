@@ -11,6 +11,7 @@ import { firstNumber } from "@/lib/benchmark-position";
 import { formatUserDateTime } from "@/lib/user-time";
 import { useUserTimeZone } from "@/lib/use-user-time-zone";
 import styles from "@/components/dashboard/dashboard-shared.module.css";
+import { executionFeed } from "@/lib/feed-winners";
 
 function DetailList({ rows }: { rows: Array<{ label: string; value: string }> }) {
   return <dl className={styles.detailList}>{rows.map((item) => <div key={item.label}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}</dl>;
@@ -48,6 +49,7 @@ function LatencyBreakdown({ row }: { row: DashboardExecution }) {
 }
 
 function GroupedDiagnostics({ row, timeZone }: { row: DashboardExecution; timeZone: string }) {
+  const feed = executionFeed(row.inboundSource);
   const timingRows = [
     { label: "Observed", value: formatUserDateTime(row.observedAtMs, timeZone) },
     { label: "Outcome", value: landingSummary(row) },
@@ -71,7 +73,10 @@ function GroupedDiagnostics({ row, timeZone }: { row: DashboardExecution; timeZo
     { label: "Action", value: row.observedAction || "n/a" },
     { label: "Mint", value: row.mint || "n/a" },
     { label: "Provider", value: row.provider || "n/a" },
-    { label: "Source", value: row.source || "n/a" },
+    { label: "Feed", value: row.inboundSource ? `${feed.label} (${row.inboundSource})` : "Unknown" },
+    { label: "Feed contributors", value: row.inboundContributors.length > 0 ? row.inboundContributors.join(" → ") : "n/a" },
+    { label: "Feed selection generation", value: formatCount(row.inboundSelectionGeneration) },
+    { label: "Legacy source label", value: row.source || "n/a" },
     { label: "Route", value: row.selectedRoute || "n/a" },
     { label: "Observed wallet", value: row.observedWallet || "n/a" }
   ];

@@ -1,12 +1,12 @@
-export type FeedKey =
-  | "vortex"
-  | "jito"
-  | "erpc"
-  | "shred-union"
-  | "everstake"
-  | "doublezero"
-  | "on-chain"
-  | "unknown";
+export const RECOGNIZED_FEED_SOURCES = [
+  "jito-primary",
+  "doublezero-leader",
+  "doublezero-retransmit-eu",
+  "vortex-fra"
+] as const;
+
+export type RecognizedFeedSource = (typeof RECOGNIZED_FEED_SOURCES)[number];
+export type FeedKey = RecognizedFeedSource | "unknown";
 
 export interface FeedIdentity {
   key: FeedKey;
@@ -18,44 +18,123 @@ export interface FeedStanding extends FeedIdentity {
   share: number;
 }
 
+export interface InboundFeedAttribution {
+  inboundSource: string | null;
+  inboundContributors: string[];
+  inboundSelectionGeneration: number | null;
+}
+
 export function isLandedBuy(row: { observedAction?: string | null; outcome?: string | null }): boolean {
   return row.observedAction?.toLowerCase() === "buy" && row.outcome === "landed";
 }
 
+const RECOGNIZED_FEED_SOURCE_SET = new Set<string>(RECOGNIZED_FEED_SOURCES);
+
 const FEED_LABELS: Record<FeedKey, string> = {
-  vortex: "Vortex",
-  jito: "Jito",
-  erpc: "eRPC",
-  "shred-union": "Shred union",
-  everstake: "Everstake",
-  doublezero: "DoubleZero Edge",
-  "on-chain": "On-chain",
+  "jito-primary": "Jito primary",
+  "doublezero-leader": "DoubleZero leader",
+  "doublezero-retransmit-eu": "DoubleZero retransmit EU",
+  "vortex-fra": "Vortex FRA",
   unknown: "Unknown"
 };
 
-const FEED_ORDER: FeedKey[] = [
-  "vortex",
-  "jito",
-  "erpc",
-  "shred-union",
-  "everstake",
-  "doublezero",
-  "on-chain",
-  "unknown"
-];
+const FEED_ORDER: FeedKey[] = [...RECOGNIZED_FEED_SOURCES, "unknown"];
+
+export function recognizedFeedSource(value: unknown): RecognizedFeedSource | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return RECOGNIZED_FEED_SOURCE_SET.has(normalized) ? normalized as RecognizedFeedSource : null;
+}
+
+export function recognizedFeedSourcesMatchingFilter(value: string): RecognizedFeedSource[] {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return [...RECOGNIZED_FEED_SOURCES];
+  return RECOGNIZED_FEED_SOURCES.filter((source) => source.includes(normalized));
+}
+
+export function dashboardInboundSourcePredicate(sourceFilter: string): string {
+  const candidates = recognizedFeedSourcesMatchingFilter(sourceFilter);
+  const rawInbound = "raw_execution->executionTelemetry->inbound";
+  const confirmationInbound = "raw_execution->rustTransactionConfirmation->executionTelemetry->inbound";
+  const chainInbound = "chain_report->executionTelemetry->inbound";
+
+  if (candidates.length === 0) {
+    if (sourceFilter.trim().toLowerCase() !== "unknown") return "source.eq.__no_typed_feed_match__";
+    const recognized = `(${RECOGNIZED_FEED_SOURCES.join(",")})`;
+    return [
+      `and(${rawInbound}.not.is.null,or(${rawInbound}->>selectedSource.is.null,${rawInbound}->>selectedSource.not.in.${recognized}))`,
+      `and(${rawInbound}.is.null,${confirmationInbound}.not.is.null,or(${confirmationInbound}->>selectedSource.is.null,${confirmationInbound}->>selectedSource.not.in.${recognized}))`,
+      `and(${rawInbound}.is.null,${confirmationInbound}.is.null,${chainInbound}.not.is.null,or(${chainInbound}->>selectedSource.is.null,${chainInbound}->>selectedSource.not.in.${recognized}))`,
+      `and(${rawInbound}.is.null,${confirmationInbound}.is.null,${chainInbound}.is.null,source.not.in.${recognized})`
+    ].join(",");
+  }
+
+  const predicates: string[] = [];
+  for (const source of candidates) {
+    predicates.push(`${rawInbound}->>selectedSource.ilike.${source}`);
+    predicates.push(`and(${rawInbound}.is.null,${confirmationInbound}->>selectedSource.ilike.${source})`);
+    predicates.push(`and(${rawInbound}.is.null,${confirmationInbound}.is.null,${chainInbound}->>selectedSource.ilike.${source})`);
+    predicates.push(`and(${rawInbound}.is.null,${confirmationInbound}.is.null,${chainInbound}.is.null,source.ilike.${source})`);
+  }
+  return predicates.join(",");
+}
+
+export function normalizeFeedContributors(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const contributors: string[] = [];
+  for (const item of value) {
+    const source = recognizedFeedSource(item) ?? "unknown";
+    if (!contributors.includes(source)) contributors.push(source);
+  }
+  return contributors;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function hasOwn(value: Record<string, unknown> | null, key: string): boolean {
+  return value !== null && Object.prototype.hasOwnProperty.call(value, key);
+}
+
+export function normalizeInboundFeedAttribution(
+  rawExecutionValue: unknown,
+  chainReportValue: unknown,
+  legacySource: unknown
+): InboundFeedAttribution {
+  const rawExecution = recordValue(rawExecutionValue);
+  const confirmation = recordValue(rawExecution?.rustTransactionConfirmation);
+  const telemetryCandidates = [
+    recordValue(rawExecution?.executionTelemetry),
+    recordValue(confirmation?.executionTelemetry),
+    recordValue(recordValue(chainReportValue)?.executionTelemetry)
+  ];
+
+  for (const telemetry of telemetryCandidates) {
+    if (!hasOwn(telemetry, "inbound")) continue;
+    const inbound = recordValue(telemetry?.inbound);
+    return {
+      inboundSource: recognizedFeedSource(inbound?.selectedSource),
+      inboundContributors: normalizeFeedContributors(inbound?.contributors),
+      inboundSelectionGeneration: finiteNumber(inbound?.selectionGeneration)
+    };
+  }
+
+  return {
+    inboundSource: recognizedFeedSource(legacySource),
+    inboundContributors: [],
+    inboundSelectionGeneration: null
+  };
+}
 
 export function feedIdentity(value: string | null | undefined): FeedIdentity {
-  const normalized = value?.trim().toLowerCase() || "";
-  let key: FeedKey = "unknown";
-
-  if (normalized.includes("vortex")) key = "vortex";
-  else if (normalized.includes("erpc")) key = "erpc";
-  else if (normalized.includes("shred-union") || normalized.includes("raw-union")) key = "shred-union";
-  else if (normalized.includes("jito") || normalized.includes("shredstream")) key = "jito";
-  else if (normalized.includes("everstake")) key = "everstake";
-  else if (normalized.includes("doublezero")) key = "doublezero";
-  else if (normalized.includes("on_chain") || normalized.includes("confirmed_rpc")) key = "on-chain";
-
+  const key = recognizedFeedSource(value) ?? "unknown";
   return { key, label: FEED_LABELS[key] };
 }
 
@@ -68,11 +147,10 @@ export function feedTransportLabel(
 }
 
 export function executionFeed(
-  source: string | null | undefined,
-  provider: string | null | undefined
+  inboundSource: string | null | undefined,
+  _provider?: string | null | undefined
 ): FeedIdentity {
-  const sourceFeed = feedIdentity(source);
-  return sourceFeed.key !== "unknown" ? sourceFeed : feedIdentity(provider);
+  return feedIdentity(inboundSource);
 }
 
 export function feedLeaderboard(sources: Array<string | null | undefined>): FeedStanding[] {

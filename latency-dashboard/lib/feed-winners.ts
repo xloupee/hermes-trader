@@ -52,39 +52,50 @@ export function recognizedFeedSourcesMatchingFilter(value: string): RecognizedFe
   return RECOGNIZED_FEED_SOURCES.filter((source) => source.includes(normalized));
 }
 
+const RAW_INBOUND_PATH = "raw_execution->executionTelemetry->inbound";
+const CONFIRMATION_INBOUND_PATH = "raw_execution->rustTransactionConfirmation->executionTelemetry->inbound";
+const CHAIN_INBOUND_PATH = "chain_report->executionTelemetry->inbound";
+const CANONICAL_CONTRIBUTORS_FILTER = `[${RECOGNIZED_FEED_SOURCES.map((source) => `"${source}"`).join(",")}]`;
+
+function validInboundFilter(path: string, source: RecognizedFeedSource): string {
+  return [
+    `${path}->schemaVersion.eq.1`,
+    `${path}->>selectedSource.eq.${source}`,
+    `${path}->contributors.cs.["${source}"]`,
+    `${path}->contributors.cd.${CANONICAL_CONTRIBUTORS_FILTER}`,
+    `${path}->selectionGeneration.gt.0`,
+    `${path}->selectionGeneration.lt.${Number.MAX_SAFE_INTEGER + 1}`,
+    `${path}->>selectionGeneration.not.like.*.*`
+  ].join(",");
+}
+
+function invalidInboundFilter(path: string): string {
+  const anyValidAttribution = RECOGNIZED_FEED_SOURCES
+    .map((source) => `and(${validInboundFilter(path, source)})`)
+    .join(",");
+  return `not.or(${anyValidAttribution})`;
+}
+
 export function dashboardInboundSourcePredicate(sourceFilter: string): string {
   const candidates = recognizedFeedSourcesMatchingFilter(sourceFilter);
-  const rawInbound = "raw_execution->executionTelemetry->inbound";
-  const confirmationInbound = "raw_execution->rustTransactionConfirmation->executionTelemetry->inbound";
-  const chainInbound = "chain_report->executionTelemetry->inbound";
 
   if (candidates.length === 0) {
     if (sourceFilter.trim().toLowerCase() !== "unknown") return "source.eq.__no_typed_feed_match__";
     const recognized = `(${RECOGNIZED_FEED_SOURCES.join(",")})`;
     return [
-      `and(${rawInbound}.not.is.null,or(${rawInbound}->>selectedSource.is.null,${rawInbound}->>selectedSource.not.in.${recognized}))`,
-      `and(${rawInbound}.is.null,${confirmationInbound}.not.is.null,or(${confirmationInbound}->>selectedSource.is.null,${confirmationInbound}->>selectedSource.not.in.${recognized}))`,
-      `and(${rawInbound}.is.null,${confirmationInbound}.is.null,${chainInbound}.not.is.null,or(${chainInbound}->>selectedSource.is.null,${chainInbound}->>selectedSource.not.in.${recognized}))`,
-      `and(${rawInbound}.is.null,${confirmationInbound}.is.null,${chainInbound}.is.null,source.not.in.${recognized})`
+      `and(${RAW_INBOUND_PATH}.not.is.null,${invalidInboundFilter(RAW_INBOUND_PATH)})`,
+      `and(${RAW_INBOUND_PATH}.is.null,${CONFIRMATION_INBOUND_PATH}.not.is.null,${invalidInboundFilter(CONFIRMATION_INBOUND_PATH)})`,
+      `and(${RAW_INBOUND_PATH}.is.null,${CONFIRMATION_INBOUND_PATH}.is.null,${CHAIN_INBOUND_PATH}.not.is.null,${invalidInboundFilter(CHAIN_INBOUND_PATH)})`,
+      `and(${RAW_INBOUND_PATH}.is.null,${CONFIRMATION_INBOUND_PATH}.is.null,${CHAIN_INBOUND_PATH}.is.null,or(source.is.null,source.not.in.${recognized}))`
     ].join(",");
   }
 
   const predicates: string[] = [];
-  const canonicalContributors = `[${RECOGNIZED_FEED_SOURCES.map((source) => `"${source}"`).join(",")}]`;
-  const validInbound = (path: string, source: RecognizedFeedSource) => [
-    `${path}->schemaVersion.eq.1`,
-    `${path}->>selectedSource.eq.${source}`,
-    `${path}->contributors.cs.["${source}"]`,
-    `${path}->contributors.cd.${canonicalContributors}`,
-    `${path}->selectionGeneration.gt.0`,
-    `${path}->selectionGeneration.lt.${Number.MAX_SAFE_INTEGER + 1}`,
-    `${path}->>selectionGeneration.not.like.*.*`
-  ].join(",");
   for (const source of candidates) {
-    predicates.push(`and(${validInbound(rawInbound, source)})`);
-    predicates.push(`and(${rawInbound}.is.null,${validInbound(confirmationInbound, source)})`);
-    predicates.push(`and(${rawInbound}.is.null,${confirmationInbound}.is.null,${validInbound(chainInbound, source)})`);
-    predicates.push(`and(${rawInbound}.is.null,${confirmationInbound}.is.null,${chainInbound}.is.null,source.eq.${source})`);
+    predicates.push(`and(${validInboundFilter(RAW_INBOUND_PATH, source)})`);
+    predicates.push(`and(${RAW_INBOUND_PATH}.is.null,${validInboundFilter(CONFIRMATION_INBOUND_PATH, source)})`);
+    predicates.push(`and(${RAW_INBOUND_PATH}.is.null,${CONFIRMATION_INBOUND_PATH}.is.null,${validInboundFilter(CHAIN_INBOUND_PATH, source)})`);
+    predicates.push(`and(${RAW_INBOUND_PATH}.is.null,${CONFIRMATION_INBOUND_PATH}.is.null,${CHAIN_INBOUND_PATH}.is.null,source.eq.${source})`);
   }
   return predicates.join(",");
 }
@@ -153,6 +164,18 @@ export function normalizeInboundFeedAttribution(
     inboundContributors: [],
     inboundSelectionGeneration: null
   };
+}
+
+export function dashboardInboundSourceFilterMatches(
+  sourceFilter: string,
+  rawExecutionValue: unknown,
+  chainReportValue: unknown,
+  legacySource: unknown
+): boolean {
+  const attribution = normalizeInboundFeedAttribution(rawExecutionValue, chainReportValue, legacySource);
+  if (sourceFilter.trim().toLowerCase() === "unknown") return attribution.inboundSource === null;
+  return attribution.inboundSource !== null
+    && recognizedFeedSourcesMatchingFilter(sourceFilter).includes(attribution.inboundSource as RecognizedFeedSource);
 }
 
 export function feedIdentity(value: string | null | undefined): FeedIdentity {

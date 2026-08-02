@@ -41,9 +41,9 @@ const FEED_LABELS: Record<FeedKey, string> = {
 const FEED_ORDER: FeedKey[] = [...RECOGNIZED_FEED_SOURCES, "unknown"];
 
 export function recognizedFeedSource(value: unknown): RecognizedFeedSource | null {
-  if (typeof value !== "string") return null;
-  const normalized = value.trim().toLowerCase();
-  return RECOGNIZED_FEED_SOURCE_SET.has(normalized) ? normalized as RecognizedFeedSource : null;
+  return typeof value === "string" && RECOGNIZED_FEED_SOURCE_SET.has(value)
+    ? value as RecognizedFeedSource
+    : null;
 }
 
 export function recognizedFeedSourcesMatchingFilter(value: string): RecognizedFeedSource[] {
@@ -70,23 +70,29 @@ export function dashboardInboundSourcePredicate(sourceFilter: string): string {
   }
 
   const predicates: string[] = [];
+  const canonicalContributors = `[${RECOGNIZED_FEED_SOURCES.map((source) => `"${source}"`).join(",")}]`;
+  const validInbound = (path: string, source: RecognizedFeedSource) => [
+    `${path}->schemaVersion.eq.1`,
+    `${path}->>selectedSource.eq.${source}`,
+    `${path}->contributors.cs.["${source}"]`,
+    `${path}->contributors.cd.${canonicalContributors}`,
+    `${path}->selectionGeneration.gt.0`,
+    `${path}->selectionGeneration.lt.${Number.MAX_SAFE_INTEGER + 1}`,
+    `${path}->>selectionGeneration.not.like.*.*`
+  ].join(",");
   for (const source of candidates) {
-    predicates.push(`${rawInbound}->>selectedSource.ilike.${source}`);
-    predicates.push(`and(${rawInbound}.is.null,${confirmationInbound}->>selectedSource.ilike.${source})`);
-    predicates.push(`and(${rawInbound}.is.null,${confirmationInbound}.is.null,${chainInbound}->>selectedSource.ilike.${source})`);
-    predicates.push(`and(${rawInbound}.is.null,${confirmationInbound}.is.null,${chainInbound}.is.null,source.ilike.${source})`);
+    predicates.push(`and(${validInbound(rawInbound, source)})`);
+    predicates.push(`and(${rawInbound}.is.null,${validInbound(confirmationInbound, source)})`);
+    predicates.push(`and(${rawInbound}.is.null,${confirmationInbound}.is.null,${validInbound(chainInbound, source)})`);
+    predicates.push(`and(${rawInbound}.is.null,${confirmationInbound}.is.null,${chainInbound}.is.null,source.eq.${source})`);
   }
   return predicates.join(",");
 }
 
 export function normalizeFeedContributors(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  const contributors: string[] = [];
-  for (const item of value) {
-    const source = recognizedFeedSource(item) ?? "unknown";
-    if (!contributors.includes(source)) contributors.push(source);
-  }
-  return contributors;
+  return Array.isArray(value) && value.every((item) => recognizedFeedSource(item) !== null)
+    ? [...value] as string[]
+    : [];
 }
 
 function recordValue(value: unknown): Record<string, unknown> | null {
@@ -95,12 +101,29 @@ function recordValue(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function finiteNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
 function hasOwn(value: Record<string, unknown> | null, key: string): boolean {
   return value !== null && Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function validatedInboundAttribution(value: unknown): InboundFeedAttribution | null {
+  const inbound = recordValue(value);
+  if (!inbound || inbound.schemaVersion !== 1) return null;
+
+  const selectedSource = recognizedFeedSource(inbound.selectedSource);
+  if (!selectedSource) return null;
+
+  if (!Array.isArray(inbound.contributors) || inbound.contributors.length === 0) return null;
+  const contributors = normalizeFeedContributors(inbound.contributors);
+  if (contributors.length !== inbound.contributors.length || !contributors.includes(selectedSource)) return null;
+
+  const selectionGeneration = inbound.selectionGeneration;
+  if (!Number.isSafeInteger(selectionGeneration) || (selectionGeneration as number) <= 0) return null;
+
+  return {
+    inboundSource: selectedSource,
+    inboundContributors: contributors,
+    inboundSelectionGeneration: selectionGeneration as number
+  };
 }
 
 export function normalizeInboundFeedAttribution(
@@ -118,11 +141,10 @@ export function normalizeInboundFeedAttribution(
 
   for (const telemetry of telemetryCandidates) {
     if (!hasOwn(telemetry, "inbound")) continue;
-    const inbound = recordValue(telemetry?.inbound);
-    return {
-      inboundSource: recognizedFeedSource(inbound?.selectedSource),
-      inboundContributors: normalizeFeedContributors(inbound?.contributors),
-      inboundSelectionGeneration: finiteNumber(inbound?.selectionGeneration)
+    return validatedInboundAttribution(telemetry?.inbound) ?? {
+      inboundSource: null,
+      inboundContributors: [],
+      inboundSelectionGeneration: null
     };
   }
 

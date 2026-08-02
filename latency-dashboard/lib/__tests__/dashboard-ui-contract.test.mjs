@@ -190,37 +190,94 @@ describe("dashboard UI contract", () => {
     assert.deepEqual(feedIdentity("shredstream"), { key: "unknown", label: "Unknown" });
     assert.deepEqual(feedIdentity("stable-ingress-active"), { key: "unknown", label: "Unknown" });
     assert.deepEqual(feedIdentity("confirmed_rpc"), { key: "unknown", label: "Unknown" });
+    assert.deepEqual(feedIdentity("JITO-PRIMARY"), { key: "unknown", label: "Unknown" });
+    assert.deepEqual(feedIdentity(" jito-primary "), { key: "unknown", label: "Unknown" });
     assert.deepEqual(executionFeed(null, "shredstream"), { key: "unknown", label: "Unknown" });
     assert.equal(feedTransportLabel("jito-primary", null), "ShredStream");
     assert.equal(feedTransportLabel("stable-ingress-active", "shredstream"), "ShredStream");
   });
 
   test("typed inbound normalization follows durable path priority and fail-closed legacy rules", () => {
+    const inbound = (selectedSource, overrides = {}) => ({
+      schemaVersion: 1,
+      selectedSource,
+      contributors: [selectedSource],
+      selectionGeneration: 1,
+      ...overrides
+    });
+    const unknown = { inboundSource: null, inboundContributors: [], inboundSelectionGeneration: null };
+
     for (const selectedSource of ["jito-primary", "doublezero-leader", "doublezero-retransmit-eu", "vortex-fra"]) {
-      assert.equal(normalizeInboundFeedAttribution({ executionTelemetry: { inbound: { selectedSource } } }, null, "shredstream").inboundSource, selectedSource);
+      assert.deepEqual(normalizeInboundFeedAttribution({ executionTelemetry: { inbound: inbound(selectedSource) } }, null, "shredstream"), {
+        inboundSource: selectedSource,
+        inboundContributors: [selectedSource],
+        inboundSelectionGeneration: 1
+      });
     }
 
     assert.deepEqual(normalizeInboundFeedAttribution({
-      executionTelemetry: { inbound: { selectedSource: "vortex-fra", contributors: ["vortex-fra", "jito-primary", "VORTEX-FRA", "raw-union-eu"], selectionGeneration: 17 } },
-      rustTransactionConfirmation: { executionTelemetry: { inbound: { selectedSource: "jito-primary", selectionGeneration: 16 } } }
-    }, { executionTelemetry: { inbound: { selectedSource: "doublezero-leader" } } }, "jito-primary"), {
+      executionTelemetry: { inbound: inbound("vortex-fra", { contributors: ["vortex-fra", "jito-primary"], selectionGeneration: 17 }) },
+      rustTransactionConfirmation: { executionTelemetry: { inbound: inbound("jito-primary", { selectionGeneration: 16 }) } }
+    }, { executionTelemetry: { inbound: inbound("doublezero-leader") } }, "jito-primary"), {
       inboundSource: "vortex-fra",
-      inboundContributors: ["vortex-fra", "jito-primary", "unknown"],
+      inboundContributors: ["vortex-fra", "jito-primary"],
       inboundSelectionGeneration: 17
     });
 
-    assert.equal(normalizeInboundFeedAttribution({ rustTransactionConfirmation: { executionTelemetry: { inbound: { selectedSource: "doublezero-retransmit-eu" } } } }, null, null).inboundSource, "doublezero-retransmit-eu");
-    assert.equal(normalizeInboundFeedAttribution(null, { executionTelemetry: { inbound: { selectedSource: "doublezero-leader" } } }, null).inboundSource, "doublezero-leader");
+    assert.equal(normalizeInboundFeedAttribution({ rustTransactionConfirmation: { executionTelemetry: { inbound: inbound("doublezero-retransmit-eu") } } }, null, null).inboundSource, "doublezero-retransmit-eu");
+    assert.equal(normalizeInboundFeedAttribution(null, { executionTelemetry: { inbound: inbound("doublezero-leader") } }, null).inboundSource, "doublezero-leader");
     assert.equal(normalizeInboundFeedAttribution(null, null, "jito-primary").inboundSource, "jito-primary");
     assert.equal(normalizeInboundFeedAttribution(null, null, "shredstream").inboundSource, null);
-    assert.equal(normalizeInboundFeedAttribution({ executionTelemetry: { inbound: "shredstream" }, rustTransactionConfirmation: { executionTelemetry: { inbound: { selectedSource: "jito-primary" } } } }, null, "jito-primary").inboundSource, null);
+    assert.equal(normalizeInboundFeedAttribution(null, null, "stable-ingress-active").inboundSource, null);
+    assert.equal(normalizeInboundFeedAttribution(null, null, "JITO-PRIMARY").inboundSource, null);
+    assert.equal(normalizeInboundFeedAttribution(null, null, " jito-primary ").inboundSource, null);
+    assert.equal(normalizeInboundFeedAttribution({ executionTelemetry: { inbound: inbound("jito-primary", { selectionGeneration: Number.MAX_SAFE_INTEGER }) } }, null, null).inboundSelectionGeneration, Number.MAX_SAFE_INTEGER);
+
+    const malformedInbound = [
+      inbound("jito-primary", { schemaVersion: 2 }),
+      { selectedSource: "jito-primary", contributors: ["jito-primary"], selectionGeneration: 1 },
+      inbound("JITO-PRIMARY"),
+      inbound(" jito-primary "),
+      inbound("jito-primary", { contributors: [] }),
+      inbound("jito-primary", { contributors: undefined }),
+      inbound("jito-primary", { contributors: "jito-primary" }),
+      inbound("jito-primary", { contributors: ["raw-union-eu", "jito-primary"] }),
+      inbound("jito-primary", { contributors: ["vortex-fra"] }),
+      inbound("jito-primary", { selectionGeneration: 0 }),
+      inbound("jito-primary", { selectionGeneration: -1 }),
+      inbound("jito-primary", { selectionGeneration: 1.5 }),
+      inbound("jito-primary", { selectionGeneration: undefined }),
+      inbound("jito-primary", { selectionGeneration: Number.MAX_SAFE_INTEGER + 1 })
+    ];
+    for (const value of malformedInbound) {
+      assert.deepEqual(normalizeInboundFeedAttribution({
+        executionTelemetry: { inbound: value },
+        rustTransactionConfirmation: { executionTelemetry: { inbound: inbound("vortex-fra") } }
+      }, { executionTelemetry: { inbound: inbound("doublezero-leader") } }, "jito-primary"), unknown);
+    }
+    assert.deepEqual(normalizeInboundFeedAttribution({
+      executionTelemetry: { inbound: "shredstream" },
+      rustTransactionConfirmation: { executionTelemetry: { inbound: inbound("jito-primary") } }
+    }, null, "jito-primary"), unknown);
 
     const jitoFilter = dashboardInboundSourcePredicate("jito-primary");
-    assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->>selectedSource\.ilike\.jito-primary/);
-    assert.match(jitoFilter, /raw_execution->rustTransactionConfirmation->executionTelemetry->inbound->>selectedSource\.ilike\.jito-primary/);
-    assert.match(jitoFilter, /chain_report->executionTelemetry->inbound->>selectedSource\.ilike\.jito-primary/);
-    assert.match(jitoFilter, /source\.ilike\.jito-primary/);
-    assert.doesNotMatch(jitoFilter, /provider|shredstream/);
+    assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->schemaVersion\.eq\.1/);
+    assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->>selectedSource\.eq\.jito-primary/);
+    assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->contributors\.cs\.\["jito-primary"\]/);
+    assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->contributors\.cd\.\["jito-primary","doublezero-leader","doublezero-retransmit-eu","vortex-fra"\]/);
+    assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->selectionGeneration\.gt\.0/);
+    assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->selectionGeneration\.lt\.9007199254740992/);
+    assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->>selectionGeneration\.not\.like\.\*\.\*/);
+    assert.match(jitoFilter, /raw_execution->rustTransactionConfirmation->executionTelemetry->inbound->schemaVersion\.eq\.1/);
+    assert.match(jitoFilter, /chain_report->executionTelemetry->inbound->schemaVersion\.eq\.1/);
+    assert.equal((jitoFilter.match(/->schemaVersion\.eq\.1/g) || []).length, 3);
+    assert.equal((jitoFilter.match(/->contributors\.cs\.\["jito-primary"\]/g) || []).length, 3);
+    assert.equal((jitoFilter.match(/->contributors\.cd\./g) || []).length, 3);
+    assert.equal((jitoFilter.match(/->selectionGeneration\.gt\.0/g) || []).length, 3);
+    assert.equal((jitoFilter.match(/->selectionGeneration\.lt\.9007199254740992/g) || []).length, 3);
+    assert.equal((jitoFilter.match(/->>selectionGeneration\.not\.like\.\*\.\*/g) || []).length, 3);
+    assert.match(jitoFilter, /source\.eq\.jito-primary/);
+    assert.doesNotMatch(jitoFilter, /selectedSource\.ilike|source\.ilike|provider|shredstream/);
     assert.match(dashboardInboundSourcePredicate("unknown"), /source\.not\.in\.\(jito-primary,doublezero-leader,doublezero-retransmit-eu,vortex-fra\)/);
     assert.equal(dashboardInboundSourcePredicate("shredstream"), "source.eq.__no_typed_feed_match__");
   });

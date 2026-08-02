@@ -284,10 +284,13 @@ describe("dashboard UI contract", () => {
     assert.equal(dashboardInboundSourceFilterMatches("jito-primary", null, malformedChain, "jito-primary"), false);
 
     const jitoFilter = dashboardInboundSourcePredicate("jito-primary");
+    const protectedCanonicalContributors = 'contributors.cd."[\\"jito-primary\\",\\"doublezero-leader\\",\\"doublezero-retransmit-eu\\",\\"vortex-fra\\"]"';
     assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->schemaVersion\.eq\.1/);
     assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->>selectedSource\.eq\.jito-primary/);
     assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->contributors\.cs\.\["jito-primary"\]/);
-    assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->contributors\.cd\.\["jito-primary","doublezero-leader","doublezero-retransmit-eu","vortex-fra"\]/);
+    assert.equal(jitoFilter.includes(protectedCanonicalContributors), true);
+    assert.equal(jitoFilter.split(protectedCanonicalContributors).length - 1, 3);
+    assert.equal(jitoFilter.includes('contributors.cd.["jito-primary","doublezero-leader"'), false);
     assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->selectionGeneration\.gt\.0/);
     assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->selectionGeneration\.lt\.9007199254740992/);
     assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->>selectionGeneration\.not\.like\.\*\.\*/);
@@ -305,6 +308,9 @@ describe("dashboard UI contract", () => {
     assert.match(jitoFilter, /source\.eq\.jito-primary/);
     assert.doesNotMatch(jitoFilter, /selectedSource\.ilike|source\.ilike|provider|shredstream/);
     const unknownFilter = dashboardInboundSourcePredicate("unknown");
+    assert.equal(unknownFilter.includes(protectedCanonicalContributors), true);
+    assert.equal(unknownFilter.split(protectedCanonicalContributors).length - 1, 12);
+    assert.equal(unknownFilter.includes('contributors.cd.["jito-primary","doublezero-leader"'), false);
     assert.match(unknownFilter, /raw_execution->executionTelemetry->inbound\.not\.is\.null,not\.or\(/);
     assert.match(unknownFilter, /raw_execution->executionTelemetry->inbound\.is\.null,raw_execution->rustTransactionConfirmation->executionTelemetry->inbound\.not\.is\.null,not\.or\(/);
     assert.match(unknownFilter, /raw_execution->executionTelemetry->inbound\.is\.null,raw_execution->rustTransactionConfirmation->executionTelemetry->inbound\.is\.null,chain_report->executionTelemetry->inbound\.not\.is\.null,not\.or\(/);

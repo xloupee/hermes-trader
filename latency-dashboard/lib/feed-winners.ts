@@ -55,7 +55,8 @@ export function recognizedFeedSourcesMatchingFilter(value: string): RecognizedFe
 const RAW_INBOUND_PATH = "raw_execution->executionTelemetry->inbound";
 const CONFIRMATION_INBOUND_PATH = "raw_execution->rustTransactionConfirmation->executionTelemetry->inbound";
 const CHAIN_INBOUND_PATH = "chain_report->executionTelemetry->inbound";
-const CANONICAL_CONTRIBUTORS_FILTER = `[${RECOGNIZED_FEED_SOURCES.map((source) => `"${source}"`).join(",")}]`;
+const CANONICAL_CONTRIBUTORS_JSON = JSON.stringify(RECOGNIZED_FEED_SOURCES);
+const CANONICAL_CONTRIBUTORS_FILTER = `"${CANONICAL_CONTRIBUTORS_JSON.replaceAll('"', '\\"')}"`;
 
 function validInboundFilter(path: string, source: RecognizedFeedSource): string {
   return [

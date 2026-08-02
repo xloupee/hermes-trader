@@ -294,6 +294,9 @@ describe("dashboard UI contract", () => {
     assert.match(jitoFilter, /raw_execution->rustTransactionConfirmation->executionTelemetry->inbound->schemaVersion\.eq\.1/);
     assert.match(jitoFilter, /chain_report->executionTelemetry->inbound->schemaVersion\.eq\.1/);
     assert.equal((jitoFilter.match(/->schemaVersion\.eq\.1/g) || []).length, 3);
+    for (const field of ["schemaVersion", "selectedSource", "contributors", "selectionGeneration"]) {
+      assert.equal((jitoFilter.match(new RegExp(`->>${field}\\.not\\.is\\.null`, "g")) || []).length, 3);
+    }
     assert.equal((jitoFilter.match(/->contributors\.cs\.\["jito-primary"\]/g) || []).length, 3);
     assert.equal((jitoFilter.match(/->contributors\.cd\./g) || []).length, 3);
     assert.equal((jitoFilter.match(/->selectionGeneration\.gt\.0/g) || []).length, 3);
@@ -308,9 +311,95 @@ describe("dashboard UI contract", () => {
     assert.match(unknownFilter, /or\(source\.is\.null,source\.not\.in\.\(jito-primary,doublezero-leader,doublezero-retransmit-eu,vortex-fra\)\)/);
     assert.equal((unknownFilter.match(/not\.or\(/g) || []).length, 3);
     assert.equal((unknownFilter.match(/->schemaVersion\.eq\.1/g) || []).length, 12);
+    for (const field of ["schemaVersion", "selectedSource", "contributors", "selectionGeneration"]) {
+      assert.equal((unknownFilter.match(new RegExp(`->>${field}\\.not\\.is\\.null`, "g")) || []).length, 12);
+    }
     assert.equal((unknownFilter.match(/->contributors\.cd\./g) || []).length, 12);
     assert.equal((unknownFilter.match(/->selectionGeneration\.gt\.0/g) || []).length, 12);
     assert.equal(dashboardInboundSourcePredicate("shredstream"), "source.eq.__no_typed_feed_match__");
+  });
+
+  test("generated Unknown clauses are total-valued under SQL three-valued logic", () => {
+    const UNKNOWN = Symbol("SQL UNKNOWN");
+    const canonical = ["jito-primary", "doublezero-leader", "doublezero-retransmit-eu", "vortex-fra"];
+    const sqlAnd = (values) => values.includes(false) ? false : values.includes(UNKNOWN) ? UNKNOWN : true;
+    const sqlOr = (values) => values.includes(true) ? true : values.includes(UNKNOWN) ? UNKNOWN : false;
+    const sqlNot = (value) => value === UNKNOWN ? UNKNOWN : !value;
+    const sqlCompare = (value, predicate) => value === null || value === undefined ? UNKNOWN : predicate(value);
+    const record = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    const text = (value) => value === null || value === undefined ? null : typeof value === "string" ? value : JSON.stringify(value);
+    const unknownFilter = dashboardInboundSourcePredicate("unknown");
+    const rawPath = "raw_execution->executionTelemetry->inbound";
+    const guardedFields = new Set(["schemaVersion", "selectedSource", "contributors", "selectionGeneration"].filter(
+      (field) => unknownFilter.includes(`${rawPath}->>${field}.not.is.null`)
+    ));
+    assert.deepEqual([...guardedFields], ["schemaVersion", "selectedSource", "contributors", "selectionGeneration"]);
+
+    const validCandidate3vl = (value, source) => {
+      const inbound = record(value);
+      const terms = [...guardedFields].map((field) => text(inbound[field]) !== null);
+      terms.push(
+        sqlCompare(inbound.schemaVersion, (item) => item === 1),
+        sqlCompare(inbound.selectedSource, (item) => item === source),
+        sqlCompare(inbound.contributors, (item) => Array.isArray(item) && item.includes(source)),
+        sqlCompare(inbound.contributors, (item) => Array.isArray(item) && item.every((entry) => canonical.includes(entry))),
+        sqlCompare(inbound.selectionGeneration, (item) => typeof item === "number" && item > 0),
+        sqlCompare(inbound.selectionGeneration, (item) => typeof item === "number" && item < Number.MAX_SAFE_INTEGER + 1),
+        sqlCompare(text(inbound.selectionGeneration), (item) => !item.includes("."))
+      );
+      return sqlAnd(terms);
+    };
+    const unknownAtPresentTier = (value) => sqlNot(sqlOr(canonical.map((source) => validCandidate3vl(value, source))));
+    const typed = (overrides = {}) => ({
+      schemaVersion: 1,
+      selectedSource: "jito-primary",
+      contributors: ["jito-primary"],
+      selectionGeneration: 1,
+      ...overrides
+    });
+    const malformed = [
+      null,
+      "scalar inbound",
+      [],
+      { schemaVersion: 1 },
+      typed({ schemaVersion: null }),
+      typed({ schemaVersion: undefined }),
+      typed({ schemaVersion: [] }),
+      typed({ selectedSource: null }),
+      typed({ selectedSource: undefined }),
+      typed({ selectedSource: {} }),
+      typed({ contributors: null }),
+      typed({ contributors: undefined }),
+      typed({ contributors: [] }),
+      typed({ contributors: {} }),
+      typed({ contributors: ["vortex-fra"] }),
+      typed({ contributors: ["jito-primary", "raw-union-eu"] }),
+      typed({ selectionGeneration: null }),
+      typed({ selectionGeneration: undefined }),
+      typed({ selectionGeneration: {} }),
+      typed({ selectionGeneration: 0 }),
+      typed({ selectionGeneration: -1 }),
+      typed({ selectionGeneration: 1.5 }),
+      typed({ selectionGeneration: Number.MAX_SAFE_INTEGER + 1 })
+    ];
+
+    assert.equal(unknownAtPresentTier(typed()), false);
+    for (const value of malformed) {
+      assert.equal(unknownAtPresentTier(value), true);
+      assert.notEqual(unknownAtPresentTier(value), UNKNOWN);
+      const rawExecution = {
+        executionTelemetry: { inbound: value },
+        rustTransactionConfirmation: { executionTelemetry: { inbound: typed({ selectedSource: "vortex-fra", contributors: ["vortex-fra"] }) } }
+      };
+      const chainReport = { executionTelemetry: { inbound: typed({ selectedSource: "doublezero-leader", contributors: ["doublezero-leader"] }) } };
+      assert.deepEqual(normalizeInboundFeedAttribution(rawExecution, chainReport, "jito-primary"), {
+        inboundSource: null,
+        inboundContributors: [],
+        inboundSelectionGeneration: null
+      });
+      assert.equal(dashboardInboundSourceFilterMatches("unknown", rawExecution, chainReport, "jito-primary"), true);
+      assert.equal(dashboardInboundSourceFilterMatches("jito-primary", rawExecution, chainReport, "jito-primary"), false);
+    }
   });
 
   test("outbound ACK lanes use stable operator labels without losing raw attribution", () => {

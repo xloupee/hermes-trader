@@ -59,6 +59,10 @@ const CANONICAL_CONTRIBUTORS_FILTER = `[${RECOGNIZED_FEED_SOURCES.map((source) =
 
 function validInboundFilter(path: string, source: RecognizedFeedSource): string {
   return [
+    `${path}->>schemaVersion.not.is.null`,
+    `${path}->>selectedSource.not.is.null`,
+    `${path}->>contributors.not.is.null`,
+    `${path}->>selectionGeneration.not.is.null`,
     `${path}->schemaVersion.eq.1`,
     `${path}->>selectedSource.eq.${source}`,
     `${path}->contributors.cs.["${source}"]`,

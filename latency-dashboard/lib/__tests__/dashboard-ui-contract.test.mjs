@@ -183,10 +183,10 @@ describe("dashboard UI contract", () => {
   });
 
   test("feed identity accepts only typed inbound winners and keeps transport separate", () => {
-    assert.deepEqual(feedIdentity("vortex-fra"), { key: "vortex-fra", label: "Vortex FRA" });
-    assert.deepEqual(feedIdentity("jito-primary"), { key: "jito-primary", label: "Jito primary" });
-    assert.deepEqual(feedIdentity("doublezero-leader"), { key: "doublezero-leader", label: "DoubleZero leader" });
-    assert.deepEqual(feedIdentity("doublezero-retransmit-eu"), { key: "doublezero-retransmit-eu", label: "DoubleZero retransmit EU" });
+    assert.deepEqual(feedIdentity("vortex-fra"), { key: "vortex-fra", label: "Vortex" });
+    assert.deepEqual(feedIdentity("jito-primary"), { key: "jito-primary", label: "Jito" });
+    assert.deepEqual(feedIdentity("doublezero-leader"), { key: "doublezero-leader", label: "DoubleZero" });
+    assert.deepEqual(feedIdentity("doublezero-retransmit-eu"), { key: "doublezero-retransmit-eu", label: "DoubleZero" });
     assert.deepEqual(feedIdentity("shredstream"), { key: "unknown", label: "Unknown" });
     assert.deepEqual(feedIdentity("stable-ingress-active"), { key: "unknown", label: "Unknown" });
     assert.deepEqual(feedIdentity("confirmed_rpc"), { key: "unknown", label: "Unknown" });
@@ -426,20 +426,22 @@ describe("dashboard UI contract", () => {
     assert.equal(isLandedBuy({ observedAction: "buy", outcome: "failed_on_chain" }), false);
     assert.equal(isLandedBuy({ observedAction: "sell", outcome: "landed" }), false);
     assert.deepEqual(feedLeaderboard(["jito-primary", "vortex-fra", "doublezero-leader", "doublezero-retransmit-eu"]), [
-      { key: "jito-primary", label: "Jito primary", wins: 1, share: 25 },
-      { key: "doublezero-leader", label: "DoubleZero leader", wins: 1, share: 25 },
-      { key: "doublezero-retransmit-eu", label: "DoubleZero retransmit EU", wins: 1, share: 25 },
-      { key: "vortex-fra", label: "Vortex FRA", wins: 1, share: 25 }
+      { key: "doublezero-leader", label: "DoubleZero", wins: 2, share: 50 },
+      { key: "jito-primary", label: "Jito", wins: 1, share: 25 },
+      { key: "vortex-fra", label: "Vortex", wins: 1, share: 25 }
     ]);
     assert.deepEqual(feedLeaderboard(["jito-primary", "shredstream", "vortex-fra"]), [
-      { key: "jito-primary", label: "Jito primary", wins: 1, share: (1 / 3) * 100 },
-      { key: "vortex-fra", label: "Vortex FRA", wins: 1, share: (1 / 3) * 100 },
+      { key: "jito-primary", label: "Jito", wins: 1, share: (1 / 3) * 100 },
+      { key: "vortex-fra", label: "Vortex", wins: 1, share: (1 / 3) * 100 },
       { key: "unknown", label: "Unknown", wins: 1, share: (1 / 3) * 100 }
     ]);
     assert.deepEqual([...executionEvidenceCounts(["jito-primary", "vortex-fra", "jito-backup"])], [
       ["jito-primary", 1],
       ["vortex-fra", 1],
       ["unknown", 1]
+    ]);
+    assert.deepEqual([...executionEvidenceCounts(["doublezero-leader", "doublezero-retransmit-eu"])], [
+      ["doublezero-leader", 2]
     ]);
     const overview = readFileSync(new URL("../../components/dashboard/overview-dashboard.tsx", import.meta.url), "utf8");
     const leaderboard = readFileSync(new URL("../../components/dashboard/feed-leaderboard.tsx", import.meta.url), "utf8");
@@ -449,7 +451,7 @@ describe("dashboard UI contract", () => {
     assert.match(leaderboard, /Landed buy race/);
     assert.match(leaderboard, /landed buy/);
     assert.match(leaderboard, /execution evidence only/);
-    assert.match(leaderboard, /\["jito-primary", "doublezero-leader", "doublezero-retransmit-eu", "vortex-fra"\]/);
+    assert.match(leaderboard, /\["jito-primary", "doublezero-leader", "vortex-fra"\]/);
     assert.match(leaderboard, /Feed leaderboard/);
     assert.doesNotMatch(readFileSync(new URL("../../components/dashboard/execution-table.tsx", import.meta.url), "utf8"), /feedTransportLabel/);
     assert.match(styles, /\.feedLeaderboard\s*\{[^}]*block-size:\s*auto;/s);

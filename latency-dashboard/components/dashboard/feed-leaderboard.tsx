@@ -15,10 +15,10 @@ export function FeedLeaderboard({ rows }: { rows: DashboardExecution[] }) {
   const winnerStandings = feedLeaderboard(landedBuys.map((row) => row.inboundSource));
   const evidence = executionEvidenceCounts(rows.map((row) => row.inboundSource));
   const standingByKey = new Map(winnerStandings.map((standing) => [standing.key, standing]));
-  const trackedFeeds: FeedStanding[] = (["jito-primary", "doublezero-leader", "doublezero-retransmit-eu", "vortex-fra"] as const).map((key) => (
+  const trackedFeeds: FeedStanding[] = (["jito-primary", "doublezero-leader", "vortex-fra"] as const).map((key) => (
     standingByKey.get(key) || {
       key,
-      label: key === "jito-primary" ? "Jito primary" : key === "vortex-fra" ? "Vortex FRA" : key === "doublezero-leader" ? "DoubleZero leader" : "DoubleZero retransmit EU",
+      label: key === "jito-primary" ? "Jito" : key === "vortex-fra" ? "Vortex" : "DoubleZero",
       wins: 0,
       share: 0
     }

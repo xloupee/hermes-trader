@@ -31,10 +31,10 @@ export function isLandedBuy(row: { observedAction?: string | null; outcome?: str
 const RECOGNIZED_FEED_SOURCE_SET = new Set<string>(RECOGNIZED_FEED_SOURCES);
 
 const FEED_LABELS: Record<FeedKey, string> = {
-  "jito-primary": "Jito primary",
-  "doublezero-leader": "DoubleZero leader",
-  "doublezero-retransmit-eu": "DoubleZero retransmit EU",
-  "vortex-fra": "Vortex FRA",
+  "jito-primary": "Jito",
+  "doublezero-leader": "DoubleZero",
+  "doublezero-retransmit-eu": "DoubleZero",
+  "vortex-fra": "Vortex",
   unknown: "Unknown"
 };
 
@@ -203,10 +203,17 @@ export function executionFeed(
   return feedIdentity(inboundSource);
 }
 
+function leaderboardFeed(value: string | null | undefined): FeedIdentity {
+  const feed = feedIdentity(value);
+  return feed.key === "doublezero-retransmit-eu"
+    ? { key: "doublezero-leader", label: FEED_LABELS["doublezero-leader"] }
+    : feed;
+}
+
 export function feedLeaderboard(sources: Array<string | null | undefined>): FeedStanding[] {
   const counts = new Map<FeedKey, number>();
   for (const source of sources) {
-    const feed = feedIdentity(source);
+    const feed = leaderboardFeed(source);
     counts.set(feed.key, (counts.get(feed.key) || 0) + 1);
   }
 
@@ -226,7 +233,7 @@ export function executionEvidenceCounts(
 ): Map<FeedKey, number> {
   const counts = new Map<FeedKey, number>();
   for (const source of sources) {
-    const feed = feedIdentity(source);
+    const feed = leaderboardFeed(source);
     counts.set(feed.key, (counts.get(feed.key) || 0) + 1);
   }
   return counts;

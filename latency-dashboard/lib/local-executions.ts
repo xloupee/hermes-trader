@@ -1,5 +1,9 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { dashboardOutcomePredicate } from "@/lib/dashboard-contract.mjs";
+import {
+  dashboardInboundSourcePredicate,
+  normalizeInboundFeedAttribution,
+} from "@/lib/feed-winners";
 import type { SignalFilters } from "@/lib/signals";
 
 export interface BlockPositionDiagnostics {
@@ -36,6 +40,9 @@ export interface LocalExecutionReport {
   observedAtMs: number;
   provider: string;
   source: string;
+  inboundSource: string | null;
+  inboundContributors: string[];
+  inboundSelectionGeneration: number | null;
   endpoint: string | null;
   observedWallet: string;
   copyWallet: string | null;
@@ -84,6 +91,8 @@ export interface LocalExecutionReport {
   matchedAtMs: number | null;
   plannedAtMs: number | null;
   builtAtMs: number | null;
+  feedReceivedToEntriesReadyUs: number | null;
+  entryDecodeUs: number | null;
   feedReceivedToDecodedUs: number | null;
   decodedToMatchedUs: number | null;
   matchedToPlannedMs: number | null;
@@ -250,6 +259,8 @@ interface RawLocalExecutionReport {
   wallet_match_us: number | null;
   route_parse_us: number | null;
   send_lane_ms: number | null;
+  first_ack_lane: string | null;
+  send_rpc_winner: string | null;
   fee_profile_name: string | null;
   selected_priority_fee_micro_lamports: number | null;
   selected_helius_tip_lamports: number | null;
@@ -341,6 +352,8 @@ const LOCAL_EXECUTION_BASE_COLUMNS = [
   "wallet_match_us",
   "route_parse_us",
   "send_lane_ms",
+  "first_ack_lane",
+  "send_rpc_winner",
   "fee_profile_name",
   "selected_priority_fee_micro_lamports",
   "selected_helius_tip_lamports",
@@ -364,6 +377,7 @@ const LOCAL_EXECUTION_BASE_COLUMNS = [
 const LOCAL_EXECUTION_SELECT = LOCAL_EXECUTION_BASE_COLUMNS.join(",");
 const DASHBOARD_EXECUTION_SELECT = [
   ...LOCAL_EXECUTION_BASE_COLUMNS,
+  "raw_execution",
   "chain_report"
 ].join(",");
 const LOCAL_EXECUTION_DETAIL_SELECT = [
@@ -532,6 +546,7 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
   const rawExecution = objectValue(row.raw_execution);
   const chainReport = chainReportValue(row);
   const sendLaneAttribution = normalizeSendLaneAttribution(rawExecution);
+  const inbound = normalizeInboundFeedAttribution(row.raw_execution, row.chain_report, row.source);
   const rawNumber = (key: string) => numberValue(rawExecution?.[key]);
   const firstNumber = (...values: Array<unknown>): number | null => {
     for (const value of values) {
@@ -549,6 +564,9 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     observedAtMs: row.observed_at_ms,
     provider: row.provider,
     source: row.source,
+    inboundSource: inbound.inboundSource,
+    inboundContributors: inbound.inboundContributors,
+    inboundSelectionGeneration: inbound.inboundSelectionGeneration,
     endpoint: row.endpoint,
     observedWallet: row.observed_wallet,
     copyWallet: row.copy_wallet,
@@ -597,6 +615,8 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     matchedAtMs: firstNumber(row.matched_at_ms, rawNumber("matchedAtMs")),
     plannedAtMs: firstNumber(row.planned_at_ms, rawNumber("plannedAtMs")),
     builtAtMs: firstNumber(row.built_at_ms, rawNumber("builtAtMs")),
+    feedReceivedToEntriesReadyUs: rawNumber("feedReceivedToEntriesReadyUs"),
+    entryDecodeUs: rawNumber("entryDecodeUs"),
     feedReceivedToDecodedUs: firstNumber(row.feed_received_to_decoded_us, rawNumber("feedReceivedToDecodedUs")),
     decodedToMatchedUs: firstNumber(row.decoded_to_matched_us, rawNumber("decodedToMatchedUs")),
     matchedToPlannedMs: firstNumber(row.matched_to_planned_ms, rawNumber("matchedToPlannedMs")),
@@ -615,7 +635,10 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     routeParseUs: firstNumber(row.route_parse_us, rawNumber("routeParseUs")),
     sendLaneMs: firstNumber(row.send_lane_ms, rawNumber("sendLaneMs")),
     sendLaneMode: sendLaneAttribution?.sendLaneMode ?? stringValue(rawExecution?.sendLaneMode),
-    firstAckLane: sendLaneAttribution?.firstAckLane ?? stringValue(rawExecution?.sendRpcWinner),
+    firstAckLane: row.first_ack_lane
+      ?? sendLaneAttribution?.firstAckLane
+      ?? row.send_rpc_winner
+      ?? stringValue(rawExecution?.sendRpcWinner),
     sendLaneAttempts: sendLaneAttribution?.allAttempts ?? [],
     feeProfileName: row.fee_profile_name ?? stringValue(rawExecution?.feeProfileName),
     selectedPriorityFeeMicroLamports: firstNumber(
@@ -699,7 +722,7 @@ function filteredDashboardExecutionQuery(filters: DashboardExecutionFilters, col
     .lte("observed_at_ms", filters.toObservedAtMs);
 
   if (filters.provider) query = query.eq("provider", filters.provider);
-  if (filters.source) query = query.ilike("source", `%${filters.source}%`);
+  if (filters.source) query = query.or(dashboardInboundSourcePredicate(filters.source));
   if (filters.wallet) query = query.or(`observed_wallet.eq.${filters.wallet},copy_wallet.eq.${filters.wallet}`);
   if (filters.mint) query = query.ilike("mint", `%${filters.mint}%`);
   if (filters.route) query = query.eq("selected_route", filters.route);

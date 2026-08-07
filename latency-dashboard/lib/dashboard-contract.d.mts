@@ -18,8 +18,10 @@ export type LandingComparison =
 export type DashboardExecution = Omit<LocalExecutionReport, "endpoint" | "observedWallet" | "copyWallet" | "rawExecution" | "chainReport"> & {
   observedWallet: string | null;
   copyWallet: string | null;
+  telegramSubscriberId: string | null;
   outcome: ExecutionOutcome;
   landingComparison: LandingComparison;
+  leaderDiagnostics?: import("./leader-diagnostics").LeaderDiagnostics | null;
 };
 
 export interface ExecutionSummary {
@@ -96,6 +98,10 @@ export function decodeExecutionCursor(cursor: string | null | undefined): Dashbo
 export function executionOutcomeForRow(row: Partial<LocalExecutionReport> | null | undefined): ExecutionOutcome;
 export function landingComparisonForRow(row: Partial<LocalExecutionReport> | null | undefined): LandingComparison;
 export function toDashboardExecution(row: LocalExecutionReport): DashboardExecution;
+export function attachTelegramSubscriberIds<T extends { copyWallet: string | null }>(
+  rows: T[],
+  subscriberByCopyWallet: Map<string, string>
+): Array<T & { telegramSubscriberId: string | null }>;
 export function summarizeExecutions(
   rows: Array<Partial<LocalExecutionReport> | DashboardExecution>
 ): ExecutionSummary;

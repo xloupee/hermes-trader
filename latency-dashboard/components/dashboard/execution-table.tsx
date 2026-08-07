@@ -4,12 +4,18 @@ import Link from "next/link";
 import {
   type DashboardExecution,
   formatMs,
-  formatSol,
-  landingComparisonSummary,
+  isDelayedLanding,
   landingSummary,
+  leaderContext,
+  leaderSummary,
+  leaderTitle,
   shortText
 } from "@/lib/dashboard-client";
 import { CopyChip } from "@/components/dashboard/copy-chip";
+import { executionFeed, type FeedKey } from "@/lib/feed-winners";
+import { sendLaneIdentity, type SendLaneKey } from "@/lib/send-lanes";
+import { formatUserDate, formatUserTime, userTimeZoneLabel } from "@/lib/user-time";
+import { useUserTimeZone } from "@/lib/use-user-time-zone";
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
 interface ExecutionTableProps {
@@ -18,78 +24,173 @@ interface ExecutionTableProps {
   includeRowLinks?: boolean;
 }
 
-function statusClass(status: string | null) {
-  const lowered = (status || "").toLowerCase();
-  if (lowered.includes("landed") || lowered.includes("submitted")) return styles.statusGood;
-  if (lowered.includes("failed") || lowered.includes("error") || lowered.includes("forbidden")) return styles.statusBad;
+function statusClass(outcome: DashboardExecution["outcome"]) {
+  if (outcome === "landed") return styles.statusGood;
+  if (outcome === "failed_on_chain" || outcome === "send_failed") return styles.statusBad;
   return styles.statusMuted;
 }
 
+function placementClass(row: DashboardExecution) {
+  return isDelayedLanding(row) ? styles.statusBad : statusClass(row.outcome);
+}
+
+function landingParts(row: DashboardExecution): { primary: string; secondary: string } {
+  const summary = landingSummary(row);
+  const pieces = summary.split(" · ");
+  if (row.outcome !== "landed") {
+    return { primary: pieces[0], secondary: row.reason || "No additional landing context" };
+  }
+  if (row.landingComparison === "same_slot") {
+    return { primary: pieces.slice(0, 2).join(" · "), secondary: pieces.slice(2).join(" · ") };
+  }
+  if (row.landingComparison === "cross_slot") {
+    return { primary: pieces.slice(0, 2).join(" · "), secondary: pieces.slice(2).join(" · ") };
+  }
+  return { primary: pieces.slice(0, 2).join(" · "), secondary: pieces.slice(2).join(" · ") };
+}
+
+function transactionDistance(row: DashboardExecution): string {
+  if (
+    row.outcome !== "landed"
+    || (row.landingComparison !== "same_slot" && row.landingComparison !== "cross_slot")
+  ) {
+    return "n/a";
+  }
+
+  const candidates = row.landingComparison === "same_slot"
+    ? [row.sameSlotTxDelta, row.blockPositionDiagnostics?.sameSlotTxDelta]
+    : [
+        row.txDelta,
+        row.blockPositionDiagnostics?.txDelta,
+        row.blockPositionDiagnostics?.crossSlotPositionSummary?.crossSlotTxDelta
+      ];
+  const distance = candidates.find((value) => typeof value === "number" && Number.isFinite(value));
+  return typeof distance === "number" ? String(distance) : "n/a";
+}
+
+function sideClass(side: string) {
+  return side.toLowerCase() === "sell" ? styles.sideSell : styles.sideBuy;
+}
+
+const FEED_CLASSES: Record<FeedKey, string> = {
+  "vortex-fra": styles.feedVortex,
+  "jito-primary": styles.feedJito,
+  "doublezero-leader": styles.feedDoublezero,
+  "doublezero-retransmit-eu": styles.feedDoublezero,
+  unknown: styles.feedUnknown
+};
+
+const LANE_CLASSES: Record<SendLaneKey, string> = {
+  "helius-sender": styles.laneHelius,
+  nozomi: styles.laneNozomi,
+  jito: styles.laneJito,
+  erpc: styles.laneErpc,
+  astralane: styles.laneAstralane,
+  lunar: styles.laneLunar,
+  circular: styles.laneCircular,
+  bloxroute: styles.laneBloxroute,
+  "zero-slot": styles.laneZeroSlot,
+  tpu: styles.laneTpu,
+  rpc: styles.laneRpc,
+  unknown: styles.laneUnknown
+};
+
 export function ExecutionTable({ rows, emptyMessage, includeRowLinks = false }: ExecutionTableProps) {
+  const timeZone = useUserTimeZone();
+  const timeZoneLabel = userTimeZoneLabel(timeZone);
+
   if (rows.length === 0) {
     return <div className={styles.emptyState} role="status">{emptyMessage}</div>;
   }
 
   return (
-    <section className={styles.dataSection}>
+    <section className={styles.dataSection} aria-label="Live execution tape">
       <div className={styles.desktopTableWrap}>
         <table className={styles.dataTable} aria-label="Execution results">
           <thead>
             <tr>
-              <th>Seen</th>
-              <th>Action</th>
-              <th>Route</th>
-              <th>Provider</th>
-              <th>Target wallet</th>
-              <th>Landing status</th>
-              <th>Cross-slot</th>
+              <th title={timeZone}>Time · {timeZoneLabel}</th>
+              <th>Act</th>
+              <th>Result / placement</th>
+              <th>TX after</th>
+              <th>Leader</th>
+              <th>Feed</th>
+              <th>Lane / ACK</th>
+              <th>CA</th>
+              <th>Wallet</th>
+              <th>Telegram ID</th>
               <th>Transaction</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
-              <tr key={row.id}>
-                <td>{new Date(row.observedAtMs).toLocaleTimeString()}</td>
-                <td>{row.observedAction}</td>
-                <td>{row.selectedRoute || "n/a"}</td>
-                <td>{row.provider || "n/a"}</td>
-                <td><CopyChip value={row.observedWallet} label="target wallet" /></td>
-                <td>
-                  <span className={statusClass(landingSummary(row))}>{landingSummary(row)}</span>
-                  <div className={styles.meta}>{formatMs(row.observedToSignatureReturnedMs)}</div>
+            {rows.map((row) => {
+              const landing = landingParts(row);
+              const feed = executionFeed(row.inboundSource);
+              const lane = sendLaneIdentity(row.firstAckLane);
+              return <tr key={row.id}>
+                <td className={styles.timeCell}>
+                  <strong>{formatUserTime(row.observedAtMs, timeZone)}</strong>
+                  <span>{formatUserDate(row.observedAtMs, timeZone)}</span>
                 </td>
-                <td>{landingComparisonSummary(row)}</td>
+                <td><span className={sideClass(row.observedAction)}>{row.observedAction}</span></td>
+                <td>
+                  <span className={placementClass(row)}>{landing.primary}</span>
+                  {row.outcome !== "landed" ? <div className={styles.meta}>{landing.secondary}</div> : null}
+                </td>
+                <td className={styles.txDistance}>{transactionDistance(row)}</td>
+                <td className={styles.leaderCell} title={leaderTitle(row)}>
+                  <strong>{leaderSummary(row)}</strong>
+                  <span className={styles.meta}>{leaderContext(row)}</span>
+                </td>
+                <td><strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></td>
+                <td className={styles.ackCell}>
+                  <strong className={`${styles.ackLane} ${LANE_CLASSES[lane.key]}`} title={lane.raw || undefined}>{lane.label}</strong>
+                  <span className={styles.meta}>{formatMs(row.observedToSignatureReturnedMs)} ACK</span>
+                </td>
+                <td className={styles.assetCell}><CopyChip value={row.mint} label="mint address" /></td>
+                <td><CopyChip value={row.observedWallet} label="watched wallet" /></td>
+                <td className={styles.subscriberCell}><CopyChip value={row.telegramSubscriberId} label="Telegram subscriber ID" /></td>
                 <td className={styles.signCell}>
-                  <CopyChip value={row.observedSignature} label="signature" />
+                  <CopyChip value={row.sendSignature || row.observedSignature} label="transaction signature" />
                   {includeRowLinks ? (
-                    <div className={styles.meta}><Link href={`/dashboard/executions/${row.id}`}>Open detail</Link></div>
+                    <div className={styles.meta}><Link className={styles.detailLink} href={`/dashboard/executions/${row.id}`}>Inspect →</Link></div>
                   ) : (
                     <div className={styles.meta}>copy {shortText(row.sendSignature || row.observedSignature, 7)}</div>
                   )}
                 </td>
-              </tr>
-            ))}
+              </tr>;
+            })}
           </tbody>
         </table>
       </div>
       <div className={styles.mobileCards}>
-        {rows.map((row) => (
-          <article key={row.id} className={styles.card}>
-            <header>
-              <h3>{row.observedAction} · {row.selectedRoute || "n/a"}</h3>
-              <span className={statusClass(landingSummary(row))}>{landingSummary(row)}</span>
+        {rows.map((row) => {
+          const landing = landingParts(row);
+          const feed = executionFeed(row.inboundSource);
+          const lane = sendLaneIdentity(row.firstAckLane);
+          return <article key={row.id} className={styles.card}>
+            <header className={styles.cardHeader}>
+              <div><span className={sideClass(row.observedAction)}>{row.observedAction}</span><strong>{shortText(row.mint, 5)}</strong></div>
+              <time title={timeZone}>{formatUserTime(row.observedAtMs, timeZone)} {timeZoneLabel}</time>
             </header>
-            <p>Provider: {row.provider || "n/a"}</p>
-            <p>Seen: {new Date(row.observedAtMs).toLocaleString()}</p>
-            <p>Target wallet: <CopyChip value={row.observedWallet} label="target wallet" /></p>
-            <p>Target Tx: <CopyChip value={row.observedSignature} label="target signature" /></p>
-            <p>Copy slot: {row.copySlot ?? "n/a"}</p>
-            <p>Copy metrics: {row.sent ? formatSol(row.grossCopySpendSol) : "not sent"}</p>
-            <p>Copy slot delta: {row.slotDeltaFromObserved ?? "n/a"}</p>
-            <p>Cross-slot: {landingComparisonSummary(row)}</p>
-            {includeRowLinks ? <Link href={`/dashboard/executions/${row.id}`}>Open execution detail</Link> : null}
-          </article>
-        ))}
+            <div className={styles.cardOutcome}>
+              <span className={placementClass(row)}>{landing.primary}</span>
+              {row.outcome !== "landed" ? <p>{landing.secondary}</p> : null}
+            </div>
+            <div className={styles.cardMeta}>
+              <span>TX after<strong className={styles.txDistance}>{transactionDistance(row)}</strong></span>
+              <span>Leader<strong title={leaderTitle(row)}>{leaderSummary(row)}</strong><small className={styles.meta}>{leaderContext(row)}</small></span>
+              <span>Feed<strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></span>
+              <span>Lane / ACK<strong className={`${styles.ackLane} ${LANE_CLASSES[lane.key]}`} title={lane.raw || undefined}>{lane.label}</strong><small className={styles.meta}>{formatMs(row.observedToSignatureReturnedMs)} ACK</small></span>
+            </div>
+            <div className={styles.cardCopies}>
+              <span>Wallet <CopyChip value={row.observedWallet} label="watched wallet" /></span>
+              <span>Telegram <CopyChip value={row.telegramSubscriberId} label="Telegram subscriber ID" /></span>
+              <span>Tx <CopyChip value={row.sendSignature || row.observedSignature} label="transaction signature" /></span>
+            </div>
+            {includeRowLinks ? <Link className={styles.mobileDetailLink} href={`/dashboard/executions/${row.id}`}>Inspect execution <span aria-hidden="true">→</span></Link> : null}
+          </article>;
+        })}
       </div>
     </section>
   );

@@ -6,6 +6,7 @@ import { useDashboardFilters } from "./use-dashboard-filters";
 import { DashboardFiltersPanel } from "@/components/dashboard/dashboard-filters";
 import { DashboardRefreshToolbar } from "@/components/dashboard/dashboard-refresh";
 import { ExecutionTable } from "@/components/dashboard/execution-table";
+import styles from "@/components/dashboard/dashboard-shared.module.css";
 
 export function ExecutionsDashboard() {
   const { filters, setFilters, setOutcome } = useDashboardFilters();
@@ -20,7 +21,11 @@ export function ExecutionsDashboard() {
   );
 
   return (
-    <section>
+    <section className={styles.tapePage}>
+      <header className={styles.pageHeader}>
+        <div><p>Historical and live records</p><h1>All executions</h1></div>
+        <span>{data?.summary.total ?? 0} results in window</span>
+      </header>
       <DashboardFiltersPanel filters={filters} onFiltersChange={setFilters} onOutcomeChange={setOutcome} />
       <DashboardRefreshToolbar
         loading={loading}
@@ -32,7 +37,7 @@ export function ExecutionsDashboard() {
         onRefresh={refresh}
         onTogglePause={setPaused}
       />
-      <ExecutionTable rows={data?.executions || []} includeRowLinks emptyMessage="No matching executions." />
+      <ExecutionTable rows={data?.executions || []} includeRowLinks emptyMessage="No executions match these filters. Clear a filter or choose All tape." />
     </section>
   );
 }

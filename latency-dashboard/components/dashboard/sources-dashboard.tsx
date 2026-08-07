@@ -6,6 +6,8 @@ import { toQueryParams } from "@/lib/dashboard-client";
 import { useDashboardFilters } from "./use-dashboard-filters";
 import { DashboardFiltersPanel } from "@/components/dashboard/dashboard-filters";
 import { DashboardRefreshToolbar } from "@/components/dashboard/dashboard-refresh";
+import { formatUserDateTime } from "@/lib/user-time";
+import { useUserTimeZone } from "@/lib/use-user-time-zone";
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
 const SOURCE_FILTER_FIELDS = [
@@ -20,6 +22,7 @@ const SOURCE_FILTER_FIELDS = [
 ] as const;
 
 export function SourcesDashboard() {
+  const timeZone = useUserTimeZone();
   const { filters, setFilters, setOutcome } = useDashboardFilters();
   const query = useAutoRefreshQuery<DashboardSourcesResponse>(async () => {
     const response = await fetch(`/api/dashboard/sources?${toQueryParams(filters)}`);
@@ -27,12 +30,12 @@ export function SourcesDashboard() {
     return response.json() as Promise<DashboardSourcesResponse>;
   }, { intervalMs: 15000 });
   const rows = query.data?.sources ?? [];
-  const observations = rows.reduce((total, row) => total + row.count, 0);
+  const executions = rows.reduce((total, row) => total + row.count, 0);
 
   return <section>
     <div className={styles.metricStrip}>
-      <div className={styles.metric}><span>source lanes</span><strong>{rows.length}</strong></div>
-      <div className={styles.metric}><span>observations</span><strong>{observations}</strong></div>
+      <div className={styles.metric}><span>feed / provider pairs</span><strong>{rows.length}</strong></div>
+      <div className={styles.metric}><span>executions</span><strong>{executions}</strong></div>
       <div className={styles.metric}><span>providers</span><strong>{new Set(rows.map((row) => row.provider)).size}</strong></div>
     </div>
     <DashboardFiltersPanel
@@ -44,10 +47,10 @@ export function SourcesDashboard() {
     />
     <DashboardRefreshToolbar loading={query.loading} error={query.error} paused={query.paused} autoPaused={query.autoPaused} lastUpdated={query.lastUpdated} onRefresh={query.refresh} onTogglePause={query.setPaused} />
     <div className={styles.dataSection}><div className={styles.desktopTableWrap}><table className={styles.dataTable}>
-      <thead><tr><th>Source</th><th>Provider</th><th>Observations</th><th>Latest</th></tr></thead>
-      <tbody>{rows.map((row) => <tr key={`${row.source}:${row.provider}`}><td>{row.source}</td><td>{row.provider}</td><td>{row.count}</td><td>{new Date(row.latestObservedAtMs).toLocaleString()}</td></tr>)}</tbody>
+      <thead><tr><th>Feed</th><th>Provider</th><th>Executions</th><th>Latest</th></tr></thead>
+      <tbody>{rows.map((row) => <tr key={`${row.source}:${row.provider}`}><td>{row.source}</td><td>{row.provider}</td><td>{row.count}</td><td title={timeZone}>{formatUserDateTime(row.latestObservedAtMs, timeZone)}</td></tr>)}</tbody>
     </table></div>
-    <div className={styles.mobileCards}>{rows.map((row) => <article className={styles.card} key={`${row.source}:${row.provider}`}><header><h3>{row.source}</h3><span>{row.provider}</span></header><p>{row.count} observations</p><p>Latest: {new Date(row.latestObservedAtMs).toLocaleString()}</p></article>)}</div>
-    {rows.length === 0 ? <div className={styles.emptyState}>No source rows match the current filter set.</div> : null}</div>
+    <div className={styles.mobileCards}>{rows.map((row) => <article className={styles.card} key={`${row.source}:${row.provider}`}><header><h3>{row.source}</h3><span>{row.provider}</span></header><p>{row.count} executions</p><p title={timeZone}>Latest: {formatUserDateTime(row.latestObservedAtMs, timeZone)}</p></article>)}</div>
+    {rows.length === 0 ? <div className={styles.emptyState}>No feed rows match the current filter set.</div> : null}</div>
   </section>;
 }

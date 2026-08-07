@@ -33,7 +33,40 @@ export function DashboardFiltersPanel({
 
   return (
     <section className={styles.filterWrap} aria-label="Dashboard filters">
-      <div className={styles.filterRow}>
+      {showOutcomePresets ? <div className={styles.presetWrap} role="radiogroup" aria-label="Execution preset">
+        {FILTER_OUTCOME_OPTIONS.map((preset) => (
+          <button
+            className={filters.outcome === preset.value ? styles.presetActive : styles.presetButton}
+            key={preset.value}
+            onClick={() => onOutcomeChange(preset.value)}
+            type="button"
+            role="radio"
+            aria-checked={filters.outcome === preset.value}
+            disabled={disabled}
+          >
+            {preset.value === "all" ? "All tape" : preset.label}
+          </button>
+        ))}
+      </div> : null}
+      <label className={styles.rangeControl}>
+        History
+        <select
+          value={filters.since || "custom"}
+          onChange={(event) => onFiltersChange({
+            since: event.target.value === "custom" ? "" : event.target.value as DashboardTimeRange,
+            from: "",
+            to: ""
+          })}
+          disabled={disabled}
+          aria-label="History range"
+        >
+          {TIME_RANGE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          <option value="custom">Custom dates</option>
+        </select>
+      </label>
+      <details className={styles.advancedFilters} open={!showOutcomePresets}>
+        <summary>Advanced filters</summary>
+        <div className={styles.filterRow}>
         {showField("from") ? <label className={styles.filterItem}>
           From
           <input
@@ -124,38 +157,8 @@ export function DashboardFiltersPanel({
             aria-label="Source filter"
           />
         </label> : null}
-      </div>
-      <label className={styles.rangeControl}>
-        History
-        <select
-          value={filters.since || "custom"}
-          onChange={(event) => onFiltersChange({
-            since: event.target.value === "custom" ? "" : event.target.value as DashboardTimeRange,
-            from: "",
-            to: ""
-          })}
-          disabled={disabled}
-          aria-label="History range"
-        >
-          {TIME_RANGE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-          <option value="custom">Custom dates</option>
-        </select>
-      </label>
-      {showOutcomePresets ? <div className={styles.presetWrap} role="radiogroup" aria-label="Landed preset">
-        {FILTER_OUTCOME_OPTIONS.map((preset) => (
-          <button
-            className={filters.outcome === preset.value ? styles.presetActive : styles.presetButton}
-            key={preset.value}
-            onClick={() => onOutcomeChange(preset.value)}
-            type="button"
-            role="radio"
-            aria-checked={filters.outcome === preset.value}
-            disabled={disabled}
-          >
-            {preset.label}
-          </button>
-        ))}
-      </div> : null}
+        </div>
+      </details>
     </section>
   );
 }

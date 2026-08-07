@@ -291,7 +291,8 @@ export function toDashboardExecution(row) {
       outcome: "unknown",
       landingComparison: "unavailable",
       observedWallet: sanitizeWallet(row?.observedWallet),
-      copyWallet: sanitizeWallet(row?.copyWallet)
+      copyWallet: sanitizeWallet(row?.copyWallet),
+      telegramSubscriberId: null
     };
   }
 
@@ -299,13 +300,42 @@ export function toDashboardExecution(row) {
   for (const key of Object.keys(safeRow)) {
     if (/private.?key|secret.?key|keypair|mnemonic|seed|custody/i.test(key)) delete safeRow[key];
   }
+  const diagnostics = row.blockPositionDiagnostics;
+  const reportedSlot = typeof row.chainReport === "object" && row.chainReport !== null
+    ? Number(row.chainReport.slot)
+    : Number.NaN;
+  const copySlot = row.copySlot
+    ?? diagnostics?.copySlot
+    ?? (Number.isFinite(reportedSlot) ? reportedSlot : null);
+  const targetSlot = row.targetSlot ?? diagnostics?.targetSlot ?? null;
+  const slotDelta = row.slotDelta
+    ?? diagnostics?.slotDelta
+    ?? (Number.isFinite(copySlot) && Number.isFinite(targetSlot) ? copySlot - targetSlot : null);
+  const reportedCrossSlotTxDelta = diagnostics?.crossSlotPositionSummary?.crossSlotTxDelta;
+  const txDelta = row.txDelta
+    ?? diagnostics?.txDelta
+    ?? (typeof reportedCrossSlotTxDelta === "number" && Number.isFinite(reportedCrossSlotTxDelta) ? reportedCrossSlotTxDelta : null);
   return {
     ...safeRow,
     observedWallet: sanitizeWallet(row.observedWallet),
     copyWallet: sanitizeWallet(row.copyWallet),
+    copySlot,
+    targetSlot,
+    slotDelta,
+    txDelta,
     outcome,
-    landingComparison
+    landingComparison,
+    telegramSubscriberId: null
   };
+}
+
+export function attachTelegramSubscriberIds(rows, subscriberByCopyWallet) {
+  return rows.map((row) => ({
+    ...row,
+    telegramSubscriberId: row.copyWallet
+      ? subscriberByCopyWallet.get(row.copyWallet) ?? null
+      : null
+  }));
 }
 
 export function summarizeExecutions(rows) {

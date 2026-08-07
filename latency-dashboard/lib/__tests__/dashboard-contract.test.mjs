@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 import {
+  attachTelegramSubscriberIds,
   DashboardFilterError,
   decodeExecutionCursor,
   dashboardOutcomePredicate,
@@ -62,10 +64,35 @@ describe("dashboard contract", () => {
     });
     assert.equal(dto.observedWallet, "ObservedWalletFullAddress");
     assert.equal(dto.copyWallet, "CopyWalletFullAddress");
+    assert.equal(dto.telegramSubscriberId, null);
     assert.equal("rawExecution" in dto, false);
     assert.equal("chainReport" in dto, false);
     assert.equal("privateKey" in dto, false);
     assert.equal(JSON.stringify(dto).includes("never-return"), false);
+  });
+
+  test("Telegram subscriber IDs attach by exact copy-wallet match", () => {
+    const rows = [
+      toDashboardExecution({ id: 1, observedAction: "buy", observedWallet: "watched1", copyWallet: "copy1" }),
+      toDashboardExecution({ id: 2, observedAction: "sell", observedWallet: "watched2", copyWallet: "copy2" }),
+      toDashboardExecution({ id: 3, observedAction: "buy", observedWallet: "watched3", copyWallet: null })
+    ];
+    const enriched = attachTelegramSubscriberIds(rows, new Map([
+      ["copy1", "123456789"],
+      ["unrelated", "987654321"]
+    ]));
+
+    assert.equal(enriched[0].telegramSubscriberId, "123456789");
+    assert.equal(enriched[1].telegramSubscriberId, null);
+    assert.equal(enriched[2].telegramSubscriberId, null);
+    assert.equal(enriched[0].copyWallet, "copy1");
+  });
+
+  test("dashboard execution queries preserve first ACK lane attribution", () => {
+    const source = readFileSync(new URL("../local-executions.ts", import.meta.url), "utf8");
+    assert.match(source, /"first_ack_lane"/);
+    assert.match(source, /"send_rpc_winner"/);
+    assert.match(source, /firstAckLane:\s*row\.first_ack_lane[\s\S]*?row\.send_rpc_winner/);
   });
 
   test("public list and detail DTOs never expose endpoint credentials", () => {
@@ -131,6 +158,60 @@ describe("dashboard contract", () => {
     assert.equal(executionOutcomeForRow({ observedAction: "buy", decision: "error" }), "send_failed");
     assert.equal(executionOutcomeForRow({ observedAction: "buy", decision: "sent", buyStatus: "buyFailedOnChain", buyChainError: {} }), "failed_on_chain");
     assert.equal(executionOutcomeForRow({ observedAction: "buy", decision: "sent", sendSignature: "buy", copySlot: 22, buyStatus: "buyLanded", buyChainError: null }), "landed");
+  });
+
+  test("normalized DTO surfaces confirmed landing slots without exposing chain reports", () => {
+    const reconciledSell = toDashboardExecution({
+      observedAction: "sell",
+      sendSignature: "sell",
+      buyStatus: "buyLanded",
+      chainReport: { slot: 33, seed: "never-return" }
+    });
+    assert.equal(reconciledSell.outcome, "landed");
+    assert.equal(reconciledSell.landingComparison, "no_target");
+    assert.equal(reconciledSell.copySlot, 33);
+    assert.equal("chainReport" in reconciledSell, false);
+
+    const positioned = toDashboardExecution({
+      observedAction: "buy",
+      sendSignature: "buy",
+      buyStatus: "buyLanded",
+      blockPositionDiagnostics: {
+        status: "found",
+        targetSlot: 40,
+        copySlot: 43,
+        slotDelta: null
+      }
+    });
+    assert.equal(positioned.landingComparison, "cross_slot");
+    assert.equal(positioned.targetSlot, 40);
+    assert.equal(positioned.copySlot, 43);
+    assert.equal(positioned.slotDelta, 3);
+  });
+
+  test("normalized DTO promotes cross-slot transaction distance", () => {
+    const row = toDashboardExecution({
+      id: 5111272,
+      observedAtMs: 1,
+      observedAction: "buy",
+      observedWallet: "watched",
+      copyWallet: "copy",
+      sendSignature: "copy-signature",
+      buyStatus: "buyLanded",
+      targetSlot: 436402707,
+      copySlot: 436402708,
+      slotDelta: 1,
+      txDelta: null,
+      blockPositionDiagnostics: {
+        targetSlot: 436402707,
+        copySlot: 436402708,
+        slotDelta: 1,
+        txDelta: null,
+        crossSlotPositionSummary: { crossSlotTxDelta: 730 }
+      }
+    });
+    assert.equal(row.landingComparison, "cross_slot");
+    assert.equal(row.txDelta, 730);
   });
 
   test("landing comparison and summary counts", () => {

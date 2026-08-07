@@ -1,6 +1,7 @@
 "use client";
 
 import { CirclePause, CirclePlay, RefreshCcw } from "lucide-react";
+import type { DashboardExecutionFreshness } from "@/lib/local-executions";
 
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
@@ -10,6 +11,7 @@ interface DashboardRefreshToolbarProps {
   paused: boolean;
   autoPaused: boolean;
   lastUpdated: Date | null;
+  freshness?: DashboardExecutionFreshness | null;
   onRefresh: () => void;
   onTogglePause: (next: boolean) => void;
 }
@@ -19,6 +21,7 @@ export function DashboardRefreshToolbar({
   paused,
   autoPaused,
   lastUpdated,
+  freshness,
   onRefresh,
   onTogglePause
 }: DashboardRefreshToolbarProps) {
@@ -29,6 +32,11 @@ export function DashboardRefreshToolbar({
         <span className={styles.muted}>
           {!error ? `updated ${lastUpdated ? lastUpdated.toLocaleTimeString() : "never"}` : `error: ${error}`}
         </span>
+        {freshness ? <span className={styles.muted}>
+          {freshness.latestObservedAtMs === null
+            ? "Execution store has no rows"
+            : `Data through ${new Date(freshness.latestObservedAtMs).toLocaleString()}`}
+        </span> : null}
       </div>
       <div className={styles.toolbarButtons}>
         <button

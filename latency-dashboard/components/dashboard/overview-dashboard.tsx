@@ -73,6 +73,7 @@ export function OverviewDashboard() {
         paused={paused}
         autoPaused={autoPaused}
         lastUpdated={lastUpdated}
+        freshness={data?.executions.freshness}
         onRefresh={refresh}
         onTogglePause={setPaused}
       />

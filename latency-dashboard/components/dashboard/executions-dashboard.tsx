@@ -28,6 +28,7 @@ export function ExecutionsDashboard() {
         paused={paused}
         autoPaused={autoPaused}
         lastUpdated={lastUpdated}
+        freshness={data?.freshness}
         onRefresh={refresh}
         onTogglePause={setPaused}
       />

@@ -729,6 +729,33 @@ export async function listDashboardExecutions(filters: DashboardExecutionFilters
   return (((data as unknown) as RawLocalExecutionReport[] | null) || []).map(normalizeReport);
 }
 
+export interface DashboardExecutionFreshness {
+  latestObservedAtMs: number | null;
+  latestCreatedAt: string | null;
+}
+
+export async function getDashboardExecutionFreshness(): Promise<DashboardExecutionFreshness> {
+  const { data, error } = await createAdminClient()
+    .from("copytrade_local_executions")
+    .select("id,observed_at_ms,created_at")
+    .order("observed_at_ms", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(1);
+
+  if (missingTableError(error)) {
+    return { latestObservedAtMs: null, latestCreatedAt: null };
+  }
+  if (error) {
+    throw error;
+  }
+
+  const latest = (data as Array<{ observed_at_ms: number | null; created_at: string | null }> | null)?.[0];
+  return {
+    latestObservedAtMs: latest?.observed_at_ms ?? null,
+    latestCreatedAt: latest?.created_at ?? null
+  };
+}
+
 async function exactDashboardExecutionCount(filters: DashboardExecutionFilters): Promise<number> {
   const { count, error } = await filteredDashboardExecutionQuery(filters, "id", true);
   if (missingTableError(error)) return 0;

@@ -16,8 +16,10 @@ export type {
 };
 
 export type LandingPreset = "all" | "landed-buys" | "landed-sells";
+export type DashboardTimeRange = "1d" | "7d" | "30d" | "all" | "";
 
 export interface DashboardFilterState {
+  since: DashboardTimeRange;
   from: string;
   to: string;
   provider: string;
@@ -43,6 +45,7 @@ export const DASHBOARD_NAV: Array<{ href: Route; label: string }> = [
 ];
 
 export const DEFAULT_FILTERS: DashboardFilterState = {
+  since: "7d",
   from: "",
   to: "",
   provider: "",
@@ -53,6 +56,13 @@ export const DEFAULT_FILTERS: DashboardFilterState = {
   source: "",
   outcome: "all"
 };
+
+export const TIME_RANGE_OPTIONS: Array<{ value: Exclude<DashboardTimeRange, "">; label: string }> = [
+  { value: "1d", label: "Last 24 hours" },
+  { value: "7d", label: "Last 7 days" },
+  { value: "30d", label: "Last 30 days" },
+  { value: "all", label: "All history" }
+];
 
 export const FILTER_OUTCOME_OPTIONS: Array<{ value: LandingPreset; label: string }> = [
   { value: "all", label: "All" },
@@ -67,9 +77,18 @@ function normalizeOutcome(side: string | null, outcome: string | null): LandingP
 }
 
 export function parseDashboardFilters(searchParams: URLSearchParams | null): DashboardFilterState {
+  const from = searchParams?.get("from")?.trim() || "";
+  const to = searchParams?.get("to")?.trim() || "";
+  const requestedSince = searchParams?.get("since")?.trim() || "";
+  const since = requestedSince === "1d" || requestedSince === "7d" || requestedSince === "30d" || requestedSince === "all"
+    ? requestedSince
+    : from || to
+      ? ""
+      : DEFAULT_FILTERS.since;
   return {
-    from: searchParams?.get("from")?.trim() || "",
-    to: searchParams?.get("to")?.trim() || "",
+    since,
+    from,
+    to,
     provider: searchParams?.get("provider")?.trim() || "",
     wallet: searchParams?.get("wallet")?.trim() || "",
     mint: searchParams?.get("mint")?.trim() || "",
@@ -97,6 +116,9 @@ export function toQueryParams(filters: Partial<DashboardFilterState>, includeOut
     source: normalized.source
   })) {
     if (value.trim()) params.set(key, value.trim());
+  }
+  if (!normalized.from.trim() && !normalized.to.trim() && normalized.since) {
+    params.set("since", normalized.since);
   }
   if (includeOutcome && normalized.outcome === "landed-buys") {
     params.set("side", "buy");

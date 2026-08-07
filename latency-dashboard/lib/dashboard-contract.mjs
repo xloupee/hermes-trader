@@ -11,6 +11,7 @@ function hasOwn(obj, key) {
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
+const DEFAULT_LOOKBACK_MS = 7 * 86_400_000;
 const SKIPPED_DECISIONS = new Set(["skip", "skipped", "simulated", "wouldCopy", "wouldBuy"]);
 const SEND_FAILED_DECISIONS = new Set(["error", "send_failed"]);
 
@@ -57,6 +58,7 @@ function parseAbsoluteTime(value, name) {
 function parseLegacySince(value, nowMs) {
   const trimmed = optionalString(value);
   if (trimmed === null) return null;
+  if (trimmed === "all") return 0;
   const match = trimmed.match(/^(\d+)(m|h|d)$/);
   if (match) {
     const amount = Number(match[1]);
@@ -72,7 +74,7 @@ function parseLegacySince(value, nowMs) {
 function parseTimeRange(searchParams, nowMs) {
   const fixedFrom = parseAbsoluteTime(searchParams.get("from"), "from");
   const fixedTo = parseAbsoluteTime(searchParams.get("to"), "to");
-  const fromObservedAtMs = fixedFrom ?? parseLegacySince(searchParams.get("since"), nowMs) ?? nowMs - 86_400_000;
+  const fromObservedAtMs = fixedFrom ?? parseLegacySince(searchParams.get("since"), nowMs) ?? nowMs - DEFAULT_LOOKBACK_MS;
   const toObservedAtMs = fixedTo ?? nowMs;
   if (fromObservedAtMs > toObservedAtMs) throw new DashboardFilterError("from must be less than or equal to to");
   return {
@@ -349,8 +351,8 @@ export const dashboardContractSchema = {
   defaultLimit: DEFAULT_LIMIT,
   maxLimit: MAX_LIMIT,
   filters: {
-    fixed: ["from", "to", "wallet", "side", "outcome", "mint", "route", "provider"],
-    legacyFallbacks: { since: "from", action: "side" },
+    fixed: ["from", "to", "since", "wallet", "side", "outcome", "mint", "route", "provider"],
+    legacyFallbacks: { action: "side" },
     time: { formats: ["RFC3339", "unix_epoch_milliseconds"], boundaries: "inclusive" },
     executionWallet: { match: "exact", columns: ["observed_wallet", "copy_wallet"] },
     sourceWallet: { match: "exact", columns: ["target_wallet"] }

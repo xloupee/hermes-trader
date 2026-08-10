@@ -449,6 +449,41 @@ h1 {
   width: min(100%, 430px);
 }
 
+.login-panel .hermes-logo {
+  --mark-cutout: var(--panel);
+  align-items: center;
+  color: var(--ink);
+  display: inline-flex;
+  gap: 9px;
+  line-height: 1;
+  margin-bottom: 28px;
+}
+
+.login-panel .hermes-mark {
+  display: block;
+  height: 43px;
+  width: 43px;
+}
+
+.login-panel .hermes-wordmark {
+  display: inline-flex;
+  flex-direction: column;
+  font-size: 17px;
+  letter-spacing: -0.045em;
+}
+
+.login-panel .hermes-wordmark strong {
+  font-weight: 900;
+}
+
+.login-panel .hermes-wordmark span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 750;
+  letter-spacing: 0.01em;
+  margin-top: 1px;
+}
+
 .login-form {
   display: grid;
   gap: 14px;

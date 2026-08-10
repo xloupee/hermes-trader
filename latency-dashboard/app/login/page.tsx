@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { HermesLogo } from "@/components/hermes-logo";
 import { LoginForm } from "@/components/login-form";
 
 export default async function LoginPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
@@ -8,11 +8,10 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
   return (
     <main className="login-shell">
       <section className="login-panel">
-        <p className="eyebrow">Hermes Trader</p>
-        <h1>Operator access</h1>
-        <p>Use the operator credentials or an approved Supabase account to open the private dashboard.</p>
+        <HermesLogo />
+        <p className="eyebrow">Copy latency</p>
+        <h1>Admin sign in</h1>
         <LoginForm initialMessage={message} />
-        <Link href="/">Return to Hermes Trader</Link>
       </section>
     </main>
   );

@@ -34,7 +34,6 @@ export function OverviewDashboard() {
         paused={paused}
         autoPaused={autoPaused}
         lastUpdated={lastUpdated}
-        freshness={data?.freshness}
         onRefresh={refresh}
         onTogglePause={setPaused}
       />

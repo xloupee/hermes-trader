@@ -1,12 +1,6 @@
 "use client";
 
-import {
-  FILTER_OUTCOME_OPTIONS,
-  TIME_RANGE_OPTIONS,
-  type DashboardFilterState,
-  type DashboardTimeRange,
-  type LandingPreset
-} from "@/lib/dashboard-client";
+import { FILTER_OUTCOME_OPTIONS, type DashboardFilterState, type LandingPreset } from "@/lib/dashboard-client";
 
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
@@ -48,22 +42,6 @@ export function DashboardFiltersPanel({
           </button>
         ))}
       </div> : null}
-      <label className={styles.rangeControl}>
-        History
-        <select
-          value={filters.since || "custom"}
-          onChange={(event) => onFiltersChange({
-            since: event.target.value === "custom" ? "" : event.target.value as DashboardTimeRange,
-            from: "",
-            to: ""
-          })}
-          disabled={disabled}
-          aria-label="History range"
-        >
-          {TIME_RANGE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-          <option value="custom">Custom dates</option>
-        </select>
-      </label>
       <details className={styles.advancedFilters} open={!showOutcomePresets}>
         <summary>Advanced filters</summary>
         <div className={styles.filterRow}>

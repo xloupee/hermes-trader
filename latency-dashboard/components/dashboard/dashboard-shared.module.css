@@ -218,30 +218,6 @@
   border-left: 0;
 }
 
-.rangeControl {
-  align-items: center;
-  color: var(--muted);
-  display: flex;
-  flex-wrap: wrap;
-  font-size: 10px;
-  font-weight: 800;
-  gap: 8px;
-  letter-spacing: 0.09em;
-  margin-left: auto;
-  text-transform: uppercase;
-}
-
-.rangeControl select {
-  background: var(--paper);
-  border: 1px solid var(--line);
-  color: var(--ink);
-  font: inherit;
-  letter-spacing: 0.02em;
-  min-height: 44px;
-  padding: 0 28px 0 11px;
-  text-transform: none;
-}
-
 .presetButton:hover,
 .presetActive {
   background: var(--amber);

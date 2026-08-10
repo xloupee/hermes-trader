@@ -2,7 +2,6 @@ import type {
   DashboardExecutionOutcome,
   DashboardExecutionCursor,
   DashboardExecutionFilters,
-  DashboardExecutionFreshness,
   DashboardOverviewSummary,
   LocalExecutionReport
 } from "./local-executions";
@@ -36,7 +35,6 @@ export interface ExecutionSummary {
 export interface DashboardExecutionsResponse {
   executions: DashboardExecution[];
   summary: ExecutionSummary;
-  freshness: DashboardExecutionFreshness;
   pagination: {
     limit: number;
     hasMore: boolean;
@@ -121,7 +119,7 @@ export const dashboardContractSchema: {
   maxLimit: 100;
   filters: {
     fixed: string[];
-    legacyFallbacks: { action: "side" };
+    legacyFallbacks: { since: "from"; action: "side" };
     time: { formats: string[]; boundaries: "inclusive" };
     executionWallet: { match: "exact"; columns: string[] };
     sourceWallet: { match: "exact"; columns: string[] };

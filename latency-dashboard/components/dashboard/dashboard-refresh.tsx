@@ -1,8 +1,7 @@
 "use client";
 
 import { Pause, Play, RefreshCcw } from "lucide-react";
-import type { DashboardExecutionFreshness } from "@/lib/local-executions";
-import { formatUserDateTime, formatUserTime, userTimeZoneLabel } from "@/lib/user-time";
+import { formatUserTime, userTimeZoneLabel } from "@/lib/user-time";
 import { useUserTimeZone } from "@/lib/use-user-time-zone";
 
 import styles from "@/components/dashboard/dashboard-shared.module.css";
@@ -13,7 +12,6 @@ interface DashboardRefreshToolbarProps {
   paused: boolean;
   autoPaused: boolean;
   lastUpdated: Date | null;
-  freshness?: DashboardExecutionFreshness | null;
   onRefresh: () => void;
   onTogglePause: (next: boolean) => void;
 }
@@ -23,7 +21,6 @@ export function DashboardRefreshToolbar({
   paused,
   autoPaused,
   lastUpdated,
-  freshness,
   onRefresh,
   onTogglePause
 }: DashboardRefreshToolbarProps) {
@@ -36,11 +33,6 @@ export function DashboardRefreshToolbar({
           {error ? "Feed interrupted" : loading && !lastUpdated ? "Connecting to execution feed" : paused || autoPaused ? "Refresh paused" : "Live feed"}
         </span>
         <span className={styles.muted}>{error || (lastUpdated ? `Synced ${formatUserTime(lastUpdated, timeZone)} ${userTimeZoneLabel(timeZone, lastUpdated)}` : "Waiting for first response")}</span>
-        {freshness ? <span className={styles.muted}>
-          {freshness.latestObservedAtMs === null
-            ? "Execution store has no rows"
-            : `Data through ${formatUserDateTime(freshness.latestObservedAtMs, timeZone)}`}
-        </span> : null}
       </div>
       <div className={styles.toolbarButtons}>
         <button

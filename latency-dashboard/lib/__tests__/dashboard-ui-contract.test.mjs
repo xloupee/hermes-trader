@@ -48,6 +48,12 @@ describe("dashboard UI contract", () => {
     }, true));
     assert.deepEqual([...fixed.keys()].sort(), ["from", "mint", "provider", "route", "side", "to", "wallet"]);
     assert.equal(fixed.has("since"), false);
+
+    const defaultRange = new URLSearchParams(toQueryParams({}, true));
+    assert.equal(defaultRange.get("since"), "7d");
+
+    const allHistory = new URLSearchParams(toQueryParams({ since: "all" }, true));
+    assert.equal(allHistory.get("since"), "all");
     assert.equal(fixed.has("action"), false);
 
     const buyQuery = new URLSearchParams(toQueryParams({ outcome: "landed-buys" }, true));

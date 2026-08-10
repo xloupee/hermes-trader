@@ -26,8 +26,12 @@ describe("dashboard contract", () => {
     const defaults = parseExecutionFilters(new URLSearchParams(), now);
     assert.equal(defaults.limit, 50);
     assert.equal(defaults.cursor, null);
-    assert.equal(defaults.from, "2026-07-30T12:00:00.000Z");
+    assert.equal(defaults.from, "2026-07-24T12:00:00.000Z");
     assert.equal(defaults.to, "2026-07-31T12:00:00.000Z");
+
+    const allHistory = parseExecutionFilters(new URLSearchParams("since=all"), now);
+    assert.equal(allHistory.fromObservedAtMs, 0);
+    assert.equal(allHistory.toObservedAtMs, now);
 
     const empty = parseExecutionFilters(new URLSearchParams("limit="));
     assert.equal(empty.limit, 50);

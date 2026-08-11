@@ -8,6 +8,7 @@ export interface GatewayConfirmation {
   confirmationAtMs: number | null;
   provider: string;
   source: string;
+  inboundSource: string | null;
   observedWallet: string;
   copyWallet: string;
   observedSignature: string;
@@ -46,6 +47,7 @@ const GATEWAY_CONFIRMATION_SELECT = [
   "confirmation_at_ms",
   "provider",
   "source",
+  "execution_telemetry",
   "observed_wallet",
   "copy_wallet",
   "observed_signature",
@@ -89,6 +91,12 @@ function booleanValue(value: unknown): boolean | null {
 }
 
 function mapGatewayConfirmation(row: Record<string, unknown>): GatewayConfirmation {
+  const telemetry = row.execution_telemetry && typeof row.execution_telemetry === "object" && !Array.isArray(row.execution_telemetry)
+    ? row.execution_telemetry as Record<string, unknown>
+    : null;
+  const inbound = telemetry?.inbound && typeof telemetry.inbound === "object" && !Array.isArray(telemetry.inbound)
+    ? telemetry.inbound as Record<string, unknown>
+    : null;
   return {
     id: numberValue(row.id) ?? 0,
     createdAt: stringValue(row.created_at) ?? new Date(0).toISOString(),
@@ -96,6 +104,7 @@ function mapGatewayConfirmation(row: Record<string, unknown>): GatewayConfirmati
     confirmationAtMs: numberValue(row.confirmation_at_ms),
     provider: stringValue(row.provider) ?? "unknown",
     source: stringValue(row.source) ?? "unknown",
+    inboundSource: stringValue(inbound?.selectedSource),
     observedWallet: stringValue(row.observed_wallet) ?? "",
     copyWallet: stringValue(row.copy_wallet) ?? "",
     observedSignature: stringValue(row.observed_signature) ?? "",

@@ -163,7 +163,7 @@ describe("dashboard UI contract", () => {
     assert.doesNotMatch(table, /feedTransportLabel|row\.selectedRoute/);
     assert.match(table, /executionFeed\(canonical\.inboundSource\)/);
     assert.match(table, /sendLaneIdentity\(canonical\.firstAckLane\)/);
-    assert.match(table, /title=\{lane!\.raw \|\| undefined\}/);
+    assert.match(table, /title=\{lane\.raw \|\| undefined\}/);
     assert.match(table, /placementClass\(canonical\)/);
     assert.match(table, /transactionDistance\(canonical\)/);
     assert.match(table, /row\.sameSlotTxDelta/);
@@ -173,7 +173,7 @@ describe("dashboard UI contract", () => {
     assert.match(table, /canonical\.telegramSubscriberId/);
     assert.match(table, /label="Telegram subscriber ID"/);
     assert.match(table, /leaderSummary\(canonical\)/);
-    assert.match(table, /className=\{styles\.ackCell\}[\s\S]*lane!\.label[\s\S]*formatMs\(canonical\.observedToSignatureReturnedMs\)/);
+    assert.match(table, /className=\{styles\.ackCell\}[\s\S]*lane\.label[\s\S]*formatMs\(canonical\.observedToSignatureReturnedMs\)/);
     assert.match(table, /gatewayRows/);
     assert.match(table, /useUserTimeZone\(\)/);
     assert.match(table, /Time · \{timeZoneLabel\}/);

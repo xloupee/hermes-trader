@@ -90,13 +90,18 @@ function gatewayStatusLabel(row: GatewayConfirmation) {
   return row.ok ? "Confirmed" : "Failed";
 }
 
+function gatewayResultLabel(row: GatewayConfirmation) {
+  const status = gatewayStatusLabel(row);
+  if (!(row.ok && row.status === "landed")) return status;
+  if (typeof row.slotDelta !== "number" || !Number.isFinite(row.slotDelta)) return status;
+  if (row.slotDelta === 0) return "Landed · same slot";
+  return `Landed · ${row.slotDelta > 0 ? "+" : ""}${row.slotDelta} slot${Math.abs(row.slotDelta) === 1 ? "" : "s"}`;
+}
+
 function gatewayPlacement(row: GatewayConfirmation): string {
   const txDelta = row.txDelta ?? row.sameSlotTxDelta;
   if (typeof txDelta === "number" && Number.isFinite(txDelta)) {
-    return txDelta === 0 ? "same slot" : `${txDelta > 0 ? "+" : ""}${txDelta} tx`;
-  }
-  if (typeof row.slotDelta === "number" && Number.isFinite(row.slotDelta)) {
-    return row.slotDelta === 0 ? "same slot" : `${row.slotDelta > 0 ? "+" : ""}${row.slotDelta} slot`;
+    return String(txDelta);
   }
   return "n/a";
 }
@@ -161,9 +166,11 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
               const gateway = entry.kind === "gateway" ? entry.row : null;
               const row = entry.row;
               const landing = canonical ? landingParts(canonical) : null;
-              const feed = canonical ? executionFeed(canonical.inboundSource) : null;
-              const lane = canonical ? sendLaneIdentity(canonical.firstAckLane) : null;
-              return <tr key={row.id}>
+              const feed = canonical
+                ? executionFeed(canonical.inboundSource)
+                : executionFeed(gateway?.inboundSource);
+              const lane = canonical ? sendLaneIdentity(canonical.firstAckLane) : sendLaneIdentity(null);
+              return <tr key={`${entry.kind}-${row.id}`}>
                 <td className={styles.timeCell}>
                   <strong>{formatUserTime(row.observedAtMs, timeZone)}</strong>
                   <span>{formatUserDate(row.observedAtMs, timeZone)}</span>
@@ -174,8 +181,8 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
                     <span className={placementClass(canonical)}>{landing?.primary}</span>
                     {canonical.outcome !== "landed" ? <div className={styles.meta}>{landing?.secondary}</div> : null}
                   </> : <>
-                    <span className={gatewayStatusClass(gateway!)}>{gatewayStatusLabel(gateway!)}</span>
-                    <div className={styles.meta}>{gateway?.confirmationStatus || gateway?.gatewayState || gateway?.transactionRole}</div>
+                    <span className={gatewayStatusClass(gateway!)}>{gatewayResultLabel(gateway!)}</span>
+                    {gateway?.ok && gateway.status === "landed" ? null : <div className={styles.meta}>{gateway?.confirmationStatus || gateway?.gatewayState || gateway?.transactionRole}</div>}
                   </>}
                 </td>
                 <td className={styles.txDistance}>{canonical ? transactionDistance(canonical) : gatewayPlacement(gateway!)}</td>
@@ -183,15 +190,10 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
                   <strong>{canonical ? leaderSummary(canonical) : "n/a"}</strong>
                   <span className={styles.meta}>{canonical ? leaderContext(canonical) : "gateway evidence"}</span>
                 </td>
-                <td><strong className={feed ? FEED_CLASSES[feed.key] : styles.feedUnknown}>{feed ? feed.label : gateway?.source}</strong></td>
+                <td><strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></td>
                 <td className={styles.ackCell}>
-                  {canonical ? <>
-                    <strong className={`${styles.ackLane} ${LANE_CLASSES[lane!.key]}`} title={lane!.raw || undefined}>{lane!.label}</strong>
-                    <span className={styles.meta}>{formatMs(canonical.observedToSignatureReturnedMs)} ACK</span>
-                  </> : <>
-                    <strong className={styles.ackLane}>N/A</strong>
-                    <span className={styles.meta}>{gateway?.confirmationStatus || "confirmation"}</span>
-                  </>}
+                  <strong className={`${styles.ackLane} ${LANE_CLASSES[lane.key]}`} title={lane.raw || undefined}>{lane.label}</strong>
+                  <span className={styles.meta}>{canonical ? `${formatMs(canonical.observedToSignatureReturnedMs)} ACK` : "n/a ACK"}</span>
                 </td>
                 <td className={styles.assetCell}><CopyChip value={row.mint} label="mint address" /></td>
                 <td><CopyChip value={row.observedWallet} label="watched wallet" /></td>
@@ -200,7 +202,7 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
                   <CopyChip value={canonical ? (canonical.sendSignature || canonical.observedSignature) : gateway?.signature} label="transaction signature" />
                   {canonical && includeRowLinks ? (
                     <div className={styles.meta}><Link className={styles.detailLink} href={`/dashboard/executions/${row.id}`}>Inspect →</Link></div>
-                  ) : <div className={styles.meta}>{canonical ? `copy ${shortText(canonical.sendSignature || canonical.observedSignature, 7)}` : `observed ${shortText(gateway?.observedSignature, 7)}`}</div>}
+                  ) : <div className={styles.meta}>copy {shortText(canonical ? (canonical.sendSignature || canonical.observedSignature) : gateway?.signature, 7)}</div>}
                 </td>
               </tr>;
             })}
@@ -213,9 +215,11 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
           const gateway = entry.kind === "gateway" ? entry.row : null;
           const row = entry.row;
           const landing = canonical ? landingParts(canonical) : null;
-          const feed = canonical ? executionFeed(canonical.inboundSource) : null;
-          const lane = canonical ? sendLaneIdentity(canonical.firstAckLane) : null;
-          return <article key={row.id} className={styles.card}>
+          const feed = canonical
+            ? executionFeed(canonical.inboundSource)
+            : executionFeed(gateway?.inboundSource);
+          const lane = canonical ? sendLaneIdentity(canonical.firstAckLane) : sendLaneIdentity(null);
+          return <article key={`${entry.kind}-${row.id}`} className={styles.card}>
             <header className={styles.cardHeader}>
               <div><span className={sideClass(row.observedAction)}>{row.observedAction}</span><strong>{shortText(row.mint, 5)}</strong></div>
               <time title={timeZone}>{formatUserTime(row.observedAtMs, timeZone)} {timeZoneLabel}</time>
@@ -225,15 +229,15 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
                 <span className={placementClass(canonical)}>{landing?.primary}</span>
                 {canonical.outcome !== "landed" ? <p>{landing?.secondary}</p> : null}
               </> : <>
-                <span className={gatewayStatusClass(gateway!)}>{gatewayStatusLabel(gateway!)}</span>
-                <p>{gateway?.confirmationStatus || gateway?.gatewayState || gateway?.transactionRole}</p>
+                <span className={gatewayStatusClass(gateway!)}>{gatewayResultLabel(gateway!)}</span>
+                {gateway?.ok && gateway.status === "landed" ? null : <p>{gateway?.confirmationStatus || gateway?.gatewayState || gateway?.transactionRole}</p>}
               </>}
             </div>
             <div className={styles.cardMeta}>
               <span>TX after<strong className={styles.txDistance}>{canonical ? transactionDistance(canonical) : gatewayPlacement(gateway!)}</strong></span>
               <span>Leader<strong title={canonical ? leaderTitle(canonical) : undefined}>{canonical ? leaderSummary(canonical) : "n/a"}</strong><small className={styles.meta}>{canonical ? leaderContext(canonical) : "gateway evidence"}</small></span>
-              <span>Feed<strong className={feed ? FEED_CLASSES[feed.key] : styles.feedUnknown}>{feed ? feed.label : gateway?.source}</strong></span>
-              {canonical ? <span>Lane / ACK<strong className={`${styles.ackLane} ${LANE_CLASSES[lane!.key]}`} title={lane!.raw || undefined}>{lane!.label}</strong><small className={styles.meta}>{formatMs(canonical.observedToSignatureReturnedMs)} ACK</small></span> : <span>Lane / ACK<strong className={styles.ackLane}>N/A</strong><small className={styles.meta}>{gateway?.confirmationStatus || "confirmation"}</small></span>}
+              <span>Feed<strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></span>
+              <span>Lane / ACK<strong className={`${styles.ackLane} ${LANE_CLASSES[lane.key]}`} title={lane.raw || undefined}>{lane.label}</strong><small className={styles.meta}>{canonical ? `${formatMs(canonical.observedToSignatureReturnedMs)} ACK` : "n/a ACK"}</small></span>
             </div>
             <div className={styles.cardCopies}>
               <span>Wallet <CopyChip value={row.observedWallet} label="watched wallet" /></span>

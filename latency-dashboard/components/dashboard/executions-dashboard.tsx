@@ -6,7 +6,6 @@ import { useDashboardFilters } from "./use-dashboard-filters";
 import { DashboardFiltersPanel } from "@/components/dashboard/dashboard-filters";
 import { DashboardRefreshToolbar } from "@/components/dashboard/dashboard-refresh";
 import { ExecutionTable } from "@/components/dashboard/execution-table";
-import { GatewayConfirmationTable } from "@/components/dashboard/gateway-confirmation-table";
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
 export function ExecutionsDashboard() {
@@ -38,11 +37,12 @@ export function ExecutionsDashboard() {
         onRefresh={refresh}
         onTogglePause={setPaused}
       />
-      <GatewayConfirmationTable
-        rows={data?.gatewayConfirmations ?? []}
-        freshness={data?.gatewayConfirmationFreshness}
+      <ExecutionTable
+        rows={data?.executions || []}
+        gatewayRows={data?.gatewayConfirmations ?? []}
+        includeRowLinks
+        emptyMessage="No executions match these filters. Clear a filter or choose All tape."
       />
-      <ExecutionTable rows={data?.executions || []} includeRowLinks emptyMessage="No executions match these filters. Clear a filter or choose All tape." />
     </section>
   );
 }

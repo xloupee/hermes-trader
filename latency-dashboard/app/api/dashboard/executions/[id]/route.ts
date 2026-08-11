@@ -1,11 +1,10 @@
-import { authErrorResponse, requireAdmin } from "@/lib/auth";
+import { authErrorResponse } from "@/lib/auth";
 import { attachTelegramSubscriberIds, toDashboardExecution } from "@/lib/dashboard-contract.mjs";
 import { getLocalExecution } from "@/lib/local-executions";
 import { listTelegramSubscribersByCopyWallet } from "@/lib/telegram-subscribers";
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    await requireAdmin();
     const { id: idParam } = await params;
     const id = Number(idParam);
     if (!Number.isFinite(id)) {

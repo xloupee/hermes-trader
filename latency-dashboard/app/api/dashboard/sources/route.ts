@@ -1,10 +1,9 @@
-import { authErrorResponse, requireAdmin } from "@/lib/auth";
+import { authErrorResponse } from "@/lib/auth";
 import { parseSourceFilters, unsupportedSourceFilters } from "@/lib/dashboard-contract.mjs";
 import { listDashboardSources } from "@/lib/dashboard-sources";
 
 export async function GET(request: Request) {
   try {
-    await requireAdmin();
     const searchParams = new URL(request.url).searchParams;
     const unsupported = unsupportedSourceFilters(searchParams);
     if (unsupported.length > 0) {

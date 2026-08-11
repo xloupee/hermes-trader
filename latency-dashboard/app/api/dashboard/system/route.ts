@@ -1,4 +1,4 @@
-import { authErrorResponse, requireAdmin } from "@/lib/auth";
+import { authErrorResponse } from "@/lib/auth";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 async function tableCount(table: "copytrade_local_executions" | "copytrade_signal_observations"): Promise<number | null> {
@@ -15,7 +15,6 @@ async function tableCount(table: "copytrade_local_executions" | "copytrade_signa
 
 export async function GET() {
   try {
-    await requireAdmin();
     const [localExecutions, signalObservations] = await Promise.all([
       tableCount("copytrade_local_executions"),
       tableCount("copytrade_signal_observations")

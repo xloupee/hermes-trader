@@ -1,4 +1,3 @@
-import { DashboardshellClientSignOut } from "@/components/dashboard/dashboard-shell-client";
 import { DashboardNav } from "@/components/dashboard/dashboard-nav";
 import styles from "@/components/dashboard/dashboard-shell.module.css";
 
@@ -21,9 +20,8 @@ export function DashboardShell({
         </div>
         <DashboardNav />
         <div className={styles.userTools}>
-          <span className={styles.liveState}><i aria-hidden="true" /> operator online</span>
-          <span className={styles.userPill}>{adminEmail || "operator"}</span>
-          <DashboardshellClientSignOut />
+          <span className={styles.liveState}><i aria-hidden="true" /> read-only public</span>
+          <span className={styles.userPill}>{adminEmail || "observer"}</span>
         </div>
       </header>
       <main className={styles.mainContent}>{children}</main>

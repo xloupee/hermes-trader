@@ -1,4 +1,4 @@
-import { authErrorResponse, requireAdmin } from "@/lib/auth";
+import { authErrorResponse } from "@/lib/auth";
 import { attachTelegramSubscriberIds, encodeExecutionCursor, pageExecutionRows, parseExecutionFilters, summarizeExecutions, toDashboardExecution } from "@/lib/dashboard-contract.mjs";
 import { getDashboardExecutionFreshness, listDashboardExecutions } from "@/lib/local-executions";
 import { enrichExecutionsWithLeaderDiagnostics } from "@/lib/leader-diagnostics";
@@ -6,7 +6,6 @@ import { listTelegramSubscribersByCopyWallet } from "@/lib/telegram-subscribers"
 
 export async function GET(request: Request) {
   try {
-    await requireAdmin();
     const filters = parseExecutionFilters(new URL(request.url).searchParams);
     const [fetchedRows, freshness] = await Promise.all([
       listDashboardExecutions(filters),

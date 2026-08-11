@@ -11,9 +11,7 @@ export function DashboardNav() {
   return (
     <nav className={styles.nav} aria-label="Dashboard navigation">
       {DASHBOARD_NAV.map((route) => {
-        const active = route.href === "/dashboard"
-          ? pathname === route.href
-          : pathname.startsWith(route.href);
+        const active = pathname === route.href || pathname.startsWith(`${route.href}/`);
         return (
           <Link
             key={route.href}

@@ -20,7 +20,9 @@ export function dashboardRedirectPath(value) {
 }
 
 export function protectedRequestKind(pathname) {
-  if (pathname === "/dashboard" || pathname.startsWith("/dashboard/")) return "dashboard_page";
-  if (pathname === "/api/dashboard" || pathname.startsWith("/api/dashboard/") || pathname === "/api/me" || pathname.startsWith("/api/me/")) return "dashboard_api";
+  // The dashboard and CI surfaces are intentionally public while this Vercel
+  // dashboard is being used as a read-only operator view. Route handlers for
+  // other admin APIs still enforce their own authentication.
+  if (pathname === "/api/me" || pathname.startsWith("/api/me/")) return "dashboard_api";
   return "none";
 }

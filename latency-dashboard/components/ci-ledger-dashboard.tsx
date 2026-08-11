@@ -15,6 +15,7 @@ import {
   XCircle
 } from "lucide-react";
 import type { CiCheck, CiConclusion, CiDashboardPayload, CiJob, CiPullRequest, CiRun, CiStep } from "@/lib/ci-types";
+import { DashboardNav } from "@/components/dashboard/dashboard-nav";
 import styles from "@/app/ci/ci-ledger.module.css";
 
 // The server resolves which repository to query from its own configuration and rejects
@@ -379,7 +380,10 @@ export function CILedgerDashboard() {
       {!selectedPr && (
         <header className={styles.header}>
           <div className={styles.brand}><span>H</span><div><b>HERMES / CI</b><small>VPS build intelligence</small></div></div>
-          <div className={styles.repo}>{data?.repository ?? ""}</div>
+          <div className={styles.headerCenter}>
+            <DashboardNav />
+            <div className={styles.repo}>{data?.repository ?? ""}</div>
+          </div>
           <div className={styles.headerRight}>
             <span className={styles.live}><i />{data?.source === "github" ? "Live" : "Unavailable"}</span>
             <button type="button" onClick={() => void load(selectedRun?.id, true)} aria-label="Refresh CI data"><RefreshCw className={refreshing ? styles.spin : ""} size={14} /></button>

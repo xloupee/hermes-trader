@@ -119,10 +119,10 @@ describe("auth hardening", () => {
     assert.match(middleware, /NextResponse\.redirect/);
   });
 
-  test("middleware protection covers dashboard pages and APIs", () => {
-    assert.equal(protectedRequestKind("/dashboard"), "dashboard_page");
-    assert.equal(protectedRequestKind("/dashboard/executions"), "dashboard_page");
-    assert.equal(protectedRequestKind("/api/dashboard/overview"), "dashboard_api");
+  test("middleware leaves the public dashboard surfaces open", () => {
+    assert.equal(protectedRequestKind("/dashboard"), "none");
+    assert.equal(protectedRequestKind("/dashboard/executions"), "none");
+    assert.equal(protectedRequestKind("/api/dashboard/overview"), "none");
     assert.equal(protectedRequestKind("/api/me"), "dashboard_api");
     assert.equal(protectedRequestKind("/api/signals/summary"), "none");
   });

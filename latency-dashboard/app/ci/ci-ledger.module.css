@@ -6,6 +6,8 @@
   --text: oklch(92% 0.014 88);
   --muted: oklch(64% 0.022 245);
   --gold: oklch(73% 0.105 78);
+  --ink: var(--text);
+  --amber: var(--gold);
   --green: oklch(72% 0.13 151);
   --red: oklch(66% 0.17 28);
   --blue: oklch(69% 0.1 235);
@@ -33,6 +35,14 @@
 .brand, .brand > div, .headerRight, .status, .identity, .counts, .ledgerFooter, .detailFooter, .eventActions {
   align-items: center;
   display: flex;
+}
+
+.headerCenter {
+  align-items: center;
+  display: flex;
+  gap: clamp(12px, 2vw, 24px);
+  justify-content: center;
+  min-width: 0;
 }
 
 .brand { gap: 11px; }
@@ -298,7 +308,9 @@
 @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 900px) {
-  .header { grid-template-columns: 1fr auto; }
+  .header { grid-template-columns: 1fr auto; grid-template-rows: auto auto; }
+  .headerCenter { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; min-height: 44px; overflow-x: auto; }
+  .headerRight { grid-column: 2; grid-row: 1; }
   .repo { display: none; }
   .tableHead, .row { grid-template-columns: minmax(240px, 1.2fr) 95px minmax(170px, 1fr) 80px; }
   .tableHead span:nth-child(4), .row .progress { display: none; }

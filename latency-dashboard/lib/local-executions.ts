@@ -1,4 +1,9 @@
 import { createAdminClient } from "@/lib/supabase/admin";
+import { dashboardOutcomePredicate } from "@/lib/dashboard-contract.mjs";
+import {
+  dashboardInboundSourcePredicate,
+  normalizeInboundFeedAttribution,
+} from "@/lib/feed-winners";
 import type { SignalFilters } from "@/lib/signals";
 
 export interface BlockPositionDiagnostics {
@@ -35,6 +40,9 @@ export interface LocalExecutionReport {
   observedAtMs: number;
   provider: string;
   source: string;
+  inboundSource: string | null;
+  inboundContributors: string[];
+  inboundSelectionGeneration: number | null;
   endpoint: string | null;
   observedWallet: string;
   copyWallet: string | null;
@@ -83,6 +91,8 @@ export interface LocalExecutionReport {
   matchedAtMs: number | null;
   plannedAtMs: number | null;
   builtAtMs: number | null;
+  feedReceivedToEntriesReadyUs: number | null;
+  entryDecodeUs: number | null;
   feedReceivedToDecodedUs: number | null;
   decodedToMatchedUs: number | null;
   matchedToPlannedMs: number | null;
@@ -148,6 +158,36 @@ export interface SendLaneAttribution {
   firstAckLane: string | null;
   firstAckAtMs: number | null;
   allAttempts: SendLaneAttempt[];
+}
+
+export interface DashboardExecutionCursor {
+  observedAtMs: number;
+  id: number;
+}
+
+export type DashboardExecutionOutcome = "landed" | "failed_on_chain" | "ack_not_landed" | "send_failed" | "skipped" | "unknown";
+
+export interface DashboardExecutionFilters {
+  from: string;
+  to: string;
+  fromObservedAtMs: number;
+  toObservedAtMs: number;
+  limit: number;
+  cursor: DashboardExecutionCursor | null;
+  provider?: string | null;
+  source?: string | null;
+  wallet?: string | null;
+  mint?: string | null;
+  route?: string | null;
+  side?: "buy" | "sell" | null;
+  outcome?: DashboardExecutionOutcome | null;
+}
+
+export interface DashboardOverviewSummary {
+  total: number;
+  landed: number;
+  outcome: Record<DashboardExecutionOutcome, number>;
+  side: { buy: number; sell: number; other: number };
 }
 
 interface RawLocalExecutionReport {
@@ -219,6 +259,8 @@ interface RawLocalExecutionReport {
   wallet_match_us: number | null;
   route_parse_us: number | null;
   send_lane_ms: number | null;
+  first_ack_lane: string | null;
+  send_rpc_winner: string | null;
   fee_profile_name: string | null;
   selected_priority_fee_micro_lamports: number | null;
   selected_helius_tip_lamports: number | null;
@@ -310,6 +352,8 @@ const LOCAL_EXECUTION_BASE_COLUMNS = [
   "wallet_match_us",
   "route_parse_us",
   "send_lane_ms",
+  "first_ack_lane",
+  "send_rpc_winner",
   "fee_profile_name",
   "selected_priority_fee_micro_lamports",
   "selected_helius_tip_lamports",
@@ -331,6 +375,11 @@ const LOCAL_EXECUTION_BASE_COLUMNS = [
 ];
 
 const LOCAL_EXECUTION_SELECT = LOCAL_EXECUTION_BASE_COLUMNS.join(",");
+const DASHBOARD_EXECUTION_SELECT = [
+  ...LOCAL_EXECUTION_BASE_COLUMNS,
+  "raw_execution",
+  "chain_report"
+].join(",");
 const LOCAL_EXECUTION_DETAIL_SELECT = [
   ...LOCAL_EXECUTION_BASE_COLUMNS,
   "raw_execution",
@@ -380,14 +429,14 @@ function submittedAutoSellStatus(row: RawLocalExecutionReport): string | null {
 function buyStatus(row: RawLocalExecutionReport): string | null {
   const report = chainReportValue(row);
   const status = stringValue(report?.buyStatus);
-  if (status) {
-    return status;
-  }
-  if (report?.err) {
+  if (status === "buyFailedOnChain" || report?.err) {
     return "buyFailedOnChain";
   }
   if (numberValue(report?.slot) !== null || Number.isFinite(row.copy_slot)) {
     return "buyLanded";
+  }
+  if (status) {
+    return status;
   }
   return submittedBuyStatus(row);
 }
@@ -497,6 +546,7 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
   const rawExecution = objectValue(row.raw_execution);
   const chainReport = chainReportValue(row);
   const sendLaneAttribution = normalizeSendLaneAttribution(rawExecution);
+  const inbound = normalizeInboundFeedAttribution(row.raw_execution, row.chain_report, row.source);
   const rawNumber = (key: string) => numberValue(rawExecution?.[key]);
   const firstNumber = (...values: Array<unknown>): number | null => {
     for (const value of values) {
@@ -514,6 +564,9 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     observedAtMs: row.observed_at_ms,
     provider: row.provider,
     source: row.source,
+    inboundSource: inbound.inboundSource,
+    inboundContributors: inbound.inboundContributors,
+    inboundSelectionGeneration: inbound.inboundSelectionGeneration,
     endpoint: row.endpoint,
     observedWallet: row.observed_wallet,
     copyWallet: row.copy_wallet,
@@ -562,6 +615,8 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     matchedAtMs: firstNumber(row.matched_at_ms, rawNumber("matchedAtMs")),
     plannedAtMs: firstNumber(row.planned_at_ms, rawNumber("plannedAtMs")),
     builtAtMs: firstNumber(row.built_at_ms, rawNumber("builtAtMs")),
+    feedReceivedToEntriesReadyUs: rawNumber("feedReceivedToEntriesReadyUs"),
+    entryDecodeUs: rawNumber("entryDecodeUs"),
     feedReceivedToDecodedUs: firstNumber(row.feed_received_to_decoded_us, rawNumber("feedReceivedToDecodedUs")),
     decodedToMatchedUs: firstNumber(row.decoded_to_matched_us, rawNumber("decodedToMatchedUs")),
     matchedToPlannedMs: firstNumber(row.matched_to_planned_ms, rawNumber("matchedToPlannedMs")),
@@ -580,7 +635,10 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     routeParseUs: firstNumber(row.route_parse_us, rawNumber("routeParseUs")),
     sendLaneMs: firstNumber(row.send_lane_ms, rawNumber("sendLaneMs")),
     sendLaneMode: sendLaneAttribution?.sendLaneMode ?? stringValue(rawExecution?.sendLaneMode),
-    firstAckLane: sendLaneAttribution?.firstAckLane ?? stringValue(rawExecution?.sendRpcWinner),
+    firstAckLane: row.first_ack_lane
+      ?? sendLaneAttribution?.firstAckLane
+      ?? row.send_rpc_winner
+      ?? stringValue(rawExecution?.sendRpcWinner),
     sendLaneAttempts: sendLaneAttribution?.allAttempts ?? [],
     feeProfileName: row.fee_profile_name ?? stringValue(rawExecution?.feeProfileName),
     selectedPriorityFeeMicroLamports: firstNumber(
@@ -650,6 +708,99 @@ export async function listLocalExecutions(filters: SignalFilters): Promise<Local
   }
 
   return (((data as unknown) as RawLocalExecutionReport[] | null) || []).map(normalizeReport);
+}
+
+function buildDashboardCursorWhere(cursor: DashboardExecutionCursor) {
+  return `observed_at_ms.lt.${cursor.observedAtMs},and(observed_at_ms.eq.${cursor.observedAtMs},id.lt.${cursor.id})`;
+}
+
+function filteredDashboardExecutionQuery(filters: DashboardExecutionFilters, columns: string, exactCount = false) {
+  let query = createAdminClient()
+    .from("copytrade_local_executions")
+    .select(columns, exactCount ? { count: "exact", head: true } : undefined)
+    .gte("observed_at_ms", filters.fromObservedAtMs)
+    .lte("observed_at_ms", filters.toObservedAtMs);
+
+  if (filters.provider) query = query.eq("provider", filters.provider);
+  if (filters.source) query = query.or(dashboardInboundSourcePredicate(filters.source));
+  if (filters.wallet) query = query.or(`observed_wallet.eq.${filters.wallet},copy_wallet.eq.${filters.wallet}`);
+  if (filters.mint) query = query.ilike("mint", `%${filters.mint}%`);
+  if (filters.route) query = query.eq("selected_route", filters.route);
+  if (filters.side) query = query.eq("observed_action", filters.side);
+  if (filters.outcome) query = query.or(dashboardOutcomePredicate(filters.outcome));
+  return query;
+}
+
+export async function listDashboardExecutions(filters: DashboardExecutionFilters): Promise<LocalExecutionReport[]> {
+  let query = filteredDashboardExecutionQuery(filters, DASHBOARD_EXECUTION_SELECT)
+    .order("observed_at_ms", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(filters.limit + 1);
+
+  if (filters.cursor) {
+    query = query.or(buildDashboardCursorWhere(filters.cursor));
+  }
+
+  const { data, error } = await query;
+  if (missingTableError(error)) {
+    return [];
+  }
+  if (error) {
+    throw error;
+  }
+
+  return (((data as unknown) as RawLocalExecutionReport[] | null) || []).map(normalizeReport);
+}
+
+export interface DashboardExecutionFreshness {
+  latestObservedAtMs: number | null;
+  latestCreatedAt: string | null;
+}
+
+export async function getDashboardExecutionFreshness(): Promise<DashboardExecutionFreshness> {
+  const { data, error } = await createAdminClient()
+    .from("copytrade_local_executions")
+    .select("id,observed_at_ms,created_at")
+    .order("observed_at_ms", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(1);
+
+  if (missingTableError(error)) {
+    return { latestObservedAtMs: null, latestCreatedAt: null };
+  }
+  if (error) {
+    throw error;
+  }
+
+  const latest = (data as Array<{ observed_at_ms: number | null; created_at: string | null }> | null)?.[0];
+  return {
+    latestObservedAtMs: latest?.observed_at_ms ?? null,
+    latestCreatedAt: latest?.created_at ?? null
+  };
+}
+
+async function exactDashboardExecutionCount(filters: DashboardExecutionFilters): Promise<number> {
+  const { count, error } = await filteredDashboardExecutionQuery(filters, "id", true);
+  if (missingTableError(error)) return 0;
+  if (error) throw error;
+  return count ?? 0;
+}
+
+export async function dashboardOverviewSummary(filters: DashboardExecutionFilters): Promise<DashboardOverviewSummary> {
+  const outcomes: DashboardExecutionOutcome[] = ["landed", "failed_on_chain", "ack_not_landed", "send_failed", "skipped", "unknown"];
+  const countForOutcome = (outcome: DashboardExecutionOutcome) =>
+    filters.outcome && filters.outcome !== outcome ? Promise.resolve(0) : exactDashboardExecutionCount({ ...filters, outcome });
+  const countForSide = (action: "buy" | "sell") =>
+    filters.side && filters.side !== action ? Promise.resolve(0) : exactDashboardExecutionCount({ ...filters, side: action });
+
+  const [total, outcomeCounts, buy, sell] = await Promise.all([
+    exactDashboardExecutionCount(filters),
+    Promise.all(outcomes.map(countForOutcome)),
+    countForSide("buy"),
+    countForSide("sell")
+  ]);
+  const outcome = Object.fromEntries(outcomes.map((name, index) => [name, outcomeCounts[index]])) as Record<DashboardExecutionOutcome, number>;
+  return { total, landed: outcome.landed, outcome, side: { buy, sell, other: Math.max(0, total - buy - sell) } };
 }
 
 export async function getLocalExecution(id: number): Promise<LocalExecutionReport | null> {

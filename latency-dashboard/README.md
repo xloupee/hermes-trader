@@ -9,8 +9,14 @@ Set these in local `.env.local` and Vercel Project Settings:
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `LATENCY_FAST_LOGIN` - set to `1` to enable the shortcut login in production. It is enabled automatically during local development.
+- `GITHUB_TOKEN` - server-only token with read access to the CI source repository.
+- `CI_REPOSITORY` - explicit repository queried by `/ci`, currently `xloupee/pumpfun-migration-bot`.
+- `CI_ALLOWED_REPOSITORIES` - comma-separated allowlist; keep it aligned with `CI_REPOSITORY`.
 
 The service-role key is used only by server route handlers. The browser never receives it.
+The GitHub token is also server-only. If GitHub is unavailable, `/ci` fails closed and does not render historical fixture data.
+
+The `/ci` page and its read-only CI feed routes are temporarily public for the Vercel dashboard. The rest of the dashboard remains admin-only. Re-enable the CI page/API auth before sharing the deployment beyond the intended audience.
 
 ## Run
 

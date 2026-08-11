@@ -489,8 +489,7 @@ export function CILedgerDashboard() {
         </section>
       ) : (
         <section className={styles.ledger}>
-          <div className={styles.ledgerLead}>
-            <div><span className={styles.eyebrow}>Exact state ledger</span><h1>VPS builds</h1><p>Open pull requests, broken into the phases the VPS reporter actually published.</p></div>
+          <div className={styles.ledgerMeta}>
             <div className={styles.counts}><span><i />{runningCount} running</span><span>{data?.pullRequests.length || 0} in view</span></div>
           </div>
           <div className={styles.table} role="table" aria-label="VPS pull request builds">

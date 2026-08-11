@@ -102,13 +102,14 @@
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
 }
-.ledgerLead, .detailLead {
+.ledgerMeta, .detailLead {
   align-items: flex-end;
   border-bottom: 1px solid var(--line);
   display: flex;
   justify-content: space-between;
   padding-bottom: 30px;
 }
+.ledgerMeta { justify-content: flex-end; min-height: 42px; padding-bottom: 10px; }
 .eyebrow, .evidenceHeading span:first-child {
   color: var(--gold);
   display: block;
@@ -117,7 +118,7 @@
   letter-spacing: .11em;
   text-transform: uppercase;
 }
-.ledgerLead h1, .detailLead h1 {
+.detailLead h1 {
   font-family: var(--serif);
   font-size: clamp(3rem, 6vw, 6.4rem);
   font-weight: 500;
@@ -125,7 +126,6 @@
   line-height: .88;
   margin: 12px 0 0;
 }
-.ledgerLead p { color: var(--muted); font-size: .72rem; margin: 15px 0 0; }
 .counts { color: var(--muted); font-size: .62rem; gap: 18px; padding-bottom: 5px; }
 
 .table { border: 1px solid var(--line); border-top: 0; }
@@ -322,8 +322,7 @@
   .brand small, .headerRight .live, .headerRight a { display: none; }
   .ledger, .detail { padding: 32px 14px; }
   .timelineOnly { padding-block: 16px; }
-  .ledgerLead, .detailLead { align-items: flex-start; display: grid; gap: 20px; }
-  .ledgerLead h1, .detailLead h1 { font-size: 3.2rem; }
+  .detailLead { align-items: flex-start; display: grid; gap: 20px; }
   .counts { padding: 0; }
   .table { border-inline: 0; }
   .tableHead { display: none; }

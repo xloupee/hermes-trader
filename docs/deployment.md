@@ -1,40 +1,27 @@
 # Deployment
 
-Production deploys are handled by GitHub Actions when `main` is updated.
+GitHub Actions is CI-only. It does not connect to a server, transfer files, restart services, or deploy an application.
 
-## Branch behavior
+## CI behavior
 
-- `main`: runs CI, then deploys to the production VPS.
-- `dev`: runs CI only. It does not deploy to the production VPS.
-- Pull requests targeting `main` or `dev`: run CI only.
+- Pushes to `main`: run the root, frontend, Rust, and tracked-tree absence checks.
+- Pull requests targeting `main` or `dev`: run the same CI checks.
+- Manual workflow runs execute checks only when run from `main`.
 
-The deploy job is guarded with `github.ref == 'refs/heads/main'`, so a manual workflow run from another branch will not update production.
+No push, pull request, or manual workflow run performs a backend deployment.
+The repository's `npm run deploy` command is intentionally disabled and fails closed.
 
-## Required GitHub secrets
+## Backend deployment policy
 
-Configure these repository secrets before relying on automatic production deploys:
+Backend deployment is manual and fail-closed. An operator must explicitly choose the target environment and host, review the exact commit, confirm the required checks passed, and invoke an approved deployment procedure outside GitHub Actions.
 
-- `VPS_SSH_PRIVATE_KEY`: private SSH key allowed to connect to the VPS user.
-- `VPS_HOST`: SSH target, for example `root@207.154.228.222`. If omitted, `scripts/deploy.sh` defaults to `root@207.154.228.222`.
+Deployment tooling must stop when target, credentials, application directory, or service name are missing. It must not infer or fall back to a historical host.
+This repository does not provide a remote-shell or remote-copy deployment wrapper.
 
-Optional repository secrets:
+## Manual deployment checklist
 
-- `APP_DIR`: production app directory. Defaults to `/opt/pumpfun-migration-bot`.
-- `SERVICE_NAME`: systemd service name. Defaults to `pumpfun-migration-bot`.
-
-## What the deploy does
-
-The workflow checks out the exact `main` commit, installs dependencies, runs the full test suite, configures SSH, then runs:
-
-```bash
-npm run deploy
-```
-
-The deploy script preserves the VPS `.env`, `logs`, `data`, and `node_modules` directories, rebuilds the app on the VPS, restarts the systemd service, and prints recent service logs.
-
-## First enablement checklist
-
-1. Add the required GitHub secrets.
-2. Confirm branch protection requires the `CI / Check and test` job before merging to `main`.
-3. Optionally require approval for the `production` environment in GitHub repository settings.
-4. Merge a small non-functional change to `main` when ready to test the first automatic deploy.
+1. Identify the exact commit and target environment.
+2. Confirm the CI safety checks passed for that commit.
+3. Supply every target and service parameter explicitly.
+4. Obtain the required operational approval.
+5. Run the approved manual procedure and retain its deployment evidence.

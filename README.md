@@ -1,9 +1,7 @@
 # Hermes Trader
 
-Hermes is being built measurement-first for Robinhood Chain. The initial Rust
-component is the [sequencer-feed latency probe and narrow Nitro decoder](hermes-feed/README.md).
-It is read-only: region selection and decoder validation come before the
-Uniswap v2 paper trader.
+Hermes Trader is a Solana-focused Telegram bot for Pump.fun migration and wallet
+copy-trade monitoring.
 
 The existing Solana/Pump.fun system is retained below as the reference project
 that Hermes is evolving from.

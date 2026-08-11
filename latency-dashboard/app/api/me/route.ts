@@ -4,6 +4,7 @@ export async function GET() {
   try {
     const { user, email } = await requireAdmin();
     return Response.json({
+      id: user.id,
       user: {
         id: user.id,
         email

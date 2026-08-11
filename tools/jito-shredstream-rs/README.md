@@ -77,13 +77,14 @@ Mention-only transactions are emitted as classified JSONL:
 
 ## Local Copy Simulation
 
-Run this on the Mac, not the VPS. It opens an SSH tunnel to the VPS ShredStream
-proxy, uses the local copy wallet keypair, signs a copy transaction, and calls
-`simulateTransaction`. It cannot send because it forces
+Run this on the same machine as a locally reachable ShredStream proxy. Set
+`JITO_SHREDSTREAM_PROXY_URL` explicitly when the proxy is not listening at
+`http://127.0.0.1:9999`. The harness uses the local copy wallet keypair, signs a
+copy transaction, and calls `simulateTransaction`. It cannot send because it forces
 `JITO_ENABLE_COPY_SEND=false` and `JITO_DRY_RUN=true`.
 
 ```bash
-tools/jito-shredstream-rs/run-local-copy-sim-vps.sh
+tools/jito-shredstream-rs/run-local-copy-sim.sh
 ```
 
 When a tiny tracked-wallet buy lands, verify the signed simulation gate:
@@ -113,12 +114,12 @@ The verifier requires a clean `copytrade.localExecution.v1` row with:
 
 ## Local Tiny Send
 
-Only run this after the simulation verifier passes for a live buy. This still
-runs on the Mac and still uses the local copy wallet keypair. It opens the VPS
-tunnel, simulates first, and sends only if explicitly armed:
+Only run this after the simulation verifier passes for a live buy. It requires
+a locally reachable proxy, uses the local copy wallet keypair, simulates first,
+and sends only if explicitly armed:
 
 ```bash
-JITO_ARM_LIVE_COPY_SEND=YES tools/jito-shredstream-rs/run-local-copy-send-vps.sh
+JITO_ARM_LIVE_COPY_SEND=YES tools/jito-shredstream-rs/run-local-copy-send.sh
 ```
 
 The send harness forces:
@@ -155,7 +156,7 @@ For a one-shot fast-send test, arm the separate fast profile:
 JITO_ARM_LIVE_COPY_SEND=YES \
 JITO_FAST_COPY_SEND=YES \
 JITO_ONE_SHOT_COPY_SEND=true \
-tools/jito-shredstream-rs/run-local-copy-send-vps.sh
+tools/jito-shredstream-rs/run-local-copy-send.sh
 ```
 
 Fast mode keeps the same max-copy-SOL and keypair guards, but skips pre-submit
@@ -167,8 +168,8 @@ explicitly enabled. Fast local sends default `JITO_SEND_HTTP_TIMEOUT_MS=750`.
 
 ## VPS Tiny Send
 
-The production-shaped copy worker runs on the VPS, next to the local
-ShredStream proxy, without the Mac SSH tunnel:
+The production-shaped copy worker runs on the service host, next to the local
+ShredStream proxy, without any remote tunnel:
 
 ```bash
 JITO_ARM_LIVE_COPY_SEND=YES /opt/jito-feed-probe-watch/run-vps-copy-send.sh

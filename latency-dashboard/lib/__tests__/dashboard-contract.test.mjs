@@ -1,0 +1,279 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { describe, test } from "node:test";
+import {
+  attachTelegramSubscriberIds,
+  DashboardFilterError,
+  decodeExecutionCursor,
+  dashboardOutcomePredicate,
+  encodeExecutionCursor,
+  executionOutcomeForRow,
+  executionMatchesWallet,
+  landingComparisonForRow,
+  parseExecutionFilters,
+  parseSourceFilters,
+  pageExecutionRows,
+  isExecutionBeforeCursor,
+  isObservedAtWithinRange,
+  sanitizeWallet,
+  summarizeExecutions,
+  toDashboardExecution
+} from "../dashboard-contract.mjs";
+
+describe("dashboard contract", () => {
+  test("parseExecutionFilters applies default and max bounds", () => {
+    const now = Date.parse("2026-07-31T12:00:00.000Z");
+    const defaults = parseExecutionFilters(new URLSearchParams(), now);
+    assert.equal(defaults.limit, 50);
+    assert.equal(defaults.cursor, null);
+    assert.equal(defaults.from, "2026-07-24T12:00:00.000Z");
+    assert.equal(defaults.to, "2026-07-31T12:00:00.000Z");
+
+    const allHistory = parseExecutionFilters(new URLSearchParams("since=all"), now);
+    assert.equal(allHistory.fromObservedAtMs, 0);
+    assert.equal(allHistory.toObservedAtMs, now);
+
+    const empty = parseExecutionFilters(new URLSearchParams("limit="));
+    assert.equal(empty.limit, 50);
+
+    const capped = parseExecutionFilters(new URLSearchParams("limit=500"));
+    assert.equal(capped.limit, 100);
+
+    assert.throws(() => parseExecutionFilters(new URLSearchParams("limit=0")), DashboardFilterError);
+  });
+
+  test("cursor encoding is reversible", () => {
+    const cursor = { observedAtMs: 1710000000000, id: 7 };
+    const encoded = encodeExecutionCursor(cursor);
+    const decoded = decodeExecutionCursor(encoded);
+    assert.deepEqual(decoded, cursor);
+  });
+
+  test("authenticated execution DTOs preserve full wallets and omit raw custody material", () => {
+    assert.equal(sanitizeWallet("abcdefghijklmnopqrstuvwxyz"), "abcdefghijklmnopqrstuvwxyz");
+    assert.equal(sanitizeWallet("short"), "short");
+    assert.equal(sanitizeWallet(""), null);
+    assert.equal(sanitizeWallet("  abcdefghijklmnopqrstuvwxyz  "), "abcdefghijklmnopqrstuvwxyz");
+    const dto = toDashboardExecution({
+      observedWallet: "ObservedWalletFullAddress",
+      copyWallet: "CopyWalletFullAddress",
+      rawExecution: { privateKey: "never-return" },
+      chainReport: { seed: "never-return" },
+      privateKey: "never-return",
+      observedAction: "buy"
+    });
+    assert.equal(dto.observedWallet, "ObservedWalletFullAddress");
+    assert.equal(dto.copyWallet, "CopyWalletFullAddress");
+    assert.equal(dto.telegramSubscriberId, null);
+    assert.equal("rawExecution" in dto, false);
+    assert.equal("chainReport" in dto, false);
+    assert.equal("privateKey" in dto, false);
+    assert.equal(JSON.stringify(dto).includes("never-return"), false);
+  });
+
+  test("Telegram subscriber IDs attach by exact copy-wallet match", () => {
+    const rows = [
+      toDashboardExecution({ id: 1, observedAction: "buy", observedWallet: "watched1", copyWallet: "copy1" }),
+      toDashboardExecution({ id: 2, observedAction: "sell", observedWallet: "watched2", copyWallet: "copy2" }),
+      toDashboardExecution({ id: 3, observedAction: "buy", observedWallet: "watched3", copyWallet: null })
+    ];
+    const enriched = attachTelegramSubscriberIds(rows, new Map([
+      ["copy1", "123456789"],
+      ["unrelated", "987654321"]
+    ]));
+
+    assert.equal(enriched[0].telegramSubscriberId, "123456789");
+    assert.equal(enriched[1].telegramSubscriberId, null);
+    assert.equal(enriched[2].telegramSubscriberId, null);
+    assert.equal(enriched[0].copyWallet, "copy1");
+  });
+
+  test("dashboard execution queries preserve first ACK lane attribution", () => {
+    const source = readFileSync(new URL("../local-executions.ts", import.meta.url), "utf8");
+    assert.match(source, /"first_ack_lane"/);
+    assert.match(source, /"send_rpc_winner"/);
+    assert.match(source, /firstAckLane:\s*row\.first_ack_lane[\s\S]*?row\.send_rpc_winner/);
+  });
+
+  test("public list and detail DTOs never expose endpoint credentials", () => {
+    const adversarialEndpoints = [
+      { endpoint: "https://rpc.example.test/?api-key=query-secret", secret: "query-secret" },
+      { endpoint: "https://basic-user:basic-secret@rpc.example.test/", secret: "basic-secret" },
+      { endpoint: "https://rpc.example.test/private/path-secret/send", secret: "path-secret" },
+      { endpoint: "https://rpc.example.test/#fragment-secret", secret: "fragment-secret" }
+    ];
+
+    for (const { endpoint, secret } of adversarialEndpoints) {
+      const publicDto = toDashboardExecution({
+        id: 1,
+        observedAtMs: 1,
+        endpoint,
+        observedWallet: "ObservedWalletFullAddress",
+        copyWallet: "CopyWalletFullAddress",
+        observedAction: "buy"
+      });
+      const listJson = JSON.stringify({ executions: [publicDto] });
+      const detailJson = JSON.stringify({ execution: publicDto });
+      assert.equal("endpoint" in publicDto, false);
+      assert.equal(listJson.includes("endpoint"), false);
+      assert.equal(detailJson.includes("endpoint"), false);
+      assert.equal(listJson.includes(secret), false);
+      assert.equal(detailJson.includes(secret), false);
+    }
+  });
+
+  test("fixed from/to are inclusive, primary, and invalid dates fail with 400", () => {
+    const filters = parseExecutionFilters(new URLSearchParams(
+      "from=2026-07-01T00%3A00%3A00Z&to=1782950400000&since=1h&side=sell&action=buy"
+    ));
+    assert.equal(filters.fromObservedAtMs, Date.parse("2026-07-01T00:00:00Z"));
+    assert.equal(filters.toObservedAtMs, 1782950400000);
+    assert.equal(filters.side, "sell");
+    assert.equal(isObservedAtWithinRange(filters.fromObservedAtMs, filters), true);
+    assert.equal(isObservedAtWithinRange(filters.toObservedAtMs, filters), true);
+    assert.equal(isObservedAtWithinRange(filters.toObservedAtMs + 1, filters), false);
+    for (const query of ["from=yesterday", "to=2026-07-31", "from=2026-02-30T00%3A00%3A00Z", "from=2026-08-01T00%3A00%3A00Z&to=2026-07-01T00%3A00%3A00Z"]) {
+      assert.throws(
+        () => parseExecutionFilters(new URLSearchParams(query)),
+        (error) => error instanceof DashboardFilterError && error.status === 400
+      );
+    }
+  });
+
+  test("wallet matching covers observed and copy wallets exactly", () => {
+    const row = { observedWallet: "watched123", copyWallet: "copy456" };
+    assert.equal(executionMatchesWallet(row, "watched123"), true);
+    assert.equal(executionMatchesWallet(row, "copy456"), true);
+    assert.equal(executionMatchesWallet(row, "watched"), false);
+    const filters = parseExecutionFilters(new URLSearchParams("wallet=copy456"));
+    assert.equal(filters.wallet, "copy456");
+  });
+
+  test("outcome mapping requires confirmed landing evidence", () => {
+    assert.equal(executionOutcomeForRow({ observedAction: "sell", decision: "sent" }), "ack_not_landed");
+    assert.equal(executionOutcomeForRow({ observedAction: "sell" }), "unknown");
+    assert.equal(executionOutcomeForRow({ observedAction: "sell", decision: "sent", sendSignature: "sell", copySlot: 21, buyStatus: "buyLanded" }), "landed");
+    assert.equal(executionOutcomeForRow({ observedAction: "sell", decision: "reconciled", sendSignature: "sell", buyStatus: "buyLanded", chainReport: { slot: 21 } }), "landed");
+    assert.equal(executionOutcomeForRow({ observedAction: "buy", decision: "skip" }), "skipped");
+    assert.equal(executionOutcomeForRow({ observedAction: "buy", decision: "error" }), "send_failed");
+    assert.equal(executionOutcomeForRow({ observedAction: "buy", decision: "sent", buyStatus: "buyFailedOnChain", buyChainError: {} }), "failed_on_chain");
+    assert.equal(executionOutcomeForRow({ observedAction: "buy", decision: "sent", sendSignature: "buy", copySlot: 22, buyStatus: "buyLanded", buyChainError: null }), "landed");
+  });
+
+  test("normalized DTO surfaces confirmed landing slots without exposing chain reports", () => {
+    const reconciledSell = toDashboardExecution({
+      observedAction: "sell",
+      sendSignature: "sell",
+      buyStatus: "buyLanded",
+      chainReport: { slot: 33, seed: "never-return" }
+    });
+    assert.equal(reconciledSell.outcome, "landed");
+    assert.equal(reconciledSell.landingComparison, "no_target");
+    assert.equal(reconciledSell.copySlot, 33);
+    assert.equal("chainReport" in reconciledSell, false);
+
+    const positioned = toDashboardExecution({
+      observedAction: "buy",
+      sendSignature: "buy",
+      buyStatus: "buyLanded",
+      blockPositionDiagnostics: {
+        status: "found",
+        targetSlot: 40,
+        copySlot: 43,
+        slotDelta: null
+      }
+    });
+    assert.equal(positioned.landingComparison, "cross_slot");
+    assert.equal(positioned.targetSlot, 40);
+    assert.equal(positioned.copySlot, 43);
+    assert.equal(positioned.slotDelta, 3);
+  });
+
+  test("normalized DTO promotes cross-slot transaction distance", () => {
+    const row = toDashboardExecution({
+      id: 5111272,
+      observedAtMs: 1,
+      observedAction: "buy",
+      observedWallet: "watched",
+      copyWallet: "copy",
+      sendSignature: "copy-signature",
+      buyStatus: "buyLanded",
+      targetSlot: 436402707,
+      copySlot: 436402708,
+      slotDelta: 1,
+      txDelta: null,
+      blockPositionDiagnostics: {
+        targetSlot: 436402707,
+        copySlot: 436402708,
+        slotDelta: 1,
+        txDelta: null,
+        crossSlotPositionSummary: { crossSlotTxDelta: 730 }
+      }
+    });
+    assert.equal(row.landingComparison, "cross_slot");
+    assert.equal(row.txDelta, 730);
+  });
+
+  test("landing comparison and summary counts", () => {
+    const rows = [
+      toDashboardExecution({ observedAtMs: 1, id: 1, observedAction: "buy", sendSignature: "abc", observedWallet: "obs1", copyWallet: null, buyStatus: "buySubmitted" }),
+      toDashboardExecution({ observedAtMs: 2, id: 2, observedAction: "sell", observedWallet: "obs2", copyWallet: null, sendSignature: "sell", buyStatus: "buyLanded", targetSlot: 20, copySlot: 20 }),
+      toDashboardExecution({ observedAtMs: 3, id: 3, observedAction: "buy", observedWallet: "obs3", copyWallet: null, sendSignature: "buy", copySlot: 21, buyStatus: "buyLanded" }),
+    ];
+    const summary = summarizeExecutions(rows);
+    assert.equal(summary.outcome.landed, 2);
+    assert.equal(summary.outcome.ack_not_landed, 1);
+    assert.equal(summarizeExecutions([{ outcome: "landed", landingComparison: "no_target" }]).landed, 1);
+    assert.equal(landingComparisonForRow({ targetSlot: 11, copySlot: 12 }), "cross_slot");
+    assert.equal(landingComparisonForRow({}), "no_target");
+  });
+
+  test("outcome predicates are database-side and source filters omit execution-only fields", () => {
+    assert.match(dashboardOutcomePredicate("landed"), /copy_slot\.not\.is\.null/);
+    assert.match(dashboardOutcomePredicate("landed"), /chain_report->>slot\.not\.is\.null/);
+    assert.match(dashboardOutcomePredicate("landed"), /chain_report->>err\.is\.null/);
+    assert.match(dashboardOutcomePredicate("failed_on_chain"), /buyFailedOnChain/);
+    const filters = parseExecutionFilters(new URLSearchParams("outcome=ack_not_landed"));
+    assert.equal(filters.outcome, "ack_not_landed");
+    const sourceFilters = parseSourceFilters(new URLSearchParams("source=shred&wallet=abc&side=buy"));
+    assert.equal(sourceFilters.source, "shred");
+    assert.equal(sourceFilters.wallet, "abc");
+    assert.equal(sourceFilters.side, "buy");
+    assert.equal("copyWallet" in sourceFilters, false);
+    assert.equal("outcome" in sourceFilters, false);
+
+    const sideFilters = parseExecutionFilters(new URLSearchParams("side=buy&outcome=landed"));
+    assert.equal(sideFilters.side, "buy");
+    assert.equal(sideFilters.outcome, "landed");
+    assert.equal(parseSourceFilters(new URLSearchParams("side=sell")).side, "sell");
+  });
+
+  test("sentinel pagination preserves tied timestamp keysets across pages", () => {
+    const rows = [
+      { observedAtMs: 100, id: 3 },
+      { observedAtMs: 100, id: 2 },
+      { observedAtMs: 100, id: 1 },
+      { observedAtMs: 99, id: 9 }
+    ];
+    const first = pageExecutionRows(rows.slice(0, 3), 2);
+    assert.deepEqual(first.items.map((row) => row.id), [3, 2]);
+    assert.equal(first.hasMore, true);
+    const cursor = first.items.at(-1);
+    const secondCandidates = rows.filter((row) => isExecutionBeforeCursor(row, cursor));
+    const second = pageExecutionRows(secondCandidates, 2);
+    assert.deepEqual(second.items.map((row) => row.id), [1, 9]);
+    assert.equal(second.hasMore, false);
+  });
+
+  test("database filters precede limit and overview reuses the identical filter query", async () => {
+    const source = await import("node:fs/promises").then((fs) => fs.readFile(new URL("../local-executions.ts", import.meta.url), "utf8"));
+    const filterBuilder = source.indexOf("function filteredDashboardExecutionQuery");
+    const listQuery = source.indexOf("export async function listDashboardExecutions");
+    const limit = source.indexOf(".limit(filters.limit + 1)", listQuery);
+    assert.equal(filterBuilder >= 0 && filterBuilder < listQuery && listQuery < limit, true);
+    assert.match(source, /\.gte\("observed_at_ms", filters\.fromObservedAtMs\)\s*\.lte\("observed_at_ms", filters\.toObservedAtMs\)/);
+    assert.match(source, /observed_wallet\.eq\.\$\{filters\.wallet\},copy_wallet\.eq\.\$\{filters\.wallet\}/);
+    assert.match(source, /filteredDashboardExecutionQuery\(filters, DASHBOARD_EXECUTION_SELECT\)/);
+    assert.match(source, /exactDashboardExecutionCount[\s\S]*filteredDashboardExecutionQuery\(filters, "id", true\)/);
+  });
+});

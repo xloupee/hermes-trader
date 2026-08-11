@@ -27,7 +27,7 @@ export function LoginForm({ initialMessage = null }: { initialMessage?: string |
       return;
     }
 
-    window.location.assign("/");
+    window.location.assign("/dashboard");
   }
 
   return (

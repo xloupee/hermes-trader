@@ -39,7 +39,8 @@ export interface MeResponse {
 
 export const DASHBOARD_NAV: Array<{ href: Route; label: string }> = [
   { href: "/dashboard", label: "Dashboard" },
-  { href: "/ci", label: "CI" }
+  { href: "/ci", label: "CI" },
+  { href: "/app", label: "Bot settings" }
 ];
 
 export const DEFAULT_FILTERS: DashboardFilterState = {

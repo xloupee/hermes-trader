@@ -1,0 +1,178 @@
+import { createAdminClient } from "@/lib/supabase/admin";
+import type { DashboardExecutionFilters } from "@/lib/local-executions";
+
+export interface GatewayConfirmation {
+  id: number;
+  createdAt: string;
+  observedAtMs: number;
+  confirmationAtMs: number | null;
+  provider: string;
+  source: string;
+  observedWallet: string;
+  copyWallet: string;
+  observedSignature: string;
+  signature: string;
+  slot: number;
+  confirmationSlot: number | null;
+  slotDelta: number | null;
+  targetTxIndex: number | null;
+  copyTxIndex: number | null;
+  sameSlotTxDelta: number | null;
+  txDelta: number | null;
+  selectedRoute: string | null;
+  routeLayout: string | null;
+  mint: string;
+  observedAction: string;
+  transactionRole: string;
+  status: string | null;
+  ok: boolean;
+  confirmationStatus: string | null;
+  reason: string | null;
+  gatewayIntentKey: string | null;
+  gatewayState: string | null;
+  reconciliationApplied: boolean | null;
+}
+
+export interface GatewayConfirmationFreshness {
+  latestObservedAtMs: number | null;
+  latestConfirmationAtMs: number | null;
+  latestCreatedAt: string | null;
+}
+
+const GATEWAY_CONFIRMATION_SELECT = [
+  "id",
+  "created_at",
+  "observed_at_ms",
+  "confirmation_at_ms",
+  "provider",
+  "source",
+  "observed_wallet",
+  "copy_wallet",
+  "observed_signature",
+  "signature",
+  "slot",
+  "confirmation_slot",
+  "slot_delta",
+  "target_tx_index",
+  "copy_tx_index",
+  "same_slot_tx_delta",
+  "tx_delta",
+  "selected_route",
+  "route_layout",
+  "mint",
+  "observed_action",
+  "transaction_role",
+  "status",
+  "ok",
+  "confirmation_status",
+  "reason",
+  "gateway_intent_key",
+  "gateway_state",
+  "reconciliation_applied"
+].join(",");
+
+function missingTableError(error: { message?: string; code?: string } | null): boolean {
+  const message = error?.message?.toLowerCase() || "";
+  return error?.code === "42P01" || message.includes("does not exist") || message.includes("schema cache");
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function booleanValue(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function mapGatewayConfirmation(row: Record<string, unknown>): GatewayConfirmation {
+  return {
+    id: numberValue(row.id) ?? 0,
+    createdAt: stringValue(row.created_at) ?? new Date(0).toISOString(),
+    observedAtMs: numberValue(row.observed_at_ms) ?? 0,
+    confirmationAtMs: numberValue(row.confirmation_at_ms),
+    provider: stringValue(row.provider) ?? "unknown",
+    source: stringValue(row.source) ?? "unknown",
+    observedWallet: stringValue(row.observed_wallet) ?? "",
+    copyWallet: stringValue(row.copy_wallet) ?? "",
+    observedSignature: stringValue(row.observed_signature) ?? "",
+    signature: stringValue(row.signature) ?? "",
+    slot: numberValue(row.slot) ?? 0,
+    confirmationSlot: numberValue(row.confirmation_slot),
+    slotDelta: numberValue(row.slot_delta),
+    targetTxIndex: numberValue(row.target_tx_index),
+    copyTxIndex: numberValue(row.copy_tx_index),
+    sameSlotTxDelta: numberValue(row.same_slot_tx_delta),
+    txDelta: numberValue(row.tx_delta),
+    selectedRoute: stringValue(row.selected_route),
+    routeLayout: stringValue(row.route_layout),
+    mint: stringValue(row.mint) ?? "",
+    observedAction: stringValue(row.observed_action) ?? "unknown",
+    transactionRole: stringValue(row.transaction_role) ?? "unknown",
+    status: stringValue(row.status),
+    ok: row.ok === true,
+    confirmationStatus: stringValue(row.confirmation_status),
+    reason: stringValue(row.reason),
+    gatewayIntentKey: stringValue(row.gateway_intent_key),
+    gatewayState: stringValue(row.gateway_state),
+    reconciliationApplied: booleanValue(row.reconciliation_applied)
+  };
+}
+
+function filteredGatewayConfirmationQuery(filters: DashboardExecutionFilters) {
+  let query = createAdminClient()
+    .from("copytrade_gateway_confirmations")
+    .select(GATEWAY_CONFIRMATION_SELECT)
+    .gte("observed_at_ms", filters.fromObservedAtMs)
+    .lte("observed_at_ms", filters.toObservedAtMs);
+
+  if (filters.provider) query = query.eq("provider", filters.provider);
+  if (filters.source) query = query.eq("source", filters.source);
+  if (filters.wallet) query = query.or(`observed_wallet.eq.${filters.wallet},copy_wallet.eq.${filters.wallet}`);
+  if (filters.mint) query = query.ilike("mint", `%${filters.mint}%`);
+  if (filters.route) query = query.eq("selected_route", filters.route);
+  if (filters.side) query = query.eq("observed_action", filters.side);
+  if (filters.outcome === "landed") {
+    query = query.eq("status", "landed").eq("ok", true);
+  } else if (filters.outcome === "failed_on_chain") {
+    query = query.eq("ok", false);
+  } else if (filters.outcome) {
+    query = query.eq("status", filters.outcome);
+  }
+  return query;
+}
+
+export async function listGatewayConfirmations(filters: DashboardExecutionFilters): Promise<GatewayConfirmation[]> {
+  const { data, error } = await filteredGatewayConfirmationQuery(filters)
+    .order("observed_at_ms", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(filters.limit);
+
+  if (missingTableError(error)) return [];
+  if (error) throw error;
+  return ((((data as unknown) as Array<Record<string, unknown>> | null) ?? [])).map(mapGatewayConfirmation);
+}
+
+export async function getGatewayConfirmationFreshness(): Promise<GatewayConfirmationFreshness> {
+  const { data, error } = await createAdminClient()
+    .from("copytrade_gateway_confirmations")
+    .select("observed_at_ms,confirmation_at_ms,created_at")
+    .order("observed_at_ms", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(1);
+
+  if (missingTableError(error)) {
+    return { latestObservedAtMs: null, latestConfirmationAtMs: null, latestCreatedAt: null };
+  }
+  if (error) throw error;
+
+  const latest = ((data as unknown) as Array<Record<string, unknown>> | null)?.[0];
+  return {
+    latestObservedAtMs: numberValue(latest?.observed_at_ms),
+    latestConfirmationAtMs: numberValue(latest?.confirmation_at_ms),
+    latestCreatedAt: stringValue(latest?.created_at)
+  };
+}

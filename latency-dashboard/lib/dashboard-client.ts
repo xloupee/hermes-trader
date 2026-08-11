@@ -4,7 +4,8 @@ import type {
   DashboardExecutionsResponse,
   DashboardOverviewResponse,
   DashboardSourcesResponse,
-  DashboardSystemResponse
+  DashboardSystemResponse,
+  GatewayConfirmation
 } from "@/lib/dashboard-contract.mjs";
 
 export type {
@@ -12,7 +13,8 @@ export type {
   DashboardExecutionsResponse,
   DashboardOverviewResponse,
   DashboardSourcesResponse,
-  DashboardSystemResponse
+  DashboardSystemResponse,
+  GatewayConfirmation
 };
 
 export type LandingPreset = "all" | "landed-buys" | "landed-sells";

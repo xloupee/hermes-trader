@@ -6,6 +6,9 @@ import type {
   DashboardOverviewSummary,
   LocalExecutionReport
 } from "./local-executions";
+import type { GatewayConfirmation, GatewayConfirmationFreshness } from "./gateway-confirmations";
+
+export type { GatewayConfirmation, GatewayConfirmationFreshness } from "./gateway-confirmations";
 
 export type ExecutionOutcome = DashboardExecutionOutcome;
 
@@ -35,8 +38,10 @@ export interface ExecutionSummary {
 
 export interface DashboardExecutionsResponse {
   executions: DashboardExecution[];
+  gatewayConfirmations: GatewayConfirmation[];
   summary: ExecutionSummary;
   freshness: DashboardExecutionFreshness;
+  gatewayConfirmationFreshness: GatewayConfirmationFreshness;
   pagination: {
     limit: number;
     hasMore: boolean;

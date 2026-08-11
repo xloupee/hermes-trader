@@ -382,7 +382,6 @@ export function CILedgerDashboard() {
           <div className={styles.brand}><span>H</span><div><b>HERMES / CI</b><small>VPS build intelligence</small></div></div>
           <div className={styles.headerCenter}>
             <DashboardNav />
-            <div className={styles.repo}>{data?.repository ?? ""}</div>
           </div>
           <div className={styles.headerRight}>
             <span className={styles.live}><i />{data?.source === "github" ? "Live" : "Unavailable"}</span>

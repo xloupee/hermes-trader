@@ -92,11 +92,13 @@ interface DetailEvent {
 interface CiPhase {
   key: string;
   name: string;
+  description: string;
   startedAt: string | null;
   completedAt: string | null;
   duration: number | null;
   tone: Tone;
   evidence: string | null;
+  source: "reported" | "planned";
 }
 
 interface CheckContext {
@@ -111,6 +113,7 @@ interface PhaseReport {
   check: CiCheck | null;
   context: CheckContext;
   phases: CiPhase[];
+  isPlanned: boolean;
   current: CiPhase | null;
   tone: Tone;
   phaseLabel: string;
@@ -127,6 +130,61 @@ function eventTime(event: DetailEvent): number {
 
 function phaseTitle(value: string): string {
   return value.replaceAll("_", " ").replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+const PHASE_DESCRIPTIONS: Record<string, string> = {
+  resolve_exact_merge: "Resolve the PR head against its base and lock the exact merge identity.",
+  prepare_runner: "Check disk headroom, caches, dependencies, and the required toolchain.",
+  repository_integrity: "Verify the repository diff and fail on malformed or unsafe changes.",
+  npm_ci: "Install the exact Node dependency lockfile.",
+  portable_preflight: "Validate portable build inputs before platform-specific work begins.",
+  typescript_build: "Compile the TypeScript application and catch type or bundling errors.",
+  node_suite: "Run the Node-only test suite.",
+  rust_format: "Verify Rust formatting without changing source files.",
+  rust_check: "Type-check the full Rust workspace and all targets.",
+  debug_validator: "Build and fingerprint the runtime validator used by cross-language tests.",
+  cross_language_node_suite: "Run Node tests against the validated Rust binary.",
+  full_node_suite: "Run the complete cross-language Node validation suite.",
+  vps_ci_tests: "Exercise VPS CI policy, receipt, and promotion contracts.",
+  release_build: "Build the exact release artifacts once for the selected merge.",
+  release_validator: "Verify the release validator is present, executable, and sealed.",
+  linux_gates: "Run Linux, systemd, socket, and kernel compatibility gates.",
+  restart_regressions: "Run restart, rollback, and AX-safe integration regressions.",
+  gateway_hotfix_build: "Build the scoped gateway hotfix artifact.",
+  gateway_hotfix_verify: "Verify hotfix identity and runtime compatibility.",
+  optional_control_check: "Validate affected control-plane code when present.",
+  run_validation: "Execute the tests and platform gates required by this risk tier.",
+  seal_promotion: "Seal the artifact, receipt, and promotion evidence.",
+  seal_evidence: "Publish the final receipt and immutable build evidence."
+};
+
+function phaseDescription(name: string): string {
+  return PHASE_DESCRIPTIONS[name] || "Run the reporter-defined validation for this phase.";
+}
+
+function plannedPhaseNames(context: CheckContext): string[] {
+  if (context.tier === "fast") return ["resolve_exact_merge", "repository_integrity", "seal_evidence"];
+  if (context.tier === "hotfix" || context.route === "routine") {
+    return ["resolve_exact_merge", "gateway_hotfix_build", "gateway_hotfix_verify", "optional_control_check", "seal_evidence"];
+  }
+  if (context.tier === "standard") {
+    return ["resolve_exact_merge", "prepare_runner", "npm_ci", "typescript_build", "node_suite", "seal_evidence"];
+  }
+  return ["resolve_exact_merge", "prepare_runner", "release_build", "run_validation", "restart_regressions", "seal_promotion"];
+}
+
+function plannedPhases(check: CiCheck, context: CheckContext): CiPhase[] {
+  return plannedPhaseNames(context).map((name) => ({
+    key: `${check.kind}-${check.id}-planned-${name}`,
+    name,
+    description: phaseDescription(name),
+    startedAt: null,
+    completedAt: null,
+    duration: null,
+    tone: "neutral",
+    evidence: null,
+    source: "planned"
+  }));
 }
 
 function completeAt(startedAt: string | null, duration: number | null, fallback: string | null): string | null {
@@ -148,11 +206,13 @@ function phasesFromCheck(check: CiCheck): CiPhase[] {
     const created: CiPhase = {
       key: `${check.kind}-${check.id}-${name}`,
       name,
+      description: phaseDescription(name),
       startedAt: check.startedAt,
       completedAt: null,
       duration: null,
       tone: "neutral",
-      evidence: null
+      evidence: null,
+      source: "reported"
     };
     byName.set(name, created);
     phases.push(created);
@@ -198,11 +258,16 @@ function vpsCheck(pr: CiPullRequest): CiCheck | null {
 
 function phaseReport(pr: CiPullRequest): PhaseReport {
   const check = vpsCheck(pr) || pr.checks[0] || null;
-  const phases = check ? phasesFromCheck(check) : [];
+  const context = checkContext(check);
+  const reportedPhases = check ? phasesFromCheck(check) : [];
+  const isPlanned = Boolean(check && !reportedPhases.length);
+  const phases = reportedPhases.length ? reportedPhases : check ? plannedPhases(check, context) : [];
   const passed = phases.filter((phase) => phase.tone === "success").length;
   const failed = phases.filter((phase) => phase.tone === "failure").length;
   const running = phases.filter((phase) => phase.tone === "running").length;
-  const current = [...phases].reverse().find((phase) => phase.tone === "running" || phase.tone === "queued") || phases[phases.length - 1] || null;
+  const current = reportedPhases.length
+    ? [...reportedPhases].reverse().find((phase) => phase.tone === "running" || phase.tone === "queued") || reportedPhases[reportedPhases.length - 1] || null
+    : null;
 
   let tone: Tone = "neutral";
   if (failed || check?.conclusion === "failure" || check?.conclusion === "timed_out" || check?.conclusion === "action_required") {
@@ -218,23 +283,26 @@ function phaseReport(pr: CiPullRequest): PhaseReport {
   const phaseLabel = current
     ? phaseTitle(current.name)
     : check?.status === "in_progress"
-      ? "VPS runner active · phase telemetry pending"
+      ? "Waiting for first phase marker"
       : check && ["queued", "waiting", "requested", "pending"].includes(check.status)
         ? "Waiting for VPS runner"
         : check
           ? "Check complete · phase list unavailable"
           : "Waiting for VPS reporter";
-  const phaseSummary = phases.length
-    ? `${phases.length} reported · ${passed} passed${failed ? ` · ${failed} failed` : ""}${running ? ` · ${running} active` : ""}`
+  const phaseSummary = reportedPhases.length
+    ? `${reportedPhases.length} reported · ${passed} passed${failed ? ` · ${failed} failed` : ""}${running ? ` · ${running} active` : ""}`
     : check?.status === "in_progress"
-      ? "The reporter has not published phase markers yet"
-      : "No phase telemetry published";
+      ? `${phases.length} expected stages · awaiting live phase telemetry`
+      : phases.length
+        ? `${phases.length} expected stages · no phase telemetry published`
+        : "No phase telemetry published";
   const progressLabel = phases.length ? `${passed}/${phases.length}` : "—";
 
   return {
     check,
-    context: checkContext(check),
+    context,
     phases,
+    isPlanned,
     current,
     tone,
     phaseLabel,
@@ -400,8 +468,7 @@ export function CILedgerDashboard() {
           {detailReport && (
             <>
               <div className={styles.detailLead}>
-                <div>
-                  <span className={styles.eyebrow}>Exact phase record</span>
+                <div className={styles.titleBlock}>
                   <h1>#{selectedPr.number} {selectedPr.title}</h1>
                   <div className={styles.identity}>
                     <span>{selectedPr.branch}</span>
@@ -413,33 +480,37 @@ export function CILedgerDashboard() {
                 <Status tone={detailReport.tone} />
               </div>
 
-              <div className={styles.contextStrip}>
-                <span><small>Mode</small><strong>{detailReport.context.mode ? `${phaseTitle(detailReport.context.mode)} mode` : "—"}</strong></span>
-                <span><small>Tier</small><strong>{detailReport.context.tier ? phaseTitle(detailReport.context.tier) : "—"}</strong></span>
-                <span><small>Route</small><strong>{detailReport.context.route ? phaseTitle(detailReport.context.route) : "—"}</strong></span>
-                <span><small>Path risk</small><strong>{detailReport.context.pathRisk ? phaseTitle(detailReport.context.pathRisk) : "—"}</strong></span>
-                <span><small>Exact merge</small><strong>{detailReport.context.mergeSha?.slice(0, 12) || "—"}</strong></span>
+              <div className={styles.runMeta} aria-label="Build context">
+                <span>{detailReport.context.mode ? `${phaseTitle(detailReport.context.mode)} mode` : "Mode unknown"}</span>
+                <span>{detailReport.context.tier ? `${phaseTitle(detailReport.context.tier)} tier` : "Tier unknown"}</span>
+                <span>{detailReport.context.route ? `${phaseTitle(detailReport.context.route)} route` : "Route unknown"}</span>
+                <span>Risk {detailReport.context.pathRisk ? phaseTitle(detailReport.context.pathRisk) : "unknown"}</span>
+                <span>Merge {detailReport.context.mergeSha?.slice(0, 12) || "pending"}</span>
               </div>
 
               <section className={styles.breakdown} aria-label="CI phase breakdown">
                 <div className={styles.breakdownHead}>
-                  <div><span className={styles.eyebrow}>Phase breakdown</span><strong>{detailReport.phaseSummary}</strong></div>
-                  <span>{detailReport.check ? `Reporter: ${detailReport.check.name}` : "No VPS PR CI check"}</span>
+                  <div>
+                    <span className={styles.eyebrow}>{detailReport.isPlanned ? "Expected build path" : "Build progress"}</span>
+                    <strong>{detailReport.phaseLabel}</strong>
+                    <small>{detailReport.phaseSummary}</small>
+                  </div>
+                  <div className={styles.progressSummary}>
+                    <strong>{detailReport.progressLabel}</strong>
+                    <span>{formatDuration(detailReport.check?.durationMs || selectedRun?.durationMs || null)} elapsed</span>
+                  </div>
                 </div>
-                <div className={styles.phaseStats}>
-                  <span><b>{detailReport.phases.length}</b><small>reported</small></span>
-                  <span><b>{detailReport.passed}</b><small>passed</small></span>
-                  <span><b>{detailReport.failed}</b><small>failed</small></span>
-                  <span><b>{formatDuration(detailReport.check?.durationMs || selectedRun?.durationMs || null)}</b><small>wall time</small></span>
-                </div>
+                <span className={`${styles.phaseRail} ${styles.detailRail}`} aria-label={`${detailReport.progressLabel} phases passed`}>
+                  {detailReport.phases.map((phase) => <i className={toneClass(phase.tone)} key={phase.key} title={`${phaseTitle(phase.name)} · ${phase.source === "planned" ? "Awaiting reporter" : stateLabel(phase.tone)}`} />)}
+                </span>
                 {detailReport.phases.length ? (
                   <div className={styles.phaseList}>
                     {detailReport.phases.map((phase, index) => (
                       <div className={styles.phaseRow} key={phase.key}>
                         <span className={`${styles.phaseMarker} ${toneClass(phase.tone)}`}><StatusMark tone={phase.tone} /></span>
                         <span className={styles.phaseIndex}>{String(index + 1).padStart(2, "0")}</span>
-                        <span className={styles.phaseName}><strong>{phaseTitle(phase.name)}</strong><small>{stateLabel(phase.tone)}{phase.evidence ? ` · ${phase.evidence}` : ""}</small></span>
-                        <span className={styles.phaseTiming}><time>{formatTime(phase.startedAt)}</time><small>{formatDuration(phase.duration)}</small></span>
+                        <span className={styles.phaseName}><strong>{phaseTitle(phase.name)}</strong><small>{phase.description}</small></span>
+                        <span className={styles.phaseTiming}><time>{phase.source === "planned" ? "Awaiting marker" : formatTime(phase.startedAt)}</time><small>{phase.source === "planned" ? "Planned" : `${stateLabel(phase.tone)} · ${formatDuration(phase.duration)}`}</small></span>
                       </div>
                     ))}
                   </div>
@@ -449,43 +520,45 @@ export function CILedgerDashboard() {
                     <div><strong>{detailReport.phaseLabel}</strong><small>{detailReport.phaseSummary}. Refreshing this record every 12 seconds.</small></div>
                   </div>
                 )}
-                <p className={styles.breakdownNote}>This board counts only phase markers published by the VPS check. A green GitHub check without those markers is not treated as a detailed phase record.</p>
+                {detailReport.isPlanned && <p className={styles.breakdownNote}>Expected stages are shown until the VPS reporter publishes exact phase markers. Planned rows are never counted as completed.</p>}
               </section>
 
-              <div className={styles.evidenceHeading}><span>Published evidence</span><span>{events.length} records · GitHub checks and workflow steps</span></div>
+              <details className={styles.evidenceDisclosure}>
+                <summary><span>Raw evidence</span><small>{events.length} GitHub record{events.length === 1 ? "" : "s"}</small><ChevronDown size={14} /></summary>
+                <div className={styles.timeline}>
+                  {events.length ? events.map((event) => {
+                    const isOpen = expanded === event.key;
+                    return (
+                      <div className={styles.event} key={event.key}>
+                        <button className={styles.eventTrigger} type="button" aria-expanded={isOpen} onClick={() => { setExpanded(isOpen ? null : event.key); setLogText(null); }}>
+                          <time>{formatTime(event.time)}</time>
+                          <span className={`${styles.eventMark} ${toneClass(event.tone)}`}><StatusMark tone={event.tone} /></span>
+                          <span className={styles.eventName}><strong>{event.title}</strong><small>{event.summary}</small></span>
+                          <span className={styles.eventDuration}>{formatDuration(event.duration)}<ChevronDown size={14} /></span>
+                        </button>
+                        <div className={`${styles.disclosure} ${isOpen ? styles.disclosureOpen : ""}`} aria-hidden={!isOpen}>
+                          <div>
+                            <div className={styles.factGrid}>
+                              <span><small>Status</small><strong>{stateLabel(event.tone)}</strong></span>
+                              <span><small>Started</small><strong>{formatTime(event.step?.startedAt || event.time || event.check?.startedAt || null)}</strong></span>
+                              <span><small>Completed</small><strong>{formatTime(event.step?.completedAt || (event.time && event.duration !== null ? new Date(new Date(event.time).getTime() + event.duration).toISOString() : event.check?.completedAt || null))}</strong></span>
+                              <span><small>Duration</small><strong>{formatDuration(event.duration)}</strong></span>
+                              <span className={styles.wideFact}><small>Evidence</small><strong>{event.evidence || event.check?.summary || `${event.job?.name || "VPS check"} · ${event.step?.conclusion || event.step?.status || "recorded"}`}</strong></span>
+                            </div>
+                            <div className={styles.eventActions}>
+                              {event.job && <button type="button" onClick={() => void loadLog(event.job!)} disabled={loadingLog}>{loadingLog && logJobId === event.job.id ? "Loading log…" : "Load job log"}<SquareTerminal size={13} /></button>}
+                              {(event.check?.detailsUrl || event.check?.url) && <a href={event.check.detailsUrl || event.check.url || "#"} target="_blank" rel="noreferrer">Source evidence <ExternalLink size={12} /></a>}
+                            </div>
+                            {logText && event.job?.id === logJobId && <pre className={styles.log}>{logText.slice(-12_000)}</pre>}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }) : <div className={styles.empty}><CircleDashed size={17} />No raw workflow or phase evidence has been published for this head.</div>}
+                </div>
+              </details>
             </>
           )}
-          <div className={styles.timeline}>
-            {events.length ? events.map((event) => {
-              const isOpen = expanded === event.key;
-              return (
-                <div className={styles.event} key={event.key}>
-                  <button className={styles.eventTrigger} type="button" aria-expanded={isOpen} onClick={() => { setExpanded(isOpen ? null : event.key); setLogText(null); }}>
-                    <time>{formatTime(event.time)}</time>
-                    <span className={`${styles.eventMark} ${toneClass(event.tone)}`}><StatusMark tone={event.tone} /></span>
-                    <span className={styles.eventName}><strong>{event.title}</strong><small>{event.summary}</small></span>
-                    <span className={styles.eventDuration}>{formatDuration(event.duration)}<ChevronDown size={14} /></span>
-                  </button>
-                  <div className={`${styles.disclosure} ${isOpen ? styles.disclosureOpen : ""}`} aria-hidden={!isOpen}>
-                    <div>
-                      <div className={styles.factGrid}>
-                        <span><small>Status</small><strong>{stateLabel(event.tone)}</strong></span>
-                        <span><small>Started</small><strong>{formatTime(event.step?.startedAt || event.time || event.check?.startedAt || null)}</strong></span>
-                        <span><small>Completed</small><strong>{formatTime(event.step?.completedAt || (event.time && event.duration !== null ? new Date(new Date(event.time).getTime() + event.duration).toISOString() : event.check?.completedAt || null))}</strong></span>
-                        <span><small>Duration</small><strong>{formatDuration(event.duration)}</strong></span>
-                        <span className={styles.wideFact}><small>Evidence</small><strong>{event.evidence || event.check?.summary || `${event.job?.name || "VPS check"} · ${event.step?.conclusion || event.step?.status || "recorded"}`}</strong></span>
-                      </div>
-                      <div className={styles.eventActions}>
-                        {event.job && <button type="button" onClick={() => void loadLog(event.job!)} disabled={loadingLog}>{loadingLog && logJobId === event.job.id ? "Loading log…" : "Load job log"}<SquareTerminal size={13} /></button>}
-                        {(event.check?.detailsUrl || event.check?.url) && <a href={event.check.detailsUrl || event.check.url || "#"} target="_blank" rel="noreferrer">Source evidence <ExternalLink size={12} /></a>}
-                      </div>
-                      {logText && event.job?.id === logJobId && <pre className={styles.log}>{logText.slice(-12_000)}</pre>}
-                    </div>
-                  </div>
-                </div>
-              );
-            }) : <div className={styles.empty}><CircleDashed size={17} />This PR is visible, but no workflow or phase evidence has been published for its head yet.</div>}
-          </div>
         </section>
       ) : (
         <section className={styles.ledger}>

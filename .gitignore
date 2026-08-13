@@ -3,6 +3,8 @@ node_modules/
 .DS_Store
 npm-debug.log*
 logs/
+!latency-dashboard/app/api/ci/logs/
+!latency-dashboard/app/api/ci/logs/route.ts
 data/
 dist/
 supabase/.temp/

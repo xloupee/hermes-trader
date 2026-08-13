@@ -41,4 +41,13 @@ describe("release contract", () => {
     assert.match(disposition, /## Root Solana service artifact/);
     assert.match(disposition, /Follow-up release gate/g);
   });
+
+  test("CI renders actual checks and workflow jobs instead of synthetic planned builds", async () => {
+    const dashboard = await read("latency-dashboard/components/ci-ledger-dashboard.tsx");
+
+    assert.match(dashboard, /function checkBuilds\(pr: CiPullRequest\)/);
+    assert.match(dashboard, /function workflowBuilds\(pr: CiPullRequest, run: CiRun \| null\)/);
+    assert.match(dashboard, /<span className=\{styles\.eyebrow\}>Builds<\/span>/);
+    assert.doesNotMatch(dashboard, /plannedPhases|Expected build path|expected stages|Awaiting marker/);
+  });
 });

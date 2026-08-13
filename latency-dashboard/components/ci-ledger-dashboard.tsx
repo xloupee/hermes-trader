@@ -98,7 +98,7 @@ interface CiPhase {
   duration: number | null;
   tone: Tone;
   evidence: string | null;
-  source: "reported" | "planned";
+  source: "reported" | "workflow" | "check";
 }
 
 interface CheckContext {
@@ -113,7 +113,6 @@ interface PhaseReport {
   check: CiCheck | null;
   context: CheckContext;
   phases: CiPhase[];
-  isPlanned: boolean;
   current: CiPhase | null;
   tone: Tone;
   phaseLabel: string;
@@ -160,31 +159,6 @@ const PHASE_DESCRIPTIONS: Record<string, string> = {
 
 function phaseDescription(name: string): string {
   return PHASE_DESCRIPTIONS[name] || "Run the reporter-defined validation for this phase.";
-}
-
-function plannedPhaseNames(context: CheckContext): string[] {
-  if (context.tier === "fast") return ["resolve_exact_merge", "repository_integrity", "seal_evidence"];
-  if (context.tier === "hotfix" || context.route === "routine") {
-    return ["resolve_exact_merge", "gateway_hotfix_build", "gateway_hotfix_verify", "optional_control_check", "seal_evidence"];
-  }
-  if (context.tier === "standard") {
-    return ["resolve_exact_merge", "prepare_runner", "npm_ci", "typescript_build", "node_suite", "seal_evidence"];
-  }
-  return ["resolve_exact_merge", "prepare_runner", "release_build", "run_validation", "restart_regressions", "seal_promotion"];
-}
-
-function plannedPhases(check: CiCheck, context: CheckContext): CiPhase[] {
-  return plannedPhaseNames(context).map((name) => ({
-    key: `${check.kind}-${check.id}-planned-${name}`,
-    name,
-    description: phaseDescription(name),
-    startedAt: null,
-    completedAt: null,
-    duration: null,
-    tone: "neutral",
-    evidence: null,
-    source: "planned"
-  }));
 }
 
 function completeAt(startedAt: string | null, duration: number | null, fallback: string | null): string | null {
@@ -256,18 +230,45 @@ function vpsCheck(pr: CiPullRequest): CiCheck | null {
   return pr.checks.find((check) => check.name.toLowerCase() === "vps pr ci" || check.app?.toLowerCase().includes("vps-ci")) || null;
 }
 
-function phaseReport(pr: CiPullRequest): PhaseReport {
+function checkBuilds(pr: CiPullRequest): CiPhase[] {
+  return pr.checks.map((check) => ({
+    key: `${check.kind}-${check.id}-build`,
+    name: check.name,
+    description: check.summary?.split("\n").map((line) => line.trim()).find(Boolean) || `${check.app || "GitHub"} check`,
+    startedAt: check.startedAt,
+    completedAt: check.completedAt,
+    duration: check.durationMs,
+    tone: toneFor(check.status, check.conclusion),
+    evidence: check.summary,
+    source: "check"
+  }));
+}
+
+function workflowBuilds(pr: CiPullRequest, run: CiRun | null): CiPhase[] {
+  if (!run || (run.sha !== pr.sha && run.branch !== pr.branch)) return [];
+  return run.jobs.map((job) => ({
+    key: `job-${job.id}`,
+    name: job.name,
+    description: `${job.steps.length} step${job.steps.length === 1 ? "" : "s"}${job.runnerName ? ` · ${job.runnerName}` : ""}`,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt,
+    duration: job.durationMs,
+    tone: toneFor(job.status, job.conclusion),
+    evidence: job.url,
+    source: "workflow"
+  }));
+}
+
+function phaseReport(pr: CiPullRequest, run: CiRun | null = null): PhaseReport {
   const check = vpsCheck(pr) || pr.checks[0] || null;
   const context = checkContext(check);
   const reportedPhases = check ? phasesFromCheck(check) : [];
-  const isPlanned = Boolean(check && !reportedPhases.length);
-  const phases = reportedPhases.length ? reportedPhases : check ? plannedPhases(check, context) : [];
+  const workflow = workflowBuilds(pr, run);
+  const phases = reportedPhases.length ? reportedPhases : workflow.length ? workflow : checkBuilds(pr);
   const passed = phases.filter((phase) => phase.tone === "success").length;
   const failed = phases.filter((phase) => phase.tone === "failure").length;
   const running = phases.filter((phase) => phase.tone === "running").length;
-  const current = reportedPhases.length
-    ? [...reportedPhases].reverse().find((phase) => phase.tone === "running" || phase.tone === "queued") || reportedPhases[reportedPhases.length - 1] || null
-    : null;
+  const current = [...phases].reverse().find((phase) => phase.tone === "running" || phase.tone === "queued") || phases[phases.length - 1] || null;
 
   let tone: Tone = "neutral";
   if (failed || check?.conclusion === "failure" || check?.conclusion === "timed_out" || check?.conclusion === "action_required") {
@@ -282,27 +283,18 @@ function phaseReport(pr: CiPullRequest): PhaseReport {
 
   const phaseLabel = current
     ? phaseTitle(current.name)
-    : check?.status === "in_progress"
-      ? "Waiting for first phase marker"
-      : check && ["queued", "waiting", "requested", "pending"].includes(check.status)
-        ? "Waiting for VPS runner"
-        : check
-          ? "Check complete · phase list unavailable"
-          : "Waiting for VPS reporter";
+    : "Waiting for first build";
   const phaseSummary = reportedPhases.length
-    ? `${reportedPhases.length} reported · ${passed} passed${failed ? ` · ${failed} failed` : ""}${running ? ` · ${running} active` : ""}`
-    : check?.status === "in_progress"
-      ? `${phases.length} expected stages · awaiting live phase telemetry`
-      : phases.length
-        ? `${phases.length} expected stages · no phase telemetry published`
-        : "No phase telemetry published";
+    ? `${reportedPhases.length} build stages · ${passed} passed${failed ? ` · ${failed} failed` : ""}${running ? ` · ${running} active` : ""}`
+    : phases.length
+      ? `${phases.length} build${phases.length === 1 ? "" : "s"} · ${passed} passed${failed ? ` · ${failed} failed` : ""}${running ? ` · ${running} active` : ""}`
+      : "No builds published";
   const progressLabel = phases.length ? `${passed}/${phases.length}` : "—";
 
   return {
     check,
     context,
     phases,
-    isPlanned,
     current,
     tone,
     phaseLabel,
@@ -440,7 +432,7 @@ export function CILedgerDashboard() {
   };
 
   const events = useMemo(() => selectedPr ? eventsFor(selectedPr, selectedRun) : [], [selectedPr, selectedRun]);
-  const detailReport = selectedPr ? phaseReport(selectedPr) : null;
+  const detailReport = selectedPr ? phaseReport(selectedPr, selectedRun) : null;
   const runningCount = data?.pullRequests.filter((pr) => phaseReport(pr).tone === "running").length || 0;
 
   return (
@@ -488,10 +480,10 @@ export function CILedgerDashboard() {
                 <span>Merge {detailReport.context.mergeSha?.slice(0, 12) || "pending"}</span>
               </div>
 
-              <section className={styles.breakdown} aria-label="CI phase breakdown">
+              <section className={styles.breakdown} aria-label="CI builds">
                 <div className={styles.breakdownHead}>
                   <div>
-                    <span className={styles.eyebrow}>{detailReport.isPlanned ? "Expected build path" : "Build progress"}</span>
+                    <span className={styles.eyebrow}>Builds</span>
                     <strong>{detailReport.phaseLabel}</strong>
                     <small>{detailReport.phaseSummary}</small>
                   </div>
@@ -500,8 +492,8 @@ export function CILedgerDashboard() {
                     <span>{formatDuration(detailReport.check?.durationMs || selectedRun?.durationMs || null)} elapsed</span>
                   </div>
                 </div>
-                <span className={`${styles.phaseRail} ${styles.detailRail}`} aria-label={`${detailReport.progressLabel} phases passed`}>
-                  {detailReport.phases.map((phase) => <i className={toneClass(phase.tone)} key={phase.key} title={`${phaseTitle(phase.name)} · ${phase.source === "planned" ? "Awaiting reporter" : stateLabel(phase.tone)}`} />)}
+                <span className={`${styles.phaseRail} ${styles.detailRail}`} aria-label={`${detailReport.progressLabel} builds passed`}>
+                  {detailReport.phases.map((phase) => <i className={toneClass(phase.tone)} key={phase.key} title={`${phaseTitle(phase.name)} · ${stateLabel(phase.tone)}`} />)}
                 </span>
                 {detailReport.phases.length ? (
                   <div className={styles.phaseList}>
@@ -510,7 +502,7 @@ export function CILedgerDashboard() {
                         <span className={`${styles.phaseMarker} ${toneClass(phase.tone)}`}><StatusMark tone={phase.tone} /></span>
                         <span className={styles.phaseIndex}>{String(index + 1).padStart(2, "0")}</span>
                         <span className={styles.phaseName}><strong>{phaseTitle(phase.name)}</strong><small>{phase.description}</small></span>
-                        <span className={styles.phaseTiming}><time>{phase.source === "planned" ? "Awaiting marker" : formatTime(phase.startedAt)}</time><small>{phase.source === "planned" ? "Planned" : `${stateLabel(phase.tone)} · ${formatDuration(phase.duration)}`}</small></span>
+                        <span className={styles.phaseTiming}><time>{formatTime(phase.startedAt)}</time><small>{stateLabel(phase.tone)} · {formatDuration(phase.duration)}</small></span>
                       </div>
                     ))}
                   </div>
@@ -520,7 +512,6 @@ export function CILedgerDashboard() {
                     <div><strong>{detailReport.phaseLabel}</strong><small>{detailReport.phaseSummary}. Refreshing this record every 12 seconds.</small></div>
                   </div>
                 )}
-                {detailReport.isPlanned && <p className={styles.breakdownNote}>Expected stages are shown until the VPS reporter publishes exact phase markers. Planned rows are never counted as completed.</p>}
               </section>
 
               <details className={styles.evidenceDisclosure}>

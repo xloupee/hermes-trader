@@ -478,12 +478,154 @@ function eventsFor(pr: CiPullRequest, run: CiRun | null): DetailEvent[] {
   return [...workflowEvents, ...pr.checks.flatMap(eventsFromCheck)].sort((a, b) => eventTime(b) - eventTime(a));
 }
 
+function runTone(run: CiRun): Tone {
+  return toneFor(run.status, run.conclusion);
+}
+
+function runProgress(run: CiRun): { completed: number; total: number; label: string } {
+  const steps = run.jobs.flatMap((job) => job.steps);
+  const completed = steps.filter((step) => step.status === "completed").length;
+  return {
+    completed,
+    total: steps.length,
+    label: steps.length ? `${completed}/${steps.length} steps` : `${run.jobs.length} job${run.jobs.length === 1 ? "" : "s"}`
+  };
+}
+
+interface WorkflowRunDetailProps {
+  run: CiRun;
+  logText: string | null;
+  logError: string | null;
+  logJobId: number | null;
+  loadingLog: boolean;
+  onBack: () => void;
+  onLoadLog: (job: CiJob) => void;
+}
+
+function WorkflowRunDetail({ run, logText, logError, logJobId, loadingLog, onBack, onLoadLog }: WorkflowRunDetailProps) {
+  const tone = runTone(run);
+  const progress = runProgress(run);
+  const activeJob = run.jobs.find((job) => job.status === "in_progress") || null;
+
+  return (
+    <section className={`${styles.detail} ${styles.timelineOnly}`}>
+      <button className={styles.back} type="button" onClick={onBack}><ArrowLeft size={13} />All CI builds</button>
+      <div className={styles.detailLead}>
+        <div className={styles.titleBlock}>
+          <h1>{run.name}</h1>
+          <div className={styles.identity}>
+            <span>run #{run.runNumber}</span>
+            <span>{run.branch}</span>
+            <span>head {run.sha.slice(0, 12)}</span>
+            <a href={run.url} target="_blank" rel="noreferrer">Open Actions run <ExternalLink size={12} /></a>
+          </div>
+        </div>
+        <Status tone={tone} />
+      </div>
+
+      <div className={styles.runMeta} aria-label="Workflow context">
+        <span>{phaseTitle(run.event)} trigger</span>
+        <span>Attempt {run.runAttempt}</span>
+        <span>Actor {run.actor}</span>
+        <span>{run.jobs.length} jobs</span>
+        <span>{run.artifacts.length} artifacts</span>
+      </div>
+
+      <section className={styles.breakdown} aria-label="GitHub Actions execution progress">
+        <div className={styles.breakdownHead}>
+          <div>
+            <span className={styles.eyebrow}>Workflow execution</span>
+            <strong>{activeJob ? `${activeJob.name} · ${stateLabel(runTone(run))}` : run.displayTitle}</strong>
+            <small>{run.commitMessage}</small>
+          </div>
+          <div className={styles.progressSummary}>
+            <strong>{progress.label}</strong>
+            <span>{formatDuration(run.durationMs)} elapsed</span>
+          </div>
+        </div>
+        <span className={`${styles.phaseRail} ${styles.detailRail}`} aria-label={`${progress.completed} of ${progress.total} workflow steps completed`}>
+          {run.jobs.flatMap((job) => job.steps.map((step) => ({ job, step }))).map(({ job, step }) => <i className={toneClass(toneFor(step.status, step.conclusion))} key={`${run.id}-${job.id}-${step.number}`} title={`${job.name} · ${step.name} · ${stateLabel(toneFor(step.status, step.conclusion))}`} />)}
+        </span>
+      </section>
+
+      <section className={styles.buildFeed} aria-label="GitHub Actions workflow jobs">
+        <div className={styles.buildFeedHead}>
+          <div>
+            <span className={styles.eyebrow}>Actual Actions builds</span>
+            <strong>{run.jobs.length} published job{run.jobs.length === 1 ? "" : "s"}</strong>
+            <small>Every step below comes directly from GitHub Actions. Load a job log to inspect downloads, commands, compiler output, and failures.</small>
+          </div>
+          <span className={styles.feedRefresh}><i />refreshes every 12s</span>
+        </div>
+
+        {run.jobs.map((job) => {
+          const jobTone = toneFor(job.status, job.conclusion);
+          const completedSteps = job.steps.filter((step) => step.status === "completed").length;
+          const showingLog = logJobId === job.id && (logText !== null || logError !== null);
+          const logPending = job.status !== "completed";
+          return (
+            <article className={styles.buildRecord} key={job.id}>
+              <div className={styles.buildRecordHead}>
+                <span className={`${styles.buildPulse} ${toneClass(jobTone)}`}><StatusMark tone={jobTone} /></span>
+                <div className={styles.buildIdentity}>
+                  <strong>{job.name}</strong>
+                  <small>{job.runnerName || "Runner pending"} · job {job.id}</small>
+                </div>
+                <Status tone={jobTone} />
+              </div>
+
+              <div className={styles.buildFacts}>
+                <span><small>Started</small><strong>{formatTime(job.startedAt)}</strong></span>
+                <span><small>Elapsed</small><strong>{formatDuration(job.durationMs)}</strong></span>
+                <span><small>Completed</small><strong>{formatTime(job.completedAt)}</strong></span>
+                <span><small>Steps</small><strong>{completedSteps}/{job.steps.length}</strong></span>
+              </div>
+
+              {job.steps.length > 0 && (
+                <div className={styles.buildSteps} aria-label={`${job.name} steps`}>
+                  {job.steps.map((step) => {
+                    const stepTone = toneFor(step.status, step.conclusion);
+                    return <span key={`${job.id}-${step.number}`}><i className={toneClass(stepTone)} /><b>{String(step.number).padStart(2, "0")}</b><strong>{step.name}</strong><small>{stateLabel(stepTone)} · {formatDuration(step.durationMs)}</small></span>;
+                  })}
+                </div>
+              )}
+
+              <div className={styles.buildActions}>
+                <button type="button" onClick={() => onLoadLog(job)} disabled={logPending || (loadingLog && logJobId === job.id)}>{logPending ? "Log available after completion" : loadingLog && logJobId === job.id ? "Loading full log…" : showingLog ? "Reload full job log" : "Load full job log"}<SquareTerminal size={13} /></button>
+                <a href={job.url} target="_blank" rel="noreferrer">Open GitHub job <ExternalLink size={12} /></a>
+              </div>
+              {logPending && <p className={styles.logPending}>GitHub publishes the downloadable raw log after this job completes. Live step status continues refreshing above.</p>}
+              {showingLog && (
+                <div className={styles.workflowLog} aria-label={`${job.name} full log`}>
+                  <div className={styles.terminalHead}><span><SquareTerminal size={13} />Full GitHub job log</span><small>{logText ? `${logText.split("\n").length.toLocaleString()} lines` : "unavailable"}</small></div>
+                  {logText ? <pre className={styles.log}>{logText}</pre> : <p className={styles.logError}>{logError}</p>}
+                </div>
+              )}
+            </article>
+          );
+        })}
+        {!run.jobs.length && <div className={styles.telemetryEmpty}><CircleDashed size={17} /><div><strong>Jobs not published yet</strong><small>GitHub has created the workflow run, but its job graph is still pending.</small></div></div>}
+      </section>
+
+      {run.artifacts.length > 0 && (
+        <details className={styles.evidenceDisclosure}>
+          <summary><span>Workflow artifacts</span><small>{run.artifacts.length} published</small><ChevronDown size={14} /></summary>
+          <div className={styles.artifactList}>
+            {run.artifacts.map((artifact) => <span key={artifact.id}><strong>{artifact.name}</strong><small>{(artifact.sizeInBytes / 1024 / 1024).toFixed(1)} MB · {artifact.expired ? "Expired" : "Available"}</small></span>)}
+          </div>
+        </details>
+      )}
+    </section>
+  );
+}
+
 export function CILedgerDashboard() {
   const [data, setData] = useState<CiDashboardPayload | null>(null);
   const [selectedPr, setSelectedPr] = useState<CiPullRequest | null>(null);
   const [selectedRun, setSelectedRun] = useState<CiRun | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [logText, setLogText] = useState<string | null>(null);
+  const [logError, setLogError] = useState<string | null>(null);
   const [logJobId, setLogJobId] = useState<number | null>(null);
   const [loadingLog, setLoadingLog] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -527,9 +669,20 @@ export function CILedgerDashboard() {
     setSelectedPr(pr);
     setSelectedRun(null);
     setLogText(null);
+    setLogError(null);
     const matchingRun = data?.runs.find((run) => run.branch === pr.branch || run.sha === pr.sha);
     if (matchingRun) await load(matchingRun.id);
     setExpanded(null);
+  };
+
+  const openRun = async (runId: number) => {
+    setSelectedPr(null);
+    setSelectedRun(null);
+    setExpanded(null);
+    setLogText(null);
+    setLogError(null);
+    setLogJobId(null);
+    await load(runId);
   };
 
   const closeDetail = () => {
@@ -537,11 +690,15 @@ export function CILedgerDashboard() {
     setSelectedRun(null);
     setExpanded(null);
     setLogText(null);
+    setLogError(null);
+    setLogJobId(null);
   };
 
   const loadLog = async (job: CiJob) => {
     setLoadingLog(true);
     setLogJobId(job.id);
+    setLogText(null);
+    setLogError(null);
     try {
       const params = new URLSearchParams({ jobId: String(job.id) });
       const response = await fetch(`/api/ci/logs?${params}`, { cache: "no-store" });
@@ -549,7 +706,7 @@ export function CILedgerDashboard() {
       if (!response.ok || !payload.text) throw new Error(payload.error || "Log unavailable");
       setLogText(payload.text);
     } catch (cause) {
-      setLogText(cause instanceof Error ? cause.message : "Log unavailable");
+      setLogError(cause instanceof Error ? cause.message : "Log unavailable");
     } finally {
       setLoadingLog(false);
     }
@@ -558,10 +715,11 @@ export function CILedgerDashboard() {
   const events = useMemo(() => selectedPr ? eventsFor(selectedPr, selectedRun) : [], [selectedPr, selectedRun]);
   const detailReport = selectedPr ? phaseReport(selectedPr, selectedRun) : null;
   const runningCount = data?.pullRequests.filter((pr) => phaseReport(pr).tone === "running").length || 0;
+  const actionRunningCount = data?.runs.filter((run) => run.status === "in_progress").length || 0;
 
   return (
     <main className={styles.shell}>
-      {!selectedPr && (
+      {!selectedPr && !selectedRun && (
         <header className={styles.header}>
           <div className={styles.brand}><span>H</span><div><b>HERMES / CI</b><small>VPS build intelligence</small></div></div>
           <div className={styles.headerCenter}>
@@ -569,7 +727,7 @@ export function CILedgerDashboard() {
           </div>
           <div className={styles.headerRight}>
             <span className={styles.live}><i />{data?.source === "github" ? "Live" : "Unavailable"}</span>
-            <button type="button" onClick={() => void load(selectedRun?.id, true)} aria-label="Refresh CI data"><RefreshCw className={refreshing ? styles.spin : ""} size={14} /></button>
+            <button type="button" onClick={() => void load(undefined, true)} aria-label="Refresh CI data"><RefreshCw className={refreshing ? styles.spin : ""} size={14} /></button>
           </div>
         </header>
       )}
@@ -701,6 +859,7 @@ export function CILedgerDashboard() {
                       {build.check && (build.check.url || build.check.detailsUrl) && <a href={build.check.url || build.check.detailsUrl || "#"} target="_blank" rel="noreferrer">Open VPS check <ExternalLink size={12} /></a>}
                     </div>
                     {build.job && logText && build.job.id === logJobId && <pre className={styles.log}>{logText.slice(-12_000)}</pre>}
+                    {build.job && logError && build.job.id === logJobId && <p className={styles.logError}>{logError}</p>}
                   </article>
                 )) : <div className={styles.telemetryEmpty}><CircleDashed size={17} /><div><strong>No build record published</strong><small>Hermes is still polling GitHub for this PR head.</small></div></div>}
               </section>
@@ -732,6 +891,7 @@ export function CILedgerDashboard() {
                               {(event.check?.detailsUrl || event.check?.url) && <a href={event.check.detailsUrl || event.check.url || "#"} target="_blank" rel="noreferrer">Source evidence <ExternalLink size={12} /></a>}
                             </div>
                             {logText && event.job?.id === logJobId && <pre className={styles.log}>{logText.slice(-12_000)}</pre>}
+                            {logError && event.job?.id === logJobId && <p className={styles.logError}>{logError}</p>}
                           </div>
                         </div>
                       </div>
@@ -742,9 +902,12 @@ export function CILedgerDashboard() {
             </>
           )}
         </section>
+      ) : selectedRun ? (
+        <WorkflowRunDetail run={selectedRun} logText={logText} logError={logError} logJobId={logJobId} loadingLog={loadingLog} onBack={closeDetail} onLoadLog={(job) => void loadLog(job)} />
       ) : (
         <section className={styles.ledger}>
-          <div className={styles.ledgerMeta}>
+          <div className={styles.ledgerSectionHead}>
+            <div><span className={styles.eyebrow}>Pull request checks</span><strong>VPS PR builds</strong></div>
             <div className={styles.counts}><span><i />{runningCount} running</span><span>{data?.pullRequests.length || 0} in view</span></div>
           </div>
           <div className={styles.table} role="table" aria-label="VPS pull request builds">
@@ -767,6 +930,27 @@ export function CILedgerDashboard() {
               );
             })}
             {!data?.pullRequests.length && <div className={styles.empty}><CircleDashed size={17} />No open pull requests are currently visible.</div>}
+          </div>
+
+          <div className={`${styles.ledgerSectionHead} ${styles.actionsSectionHead}`}>
+            <div><span className={styles.eyebrow}>GitHub Actions</span><strong>Workflow builds</strong><small>Manual releases, exhaustive builds, and branch workflows—including runs not attached to an open PR.</small></div>
+            <div className={styles.counts}><span><i />{actionRunningCount} running</span><span>{data?.runs.length || 0} recent</span></div>
+          </div>
+          <div className={styles.table} role="table" aria-label="GitHub Actions workflow builds">
+            <div className={styles.tableHead} role="row"><span>Workflow / branch</span><span>Result</span><span>Trigger / actor</span><span>Runtime</span><span>Updated</span></div>
+            {data?.runs.map((run) => {
+              const tone = toneFor(run.status, run.conclusion);
+              return (
+                <button className={styles.row} role="row" type="button" key={run.id} onClick={() => void openRun(run.id)} aria-label={`Open Actions run ${run.id}: ${run.name}. ${stateLabel(tone)}`}>
+                  <span className={styles.prIdentity}><b>#{run.runNumber} {run.name}</b><small>{run.branch} · {run.sha.slice(0, 12)}</small></span>
+                  <Status tone={tone} />
+                  <span className={styles.phase}><strong>{run.displayTitle}</strong><small>{phaseTitle(run.event)} · {run.actor}</small></span>
+                  <span className={styles.progress}><span className={styles.runBar}><i className={toneClass(tone)} /></span><small>{formatDuration(run.durationMs)}</small></span>
+                  <span className={styles.updated}>{relativeTime(run.updatedAt)}<ChevronRight size={13} /></span>
+                </button>
+              );
+            })}
+            {!data?.runs.length && <div className={styles.empty}><CircleDashed size={17} />No GitHub Actions runs are currently visible.</div>}
           </div>
           <footer className={styles.ledgerFooter}><span><ServerCog size={13} />Server-side read · credentials stay off the browser</span><span>Updated {data ? relativeTime(data.fetchedAt) : "—"}</span></footer>
         </section>

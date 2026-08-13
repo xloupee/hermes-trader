@@ -56,8 +56,13 @@ describe("release contract", () => {
     assert.match(dashboard, />Published VPS output<\/span>/);
     assert.match(dashboard, /publishes only a status headline/);
     assert.match(dashboard, /commands, downloads, compiler output, and diagnostics/);
+    assert.match(dashboard, />Workflow builds<\/strong>/);
+    assert.match(dashboard, />Actual Actions builds<\/span>/);
+    assert.match(dashboard, /Load full job log/);
+    assert.match(dashboard, /<pre className=\{styles\.log\}>\{logText\}<\/pre>/);
     assert.match(githubSource, /outputTitle: check\.output\?\.title \|\| null/);
     assert.match(githubSource, /outputText: check\.output\?\.text \|\| null/);
+    assert.match(githubSource, /actions\/jobs\/\$\{jobId\}\/logs/);
     assert.match(types, /outputText: string \| null/);
   });
 });

@@ -110,6 +110,18 @@
   padding-bottom: 20px;
 }
 .ledgerMeta { justify-content: flex-end; min-height: 42px; padding-bottom: 10px; }
+.ledgerSectionHead {
+  align-items: flex-end;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  min-height: 74px;
+  padding: 0 4px 13px;
+}
+.ledgerSectionHead > div:first-child { display: grid; gap: 4px; }
+.ledgerSectionHead strong { font-family: var(--serif); font-size: 1.2rem; font-weight: 500; }
+.ledgerSectionHead small { color: var(--muted); font-size: .6rem; line-height: 1.45; }
+.actionsSectionHead { margin-top: clamp(42px, 5vw, 72px); }
 .eyebrow {
   color: var(--gold);
   display: block;
@@ -189,6 +201,13 @@
 .phaseRail i.running { background: var(--gold); }
 .phaseRail i.queued { background: var(--blue); }
 .phaseRail i.neutral { background: var(--line); }
+.runBar { background: var(--line); display: block; height: 5px; overflow: hidden; }
+.runBar i { display: block; height: 100%; width: 100%; }
+.runBar i.success { background: var(--green); }
+.runBar i.failure { background: var(--red); }
+.runBar i.running { animation: run-pulse 1.2s ease-in-out infinite alternate; background: var(--gold); transform-origin: left; }
+.runBar i.queued { background: var(--blue); width: 22%; }
+.runBar i.neutral { background: var(--muted); }
 .progress small, .updated { color: var(--muted); font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: .56rem; }
 .updated { align-items: center; display: flex; justify-content: space-between; }
 .ledgerFooter, .detailFooter { color: var(--muted); font-size: .57rem; justify-content: space-between; margin-top: 18px; }
@@ -305,6 +324,15 @@
 .buildActions { display: flex; gap: 12px; justify-content: flex-end; padding-top: 8px; }
 .buildActions button, .buildActions a { align-items: center; background: transparent; border: 0; color: var(--gold); cursor: pointer; display: inline-flex; font-size: .62rem; font-weight: 800; gap: 6px; padding: 6px; text-decoration: none; }
 .buildActions button:disabled { color: var(--muted); cursor: wait; }
+.workflowLog { background: oklch(9% .015 245); border: 1px solid color-mix(in oklch, var(--line) 78%, var(--green)); margin-top: 4px; }
+.workflowLog .log { border: 0; margin: 0; max-height: 620px; }
+.logPending, .logError { font-size: .6rem; line-height: 1.5; margin: 0; }
+.logPending { color: var(--muted); padding: 0 6px 10px; text-align: right; }
+.logError { background: color-mix(in oklch, var(--red) 8%, var(--paper)); border: 1px solid color-mix(in oklch, var(--red) 55%, var(--line)); color: var(--red); padding: 13px; }
+.artifactList { border-top: 1px solid var(--line); display: grid; }
+.artifactList > span { align-items: center; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; min-height: 54px; padding: 0 10px; }
+.artifactList strong { font-size: .7rem; }
+.artifactList small { color: var(--muted); font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: .56rem; }
 .evidenceDisclosure { border-bottom: 1px solid var(--line); }
 .evidenceDisclosure > summary {
   align-items: center;
@@ -383,6 +411,7 @@
 .spin { animation: spin .85s linear infinite; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+@keyframes run-pulse { from { opacity: .45; transform: scaleX(.38); } to { opacity: 1; transform: scaleX(1); } }
 
 @media (max-width: 900px) {
   .header { grid-template-columns: 1fr auto; grid-template-rows: auto auto; }
@@ -398,6 +427,7 @@
   .ledger, .detail { padding: 32px 14px; }
   .timelineOnly { padding-block: 16px; }
   .detailLead { align-items: flex-start; display: grid; gap: 20px; }
+  .ledgerSectionHead { align-items: flex-start; display: grid; gap: 12px; }
   .counts { padding: 0; }
   .table { border-inline: 0; }
   .tableHead { display: none; }

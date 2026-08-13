@@ -253,6 +253,58 @@
 .telemetryEmpty strong { color: var(--text); font-size: .75rem; }
 .telemetryEmpty small, .breakdownNote { font-size: .62rem; line-height: 1.5; }
 .breakdownNote { color: var(--muted); margin: 0; padding: 13px 6px 16px; }
+.buildFeed { border-bottom: 1px solid var(--line); }
+.buildFeedHead {
+  align-items: flex-end;
+  display: flex;
+  justify-content: space-between;
+  padding: 28px 6px 16px;
+}
+.buildFeedHead > div { display: grid; gap: 5px; }
+.buildFeedHead strong { font-size: 1rem; }
+.buildFeedHead small { color: var(--muted); font-size: .64rem; line-height: 1.45; }
+.feedRefresh { color: var(--muted); font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: .54rem; text-transform: uppercase; }
+.feedRefresh i { background: var(--green); border-radius: 50%; display: inline-block; height: 5px; margin-right: 7px; width: 5px; }
+.buildRecord { border-top: 1px solid var(--line); padding: 0 6px 24px; }
+.buildRecordHead {
+  align-items: center;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  min-height: 74px;
+}
+.buildPulse { align-items: center; display: flex; justify-content: center; }
+.buildIdentity { display: grid; gap: 4px; min-width: 0; }
+.buildIdentity strong { font-size: .84rem; }
+.buildIdentity small { color: var(--muted); font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: .55rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.buildFacts { display: grid; gap: 1px; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 1px; }
+.buildFacts > span { background: var(--surface); display: grid; gap: 7px; padding: 13px 15px; }
+.buildFacts small { color: var(--muted); font-size: .53rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.buildFacts strong { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: .65rem; font-weight: 500; }
+.buildSteps { border: 1px solid var(--line); border-bottom: 0; display: grid; margin-top: 12px; }
+.buildSteps > span { align-items: center; border-bottom: 1px solid var(--line); display: grid; gap: 10px; grid-template-columns: 5px 25px minmax(0, 1fr) auto; min-height: 42px; padding: 0 12px; }
+.buildSteps i { background: var(--line); height: 16px; width: 2px; }
+.buildSteps i.success { background: var(--green); }
+.buildSteps i.failure { background: var(--red); }
+.buildSteps i.running { background: var(--gold); }
+.buildSteps i.queued { background: var(--blue); }
+.buildSteps b, .buildSteps small { color: var(--muted); font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: .52rem; }
+.buildSteps strong { font-size: .64rem; }
+.vpsTerminal { background: oklch(9% .015 245); border: 1px solid color-mix(in oklch, var(--line) 78%, var(--green)); margin-top: 12px; }
+.terminalHead { align-items: center; border-bottom: 1px solid color-mix(in oklch, var(--line) 78%, var(--green)); color: oklch(82% .03 145); display: flex; justify-content: space-between; min-height: 38px; padding: 0 13px; }
+.terminalHead span { align-items: center; display: inline-flex; font-size: .56rem; font-weight: 800; gap: 7px; letter-spacing: .08em; text-transform: uppercase; }
+.terminalHead small { color: oklch(62% .025 160); font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: .5rem; text-transform: uppercase; }
+.vpsTerminal ol { counter-reset: output-line; list-style: none; margin: 0; max-height: 340px; overflow: auto; padding: 10px 0; }
+.vpsTerminal li { align-items: start; display: grid; gap: 11px; grid-template-columns: 28px minmax(0, 1fr); min-height: 27px; padding: 4px 13px; }
+.vpsTerminal li b { color: oklch(45% .025 240); font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: .52rem; font-weight: 500; padding-top: 2px; text-align: right; }
+.vpsTerminal code { color: oklch(78% .025 150); font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: .65rem; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.vpsTerminal .downloadLine { background: oklch(16% .035 145); }
+.vpsTerminal .downloadLine code { color: oklch(88% .09 135); }
+.terminalEmpty { color: oklch(62% .025 160); font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: .62rem; padding: 22px 14px; }
+.streamNote { border-top: 1px solid color-mix(in oklch, var(--line) 78%, var(--green)); color: oklch(64% .025 160); font-size: .58rem; line-height: 1.55; margin: 0; padding: 11px 13px 13px 52px; }
+.buildActions { display: flex; gap: 12px; justify-content: flex-end; padding-top: 8px; }
+.buildActions button, .buildActions a { align-items: center; background: transparent; border: 0; color: var(--gold); cursor: pointer; display: inline-flex; font-size: .62rem; font-weight: 800; gap: 6px; padding: 6px; text-decoration: none; }
+.buildActions button:disabled { color: var(--muted); cursor: wait; }
 .evidenceDisclosure { border-bottom: 1px solid var(--line); }
 .evidenceDisclosure > summary {
   align-items: center;
@@ -366,6 +418,13 @@
   .phaseName small { font-size: .58rem; }
   .phaseTiming { grid-column: 3; justify-items: start; }
   .phaseTiming time, .phaseTiming small { font-size: .53rem; }
+  .buildFeedHead { align-items: flex-start; display: grid; gap: 10px; }
+  .buildFacts { grid-template-columns: 1fr 1fr; }
+  .buildSteps > span { grid-template-columns: 4px 22px minmax(0, 1fr); padding-block: 8px; }
+  .buildSteps small { grid-column: 3; }
+  .terminalHead { align-items: flex-start; display: grid; gap: 4px; padding-block: 9px; }
+  .streamNote { padding-left: 13px; }
+  .buildActions { justify-content: flex-start; }
   .eventTrigger { gap: 8px; grid-template-columns: 54px 18px minmax(0, 1fr) auto; min-height: 92px; padding-inline: 0; }
   .eventTrigger time, .eventDuration { font-size: .65rem; }
   .eventDuration { gap: 3px; }

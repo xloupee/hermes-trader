@@ -42,12 +42,22 @@ describe("release contract", () => {
     assert.match(disposition, /Follow-up release gate/g);
   });
 
-  test("CI renders actual checks and workflow jobs instead of synthetic planned builds", async () => {
-    const dashboard = await read("latency-dashboard/components/ci-ledger-dashboard.tsx");
+  test("CI keeps the detailed process map separate from actual VPS build output", async () => {
+    const [dashboard, githubSource, types] = await Promise.all([
+      read("latency-dashboard/components/ci-ledger-dashboard.tsx"),
+      read("latency-dashboard/lib/ci-github.ts"),
+      read("latency-dashboard/lib/ci-types.ts")
+    ]);
 
-    assert.match(dashboard, /function checkBuilds\(pr: CiPullRequest\)/);
-    assert.match(dashboard, /function workflowBuilds\(pr: CiPullRequest, run: CiRun \| null\)/);
-    assert.match(dashboard, /<span className=\{styles\.eyebrow\}>Builds<\/span>/);
-    assert.doesNotMatch(dashboard, /plannedPhases|Expected build path|expected stages|Awaiting marker/);
+    assert.match(dashboard, /function plannedPhaseNames\(context: CheckContext\)/);
+    assert.match(dashboard, /function processPhases\(check: CiCheck \| null, context: CheckContext\)/);
+    assert.match(dashboard, />Process map<\/span>/);
+    assert.match(dashboard, />Actual VPS builds<\/span>/);
+    assert.match(dashboard, />Published VPS output<\/span>/);
+    assert.match(dashboard, /publishes only a status headline/);
+    assert.match(dashboard, /commands, downloads, compiler output, and diagnostics/);
+    assert.match(githubSource, /outputTitle: check\.output\?\.title \|\| null/);
+    assert.match(githubSource, /outputText: check\.output\?\.text \|\| null/);
+    assert.match(types, /outputText: string \| null/);
   });
 });

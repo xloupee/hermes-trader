@@ -66,7 +66,9 @@ export interface CiCheck {
   url: string | null;
   detailsUrl: string | null;
   app: string | null;
+  outputTitle: string | null;
   summary: string | null;
+  outputText: string | null;
 }
 
 export interface CiPullRequest {

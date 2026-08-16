@@ -162,7 +162,7 @@ describe("dashboard UI contract", () => {
     assert.ok(table.indexOf("<th>Telegram ID</th>") < table.indexOf("<th>Transaction</th>"));
     assert.doesNotMatch(table, /feedTransportLabel|row\.selectedRoute/);
     assert.match(table, /executionFeed\(canonical\.inboundSource\)/);
-    assert.match(table, /sendLaneIdentity\(canonical\.firstAckLane\)/);
+    assert.match(table, /sendLaneIdentity\(canonical\?\.firstAckLane \?\? gateway\?\.firstAckLane \?\? null\)/);
     assert.match(table, /title=\{lane\.raw \|\| undefined\}/);
     assert.match(table, /placementClass\(canonical\)/);
     assert.match(table, /transactionDistance\(canonical\)/);
@@ -173,7 +173,7 @@ describe("dashboard UI contract", () => {
     assert.match(table, /canonical\.telegramSubscriberId/);
     assert.match(table, /label="Telegram subscriber ID"/);
     assert.match(table, /leaderSummary\(canonical\)/);
-    assert.match(table, /className=\{styles\.ackCell\}[\s\S]*lane\.label[\s\S]*formatMs\(canonical\.observedToSignatureReturnedMs\)/);
+    assert.match(table, /className=\{styles\.ackCell\}[\s\S]*lane\.label[\s\S]*formatMs\(canonical\?\.observedToSignatureReturnedMs \?\? gateway\?\.observedToSignatureReturnedMs \?\? null\)/);
     assert.match(table, /gatewayRows/);
     assert.match(table, /useUserTimeZone\(\)/);
     assert.match(table, /Time · \{timeZoneLabel\}/);

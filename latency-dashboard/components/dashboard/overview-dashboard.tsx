@@ -26,7 +26,10 @@ export function OverviewDashboard() {
 
   return (
     <section className={`${styles.tapePage} ${styles.compactTapePage}`}>
-      <FeedLeaderboard rows={data?.executions ?? []} />
+      <FeedLeaderboard
+        rows={data?.executions ?? []}
+        gatewayRows={data?.gatewayConfirmations ?? []}
+      />
       <DashboardFiltersPanel filters={filters} onFiltersChange={setFilters} onOutcomeChange={setOutcome} />
       <DashboardRefreshToolbar
         loading={loading}

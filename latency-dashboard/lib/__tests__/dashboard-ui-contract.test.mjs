@@ -463,8 +463,11 @@ describe("dashboard UI contract", () => {
     const overview = readFileSync(new URL("../../components/dashboard/overview-dashboard.tsx", import.meta.url), "utf8");
     const leaderboard = readFileSync(new URL("../../components/dashboard/feed-leaderboard.tsx", import.meta.url), "utf8");
     const styles = readFileSync(new URL("../../components/dashboard/dashboard-shared.module.css", import.meta.url), "utf8");
-    assert.match(overview, /<FeedLeaderboard rows=\{data\?\.executions \?\? \[\]\} \/>/);
+    assert.match(overview, /gatewayRows=\{data\?\.gatewayConfirmations \?\? \[\]\}/);
     assert.match(leaderboard, /rows\.filter\(isLandedBuy\)/);
+    assert.match(leaderboard, /uniqueGatewayRows\.filter\(isGatewayLandedBuy\)/);
+    assert.match(leaderboard, /canonicalSignatures\.has\(row\.signature\)/);
+    assert.match(leaderboard, /feedLeaderboard\(landedBuySources\)/);
     assert.match(leaderboard, /Landed buy race/);
     assert.match(leaderboard, /landed buy/);
     assert.match(leaderboard, /execution evidence only/);

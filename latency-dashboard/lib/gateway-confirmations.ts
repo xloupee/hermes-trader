@@ -20,6 +20,16 @@ export interface GatewayConfirmation {
   copyTxIndex: number | null;
   sameSlotTxDelta: number | null;
   txDelta: number | null;
+  targetSlotLeader: string | null;
+  copySlotLeader: string | null;
+  telegramId: string | null;
+  firstAckLane: string | null;
+  firstAckAtMs: number | null;
+  dispatchAttempts: number | null;
+  observedToSendSubmittedMs: number | null;
+  observedToSignatureReturnedMs: number | null;
+  sendLaneAttribution: unknown;
+  rawConfirmation: unknown;
   selectedRoute: string | null;
   routeLayout: string | null;
   mint: string;
@@ -59,6 +69,16 @@ const GATEWAY_CONFIRMATION_SELECT = [
   "copy_tx_index",
   "same_slot_tx_delta",
   "tx_delta",
+  "target_slot_leader",
+  "copy_slot_leader",
+  "telegram_id",
+  "first_ack_lane",
+  "first_ack_at_ms",
+  "dispatch_attempts",
+  "observed_to_send_submitted_ms",
+  "observed_to_signature_returned_ms",
+  "send_lane_attribution",
+  "raw_confirmation",
   "selected_route",
   "route_layout",
   "mint",
@@ -90,6 +110,12 @@ function booleanValue(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
 }
 
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
 function mapGatewayConfirmation(row: Record<string, unknown>): GatewayConfirmation {
   const telemetry = row.execution_telemetry && typeof row.execution_telemetry === "object" && !Array.isArray(row.execution_telemetry)
     ? row.execution_telemetry as Record<string, unknown>
@@ -97,6 +123,10 @@ function mapGatewayConfirmation(row: Record<string, unknown>): GatewayConfirmati
   const inbound = telemetry?.inbound && typeof telemetry.inbound === "object" && !Array.isArray(telemetry.inbound)
     ? telemetry.inbound as Record<string, unknown>
     : null;
+  const rawConfirmation = objectValue(row.raw_confirmation);
+  const rawTelemetry = objectValue(rawConfirmation?.executionTelemetry);
+  const rawTimeline = objectValue(rawTelemetry?.timeline);
+  const rawFirstAck = objectValue(rawTimeline?.firstAck);
   return {
     id: numberValue(row.id) ?? 0,
     createdAt: stringValue(row.created_at) ?? new Date(0).toISOString(),
@@ -116,6 +146,24 @@ function mapGatewayConfirmation(row: Record<string, unknown>): GatewayConfirmati
     copyTxIndex: numberValue(row.copy_tx_index),
     sameSlotTxDelta: numberValue(row.same_slot_tx_delta),
     txDelta: numberValue(row.tx_delta),
+    targetSlotLeader: stringValue(row.target_slot_leader) ?? stringValue(rawConfirmation?.targetSlotLeader),
+    copySlotLeader: stringValue(row.copy_slot_leader) ?? stringValue(rawConfirmation?.copySlotLeader),
+    telegramId: stringValue(row.telegram_id) ?? stringValue(rawConfirmation?.telegramId),
+    firstAckLane: stringValue(row.first_ack_lane)
+      ?? stringValue(rawConfirmation?.firstAckLane)
+      ?? stringValue(rawConfirmation?.sendRpcWinner)
+      ?? stringValue(rawTelemetry?.ackLane)
+      ?? stringValue(rawFirstAck?.lane),
+    firstAckAtMs: numberValue(row.first_ack_at_ms)
+      ?? numberValue(rawConfirmation?.firstAckAtMs)
+      ?? numberValue(rawFirstAck?.observedAtUnixMs),
+    dispatchAttempts: numberValue(row.dispatch_attempts),
+    observedToSendSubmittedMs: numberValue(row.observed_to_send_submitted_ms)
+      ?? numberValue(rawConfirmation?.observedToSendSubmittedMs),
+    observedToSignatureReturnedMs: numberValue(row.observed_to_signature_returned_ms)
+      ?? numberValue(rawConfirmation?.observedToSignatureReturnedMs),
+    sendLaneAttribution: row.send_lane_attribution ?? null,
+    rawConfirmation,
     selectedRoute: stringValue(row.selected_route),
     routeLayout: stringValue(row.route_layout),
     mint: stringValue(row.mint) ?? "",

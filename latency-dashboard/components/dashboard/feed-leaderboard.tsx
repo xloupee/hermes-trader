@@ -1,4 +1,5 @@
 import type { DashboardExecution } from "@/lib/dashboard-client";
+import type { GatewayConfirmation } from "@/lib/gateway-confirmations";
 import { executionEvidenceCounts, feedLeaderboard, isLandedBuy, type FeedKey, type FeedStanding } from "@/lib/feed-winners";
 import styles from "@/components/dashboard/dashboard-shared.module.css";
 
@@ -10,10 +11,29 @@ const FEED_TONES: Record<FeedKey, string> = {
   unknown: styles.feedUnknown
 };
 
-export function FeedLeaderboard({ rows }: { rows: DashboardExecution[] }) {
-  const landedBuys = rows.filter(isLandedBuy);
-  const winnerStandings = feedLeaderboard(landedBuys.map((row) => row.inboundSource));
-  const evidence = executionEvidenceCounts(rows.map((row) => row.inboundSource));
+function isGatewayLandedBuy(row: GatewayConfirmation): boolean {
+  return row.observedAction.toLowerCase() === "buy" && row.ok && row.status === "landed";
+}
+
+export function FeedLeaderboard({
+  rows,
+  gatewayRows = []
+}: {
+  rows: DashboardExecution[];
+  gatewayRows?: GatewayConfirmation[];
+}) {
+  const canonicalSignatures = new Set(rows.map((row) => row.sendSignature).filter(Boolean));
+  const uniqueGatewayRows = gatewayRows.filter((row) => !canonicalSignatures.has(row.signature));
+  const landedBuySources = [
+    ...rows.filter(isLandedBuy).map((row) => row.inboundSource),
+    ...uniqueGatewayRows.filter(isGatewayLandedBuy).map((row) => row.inboundSource)
+  ];
+  const evidenceSources = [
+    ...rows.map((row) => row.inboundSource),
+    ...uniqueGatewayRows.map((row) => row.inboundSource)
+  ];
+  const winnerStandings = feedLeaderboard(landedBuySources);
+  const evidence = executionEvidenceCounts(evidenceSources);
   const standingByKey = new Map(winnerStandings.map((standing) => [standing.key, standing]));
   const trackedFeeds: FeedStanding[] = (["jito-primary", "doublezero-leader", "vortex-fra"] as const).map((key) => (
     standingByKey.get(key) || {
@@ -35,7 +55,7 @@ export function FeedLeaderboard({ rows }: { rows: DashboardExecution[] }) {
           <span>Landed buy race</span>
           <h2>Feed leaderboard</h2>
         </div>
-        <small>{landedBuys.length} landed buy{landedBuys.length === 1 ? "" : "s"} · execution evidence only</small>
+        <small>{landedBuySources.length} landed buy{landedBuySources.length === 1 ? "" : "s"} · execution evidence only</small>
       </header>
       <div className={styles.feedStandings}>
         {standings.length > 0 ? standings.map((standing, index) => (

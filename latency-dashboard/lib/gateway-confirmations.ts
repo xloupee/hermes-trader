@@ -1,5 +1,6 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { DashboardExecutionFilters } from "@/lib/local-executions";
+import type { LeaderDiagnostics } from "@/lib/leader-diagnostics";
 
 export interface GatewayConfirmation {
   id: number;
@@ -42,6 +43,7 @@ export interface GatewayConfirmation {
   gatewayIntentKey: string | null;
   gatewayState: string | null;
   reconciliationApplied: boolean | null;
+  leaderDiagnostics: LeaderDiagnostics | null;
 }
 
 export interface GatewayConfirmationFreshness {
@@ -175,7 +177,8 @@ function mapGatewayConfirmation(row: Record<string, unknown>): GatewayConfirmati
     reason: stringValue(row.reason),
     gatewayIntentKey: stringValue(row.gateway_intent_key),
     gatewayState: stringValue(row.gateway_state),
-    reconciliationApplied: booleanValue(row.reconciliation_applied)
+    reconciliationApplied: booleanValue(row.reconciliation_applied),
+    leaderDiagnostics: null
   };
 }
 

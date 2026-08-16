@@ -189,8 +189,8 @@ export function isDelayedLanding(row: Pick<DashboardExecution, "outcome" | "slot
 export function leaderSummary(row: Pick<DashboardExecution, "leaderDiagnostics">): string {
   const diagnostics = row.leaderDiagnostics;
   if (!diagnostics) return "n/a";
-  const copyRegion = diagnostics.copyLeader?.broadRegion || diagnostics.copyLeader?.location;
-  const targetRegion = diagnostics.targetLeader?.broadRegion || diagnostics.targetLeader?.location;
+  const copyRegion = diagnostics.copyLeader?.location || diagnostics.copyLeader?.broadRegion;
+  const targetRegion = diagnostics.targetLeader?.location || diagnostics.targetLeader?.broadRegion;
   const region = copyRegion || targetRegion;
   if (!region) {
     return diagnostics.copyLeader?.shortIdentity || diagnostics.targetLeader?.shortIdentity || "n/a";

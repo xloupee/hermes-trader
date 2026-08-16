@@ -1,4 +1,5 @@
 import type { DashboardExecution } from "@/lib/dashboard-contract.mjs";
+import type { GatewayConfirmation } from "@/lib/gateway-confirmations";
 
 const RPC_TIMEOUT_MS = 3000;
 const CLUSTER_NODES_TTL_MS = 5 * 60 * 1000;
@@ -100,7 +101,8 @@ function broadRegion(countryCode: string | null | undefined): string | null {
 
 function locationLabel(geo: GeoInfo | null): string | null {
   if (!geo || geo.status !== "success") return null;
-  return [geo.countryCode, geo.regionName, geo.city].filter(Boolean).join(":") || null;
+  const place = geo.city || geo.regionName;
+  return [place, geo.countryCode].filter(Boolean).join(", ") || null;
 }
 
 async function clusterNodes(): Promise<Map<string, ClusterNode>> {
@@ -200,12 +202,55 @@ function leaderInfo(identity: string | null, node: ClusterNode | undefined, geo:
 }
 
 function regionPath(target: LeaderInfo | null, copy: LeaderInfo | null): string | null {
-  const targetRegion = target?.broadRegion || target?.location;
-  const copyRegion = copy?.broadRegion || copy?.location;
+  const targetRegion = target?.location || target?.broadRegion;
+  const copyRegion = copy?.location || copy?.broadRegion;
   if (!targetRegion && !copyRegion) return null;
   if (!targetRegion || targetRegion === copyRegion) return copyRegion ?? null;
   if (!copyRegion) return targetRegion;
   return `${targetRegion} -> ${copyRegion}`;
+}
+
+export async function enrichGatewayConfirmationsWithLeaderDiagnostics(
+  rows: GatewayConfirmation[]
+): Promise<GatewayConfirmation[]> {
+  if (rows.length === 0) return rows;
+
+  const nodes = await clusterNodes();
+  const identities = [...new Set(rows.flatMap((row) => [row.targetSlotLeader, row.copySlotLeader])
+    .filter((identity): identity is string => Boolean(identity)))];
+  const ips = identities.map((identity) => ipFromGossip(nodes.get(identity)?.gossip))
+    .filter((ip): ip is string => Boolean(ip));
+  const geoByIp = await geoForIps(ips);
+
+  return rows.map((row) => {
+    const targetNode = row.targetSlotLeader ? nodes.get(row.targetSlotLeader) : undefined;
+    const copyNode = row.copySlotLeader ? nodes.get(row.copySlotLeader) : undefined;
+    const targetIp = ipFromGossip(targetNode?.gossip);
+    const copyIp = ipFromGossip(copyNode?.gossip);
+    const targetLeader = leaderInfo(
+      row.targetSlotLeader,
+      targetNode,
+      targetIp ? geoByIp.get(targetIp) ?? null : null
+    );
+    const copyLeader = leaderInfo(
+      row.copySlotLeader,
+      copyNode,
+      copyIp ? geoByIp.get(copyIp) ?? null : null
+    );
+    return {
+      ...row,
+      leaderDiagnostics: {
+        targetSlot: row.slot,
+        copySlot: row.confirmationSlot,
+        targetLeader,
+        copyLeader,
+        leaderChanged: row.targetSlotLeader && row.copySlotLeader
+          ? row.targetSlotLeader !== row.copySlotLeader
+          : null,
+        regionPath: regionPath(targetLeader, copyLeader)
+      }
+    };
+  });
 }
 
 export async function enrichExecutionsWithLeaderDiagnostics(rows: DashboardExecution[]): Promise<DashboardExecution[]> {

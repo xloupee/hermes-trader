@@ -95,10 +95,10 @@ describe("dashboard UI contract", () => {
   test("validator leader summaries prefer copy location and mark leader changes", () => {
     assert.equal(leaderSummary({ leaderDiagnostics: null }), "n/a");
     assert.equal(leaderSummary({ leaderDiagnostics: {
-      copyLeader: { broadRegion: "Europe", location: "DE:Hesse:Frankfurt", shortIdentity: "copy" },
-      targetLeader: { broadRegion: "North America", location: "US:Virginia", shortIdentity: "target" },
+      copyLeader: { broadRegion: "Europe", location: "Frankfurt, DE", shortIdentity: "copy" },
+      targetLeader: { broadRegion: "North America", location: "Ashburn, US", shortIdentity: "target" },
       leaderChanged: true
-    } }), "Europe changed");
+    } }), "Frankfurt, DE changed");
     assert.equal(leaderContext({ leaderDiagnostics: {
       copyLeader: { shortIdentity: "copy...leader", broadRegion: "Europe" },
       targetLeader: { shortIdentity: "copy...leader", broadRegion: "Europe" },
@@ -145,6 +145,16 @@ describe("dashboard UI contract", () => {
     assert.match(detail, /row\.inboundContributors/);
     assert.match(detail, /row\.inboundSelectionGeneration/);
     assert.doesNotMatch(detail, /rawExecution|chainReport|privateKey|keypair|mnemonic|seed|custody/);
+  });
+
+  test("gateway confirmations receive the same leader-region enrichment as canonical rows", () => {
+    const route = readFileSync(new URL("../../app/api/dashboard/executions/route.ts", import.meta.url), "utf8");
+    const diagnostics = readFileSync(new URL("../leader-diagnostics.ts", import.meta.url), "utf8");
+    assert.match(route, /enrichGatewayConfirmationsWithLeaderDiagnostics\(gatewayConfirmations\)/);
+    assert.match(route, /gatewayConfirmations: gatewayConfirmationsWithLeaders/);
+    assert.match(diagnostics, /row\.targetSlotLeader/);
+    assert.match(diagnostics, /row\.copySlotLeader/);
+    assert.match(diagnostics, /geoForIps\(ips\)/);
   });
 
   test("execution table remains accessible with eleven columns", () => {

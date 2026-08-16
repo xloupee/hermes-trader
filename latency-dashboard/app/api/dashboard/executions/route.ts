@@ -2,7 +2,7 @@ import { authErrorResponse } from "@/lib/auth";
 import { attachTelegramSubscriberIds, encodeExecutionCursor, pageExecutionRows, parseExecutionFilters, summarizeExecutions, toDashboardExecution } from "@/lib/dashboard-contract.mjs";
 import { getDashboardExecutionFreshness, listDashboardExecutions } from "@/lib/local-executions";
 import { getGatewayConfirmationFreshness, listGatewayConfirmations } from "@/lib/gateway-confirmations";
-import { enrichExecutionsWithLeaderDiagnostics } from "@/lib/leader-diagnostics";
+import { enrichExecutionsWithLeaderDiagnostics, enrichGatewayConfirmationsWithLeaderDiagnostics } from "@/lib/leader-diagnostics";
 import { listTelegramSubscribersByCopyWallet } from "@/lib/telegram-subscribers";
 
 export async function GET(request: Request) {
@@ -16,8 +16,9 @@ export async function GET(request: Request) {
     ]);
     const page = pageExecutionRows(fetchedRows, filters.limit);
     const sanitizedRows = page.items.map(toDashboardExecution);
-    const [rowsWithLeaders, subscriberByCopyWallet] = await Promise.all([
+    const [rowsWithLeaders, gatewayConfirmationsWithLeaders, subscriberByCopyWallet] = await Promise.all([
       enrichExecutionsWithLeaderDiagnostics(sanitizedRows),
+      enrichGatewayConfirmationsWithLeaderDiagnostics(gatewayConfirmations),
       listTelegramSubscribersByCopyWallet(sanitizedRows)
     ]);
     const executions = attachTelegramSubscriberIds(rowsWithLeaders, subscriberByCopyWallet);
@@ -26,7 +27,7 @@ export async function GET(request: Request) {
 
     return Response.json({
       executions,
-      gatewayConfirmations,
+      gatewayConfirmations: gatewayConfirmationsWithLeaders,
       summary: summarizeExecutions(executions),
       freshness,
       gatewayConfirmationFreshness,

@@ -107,23 +107,15 @@ function gatewayPlacement(row: GatewayConfirmation): string {
 }
 
 function gatewayLeader(row: GatewayConfirmation): string {
-  const leader = row.copySlotLeader || row.targetSlotLeader;
-  return leader ? shortText(leader, 7) : "n/a";
+  return leaderSummary(row);
 }
 
 function gatewayLeaderTitle(row: GatewayConfirmation): string | undefined {
-  const parts = [
-    row.targetSlotLeader ? `Target: ${row.targetSlotLeader}` : null,
-    row.copySlotLeader ? `Copy: ${row.copySlotLeader}` : null
-  ].filter(Boolean);
-  return parts.length > 0 ? parts.join(" · ") : undefined;
+  return leaderTitle(row);
 }
 
 function gatewayLeaderContext(row: GatewayConfirmation): string {
-  if (row.targetSlotLeader && row.copySlotLeader) {
-    return row.targetSlotLeader === row.copySlotLeader ? "target + copy" : "copy leader";
-  }
-  return row.copySlotLeader ? "copy leader" : row.targetSlotLeader ? "target leader" : "gateway evidence";
+  return leaderContext(row);
 }
 
 const FEED_CLASSES: Record<FeedKey, string> = {

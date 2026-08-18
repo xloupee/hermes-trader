@@ -7,6 +7,7 @@ import {
   landingSummary,
   isDelayedLanding,
   leaderContext,
+  leaderTitle,
   leaderSummary,
   overviewMetricValues,
   parseDashboardFilters,
@@ -98,7 +99,14 @@ describe("dashboard UI contract", () => {
       copyLeader: { broadRegion: "Europe", location: "Frankfurt, DE", shortIdentity: "copy" },
       targetLeader: { broadRegion: "North America", location: "Ashburn, US", shortIdentity: "target" },
       leaderChanged: true
-    } }), "Frankfurt, DE changed");
+    } }), "Frankfurt, DE · Europe changed");
+    assert.match(leaderTitle({ leaderDiagnostics: {
+      copyLeader: { broadRegion: "Europe", location: "Frankfurt, DE", shortIdentity: "copy" },
+      targetLeader: { broadRegion: "North America", location: "Ashburn, US", shortIdentity: "target" },
+      targetSlot: 1,
+      copySlot: 2,
+      leaderChanged: true
+    } }) || "", /Frankfurt, DE · Europe/);
     assert.equal(leaderContext({ leaderDiagnostics: {
       copyLeader: { shortIdentity: "copy...leader", broadRegion: "Europe" },
       targetLeader: { shortIdentity: "copy...leader", broadRegion: "Europe" },

@@ -1,5 +1,6 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { DashboardExecutionFilters } from "@/lib/local-executions";
+import type { LeaderDiagnostics } from "@/lib/leader-diagnostics";
 
 export interface GatewayConfirmation {
   id: number;
@@ -23,7 +24,6 @@ export interface GatewayConfirmation {
   targetSlotLeader: string | null;
   copySlotLeader: string | null;
   telegramId: string | null;
-  firstAckLane: string | null;
   firstAckAtMs: number | null;
   dispatchAttempts: number | null;
   observedToSendSubmittedMs: number | null;
@@ -44,6 +44,7 @@ export interface GatewayConfirmation {
   gatewayIntentKey: string | null;
   gatewayState: string | null;
   reconciliationApplied: boolean | null;
+  leaderDiagnostics: LeaderDiagnostics | null;
 }
 
 export interface GatewayConfirmationFreshness {
@@ -129,6 +130,15 @@ function mapGatewayConfirmation(row: Record<string, unknown>): GatewayConfirmati
   const rawTelemetry = objectValue(rawConfirmation?.executionTelemetry);
   const rawTimeline = objectValue(rawTelemetry?.timeline);
   const rawFirstAck = objectValue(rawTimeline?.firstAck);
+  const durableAckEvidence = telemetry?.retryAckEvidenceDurable !== false;
+  const ackLane = durableAckEvidence
+    ? stringValue(telemetry?.ackLane)
+      ?? stringValue(row.first_ack_lane)
+      ?? stringValue(rawConfirmation?.firstAckLane)
+      ?? stringValue(rawConfirmation?.sendRpcWinner)
+      ?? stringValue(rawTelemetry?.ackLane)
+      ?? stringValue(rawFirstAck?.lane)
+    : null;
   return {
     id: numberValue(row.id) ?? 0,
     createdAt: stringValue(row.created_at) ?? new Date(0).toISOString(),
@@ -151,11 +161,7 @@ function mapGatewayConfirmation(row: Record<string, unknown>): GatewayConfirmati
     targetSlotLeader: stringValue(row.target_slot_leader) ?? stringValue(rawConfirmation?.targetSlotLeader),
     copySlotLeader: stringValue(row.copy_slot_leader) ?? stringValue(rawConfirmation?.copySlotLeader),
     telegramId: stringValue(row.telegram_id) ?? stringValue(rawConfirmation?.telegramId),
-    firstAckLane: stringValue(row.first_ack_lane)
-      ?? stringValue(rawConfirmation?.firstAckLane)
-      ?? stringValue(rawConfirmation?.sendRpcWinner)
-      ?? stringValue(rawTelemetry?.ackLane)
-      ?? stringValue(rawFirstAck?.lane),
+    firstAckLane: ackLane,
     firstAckAtMs: numberValue(row.first_ack_at_ms)
       ?? numberValue(rawConfirmation?.firstAckAtMs)
       ?? numberValue(rawFirstAck?.observedAtUnixMs),
@@ -171,8 +177,7 @@ function mapGatewayConfirmation(row: Record<string, unknown>): GatewayConfirmati
     mint: stringValue(row.mint) ?? "",
     observedAction: stringValue(row.observed_action) ?? "unknown",
     transactionRole: stringValue(row.transaction_role) ?? "unknown",
-    firstAckLane: telemetry?.retryAckEvidenceDurable === false ? null : stringValue(telemetry?.ackLane),
-    dispatchToAckMs: telemetry?.retryAckEvidenceDurable === false
+    dispatchToAckMs: !durableAckEvidence
       ? null
       : numberValue(telemetry?.dispatchPersistenceStartedToAckMs),
     status: stringValue(row.status),
@@ -181,7 +186,8 @@ function mapGatewayConfirmation(row: Record<string, unknown>): GatewayConfirmati
     reason: stringValue(row.reason),
     gatewayIntentKey: stringValue(row.gateway_intent_key),
     gatewayState: stringValue(row.gateway_state),
-    reconciliationApplied: booleanValue(row.reconciliation_applied)
+    reconciliationApplied: booleanValue(row.reconciliation_applied),
+    leaderDiagnostics: null
   };
 }
 

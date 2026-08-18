@@ -111,10 +111,11 @@ describe("dashboard contract", () => {
     ]) {
       assert.match(query, new RegExp(`\\"${column}\\"`));
     }
-    assert.match(query, /firstAckLane:\s*stringValue\(row\.first_ack_lane\)/);
+    assert.match(query, /const ackLane = durableAckEvidence/);
+    assert.match(query, /firstAckLane:\s*ackLane/);
     assert.match(query, /telegramId:\s*stringValue\(row\.telegram_id\)/);
     assert.match(table, /gateway\?\.firstAckLane/);
-    assert.match(table, /gateway\?\.observedToSignatureReturnedMs/);
+    assert.match(table, /gateway\?\.dispatchToAckMs/);
     assert.match(table, /gatewayLeader\(gateway!\)/);
     assert.match(table, /gateway\?\.telegramId/);
     assert.doesNotMatch(table, /sendLaneIdentity\(null\)/);

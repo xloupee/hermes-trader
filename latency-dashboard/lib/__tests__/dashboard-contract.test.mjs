@@ -97,6 +97,30 @@ describe("dashboard contract", () => {
     assert.match(source, /ackEvidence\.lane/);
   });
 
+  test("gateway evidence query and both layouts render populated lane, ACK, leader, and Telegram fields", () => {
+    const query = readFileSync(new URL("../gateway-confirmations.ts", import.meta.url), "utf8");
+    const table = readFileSync(new URL("../../components/dashboard/execution-table.tsx", import.meta.url), "utf8");
+    for (const column of [
+      "first_ack_lane",
+      "observed_to_send_submitted_ms",
+      "observed_to_signature_returned_ms",
+      "target_slot_leader",
+      "copy_slot_leader",
+      "telegram_id",
+      "raw_confirmation"
+    ]) {
+      assert.match(query, new RegExp(`\\"${column}\\"`));
+    }
+    assert.match(query, /firstAckLane:\s*stringValue\(row\.first_ack_lane\)/);
+    assert.match(query, /telegramId:\s*stringValue\(row\.telegram_id\)/);
+    assert.match(table, /gateway\?\.firstAckLane/);
+    assert.match(table, /gateway\?\.observedToSignatureReturnedMs/);
+    assert.match(table, /gatewayLeader\(gateway!\)/);
+    assert.match(table, /gateway\?\.telegramId/);
+    assert.doesNotMatch(table, /sendLaneIdentity\(null\)/);
+    assert.doesNotMatch(table, /canonical \? `\$\{formatMs\(canonical\.observedToSignatureReturnedMs\)\} ACK` : "n\/a ACK"/);
+  });
+
   test("public list and detail DTOs never expose endpoint credentials", () => {
     const adversarialEndpoints = [
       { endpoint: "https://rpc.example.test/?api-key=query-secret", secret: "query-secret" },

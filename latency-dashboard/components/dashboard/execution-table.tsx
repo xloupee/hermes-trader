@@ -106,6 +106,26 @@ function gatewayPlacement(row: GatewayConfirmation): string {
   return "n/a";
 }
 
+function gatewayLeader(row: GatewayConfirmation): string {
+  const leader = row.copySlotLeader || row.targetSlotLeader;
+  return leader ? shortText(leader, 7) : "n/a";
+}
+
+function gatewayLeaderTitle(row: GatewayConfirmation): string | undefined {
+  const parts = [
+    row.targetSlotLeader ? `Target: ${row.targetSlotLeader}` : null,
+    row.copySlotLeader ? `Copy: ${row.copySlotLeader}` : null
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(" · ") : undefined;
+}
+
+function gatewayLeaderContext(row: GatewayConfirmation): string {
+  if (row.targetSlotLeader && row.copySlotLeader) {
+    return row.targetSlotLeader === row.copySlotLeader ? "target + copy" : "copy leader";
+  }
+  return row.copySlotLeader ? "copy leader" : row.targetSlotLeader ? "target leader" : "gateway evidence";
+}
+
 const FEED_CLASSES: Record<FeedKey, string> = {
   "vortex-fra": styles.feedVortex,
   "jito-primary": styles.feedJito,
@@ -187,9 +207,9 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
                   </>}
                 </td>
                 <td className={styles.txDistance}>{canonical ? transactionDistance(canonical) : gatewayPlacement(gateway!)}</td>
-                <td className={styles.leaderCell} title={canonical ? leaderTitle(canonical) : undefined}>
-                  <strong>{canonical ? leaderSummary(canonical) : "n/a"}</strong>
-                  <span className={styles.meta}>{canonical ? leaderContext(canonical) : "gateway evidence"}</span>
+                <td className={styles.leaderCell} title={canonical ? leaderTitle(canonical) : gatewayLeaderTitle(gateway!)}>
+                  <strong>{canonical ? leaderSummary(canonical) : gatewayLeader(gateway!)}</strong>
+                  <span className={styles.meta}>{canonical ? leaderContext(canonical) : gatewayLeaderContext(gateway!)}</span>
                 </td>
                 <td><strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></td>
                 <td className={styles.ackCell}>
@@ -198,7 +218,7 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
                 </td>
                 <td className={styles.assetCell}><CopyChip value={row.mint} label="mint address" /></td>
                 <td><CopyChip value={row.observedWallet} label="watched wallet" /></td>
-                <td className={styles.subscriberCell}><CopyChip value={canonical ? canonical.telegramSubscriberId : null} label="Telegram subscriber ID" /></td>
+                <td className={styles.subscriberCell}><CopyChip value={canonical ? canonical.telegramSubscriberId : gateway?.telegramId ?? null} label="Telegram subscriber ID" /></td>
                 <td className={styles.signCell}>
                   <CopyChip value={canonical ? (canonical.sendSignature || canonical.observedSignature) : gateway?.signature} label="transaction signature" />
                   {canonical && includeRowLinks ? (
@@ -237,13 +257,13 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
             </div>
             <div className={styles.cardMeta}>
               <span>TX after<strong className={styles.txDistance}>{canonical ? transactionDistance(canonical) : gatewayPlacement(gateway!)}</strong></span>
-              <span>Leader<strong title={canonical ? leaderTitle(canonical) : undefined}>{canonical ? leaderSummary(canonical) : "n/a"}</strong><small className={styles.meta}>{canonical ? leaderContext(canonical) : "gateway evidence"}</small></span>
+              <span>Leader<strong title={canonical ? leaderTitle(canonical) : gatewayLeaderTitle(gateway!)}>{canonical ? leaderSummary(canonical) : gatewayLeader(gateway!)}</strong><small className={styles.meta}>{canonical ? leaderContext(canonical) : gatewayLeaderContext(gateway!)}</small></span>
               <span>Feed<strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></span>
               <span>Lane / ACK<strong className={`${styles.ackLane} ${LANE_CLASSES[lane.key]}`} title={lane.raw || undefined}>{lane.label}</strong><small className={styles.meta}>{`${formatMs(ackMs)} ACK`}</small></span>
             </div>
             <div className={styles.cardCopies}>
               <span>Wallet <CopyChip value={row.observedWallet} label="watched wallet" /></span>
-              <span>Telegram <CopyChip value={canonical ? canonical.telegramSubscriberId : null} label="Telegram subscriber ID" /></span>
+              <span>Telegram <CopyChip value={canonical ? canonical.telegramSubscriberId : gateway?.telegramId ?? null} label="Telegram subscriber ID" /></span>
               <span>Tx <CopyChip value={canonical ? (canonical.sendSignature || canonical.observedSignature) : gateway?.signature} label="transaction signature" /></span>
             </div>
             {canonical && includeRowLinks ? <Link className={styles.mobileDetailLink} href={`/dashboard/executions/${row.id}`}>Inspect execution <span aria-hidden="true">→</span></Link> : null}

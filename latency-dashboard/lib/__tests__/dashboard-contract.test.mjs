@@ -93,6 +93,8 @@ describe("dashboard contract", () => {
     assert.match(source, /"first_ack_lane"/);
     assert.match(source, /"send_rpc_winner"/);
     assert.match(source, /firstAckLane:\s*row\.first_ack_lane[\s\S]*?row\.send_rpc_winner/);
+    assert.match(source, /dispatchToAckMs:\s*ackEvidence\.dispatchToAckMs/);
+    assert.match(source, /ackEvidence\.lane/);
   });
 
   test("public list and detail DTOs never expose endpoint credentials", () => {

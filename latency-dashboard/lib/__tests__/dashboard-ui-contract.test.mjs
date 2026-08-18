@@ -141,6 +141,7 @@ describe("dashboard UI contract", () => {
     assert.match(detail, /row\.txParseUs\).*row\.routeParseUs/s);
     assert.match(detail, /row\.unsignedBuildUs\).*row\.signUs/s);
     assert.match(detail, /ackDurationMs\(row\)/);
+    assert.match(detail, /row\.dispatchToAckMs/);
     assert.match(detail, /executionFeed\(row\.inboundSource\)/);
     assert.match(detail, /row\.inboundContributors/);
     assert.match(detail, /row\.inboundSelectionGeneration/);
@@ -162,7 +163,8 @@ describe("dashboard UI contract", () => {
     assert.ok(table.indexOf("<th>Telegram ID</th>") < table.indexOf("<th>Transaction</th>"));
     assert.doesNotMatch(table, /feedTransportLabel|row\.selectedRoute/);
     assert.match(table, /executionFeed\(canonical\.inboundSource\)/);
-    assert.match(table, /sendLaneIdentity\(canonical\.firstAckLane\)/);
+    assert.match(table, /sendLaneIdentity\(canonical\?\.firstAckLane \?\? gateway\?\.firstAckLane/);
+    assert.match(table, /gateway\?\.dispatchToAckMs/);
     assert.match(table, /title=\{lane\.raw \|\| undefined\}/);
     assert.match(table, /placementClass\(canonical\)/);
     assert.match(table, /transactionDistance\(canonical\)/);
@@ -173,7 +175,8 @@ describe("dashboard UI contract", () => {
     assert.match(table, /canonical\.telegramSubscriberId/);
     assert.match(table, /label="Telegram subscriber ID"/);
     assert.match(table, /leaderSummary\(canonical\)/);
-    assert.match(table, /className=\{styles\.ackCell\}[\s\S]*lane\.label[\s\S]*formatMs\(canonical\.observedToSignatureReturnedMs\)/);
+    assert.match(table, /const ackMs = canonical \? canonical\.dispatchToAckMs/);
+    assert.match(table, /className=\{styles\.ackCell\}[\s\S]*lane\.label[\s\S]*formatMs\(ackMs\)/);
     assert.match(table, /gatewayRows/);
     assert.match(table, /useUserTimeZone\(\)/);
     assert.match(table, /Time · \{timeZoneLabel\}/);
@@ -421,6 +424,7 @@ describe("dashboard UI contract", () => {
       label: "Helius Sender",
       raw: "helius-sender-fast:sender.helius-rpc.com"
     });
+    assert.equal(sendLaneIdentity("helius_sender").label, "Helius Sender");
     assert.equal(sendLaneIdentity("nozomi-fra-1:nozomi.example").label, "Nozomi");
     assert.equal(sendLaneIdentity("jito-1:frankfurt.mainnet.block-engine.jito.wtf").label, "Jito");
     assert.equal(sendLaneIdentity("rpc-primary:mainnet.helius-rpc.com").label, "RPC");

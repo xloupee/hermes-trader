@@ -39,15 +39,9 @@ export function executionLocalDetectUs(report: LocalExecutionReport | null | und
 }
 
 export function copyAckMs(report: LocalExecutionReport | null | undefined): number | null {
-  const returned = report?.observedToSignatureReturnedMs;
-  const submitted = report?.observedToSendSubmittedMs;
-  if (typeof returned !== "number" || !Number.isFinite(returned)) {
-    return null;
-  }
-  if (typeof submitted !== "number" || !Number.isFinite(submitted)) {
-    return returned;
-  }
-  return Math.max(0, returned - submitted);
+  return typeof report?.dispatchToAckMs === "number" && Number.isFinite(report.dispatchToAckMs)
+    ? report.dispatchToAckMs
+    : null;
 }
 
 export function autoSellAckMs(row: LocalExecutionReport): number | null {

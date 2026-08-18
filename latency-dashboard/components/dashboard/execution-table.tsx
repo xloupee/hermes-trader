@@ -169,7 +169,8 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
               const feed = canonical
                 ? executionFeed(canonical.inboundSource)
                 : executionFeed(gateway?.inboundSource);
-              const lane = canonical ? sendLaneIdentity(canonical.firstAckLane) : sendLaneIdentity(null);
+              const lane = sendLaneIdentity(canonical?.firstAckLane ?? gateway?.firstAckLane ?? null);
+              const ackMs = canonical ? canonical.dispatchToAckMs : gateway?.dispatchToAckMs ?? null;
               return <tr key={`${entry.kind}-${row.id}`}>
                 <td className={styles.timeCell}>
                   <strong>{formatUserTime(row.observedAtMs, timeZone)}</strong>
@@ -193,7 +194,7 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
                 <td><strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></td>
                 <td className={styles.ackCell}>
                   <strong className={`${styles.ackLane} ${LANE_CLASSES[lane.key]}`} title={lane.raw || undefined}>{lane.label}</strong>
-                  <span className={styles.meta}>{canonical ? `${formatMs(canonical.observedToSignatureReturnedMs)} ACK` : "n/a ACK"}</span>
+                  <span className={styles.meta}>{`${formatMs(ackMs)} ACK`}</span>
                 </td>
                 <td className={styles.assetCell}><CopyChip value={row.mint} label="mint address" /></td>
                 <td><CopyChip value={row.observedWallet} label="watched wallet" /></td>
@@ -218,7 +219,8 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
           const feed = canonical
             ? executionFeed(canonical.inboundSource)
             : executionFeed(gateway?.inboundSource);
-          const lane = canonical ? sendLaneIdentity(canonical.firstAckLane) : sendLaneIdentity(null);
+          const lane = sendLaneIdentity(canonical?.firstAckLane ?? gateway?.firstAckLane ?? null);
+          const ackMs = canonical ? canonical.dispatchToAckMs : gateway?.dispatchToAckMs ?? null;
           return <article key={`${entry.kind}-${row.id}`} className={styles.card}>
             <header className={styles.cardHeader}>
               <div><span className={sideClass(row.observedAction)}>{row.observedAction}</span><strong>{shortText(row.mint, 5)}</strong></div>
@@ -237,7 +239,7 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
               <span>TX after<strong className={styles.txDistance}>{canonical ? transactionDistance(canonical) : gatewayPlacement(gateway!)}</strong></span>
               <span>Leader<strong title={canonical ? leaderTitle(canonical) : undefined}>{canonical ? leaderSummary(canonical) : "n/a"}</strong><small className={styles.meta}>{canonical ? leaderContext(canonical) : "gateway evidence"}</small></span>
               <span>Feed<strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></span>
-              <span>Lane / ACK<strong className={`${styles.ackLane} ${LANE_CLASSES[lane.key]}`} title={lane.raw || undefined}>{lane.label}</strong><small className={styles.meta}>{canonical ? `${formatMs(canonical.observedToSignatureReturnedMs)} ACK` : "n/a ACK"}</small></span>
+              <span>Lane / ACK<strong className={`${styles.ackLane} ${LANE_CLASSES[lane.key]}`} title={lane.raw || undefined}>{lane.label}</strong><small className={styles.meta}>{`${formatMs(ackMs)} ACK`}</small></span>
             </div>
             <div className={styles.cardCopies}>
               <span>Wallet <CopyChip value={row.observedWallet} label="watched wallet" /></span>

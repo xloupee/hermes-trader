@@ -25,6 +25,8 @@ export interface GatewayConfirmation {
   mint: string;
   observedAction: string;
   transactionRole: string;
+  firstAckLane: string | null;
+  dispatchToAckMs: number | null;
   status: string | null;
   ok: boolean;
   confirmationStatus: string | null;
@@ -121,6 +123,10 @@ function mapGatewayConfirmation(row: Record<string, unknown>): GatewayConfirmati
     mint: stringValue(row.mint) ?? "",
     observedAction: stringValue(row.observed_action) ?? "unknown",
     transactionRole: stringValue(row.transaction_role) ?? "unknown",
+    firstAckLane: telemetry?.retryAckEvidenceDurable === false ? null : stringValue(telemetry?.ackLane),
+    dispatchToAckMs: telemetry?.retryAckEvidenceDurable === false
+      ? null
+      : numberValue(telemetry?.dispatchPersistenceStartedToAckMs),
     status: stringValue(row.status),
     ok: row.ok === true,
     confirmationStatus: stringValue(row.confirmation_status),

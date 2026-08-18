@@ -25,6 +25,7 @@ import { benchmarkLatencyCells, durationWithFallback } from "@/lib/benchmark-row
 import type { BenchmarkRow } from "@/lib/benchmark-rows";
 import { metricStats } from "@/lib/benchmark-stats";
 import type { LocalExecutionReport, SendLaneAttempt } from "@/lib/local-executions";
+import { sendLaneIdentity } from "@/lib/send-lanes";
 import { useAutoRefreshQuery } from "@/lib/use-auto-refresh-query";
 
 interface ExecutionSummary {
@@ -361,6 +362,7 @@ function ExecutionReport({ selectedExecution }: { selectedExecution: LocalExecut
         { label: "Send lane", value: ms(selectedExecution.sendLaneMs) },
         { label: "Send mode", value: selectedExecution.sendLaneMode || "n/a" },
         { label: "First ACK lane", value: formatFirstAckLane(selectedExecution.firstAckLane) },
+        { label: "Dispatch / ACK", value: ms(selectedExecution.dispatchToAckMs) },
         { label: "Lane attempts", value: formatSendLaneAttempts(selectedExecution.sendLaneAttempts) },
         { label: "Signed", value: ms(selectedExecution.observedToSignedMs) },
         { label: "Sim/send", value: ms(selectedExecution.observedToSendSubmittedMs) },
@@ -376,7 +378,7 @@ function formatFirstAckLane(firstAckLane: string | null): string {
   if (!firstAckLane || firstAckLane === "none") {
     return "n/a";
   }
-  return firstAckLane;
+  return sendLaneIdentity(firstAckLane).label;
 }
 
 function formatSendLaneAttempts(attempts: SendLaneAttempt[]): string {

@@ -196,6 +196,7 @@ describe("dashboard UI contract", () => {
     assert.match(table, /const ackMs = canonical \? canonical\.dispatchToAckMs/);
     assert.match(table, /className=\{styles\.ackCell\}[\s\S]*lane\.label[\s\S]*formatMs\(ackMs\)/);
     assert.match(table, /gatewayRows/);
+    assert.match(table, /unmatchedGatewayConfirmations\(rows, gatewayRows\)/);
     assert.match(table, /useUserTimeZone\(\)/);
     assert.match(table, /Time · \{timeZoneLabel\}/);
     assert.match(styles, /\.sideBuy\s*\{\s*color:\s*var\(--green\);\s*\}/);

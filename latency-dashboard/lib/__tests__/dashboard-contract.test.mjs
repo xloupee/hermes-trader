@@ -17,10 +17,30 @@ import {
   isObservedAtWithinRange,
   sanitizeWallet,
   summarizeExecutions,
-  toDashboardExecution
+  toDashboardExecution,
+  unmatchedGatewayConfirmations
 } from "../dashboard-contract.mjs";
 
 describe("dashboard contract", () => {
+  test("gateway confirmations only fill gaps in the canonical execution tape", () => {
+    const rows = [
+      { sendSignature: "canonical-copy-signature", observedSignature: "target-signature" },
+      { sendSignature: null, observedSignature: "observed-only-signature" }
+    ];
+    const gatewayRows = [
+      { id: 1, signature: "canonical-copy-signature" },
+      { id: 2, signature: "gateway-only-signature" },
+      { id: 3, signature: "gateway-only-signature" },
+      { id: 4, signature: "observed-only-signature" },
+      { id: 5, signature: "" }
+    ];
+
+    assert.deepEqual(
+      unmatchedGatewayConfirmations(rows, gatewayRows).map((row) => row.id),
+      [2, 4, 5]
+    );
+  });
+
   test("parseExecutionFilters applies default and max bounds", () => {
     const now = Date.parse("2026-07-31T12:00:00.000Z");
     const defaults = parseExecutionFilters(new URLSearchParams(), now);

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { unmatchedGatewayConfirmations } from "@/lib/dashboard-contract.mjs";
 import {
   type DashboardExecution,
   formatMs,
@@ -144,9 +145,10 @@ const LANE_CLASSES: Record<SendLaneKey, string> = {
 export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRowLinks = false }: ExecutionTableProps) {
   const timeZone = useUserTimeZone();
   const timeZoneLabel = userTimeZoneLabel(timeZone);
+  const unmatchedGatewayRows = unmatchedGatewayConfirmations(rows, gatewayRows);
   const tableRows: ExecutionTableRow[] = [
     ...rows.map((row) => ({ kind: "canonical" as const, row })),
-    ...gatewayRows.map((row) => ({ kind: "gateway" as const, row }))
+    ...unmatchedGatewayRows.map((row) => ({ kind: "gateway" as const, row }))
   ].sort((left, right) => right.row.observedAtMs - left.row.observedAtMs);
 
   if (tableRows.length === 0) {

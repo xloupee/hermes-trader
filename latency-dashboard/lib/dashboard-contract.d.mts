@@ -107,6 +107,10 @@ export function attachTelegramSubscriberIds<T extends { copyWallet: string | nul
   rows: T[],
   subscriberByCopyWallet: Map<string, string>
 ): Array<T & { telegramSubscriberId: string | null }>;
+export function unmatchedGatewayConfirmations(
+  rows: DashboardExecution[],
+  gatewayRows: GatewayConfirmation[]
+): GatewayConfirmation[];
 export function summarizeExecutions(
   rows: Array<Partial<LocalExecutionReport> | DashboardExecution>
 ): ExecutionSummary;

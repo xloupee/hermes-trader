@@ -338,6 +338,23 @@ export function attachTelegramSubscriberIds(rows, subscriberByCopyWallet) {
   }));
 }
 
+export function unmatchedGatewayConfirmations(rows, gatewayRows) {
+  const canonicalSignatures = new Set(
+    (rows ?? [])
+      .map((row) => optionalString(row?.sendSignature))
+      .filter((signature) => signature !== null)
+  );
+  const seenGatewaySignatures = new Set();
+
+  return (gatewayRows ?? []).filter((row) => {
+    const signature = optionalString(row?.signature);
+    if (signature === null) return true;
+    if (canonicalSignatures.has(signature) || seenGatewaySignatures.has(signature)) return false;
+    seenGatewaySignatures.add(signature);
+    return true;
+  });
+}
+
 export function summarizeExecutions(rows) {
   const outcome = Object.fromEntries(EXECUTION_OUTCOMES.map((item) => [item, 0]));
   const landingComparison = Object.fromEntries(LANDING_COMPARISONS.map((item) => [item, 0]));

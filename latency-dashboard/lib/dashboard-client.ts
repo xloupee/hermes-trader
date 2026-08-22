@@ -186,11 +186,18 @@ export function isDelayedLanding(row: Pick<DashboardExecution, "outcome" | "slot
     && row.slotDelta >= 1;
 }
 
+function leaderPlace(value: { location?: string | null; broadRegion?: string | null } | null): string | null {
+  const location = value?.location || null;
+  const continent = value?.broadRegion || null;
+  if (location && continent && location !== continent) return `${location} · ${continent}`;
+  return location || continent;
+}
+
 export function leaderSummary(row: Pick<DashboardExecution, "leaderDiagnostics">): string {
   const diagnostics = row.leaderDiagnostics;
   if (!diagnostics) return "n/a";
-  const copyRegion = diagnostics.copyLeader?.location || diagnostics.copyLeader?.broadRegion;
-  const targetRegion = diagnostics.targetLeader?.location || diagnostics.targetLeader?.broadRegion;
+  const copyRegion = leaderPlace(diagnostics.copyLeader);
+  const targetRegion = leaderPlace(diagnostics.targetLeader);
   const region = copyRegion || targetRegion;
   if (!region) {
     return diagnostics.copyLeader?.shortIdentity || diagnostics.targetLeader?.shortIdentity || "n/a";
@@ -203,7 +210,7 @@ export function leaderTitle(row: Pick<DashboardExecution, "leaderDiagnostics">):
   if (!diagnostics) return undefined;
   const target = diagnostics.targetLeader;
   const copy = diagnostics.copyLeader;
-  const leader = (value: typeof target) => [value?.shortIdentity, value?.location, value?.network].filter(Boolean).join(" · ") || "n/a";
+  const leader = (value: typeof target) => [value?.shortIdentity, leaderPlace(value), value?.network].filter(Boolean).join(" · ") || "n/a";
   return [
     `Target slot ${diagnostics.targetSlot ?? "n/a"}: ${leader(target)}`,
     `Copy slot ${diagnostics.copySlot ?? "n/a"}: ${leader(copy)}`,

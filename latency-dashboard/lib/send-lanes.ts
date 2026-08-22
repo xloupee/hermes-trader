@@ -38,7 +38,7 @@ export function sendLaneIdentity(value: string | null | undefined): SendLaneIden
   const normalized = raw?.toLowerCase() || "";
   let key: SendLaneKey = "unknown";
 
-  if (normalized.includes("helius-sender") || normalized.includes("sender-max")) key = "helius-sender";
+  if (normalized.includes("helius-sender") || normalized.includes("helius_sender") || normalized.includes("sender-max")) key = "helius-sender";
   else if (normalized.includes("nozomi")) key = "nozomi";
   else if (normalized.includes("jito")) key = "jito";
   else if (normalized.includes("erpc")) key = "erpc";

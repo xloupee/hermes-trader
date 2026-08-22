@@ -7,6 +7,7 @@ import {
   landingSummary,
   isDelayedLanding,
   leaderContext,
+  leaderTitle,
   leaderSummary,
   overviewMetricValues,
   parseDashboardFilters,
@@ -98,7 +99,14 @@ describe("dashboard UI contract", () => {
       copyLeader: { broadRegion: "Europe", location: "Frankfurt, DE", shortIdentity: "copy" },
       targetLeader: { broadRegion: "North America", location: "Ashburn, US", shortIdentity: "target" },
       leaderChanged: true
-    } }), "Frankfurt, DE changed");
+    } }), "Frankfurt, DE · Europe changed");
+    assert.match(leaderTitle({ leaderDiagnostics: {
+      copyLeader: { broadRegion: "Europe", location: "Frankfurt, DE", shortIdentity: "copy" },
+      targetLeader: { broadRegion: "North America", location: "Ashburn, US", shortIdentity: "target" },
+      targetSlot: 1,
+      copySlot: 2,
+      leaderChanged: true
+    } }) || "", /Frankfurt, DE · Europe/);
     assert.equal(leaderContext({ leaderDiagnostics: {
       copyLeader: { shortIdentity: "copy...leader", broadRegion: "Europe" },
       targetLeader: { shortIdentity: "copy...leader", broadRegion: "Europe" },
@@ -141,6 +149,7 @@ describe("dashboard UI contract", () => {
     assert.match(detail, /row\.txParseUs\).*row\.routeParseUs/s);
     assert.match(detail, /row\.unsignedBuildUs\).*row\.signUs/s);
     assert.match(detail, /ackDurationMs\(row\)/);
+    assert.match(detail, /row\.dispatchToAckMs/);
     assert.match(detail, /executionFeed\(row\.inboundSource\)/);
     assert.match(detail, /row\.inboundContributors/);
     assert.match(detail, /row\.inboundSelectionGeneration/);
@@ -172,7 +181,8 @@ describe("dashboard UI contract", () => {
     assert.ok(table.indexOf("<th>Telegram ID</th>") < table.indexOf("<th>Transaction</th>"));
     assert.doesNotMatch(table, /feedTransportLabel|row\.selectedRoute/);
     assert.match(table, /executionFeed\(canonical\.inboundSource\)/);
-    assert.match(table, /sendLaneIdentity\(canonical\?\.firstAckLane \?\? gateway\?\.firstAckLane \?\? null\)/);
+    assert.match(table, /sendLaneIdentity\(canonical\?\.firstAckLane \?\? gateway\?\.firstAckLane/);
+    assert.match(table, /gateway\?\.dispatchToAckMs/);
     assert.match(table, /title=\{lane\.raw \|\| undefined\}/);
     assert.match(table, /placementClass\(canonical\)/);
     assert.match(table, /transactionDistance\(canonical\)/);
@@ -183,8 +193,10 @@ describe("dashboard UI contract", () => {
     assert.match(table, /canonical\.telegramSubscriberId/);
     assert.match(table, /label="Telegram subscriber ID"/);
     assert.match(table, /leaderSummary\(canonical\)/);
-    assert.match(table, /className=\{styles\.ackCell\}[\s\S]*lane\.label[\s\S]*formatMs\(canonical\?\.observedToSignatureReturnedMs \?\? gateway\?\.observedToSignatureReturnedMs \?\? null\)/);
+    assert.match(table, /const ackMs = canonical \? canonical\.dispatchToAckMs/);
+    assert.match(table, /className=\{styles\.ackCell\}[\s\S]*lane\.label[\s\S]*formatMs\(ackMs\)/);
     assert.match(table, /gatewayRows/);
+    assert.match(table, /unmatchedGatewayConfirmations\(rows, gatewayRows\)/);
     assert.match(table, /useUserTimeZone\(\)/);
     assert.match(table, /Time · \{timeZoneLabel\}/);
     assert.match(styles, /\.sideBuy\s*\{\s*color:\s*var\(--green\);\s*\}/);
@@ -431,6 +443,7 @@ describe("dashboard UI contract", () => {
       label: "Helius Sender",
       raw: "helius-sender-fast:sender.helius-rpc.com"
     });
+    assert.equal(sendLaneIdentity("helius_sender").label, "Helius Sender");
     assert.equal(sendLaneIdentity("nozomi-fra-1:nozomi.example").label, "Nozomi");
     assert.equal(sendLaneIdentity("jito-1:frankfurt.mainnet.block-engine.jito.wtf").label, "Jito");
     assert.equal(sendLaneIdentity("rpc-primary:mainnet.helius-rpc.com").label, "RPC");

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { unmatchedGatewayConfirmations } from "@/lib/dashboard-contract.mjs";
 import {
   type DashboardExecution,
   formatMs,
@@ -144,9 +145,10 @@ const LANE_CLASSES: Record<SendLaneKey, string> = {
 export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRowLinks = false }: ExecutionTableProps) {
   const timeZone = useUserTimeZone();
   const timeZoneLabel = userTimeZoneLabel(timeZone);
+  const unmatchedGatewayRows = unmatchedGatewayConfirmations(rows, gatewayRows);
   const tableRows: ExecutionTableRow[] = [
     ...rows.map((row) => ({ kind: "canonical" as const, row })),
-    ...gatewayRows.map((row) => ({ kind: "gateway" as const, row }))
+    ...unmatchedGatewayRows.map((row) => ({ kind: "gateway" as const, row }))
   ].sort((left, right) => right.row.observedAtMs - left.row.observedAtMs);
 
   if (tableRows.length === 0) {
@@ -182,6 +184,7 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
                 ? executionFeed(canonical.inboundSource)
                 : executionFeed(gateway?.inboundSource);
               const lane = sendLaneIdentity(canonical?.firstAckLane ?? gateway?.firstAckLane ?? null);
+              const ackMs = canonical ? canonical.dispatchToAckMs : gateway?.dispatchToAckMs ?? null;
               return <tr key={`${entry.kind}-${row.id}`}>
                 <td className={styles.timeCell}>
                   <strong>{formatUserTime(row.observedAtMs, timeZone)}</strong>
@@ -205,7 +208,7 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
                 <td><strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></td>
                 <td className={styles.ackCell}>
                   <strong className={`${styles.ackLane} ${LANE_CLASSES[lane.key]}`} title={lane.raw || undefined}>{lane.label}</strong>
-                  <span className={styles.meta}>{`${formatMs(canonical?.observedToSignatureReturnedMs ?? gateway?.observedToSignatureReturnedMs ?? null)} ACK`}</span>
+                  <span className={styles.meta}>{`${formatMs(ackMs)} ACK`}</span>
                 </td>
                 <td className={styles.assetCell}><CopyChip value={row.mint} label="mint address" /></td>
                 <td><CopyChip value={row.observedWallet} label="watched wallet" /></td>
@@ -231,6 +234,7 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
             ? executionFeed(canonical.inboundSource)
             : executionFeed(gateway?.inboundSource);
           const lane = sendLaneIdentity(canonical?.firstAckLane ?? gateway?.firstAckLane ?? null);
+          const ackMs = canonical ? canonical.dispatchToAckMs : gateway?.dispatchToAckMs ?? null;
           return <article key={`${entry.kind}-${row.id}`} className={styles.card}>
             <header className={styles.cardHeader}>
               <div><span className={sideClass(row.observedAction)}>{row.observedAction}</span><strong>{shortText(row.mint, 5)}</strong></div>
@@ -249,7 +253,7 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
               <span>TX after<strong className={styles.txDistance}>{canonical ? transactionDistance(canonical) : gatewayPlacement(gateway!)}</strong></span>
               <span>Leader<strong title={canonical ? leaderTitle(canonical) : gatewayLeaderTitle(gateway!)}>{canonical ? leaderSummary(canonical) : gatewayLeader(gateway!)}</strong><small className={styles.meta}>{canonical ? leaderContext(canonical) : gatewayLeaderContext(gateway!)}</small></span>
               <span>Feed<strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></span>
-              <span>Lane / ACK<strong className={`${styles.ackLane} ${LANE_CLASSES[lane.key]}`} title={lane.raw || undefined}>{lane.label}</strong><small className={styles.meta}>{`${formatMs(canonical?.observedToSignatureReturnedMs ?? gateway?.observedToSignatureReturnedMs ?? null)} ACK`}</small></span>
+              <span>Lane / ACK<strong className={`${styles.ackLane} ${LANE_CLASSES[lane.key]}`} title={lane.raw || undefined}>{lane.label}</strong><small className={styles.meta}>{`${formatMs(ackMs)} ACK`}</small></span>
             </div>
             <div className={styles.cardCopies}>
               <span>Wallet <CopyChip value={row.observedWallet} label="watched wallet" /></span>

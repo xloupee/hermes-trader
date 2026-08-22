@@ -24,7 +24,6 @@ export interface GatewayConfirmation {
   targetSlotLeader: string | null;
   copySlotLeader: string | null;
   telegramId: string | null;
-  firstAckLane: string | null;
   firstAckAtMs: number | null;
   dispatchAttempts: number | null;
   observedToSendSubmittedMs: number | null;
@@ -36,6 +35,8 @@ export interface GatewayConfirmation {
   mint: string;
   observedAction: string;
   transactionRole: string;
+  firstAckLane: string | null;
+  dispatchToAckMs: number | null;
   status: string | null;
   ok: boolean;
   confirmationStatus: string | null;
@@ -129,6 +130,15 @@ function mapGatewayConfirmation(row: Record<string, unknown>): GatewayConfirmati
   const rawTelemetry = objectValue(rawConfirmation?.executionTelemetry);
   const rawTimeline = objectValue(rawTelemetry?.timeline);
   const rawFirstAck = objectValue(rawTimeline?.firstAck);
+  const durableAckEvidence = telemetry?.retryAckEvidenceDurable !== false;
+  const ackLane = durableAckEvidence
+    ? stringValue(telemetry?.ackLane)
+      ?? stringValue(row.first_ack_lane)
+      ?? stringValue(rawConfirmation?.firstAckLane)
+      ?? stringValue(rawConfirmation?.sendRpcWinner)
+      ?? stringValue(rawTelemetry?.ackLane)
+      ?? stringValue(rawFirstAck?.lane)
+    : null;
   return {
     id: numberValue(row.id) ?? 0,
     createdAt: stringValue(row.created_at) ?? new Date(0).toISOString(),
@@ -151,11 +161,7 @@ function mapGatewayConfirmation(row: Record<string, unknown>): GatewayConfirmati
     targetSlotLeader: stringValue(row.target_slot_leader) ?? stringValue(rawConfirmation?.targetSlotLeader),
     copySlotLeader: stringValue(row.copy_slot_leader) ?? stringValue(rawConfirmation?.copySlotLeader),
     telegramId: stringValue(row.telegram_id) ?? stringValue(rawConfirmation?.telegramId),
-    firstAckLane: stringValue(row.first_ack_lane)
-      ?? stringValue(rawConfirmation?.firstAckLane)
-      ?? stringValue(rawConfirmation?.sendRpcWinner)
-      ?? stringValue(rawTelemetry?.ackLane)
-      ?? stringValue(rawFirstAck?.lane),
+    firstAckLane: ackLane,
     firstAckAtMs: numberValue(row.first_ack_at_ms)
       ?? numberValue(rawConfirmation?.firstAckAtMs)
       ?? numberValue(rawFirstAck?.observedAtUnixMs),
@@ -171,6 +177,9 @@ function mapGatewayConfirmation(row: Record<string, unknown>): GatewayConfirmati
     mint: stringValue(row.mint) ?? "",
     observedAction: stringValue(row.observed_action) ?? "unknown",
     transactionRole: stringValue(row.transaction_role) ?? "unknown",
+    dispatchToAckMs: !durableAckEvidence
+      ? null
+      : numberValue(telemetry?.dispatchPersistenceStartedToAckMs),
     status: stringValue(row.status),
     ok: row.ok === true,
     confirmationStatus: stringValue(row.confirmation_status),

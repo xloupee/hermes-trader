@@ -26,10 +26,9 @@ function localDetectUs(row: DashboardExecution): number | null {
 }
 
 function ackDurationMs(row: DashboardExecution): number | null {
-  const returned = row.observedToSignatureReturnedMs;
-  const submitted = row.observedToSendSubmittedMs;
-  if (typeof returned !== "number" || !Number.isFinite(returned)) return null;
-  return typeof submitted === "number" && Number.isFinite(submitted) ? Math.max(0, returned - submitted) : returned;
+  return typeof row.dispatchToAckMs === "number" && Number.isFinite(row.dispatchToAckMs)
+    ? row.dispatchToAckMs
+    : null;
 }
 
 function LatencyBreakdown({ row }: { row: DashboardExecution }) {

@@ -99,6 +99,7 @@ interface GithubCheckRun {
     name?: string | null;
   } | null;
   output?: {
+    title?: string | null;
     summary?: string | null;
     text?: string | null;
   } | null;
@@ -295,7 +296,9 @@ function mapCheckRun(check: GithubCheckRun): CiCheck {
     url: check.html_url || null,
     detailsUrl: check.details_url || null,
     app: check.app?.name || check.app?.slug || null,
-    summary: check.output?.summary || check.output?.text || null
+    outputTitle: check.output?.title || null,
+    summary: check.output?.summary || null,
+    outputText: check.output?.text || null
   };
 }
 
@@ -321,7 +324,9 @@ function mapCommitStatus(status: GithubCommitStatus): CiCheck {
     url: status.target_url,
     detailsUrl: status.target_url,
     app: null,
-    summary: status.description
+    outputTitle: null,
+    summary: status.description,
+    outputText: null
   };
 }
 

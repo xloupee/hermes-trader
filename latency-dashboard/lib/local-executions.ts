@@ -86,6 +86,7 @@ export interface LocalExecutionReport {
   observedToSimulationCompletedMs: number | null;
   observedToSendSubmittedMs: number | null;
   observedToSignatureReturnedMs: number | null;
+  dispatchToAckMs: number | null;
   feedReceivedAtMs: number | null;
   decodedAtMs: number | null;
   matchedAtMs: number | null;
@@ -412,6 +413,15 @@ function arrayValue(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
+function firstBooleanValue(...values: unknown[]): boolean | null {
+  for (const value of values) {
+    if (typeof value === "boolean") {
+      return value;
+    }
+  }
+  return null;
+}
+
 function chainReportValue(row: RawLocalExecutionReport): Record<string, unknown> | null {
   return objectValue(row.chain_report);
 }
@@ -528,8 +538,29 @@ function normalizeSendLaneAttempt(value: unknown): SendLaneAttempt {
   };
 }
 
-function normalizeSendLaneAttribution(rawExecution: Record<string, unknown> | null): SendLaneAttribution | null {
-  const attribution = objectValue(rawExecution?.sendLaneAttribution);
+function meaningfulSendLaneAttribution(value: unknown): Record<string, unknown> | null {
+  const attribution = objectValue(value);
+  if (!attribution) {
+    return null;
+  }
+  return stringValue(attribution.firstAckLane)
+    || stringValue(attribution.sendLaneMode)
+    || Array.isArray(attribution.allAttempts)
+    ? attribution
+    : null;
+}
+
+function normalizeSendLaneAttribution(
+  rawExecution: Record<string, unknown> | null,
+  confirmation: Record<string, unknown> | null
+): SendLaneAttribution | null {
+  const candidates = [
+    rawExecution?.sendLaneAttribution,
+    confirmation?.sendLaneAttribution
+  ].map(meaningfulSendLaneAttribution).filter((value): value is Record<string, unknown> => value !== null);
+  const attribution = candidates.find((value) => stringValue(value.firstAckLane) || stringValue(value.sendLaneMode))
+    ?? candidates.find((value) => Array.isArray(value.allAttempts))
+    ?? null;
   if (!attribution) {
     return null;
   }
@@ -542,10 +573,43 @@ function normalizeSendLaneAttribution(rawExecution: Record<string, unknown> | nu
   };
 }
 
+function executionTelemetryCandidates(
+  rawExecution: Record<string, unknown> | null,
+  chainReport: Record<string, unknown> | null
+): Record<string, unknown>[] {
+  const confirmation = objectValue(rawExecution?.rustTransactionConfirmation);
+  return [
+    objectValue(confirmation?.executionTelemetry),
+    objectValue(rawExecution?.executionTelemetry),
+    objectValue(chainReport?.executionTelemetry)
+  ].filter((value): value is Record<string, unknown> => value !== null);
+}
+
+function durableAckEvidence(
+  rawExecution: Record<string, unknown> | null,
+  chainReport: Record<string, unknown> | null
+): { lane: string | null; dispatchToAckMs: number | null } {
+  const telemetry = executionTelemetryCandidates(rawExecution, chainReport);
+  const durable = firstBooleanValue(...telemetry.map((value) => value.retryAckEvidenceDurable));
+  return {
+    lane: durable === false
+      ? null
+      : telemetry.map((value) => stringValue(value.ackLane)).find((value): value is string => Boolean(value?.trim())) ?? null,
+    dispatchToAckMs: durable === false
+      ? null
+      : firstNumberValue(...telemetry.map((value) => value.dispatchPersistenceStartedToAckMs))
+  };
+}
+
 function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
   const rawExecution = objectValue(row.raw_execution);
   const chainReport = chainReportValue(row);
-  const sendLaneAttribution = normalizeSendLaneAttribution(rawExecution);
+  const confirmation = objectValue(rawExecution?.rustTransactionConfirmation);
+  const sendLaneAttribution = normalizeSendLaneAttribution(
+    rawExecution,
+    confirmation
+  );
+  const ackEvidence = durableAckEvidence(rawExecution, chainReport);
   const inbound = normalizeInboundFeedAttribution(row.raw_execution, row.chain_report, row.source);
   const rawNumber = (key: string) => numberValue(rawExecution?.[key]);
   const firstNumber = (...values: Array<unknown>): number | null => {
@@ -610,6 +674,7 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     observedToSimulationCompletedMs: row.observed_to_simulation_completed_ms,
     observedToSendSubmittedMs: row.observed_to_send_submitted_ms,
     observedToSignatureReturnedMs: row.observed_to_signature_returned_ms,
+    dispatchToAckMs: ackEvidence.dispatchToAckMs,
     feedReceivedAtMs: firstNumber(row.feed_received_at_ms, rawNumber("feedReceivedAtMs")),
     decodedAtMs: firstNumber(row.decoded_at_ms, rawNumber("decodedAtMs")),
     matchedAtMs: firstNumber(row.matched_at_ms, rawNumber("matchedAtMs")),
@@ -637,7 +702,9 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     sendLaneMode: sendLaneAttribution?.sendLaneMode ?? stringValue(rawExecution?.sendLaneMode),
     firstAckLane: row.first_ack_lane
       ?? sendLaneAttribution?.firstAckLane
+      ?? ackEvidence.lane
       ?? row.send_rpc_winner
+      ?? stringValue(confirmation?.firstAckLane)
       ?? stringValue(rawExecution?.sendRpcWinner),
     sendLaneAttempts: sendLaneAttribution?.allAttempts ?? [],
     feeProfileName: row.fee_profile_name ?? stringValue(rawExecution?.feeProfileName),

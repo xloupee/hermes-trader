@@ -98,7 +98,24 @@ interface CiPhase {
   duration: number | null;
   tone: Tone;
   evidence: string | null;
-  source: "reported" | "workflow" | "check";
+  source: "reported" | "derived" | "planned";
+}
+
+interface BuildRecord {
+  key: string;
+  name: string;
+  sourceLabel: string;
+  runner: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  duration: number | null;
+  tone: Tone;
+  check: CiCheck | null;
+  job: CiJob | null;
+  steps: CiStep[];
+  outputLines: string[];
+  hasDetailedOutput: boolean;
+  hasDownloadOutput: boolean;
 }
 
 interface CheckContext {
@@ -113,6 +130,8 @@ interface PhaseReport {
   check: CiCheck | null;
   context: CheckContext;
   phases: CiPhase[];
+  builds: BuildRecord[];
+  reportedCount: number;
   current: CiPhase | null;
   tone: Tone;
   phaseLabel: string;
@@ -161,6 +180,42 @@ function phaseDescription(name: string): string {
   return PHASE_DESCRIPTIONS[name] || "Run the reporter-defined validation for this phase.";
 }
 
+function checkOutputLines(check: CiCheck): string[] {
+  const sections = [check.outputTitle, check.summary, check.outputText]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .filter((value, index, values) => values.indexOf(value) === index);
+  return sections
+    .flatMap((value) => value?.split("\n") || [])
+    .map((line) => line.trim().replace(/^```(?:text)?$|^```$/g, ""))
+    .filter(Boolean);
+}
+
+const DOWNLOAD_OUTPUT = /\b(downloading|downloaded|fetching|installing|compiling|receiving objects|resolving packages|npm (?:ci|install)|cargo (?:fetch|build|check)|git fetch|curl|wget)\b/i;
+
+function plannedPhaseNames(context: CheckContext): string[] {
+  if (context.tier === "fast") {
+    return ["resolve_exact_merge", "repository_integrity", "seal_evidence"];
+  }
+  if (context.tier === "hotfix" || context.route === "routine") {
+    return ["resolve_exact_merge", "prepare_runner", "gateway_hotfix_build", "gateway_hotfix_verify", "optional_control_check", "seal_evidence"];
+  }
+  if (context.tier === "standard") {
+    return ["resolve_exact_merge", "prepare_runner", "npm_ci", "typescript_build", "node_suite", "seal_evidence"];
+  }
+  return [
+    "resolve_exact_merge",
+    "prepare_runner",
+    "npm_ci",
+    "typescript_build",
+    "rust_format",
+    "rust_check",
+    "debug_validator",
+    "cross_language_node_suite",
+    "vps_ci_tests",
+    "seal_evidence"
+  ];
+}
+
 function completeAt(startedAt: string | null, duration: number | null, fallback: string | null): string | null {
   if (startedAt && duration !== null) {
     const timestamp = Date.parse(startedAt);
@@ -170,7 +225,7 @@ function completeAt(startedAt: string | null, duration: number | null, fallback:
 }
 
 function phasesFromCheck(check: CiCheck): CiPhase[] {
-  const lines = check.summary?.split("\n").map((line) => line.trim().replaceAll("`", "")).filter(Boolean) || [];
+  const lines = checkOutputLines(check).map((line) => line.replaceAll("`", ""));
   const phases: CiPhase[] = [];
   const byName = new Map<string, CiPhase>();
 
@@ -215,8 +270,46 @@ function phasesFromCheck(check: CiCheck): CiPhase[] {
   return phases;
 }
 
+function processPhases(check: CiCheck | null, context: CheckContext): { phases: CiPhase[]; reportedCount: number } {
+  const reported = check ? phasesFromCheck(check) : [];
+  const byName = new Map(reported.map((phase) => [phase.name, phase]));
+  const phases = plannedPhaseNames(context).map((name): CiPhase => {
+    const published = byName.get(name);
+    if (published) {
+      byName.delete(name);
+      return published;
+    }
+    if (name === "resolve_exact_merge" && context.mergeSha) {
+      return {
+        key: `${check?.kind || "check"}-${check?.id || "unknown"}-derived-${name}`,
+        name,
+        description: phaseDescription(name),
+        startedAt: check?.startedAt || null,
+        completedAt: check?.startedAt || null,
+        duration: null,
+        tone: "success",
+        evidence: `Exact merge ${context.mergeSha} is present in the published check context.`,
+        source: "derived"
+      };
+    }
+    return {
+      key: `${check?.kind || "check"}-${check?.id || "unknown"}-planned-${name}`,
+      name,
+      description: phaseDescription(name),
+      startedAt: null,
+      completedAt: null,
+      duration: null,
+      tone: "neutral",
+      evidence: null,
+      source: "planned"
+    };
+  });
+  phases.push(...byName.values());
+  return { phases, reportedCount: reported.length };
+}
+
 function checkContext(check: CiCheck | null): CheckContext {
-  const summary = check?.summary || "";
+  const summary = check ? checkOutputLines(check).join("\n") : "";
   return {
     mergeSha: summary.match(/(?:Exact|Testing exact) merge\s+([0-9a-f]{7,40})/i)?.[1] || null,
     mode: summary.match(/\bin\s+([a-z-]+)\s+mode\b/i)?.[1] || null,
@@ -230,45 +323,68 @@ function vpsCheck(pr: CiPullRequest): CiCheck | null {
   return pr.checks.find((check) => check.name.toLowerCase() === "vps pr ci" || check.app?.toLowerCase().includes("vps-ci")) || null;
 }
 
-function checkBuilds(pr: CiPullRequest): CiPhase[] {
-  return pr.checks.map((check) => ({
-    key: `${check.kind}-${check.id}-build`,
-    name: check.name,
-    description: check.summary?.split("\n").map((line) => line.trim()).find(Boolean) || `${check.app || "GitHub"} check`,
-    startedAt: check.startedAt,
-    completedAt: check.completedAt,
-    duration: check.durationMs,
-    tone: toneFor(check.status, check.conclusion),
-    evidence: check.summary,
-    source: "check"
-  }));
+function checkBuilds(pr: CiPullRequest): BuildRecord[] {
+  return pr.checks.map((check) => {
+    const outputLines = checkOutputLines(check);
+    return {
+      key: `${check.kind}-${check.id}-build`,
+      name: check.name,
+      sourceLabel: check.app || "GitHub check",
+      runner: null,
+      startedAt: check.startedAt,
+      completedAt: check.completedAt,
+      duration: check.durationMs,
+      tone: toneFor(check.status, check.conclusion),
+      check,
+      job: null,
+      steps: [],
+      outputLines,
+      hasDetailedOutput: Boolean(check.outputText?.trim()) || outputLines.length > 1,
+      hasDownloadOutput: outputLines.some((line) => DOWNLOAD_OUTPUT.test(line))
+    };
+  });
 }
 
-function workflowBuilds(pr: CiPullRequest, run: CiRun | null): CiPhase[] {
+function workflowBuilds(pr: CiPullRequest, run: CiRun | null): BuildRecord[] {
   if (!run || (run.sha !== pr.sha && run.branch !== pr.branch)) return [];
   return run.jobs.map((job) => ({
     key: `job-${job.id}`,
     name: job.name,
-    description: `${job.steps.length} step${job.steps.length === 1 ? "" : "s"}${job.runnerName ? ` · ${job.runnerName}` : ""}`,
+    sourceLabel: run.name,
+    runner: job.runnerName,
     startedAt: job.startedAt,
     completedAt: job.completedAt,
     duration: job.durationMs,
     tone: toneFor(job.status, job.conclusion),
-    evidence: job.url,
-    source: "workflow"
+    check: null,
+    job,
+    steps: job.steps,
+    outputLines: [],
+    hasDetailedOutput: false,
+    hasDownloadOutput: false
   }));
 }
 
 function phaseReport(pr: CiPullRequest, run: CiRun | null = null): PhaseReport {
   const check = vpsCheck(pr) || pr.checks[0] || null;
   const context = checkContext(check);
-  const reportedPhases = check ? phasesFromCheck(check) : [];
   const workflow = workflowBuilds(pr, run);
-  const phases = reportedPhases.length ? reportedPhases : workflow.length ? workflow : checkBuilds(pr);
+  const workflowJobIds = new Set(workflow.flatMap((build) => build.job ? [String(build.job.id)] : []));
+  const workflowJobUrls = new Set(workflow.flatMap((build) => build.job ? [build.job.url] : []));
+  const builds = [
+    ...checkBuilds(pr).filter((build) => {
+      if (!build.check) return true;
+      const checkUrl = build.check.url || build.check.detailsUrl;
+      return !workflowJobIds.has(String(build.check.id)) && (!checkUrl || !workflowJobUrls.has(checkUrl));
+    }),
+    ...workflow
+  ];
+  const process = processPhases(check, context);
+  const phases = process.phases;
   const passed = phases.filter((phase) => phase.tone === "success").length;
   const failed = phases.filter((phase) => phase.tone === "failure").length;
   const running = phases.filter((phase) => phase.tone === "running").length;
-  const current = [...phases].reverse().find((phase) => phase.tone === "running" || phase.tone === "queued") || phases[phases.length - 1] || null;
+  const current = [...phases].reverse().find((phase) => phase.source === "reported" && (phase.tone === "running" || phase.tone === "queued")) || null;
 
   let tone: Tone = "neutral";
   if (failed || check?.conclusion === "failure" || check?.conclusion === "timed_out" || check?.conclusion === "action_required") {
@@ -283,18 +399,25 @@ function phaseReport(pr: CiPullRequest, run: CiRun | null = null): PhaseReport {
 
   const phaseLabel = current
     ? phaseTitle(current.name)
-    : "Waiting for first build";
-  const phaseSummary = reportedPhases.length
-    ? `${reportedPhases.length} build stages · ${passed} passed${failed ? ` · ${failed} failed` : ""}${running ? ` · ${running} active` : ""}`
-    : phases.length
-      ? `${phases.length} build${phases.length === 1 ? "" : "s"} · ${passed} passed${failed ? ` · ${failed} failed` : ""}${running ? ` · ${running} active` : ""}`
-      : "No builds published";
+    : check?.status === "in_progress"
+      ? "VPS runner active · stage stream pending"
+      : check && ["queued", "waiting", "requested", "pending"].includes(check.status)
+        ? "Waiting for VPS runner"
+        : check?.conclusion === "success"
+          ? "Build passed · detailed stage stream unavailable"
+          : check
+            ? "Build complete · inspect VPS output"
+            : "Waiting for VPS build";
+  const evidenced = phases.filter((phase) => phase.source !== "planned").length;
+  const phaseSummary = `${phases.length} expected stages · ${evidenced} evidenced${process.reportedCount ? ` · ${process.reportedCount} reporter marker${process.reportedCount === 1 ? "" : "s"}` : ""}`;
   const progressLabel = phases.length ? `${passed}/${phases.length}` : "—";
 
   return {
     check,
     context,
     phases,
+    builds,
+    reportedCount: process.reportedCount,
     current,
     tone,
     phaseLabel,
@@ -310,17 +433,18 @@ function eventsFromCheck(check: CiCheck): DetailEvent[] {
   const phases = phasesFromCheck(check);
 
   if (!phases.length) {
+    const output = checkOutputLines(check);
     return [{
       key: `${check.kind}-${check.id}`,
       title: check.name,
-      summary: check.summary?.split("\n").map((line) => line.trim()).filter(Boolean)[0] || check.name,
+      summary: check.outputTitle || output[0] || check.name,
       time: check.startedAt || check.completedAt,
       duration: check.durationMs,
       tone: toneFor(check.status, check.conclusion),
       job: null,
       step: null,
       check,
-      evidence: check.summary
+      evidence: output.join("\n") || null
     }];
   }
 
@@ -354,12 +478,154 @@ function eventsFor(pr: CiPullRequest, run: CiRun | null): DetailEvent[] {
   return [...workflowEvents, ...pr.checks.flatMap(eventsFromCheck)].sort((a, b) => eventTime(b) - eventTime(a));
 }
 
+function runTone(run: CiRun): Tone {
+  return toneFor(run.status, run.conclusion);
+}
+
+function runProgress(run: CiRun): { completed: number; total: number; label: string } {
+  const steps = run.jobs.flatMap((job) => job.steps);
+  const completed = steps.filter((step) => step.status === "completed").length;
+  return {
+    completed,
+    total: steps.length,
+    label: steps.length ? `${completed}/${steps.length} steps` : `${run.jobs.length} job${run.jobs.length === 1 ? "" : "s"}`
+  };
+}
+
+interface WorkflowRunDetailProps {
+  run: CiRun;
+  logText: string | null;
+  logError: string | null;
+  logJobId: number | null;
+  loadingLog: boolean;
+  onBack: () => void;
+  onLoadLog: (job: CiJob) => void;
+}
+
+function WorkflowRunDetail({ run, logText, logError, logJobId, loadingLog, onBack, onLoadLog }: WorkflowRunDetailProps) {
+  const tone = runTone(run);
+  const progress = runProgress(run);
+  const activeJob = run.jobs.find((job) => job.status === "in_progress") || null;
+
+  return (
+    <section className={`${styles.detail} ${styles.timelineOnly}`}>
+      <button className={styles.back} type="button" onClick={onBack}><ArrowLeft size={13} />All CI builds</button>
+      <div className={styles.detailLead}>
+        <div className={styles.titleBlock}>
+          <h1>{run.name}</h1>
+          <div className={styles.identity}>
+            <span>run #{run.runNumber}</span>
+            <span>{run.branch}</span>
+            <span>head {run.sha.slice(0, 12)}</span>
+            <a href={run.url} target="_blank" rel="noreferrer">Open Actions run <ExternalLink size={12} /></a>
+          </div>
+        </div>
+        <Status tone={tone} />
+      </div>
+
+      <div className={styles.runMeta} aria-label="Workflow context">
+        <span>{phaseTitle(run.event)} trigger</span>
+        <span>Attempt {run.runAttempt}</span>
+        <span>Actor {run.actor}</span>
+        <span>{run.jobs.length} jobs</span>
+        <span>{run.artifacts.length} artifacts</span>
+      </div>
+
+      <section className={styles.breakdown} aria-label="GitHub Actions execution progress">
+        <div className={styles.breakdownHead}>
+          <div>
+            <span className={styles.eyebrow}>Workflow execution</span>
+            <strong>{activeJob ? `${activeJob.name} · ${stateLabel(runTone(run))}` : run.displayTitle}</strong>
+            <small>{run.commitMessage}</small>
+          </div>
+          <div className={styles.progressSummary}>
+            <strong>{progress.label}</strong>
+            <span>{formatDuration(run.durationMs)} elapsed</span>
+          </div>
+        </div>
+        <span className={`${styles.phaseRail} ${styles.detailRail}`} aria-label={`${progress.completed} of ${progress.total} workflow steps completed`}>
+          {run.jobs.flatMap((job) => job.steps.map((step) => ({ job, step }))).map(({ job, step }) => <i className={toneClass(toneFor(step.status, step.conclusion))} key={`${run.id}-${job.id}-${step.number}`} title={`${job.name} · ${step.name} · ${stateLabel(toneFor(step.status, step.conclusion))}`} />)}
+        </span>
+      </section>
+
+      <section className={styles.buildFeed} aria-label="GitHub Actions workflow jobs">
+        <div className={styles.buildFeedHead}>
+          <div>
+            <span className={styles.eyebrow}>Actual Actions builds</span>
+            <strong>{run.jobs.length} published job{run.jobs.length === 1 ? "" : "s"}</strong>
+            <small>Every step below comes directly from GitHub Actions. Load a job log to inspect downloads, commands, compiler output, and failures.</small>
+          </div>
+          <span className={styles.feedRefresh}><i />refreshes every 12s</span>
+        </div>
+
+        {run.jobs.map((job) => {
+          const jobTone = toneFor(job.status, job.conclusion);
+          const completedSteps = job.steps.filter((step) => step.status === "completed").length;
+          const showingLog = logJobId === job.id && (logText !== null || logError !== null);
+          const logPending = job.status !== "completed";
+          return (
+            <article className={styles.buildRecord} key={job.id}>
+              <div className={styles.buildRecordHead}>
+                <span className={`${styles.buildPulse} ${toneClass(jobTone)}`}><StatusMark tone={jobTone} /></span>
+                <div className={styles.buildIdentity}>
+                  <strong>{job.name}</strong>
+                  <small>{job.runnerName || "Runner pending"} · job {job.id}</small>
+                </div>
+                <Status tone={jobTone} />
+              </div>
+
+              <div className={styles.buildFacts}>
+                <span><small>Started</small><strong>{formatTime(job.startedAt)}</strong></span>
+                <span><small>Elapsed</small><strong>{formatDuration(job.durationMs)}</strong></span>
+                <span><small>Completed</small><strong>{formatTime(job.completedAt)}</strong></span>
+                <span><small>Steps</small><strong>{completedSteps}/{job.steps.length}</strong></span>
+              </div>
+
+              {job.steps.length > 0 && (
+                <div className={styles.buildSteps} aria-label={`${job.name} steps`}>
+                  {job.steps.map((step) => {
+                    const stepTone = toneFor(step.status, step.conclusion);
+                    return <span key={`${job.id}-${step.number}`}><i className={toneClass(stepTone)} /><b>{String(step.number).padStart(2, "0")}</b><strong>{step.name}</strong><small>{stateLabel(stepTone)} · {formatDuration(step.durationMs)}</small></span>;
+                  })}
+                </div>
+              )}
+
+              <div className={styles.buildActions}>
+                <button type="button" onClick={() => onLoadLog(job)} disabled={logPending || (loadingLog && logJobId === job.id)}>{logPending ? "Log available after completion" : loadingLog && logJobId === job.id ? "Loading full log…" : showingLog ? "Reload full job log" : "Load full job log"}<SquareTerminal size={13} /></button>
+                <a href={job.url} target="_blank" rel="noreferrer">Open GitHub job <ExternalLink size={12} /></a>
+              </div>
+              {logPending && <p className={styles.logPending}>GitHub publishes the downloadable raw log after this job completes. Live step status continues refreshing above.</p>}
+              {showingLog && (
+                <div className={styles.workflowLog} aria-label={`${job.name} full log`}>
+                  <div className={styles.terminalHead}><span><SquareTerminal size={13} />Full GitHub job log</span><small>{logText ? `${logText.split("\n").length.toLocaleString()} lines` : "unavailable"}</small></div>
+                  {logText ? <pre className={styles.log}>{logText}</pre> : <p className={styles.logError}>{logError}</p>}
+                </div>
+              )}
+            </article>
+          );
+        })}
+        {!run.jobs.length && <div className={styles.telemetryEmpty}><CircleDashed size={17} /><div><strong>Jobs not published yet</strong><small>GitHub has created the workflow run, but its job graph is still pending.</small></div></div>}
+      </section>
+
+      {run.artifacts.length > 0 && (
+        <details className={styles.evidenceDisclosure}>
+          <summary><span>Workflow artifacts</span><small>{run.artifacts.length} published</small><ChevronDown size={14} /></summary>
+          <div className={styles.artifactList}>
+            {run.artifacts.map((artifact) => <span key={artifact.id}><strong>{artifact.name}</strong><small>{(artifact.sizeInBytes / 1024 / 1024).toFixed(1)} MB · {artifact.expired ? "Expired" : "Available"}</small></span>)}
+          </div>
+        </details>
+      )}
+    </section>
+  );
+}
+
 export function CILedgerDashboard() {
   const [data, setData] = useState<CiDashboardPayload | null>(null);
   const [selectedPr, setSelectedPr] = useState<CiPullRequest | null>(null);
   const [selectedRun, setSelectedRun] = useState<CiRun | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [logText, setLogText] = useState<string | null>(null);
+  const [logError, setLogError] = useState<string | null>(null);
   const [logJobId, setLogJobId] = useState<number | null>(null);
   const [loadingLog, setLoadingLog] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -403,9 +669,20 @@ export function CILedgerDashboard() {
     setSelectedPr(pr);
     setSelectedRun(null);
     setLogText(null);
+    setLogError(null);
     const matchingRun = data?.runs.find((run) => run.branch === pr.branch || run.sha === pr.sha);
     if (matchingRun) await load(matchingRun.id);
     setExpanded(null);
+  };
+
+  const openRun = async (runId: number) => {
+    setSelectedPr(null);
+    setSelectedRun(null);
+    setExpanded(null);
+    setLogText(null);
+    setLogError(null);
+    setLogJobId(null);
+    await load(runId);
   };
 
   const closeDetail = () => {
@@ -413,11 +690,15 @@ export function CILedgerDashboard() {
     setSelectedRun(null);
     setExpanded(null);
     setLogText(null);
+    setLogError(null);
+    setLogJobId(null);
   };
 
   const loadLog = async (job: CiJob) => {
     setLoadingLog(true);
     setLogJobId(job.id);
+    setLogText(null);
+    setLogError(null);
     try {
       const params = new URLSearchParams({ jobId: String(job.id) });
       const response = await fetch(`/api/ci/logs?${params}`, { cache: "no-store" });
@@ -425,7 +706,7 @@ export function CILedgerDashboard() {
       if (!response.ok || !payload.text) throw new Error(payload.error || "Log unavailable");
       setLogText(payload.text);
     } catch (cause) {
-      setLogText(cause instanceof Error ? cause.message : "Log unavailable");
+      setLogError(cause instanceof Error ? cause.message : "Log unavailable");
     } finally {
       setLoadingLog(false);
     }
@@ -434,10 +715,11 @@ export function CILedgerDashboard() {
   const events = useMemo(() => selectedPr ? eventsFor(selectedPr, selectedRun) : [], [selectedPr, selectedRun]);
   const detailReport = selectedPr ? phaseReport(selectedPr, selectedRun) : null;
   const runningCount = data?.pullRequests.filter((pr) => phaseReport(pr).tone === "running").length || 0;
+  const actionRunningCount = data?.runs.filter((run) => run.status === "in_progress").length || 0;
 
   return (
     <main className={styles.shell}>
-      {!selectedPr && (
+      {!selectedPr && !selectedRun && (
         <header className={styles.header}>
           <div className={styles.brand}><span>H</span><div><b>HERMES / CI</b><small>VPS build intelligence</small></div></div>
           <div className={styles.headerCenter}>
@@ -445,7 +727,7 @@ export function CILedgerDashboard() {
           </div>
           <div className={styles.headerRight}>
             <span className={styles.live}><i />{data?.source === "github" ? "Live" : "Unavailable"}</span>
-            <button type="button" onClick={() => void load(selectedRun?.id, true)} aria-label="Refresh CI data"><RefreshCw className={refreshing ? styles.spin : ""} size={14} /></button>
+            <button type="button" onClick={() => void load(undefined, true)} aria-label="Refresh CI data"><RefreshCw className={refreshing ? styles.spin : ""} size={14} /></button>
           </div>
         </header>
       )}
@@ -480,10 +762,10 @@ export function CILedgerDashboard() {
                 <span>Merge {detailReport.context.mergeSha?.slice(0, 12) || "pending"}</span>
               </div>
 
-              <section className={styles.breakdown} aria-label="CI builds">
+              <section className={styles.breakdown} aria-label="Detailed CI process">
                 <div className={styles.breakdownHead}>
                   <div>
-                    <span className={styles.eyebrow}>Builds</span>
+                    <span className={styles.eyebrow}>Process map</span>
                     <strong>{detailReport.phaseLabel}</strong>
                     <small>{detailReport.phaseSummary}</small>
                   </div>
@@ -492,8 +774,8 @@ export function CILedgerDashboard() {
                     <span>{formatDuration(detailReport.check?.durationMs || selectedRun?.durationMs || null)} elapsed</span>
                   </div>
                 </div>
-                <span className={`${styles.phaseRail} ${styles.detailRail}`} aria-label={`${detailReport.progressLabel} builds passed`}>
-                  {detailReport.phases.map((phase) => <i className={toneClass(phase.tone)} key={phase.key} title={`${phaseTitle(phase.name)} · ${stateLabel(phase.tone)}`} />)}
+                <span className={`${styles.phaseRail} ${styles.detailRail}`} aria-label={`${detailReport.progressLabel} expected stages evidenced`}>
+                  {detailReport.phases.map((phase) => <i className={toneClass(phase.tone)} key={phase.key} title={`${phaseTitle(phase.name)} · ${phase.source === "planned" ? "No VPS marker published" : phase.source === "derived" ? "Confirmed by check context" : stateLabel(phase.tone)}`} />)}
                 </span>
                 {detailReport.phases.length ? (
                   <div className={styles.phaseList}>
@@ -502,7 +784,10 @@ export function CILedgerDashboard() {
                         <span className={`${styles.phaseMarker} ${toneClass(phase.tone)}`}><StatusMark tone={phase.tone} /></span>
                         <span className={styles.phaseIndex}>{String(index + 1).padStart(2, "0")}</span>
                         <span className={styles.phaseName}><strong>{phaseTitle(phase.name)}</strong><small>{phase.description}</small></span>
-                        <span className={styles.phaseTiming}><time>{formatTime(phase.startedAt)}</time><small>{stateLabel(phase.tone)} · {formatDuration(phase.duration)}</small></span>
+                        <span className={styles.phaseTiming}>
+                          <time>{phase.source === "planned" ? "Not published" : formatTime(phase.startedAt)}</time>
+                          <small>{phase.source === "planned" ? "Expected · awaiting VPS output" : phase.source === "derived" ? "Confirmed by check context" : `${stateLabel(phase.tone)} · ${formatDuration(phase.duration)}`}</small>
+                        </span>
                       </div>
                     ))}
                   </div>
@@ -512,6 +797,71 @@ export function CILedgerDashboard() {
                     <div><strong>{detailReport.phaseLabel}</strong><small>{detailReport.phaseSummary}. Refreshing this record every 12 seconds.</small></div>
                   </div>
                 )}
+                <p className={styles.breakdownNote}>
+                  {detailReport.context.tier || detailReport.context.route
+                    ? "This is the build path selected for the PR."
+                    : "The VPS reporter has not published a route yet, so Hermes is showing the full critical build path."}
+                  {" "}Stages remain visible, but Hermes only marks a stage when the VPS check publishes evidence for it.
+                </p>
+              </section>
+
+              <section className={styles.buildFeed} aria-label="Actual VPS builds">
+                <div className={styles.buildFeedHead}>
+                  <div>
+                    <span className={styles.eyebrow}>Actual VPS builds</span>
+                    <strong>{detailReport.builds.length} published build record{detailReport.builds.length === 1 ? "" : "s"}</strong>
+                    <small>Direct GitHub check or Actions records. Nothing in this section is inferred from the process map.</small>
+                  </div>
+                  <span className={styles.feedRefresh}><i />refreshes every 12s</span>
+                </div>
+
+                {detailReport.builds.length ? detailReport.builds.map((build) => (
+                  <article className={styles.buildRecord} key={build.key}>
+                    <div className={styles.buildRecordHead}>
+                      <span className={`${styles.buildPulse} ${toneClass(build.tone)}`}><StatusMark tone={build.tone} /></span>
+                      <div className={styles.buildIdentity}>
+                        <strong>{build.name}</strong>
+                        <small>{build.sourceLabel}{build.runner ? ` · ${build.runner}` : ""}</small>
+                      </div>
+                      <Status tone={build.tone} />
+                    </div>
+
+                    <div className={styles.buildFacts}>
+                      <span><small>Started</small><strong>{formatTime(build.startedAt)}</strong></span>
+                      <span><small>Elapsed</small><strong>{formatDuration(build.duration)}</strong></span>
+                      <span><small>Completed</small><strong>{formatTime(build.completedAt)}</strong></span>
+                      <span><small>Output</small><strong>{build.hasDetailedOutput ? "Detailed stream" : build.outputLines.length ? "Status context only" : "Not published"}</strong></span>
+                    </div>
+
+                    {build.steps.length > 0 && (
+                      <div className={styles.buildSteps} aria-label={`${build.name} steps`}>
+                        {build.steps.map((step) => {
+                          const tone = toneFor(step.status, step.conclusion);
+                          return <span key={`${build.key}-${step.number}`}><i className={toneClass(tone)} /><b>{String(step.number).padStart(2, "0")}</b><strong>{step.name}</strong><small>{stateLabel(tone)} · {formatDuration(step.durationMs)}</small></span>;
+                        })}
+                      </div>
+                    )}
+
+                    <div className={styles.vpsTerminal}>
+                      <div className={styles.terminalHead}><span><SquareTerminal size={13} />Published VPS output</span><small>{build.hasDownloadOutput ? "download / build activity detected" : "live via GitHub"}</small></div>
+                      {build.outputLines.length ? (
+                        <ol>{build.outputLines.map((line, index) => <li className={DOWNLOAD_OUTPUT.test(line) ? styles.downloadLine : undefined} key={`${build.key}-output-${index}`}><b>{String(index + 1).padStart(2, "0")}</b><code>{line}</code></li>)}</ol>
+                      ) : (
+                        <div className={styles.terminalEmpty}>No output lines have been published for this build.</div>
+                      )}
+                      {build.check && !build.hasDetailedOutput && <p className={styles.streamNote}>The VPS reporter currently publishes only a status headline for this build. Hermes will print commands, downloads, compiler output, and diagnostics here automatically when they appear in the GitHub check output.</p>}
+                      {build.hasDetailedOutput && !build.hasDownloadOutput && <p className={styles.streamNote}>Detailed VPS output is available, but no package-download or build-command lines are present in the latest published record.</p>}
+                    </div>
+
+                    <div className={styles.buildActions}>
+                      {build.job && <button type="button" onClick={() => void loadLog(build.job!)} disabled={loadingLog}>{loadingLog && logJobId === build.job.id ? "Loading full log…" : "Load full GitHub job log"}<SquareTerminal size={13} /></button>}
+                      {build.job && <a href={build.job.url} target="_blank" rel="noreferrer">Open GitHub job <ExternalLink size={12} /></a>}
+                      {build.check && (build.check.url || build.check.detailsUrl) && <a href={build.check.url || build.check.detailsUrl || "#"} target="_blank" rel="noreferrer">Open VPS check <ExternalLink size={12} /></a>}
+                    </div>
+                    {build.job && logText && build.job.id === logJobId && <pre className={styles.log}>{logText.slice(-12_000)}</pre>}
+                    {build.job && logError && build.job.id === logJobId && <p className={styles.logError}>{logError}</p>}
+                  </article>
+                )) : <div className={styles.telemetryEmpty}><CircleDashed size={17} /><div><strong>No build record published</strong><small>Hermes is still polling GitHub for this PR head.</small></div></div>}
               </section>
 
               <details className={styles.evidenceDisclosure}>
@@ -541,6 +891,7 @@ export function CILedgerDashboard() {
                               {(event.check?.detailsUrl || event.check?.url) && <a href={event.check.detailsUrl || event.check.url || "#"} target="_blank" rel="noreferrer">Source evidence <ExternalLink size={12} /></a>}
                             </div>
                             {logText && event.job?.id === logJobId && <pre className={styles.log}>{logText.slice(-12_000)}</pre>}
+                            {logError && event.job?.id === logJobId && <p className={styles.logError}>{logError}</p>}
                           </div>
                         </div>
                       </div>
@@ -551,9 +902,12 @@ export function CILedgerDashboard() {
             </>
           )}
         </section>
+      ) : selectedRun ? (
+        <WorkflowRunDetail run={selectedRun} logText={logText} logError={logError} logJobId={logJobId} loadingLog={loadingLog} onBack={closeDetail} onLoadLog={(job) => void loadLog(job)} />
       ) : (
         <section className={styles.ledger}>
-          <div className={styles.ledgerMeta}>
+          <div className={styles.ledgerSectionHead}>
+            <div><span className={styles.eyebrow}>Pull request checks</span><strong>VPS PR builds</strong></div>
             <div className={styles.counts}><span><i />{runningCount} running</span><span>{data?.pullRequests.length || 0} in view</span></div>
           </div>
           <div className={styles.table} role="table" aria-label="VPS pull request builds">
@@ -576,6 +930,27 @@ export function CILedgerDashboard() {
               );
             })}
             {!data?.pullRequests.length && <div className={styles.empty}><CircleDashed size={17} />No open pull requests are currently visible.</div>}
+          </div>
+
+          <div className={`${styles.ledgerSectionHead} ${styles.actionsSectionHead}`}>
+            <div><span className={styles.eyebrow}>GitHub Actions</span><strong>Workflow builds</strong><small>Manual releases, exhaustive builds, and branch workflows—including runs not attached to an open PR.</small></div>
+            <div className={styles.counts}><span><i />{actionRunningCount} running</span><span>{data?.runs.length || 0} recent</span></div>
+          </div>
+          <div className={styles.table} role="table" aria-label="GitHub Actions workflow builds">
+            <div className={styles.tableHead} role="row"><span>Workflow / branch</span><span>Result</span><span>Trigger / actor</span><span>Runtime</span><span>Updated</span></div>
+            {data?.runs.map((run) => {
+              const tone = toneFor(run.status, run.conclusion);
+              return (
+                <button className={styles.row} role="row" type="button" key={run.id} onClick={() => void openRun(run.id)} aria-label={`Open Actions run ${run.id}: ${run.name}. ${stateLabel(tone)}`}>
+                  <span className={styles.prIdentity}><b>#{run.runNumber} {run.name}</b><small>{run.branch} · {run.sha.slice(0, 12)}</small></span>
+                  <Status tone={tone} />
+                  <span className={styles.phase}><strong>{run.displayTitle}</strong><small>{phaseTitle(run.event)} · {run.actor}</small></span>
+                  <span className={styles.progress}><span className={styles.runBar}><i className={toneClass(tone)} /></span><small>{formatDuration(run.durationMs)}</small></span>
+                  <span className={styles.updated}>{relativeTime(run.updatedAt)}<ChevronRight size={13} /></span>
+                </button>
+              );
+            })}
+            {!data?.runs.length && <div className={styles.empty}><CircleDashed size={17} />No GitHub Actions runs are currently visible.</div>}
           </div>
           <footer className={styles.ledgerFooter}><span><ServerCog size={13} />Server-side read · credentials stay off the browser</span><span>Updated {data ? relativeTime(data.fetchedAt) : "—"}</span></footer>
         </section>

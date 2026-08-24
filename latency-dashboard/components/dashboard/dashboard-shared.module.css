@@ -98,6 +98,7 @@
 .feedUnion { color: oklch(76% 0.09 260); }
 .feedEverstake { color: oklch(75% 0.1 55); }
 .feedDoublezero { color: oklch(75% 0.08 195); }
+.feedHelius { color: oklch(65% 0.21 27); }
 .feedOnChain { color: oklch(72% 0.025 245); }
 .feedUnknown { color: var(--muted); }
 

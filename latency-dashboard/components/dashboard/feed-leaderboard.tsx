@@ -7,6 +7,7 @@ const FEED_TONES: Record<FeedKey, string> = {
   "jito-primary": styles.feedJito,
   "doublezero-leader": styles.feedDoublezero,
   "doublezero-retransmit-eu": styles.feedDoublezero,
+  "helius-raw-auto-ax1": styles.feedHelius,
   unknown: styles.feedUnknown
 };
 
@@ -15,10 +16,10 @@ export function FeedLeaderboard({ rows }: { rows: DashboardExecution[] }) {
   const winnerStandings = feedLeaderboard(landedBuys.map((row) => row.inboundSource));
   const evidence = executionEvidenceCounts(rows.map((row) => row.inboundSource));
   const standingByKey = new Map(winnerStandings.map((standing) => [standing.key, standing]));
-  const trackedFeeds: FeedStanding[] = (["jito-primary", "doublezero-leader", "vortex-fra"] as const).map((key) => (
+  const trackedFeeds: FeedStanding[] = (["jito-primary", "doublezero-leader", "vortex-fra", "helius-raw-auto-ax1"] as const).map((key) => (
     standingByKey.get(key) || {
       key,
-      label: key === "jito-primary" ? "Jito" : key === "vortex-fra" ? "Vortex" : "DoubleZero",
+      label: key === "jito-primary" ? "Jito" : key === "vortex-fra" ? "Vortex" : key === "helius-raw-auto-ax1" ? "Helius" : "DoubleZero",
       wins: 0,
       share: 0
     }

@@ -2,7 +2,8 @@ export const RECOGNIZED_FEED_SOURCES = [
   "jito-primary",
   "doublezero-leader",
   "doublezero-retransmit-eu",
-  "vortex-fra"
+  "vortex-fra",
+  "helius-raw-auto-ax1"
 ] as const;
 
 export type RecognizedFeedSource = (typeof RECOGNIZED_FEED_SOURCES)[number];
@@ -35,6 +36,7 @@ const FEED_LABELS: Record<FeedKey, string> = {
   "doublezero-leader": "DoubleZero",
   "doublezero-retransmit-eu": "DoubleZero",
   "vortex-fra": "Vortex",
+  "helius-raw-auto-ax1": "Helius",
   unknown: "Unknown"
 };
 

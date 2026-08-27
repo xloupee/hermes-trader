@@ -244,6 +244,13 @@ describe("dashboard UI contract", () => {
         inboundSelectionGeneration: 1
       });
     }
+    assert.deepEqual(normalizeInboundFeedAttribution({
+      executionTelemetry: { inbound: inbound("helius-raw-auto-ax1", { schemaVersion: 2, selectionGeneration: 13 }) }
+    }, null, "shredstream"), {
+      inboundSource: "helius-raw-auto-ax1",
+      inboundContributors: ["helius-raw-auto-ax1"],
+      inboundSelectionGeneration: 13
+    });
 
     assert.deepEqual(normalizeInboundFeedAttribution({
       executionTelemetry: { inbound: inbound("vortex-fra", { contributors: ["vortex-fra", "jito-primary"], selectionGeneration: 17 }) },
@@ -264,7 +271,7 @@ describe("dashboard UI contract", () => {
     assert.equal(normalizeInboundFeedAttribution({ executionTelemetry: { inbound: inbound("jito-primary", { selectionGeneration: Number.MAX_SAFE_INTEGER }) } }, null, null).inboundSelectionGeneration, Number.MAX_SAFE_INTEGER);
 
     const malformedInbound = [
-      inbound("jito-primary", { schemaVersion: 2 }),
+      inbound("jito-primary", { schemaVersion: 3 }),
       { selectedSource: "jito-primary", contributors: ["jito-primary"], selectionGeneration: 1 },
       inbound("JITO-PRIMARY"),
       inbound(" jito-primary "),
@@ -315,7 +322,7 @@ describe("dashboard UI contract", () => {
 
     const jitoFilter = dashboardInboundSourcePredicate("jito-primary");
     const protectedCanonicalContributors = 'contributors.cd."[\\"jito-primary\\",\\"doublezero-leader\\",\\"doublezero-retransmit-eu\\",\\"vortex-fra\\",\\"helius-raw-auto-ax1\\"]"';
-    assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->schemaVersion\.eq\.1/);
+    assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->schemaVersion\.in\.\(1,2\)/);
     assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->>selectedSource\.eq\.jito-primary/);
     assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->contributors\.cs\.\["jito-primary"\]/);
     assert.equal(jitoFilter.includes(protectedCanonicalContributors), true);
@@ -324,9 +331,9 @@ describe("dashboard UI contract", () => {
     assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->selectionGeneration\.gt\.0/);
     assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->selectionGeneration\.lt\.9007199254740992/);
     assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->>selectionGeneration\.not\.like\.\*\.\*/);
-    assert.match(jitoFilter, /raw_execution->rustTransactionConfirmation->executionTelemetry->inbound->schemaVersion\.eq\.1/);
-    assert.match(jitoFilter, /chain_report->executionTelemetry->inbound->schemaVersion\.eq\.1/);
-    assert.equal((jitoFilter.match(/->schemaVersion\.eq\.1/g) || []).length, 3);
+    assert.match(jitoFilter, /raw_execution->rustTransactionConfirmation->executionTelemetry->inbound->schemaVersion\.in\.\(1,2\)/);
+    assert.match(jitoFilter, /chain_report->executionTelemetry->inbound->schemaVersion\.in\.\(1,2\)/);
+    assert.equal((jitoFilter.match(/->schemaVersion\.in\.\(1,2\)/g) || []).length, 3);
     for (const field of ["schemaVersion", "selectedSource", "contributors", "selectionGeneration"]) {
       assert.equal((jitoFilter.match(new RegExp(`->>${field}\\.not\\.is\\.null`, "g")) || []).length, 3);
     }
@@ -346,7 +353,7 @@ describe("dashboard UI contract", () => {
     assert.match(unknownFilter, /raw_execution->executionTelemetry->inbound\.is\.null,raw_execution->rustTransactionConfirmation->executionTelemetry->inbound\.is\.null,chain_report->executionTelemetry->inbound\.not\.is\.null,not\.or\(/);
     assert.match(unknownFilter, /or\(source\.is\.null,source\.not\.in\.\(jito-primary,doublezero-leader,doublezero-retransmit-eu,vortex-fra,helius-raw-auto-ax1\)\)/);
     assert.equal((unknownFilter.match(/not\.or\(/g) || []).length, 3);
-    assert.equal((unknownFilter.match(/->schemaVersion\.eq\.1/g) || []).length, 15);
+    assert.equal((unknownFilter.match(/->schemaVersion\.in\.\(1,2\)/g) || []).length, 15);
     for (const field of ["schemaVersion", "selectedSource", "contributors", "selectionGeneration"]) {
       assert.equal((unknownFilter.match(new RegExp(`->>${field}\\.not\\.is\\.null`, "g")) || []).length, 15);
     }
@@ -375,7 +382,7 @@ describe("dashboard UI contract", () => {
       const inbound = record(value);
       const terms = [...guardedFields].map((field) => text(inbound[field]) !== null);
       terms.push(
-        sqlCompare(inbound.schemaVersion, (item) => item === 1),
+        sqlCompare(inbound.schemaVersion, (item) => item === 1 || item === 2),
         sqlCompare(inbound.selectedSource, (item) => item === source),
         sqlCompare(inbound.contributors, (item) => Array.isArray(item) && item.includes(source)),
         sqlCompare(inbound.contributors, (item) => Array.isArray(item) && item.every((entry) => canonical.includes(entry))),
@@ -420,6 +427,7 @@ describe("dashboard UI contract", () => {
     ];
 
     assert.equal(unknownAtPresentTier(typed()), false);
+    assert.equal(unknownAtPresentTier(typed({ schemaVersion: 2 })), false);
     for (const value of malformed) {
       assert.equal(unknownAtPresentTier(value), true);
       assert.notEqual(unknownAtPresentTier(value), UNKNOWN);

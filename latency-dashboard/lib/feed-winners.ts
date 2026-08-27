@@ -66,7 +66,7 @@ function validInboundFilter(path: string, source: RecognizedFeedSource): string 
     `${path}->>selectedSource.not.is.null`,
     `${path}->>contributors.not.is.null`,
     `${path}->>selectionGeneration.not.is.null`,
-    `${path}->schemaVersion.eq.1`,
+    `${path}->schemaVersion.in.(1,2)`,
     `${path}->>selectedSource.eq.${source}`,
     `${path}->contributors.cs.["${source}"]`,
     `${path}->contributors.cd.${CANONICAL_CONTRIBUTORS_FILTER}`,
@@ -125,7 +125,7 @@ function hasOwn(value: Record<string, unknown> | null, key: string): boolean {
 
 function validatedInboundAttribution(value: unknown): InboundFeedAttribution | null {
   const inbound = recordValue(value);
-  if (!inbound || inbound.schemaVersion !== 1) return null;
+  if (!inbound || (inbound.schemaVersion !== 1 && inbound.schemaVersion !== 2)) return null;
 
   const selectedSource = recognizedFeedSource(inbound.selectedSource);
   if (!selectedSource) return null;

@@ -124,6 +124,7 @@ const FEED_CLASSES: Record<FeedKey, string> = {
   "jito-primary": styles.feedJito,
   "doublezero-leader": styles.feedDoublezero,
   "doublezero-retransmit-eu": styles.feedDoublezero,
+  "helius-raw-auto-ax1": styles.feedHelius,
   unknown: styles.feedUnknown
 };
 

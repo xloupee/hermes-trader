@@ -216,6 +216,7 @@ describe("dashboard UI contract", () => {
     assert.deepEqual(feedIdentity("jito-primary"), { key: "jito-primary", label: "Jito" });
     assert.deepEqual(feedIdentity("doublezero-leader"), { key: "doublezero-leader", label: "DoubleZero" });
     assert.deepEqual(feedIdentity("doublezero-retransmit-eu"), { key: "doublezero-retransmit-eu", label: "DoubleZero" });
+    assert.deepEqual(feedIdentity("helius-raw-auto-ax1"), { key: "helius-raw-auto-ax1", label: "Helius" });
     assert.deepEqual(feedIdentity("shredstream"), { key: "unknown", label: "Unknown" });
     assert.deepEqual(feedIdentity("stable-ingress-active"), { key: "unknown", label: "Unknown" });
     assert.deepEqual(feedIdentity("confirmed_rpc"), { key: "unknown", label: "Unknown" });
@@ -236,7 +237,7 @@ describe("dashboard UI contract", () => {
     });
     const unknown = { inboundSource: null, inboundContributors: [], inboundSelectionGeneration: null };
 
-    for (const selectedSource of ["jito-primary", "doublezero-leader", "doublezero-retransmit-eu", "vortex-fra"]) {
+    for (const selectedSource of ["jito-primary", "doublezero-leader", "doublezero-retransmit-eu", "vortex-fra", "helius-raw-auto-ax1"]) {
       assert.deepEqual(normalizeInboundFeedAttribution({ executionTelemetry: { inbound: inbound(selectedSource) } }, null, "shredstream"), {
         inboundSource: selectedSource,
         inboundContributors: [selectedSource],
@@ -286,7 +287,7 @@ describe("dashboard UI contract", () => {
       const chainReport = { executionTelemetry: { inbound: inbound("doublezero-leader") } };
       assert.deepEqual(normalizeInboundFeedAttribution(rawExecution, chainReport, "jito-primary"), unknown);
       assert.equal(dashboardInboundSourceFilterMatches("unknown", rawExecution, chainReport, "jito-primary"), true);
-      for (const source of ["jito-primary", "doublezero-leader", "doublezero-retransmit-eu", "vortex-fra"]) {
+      for (const source of ["jito-primary", "doublezero-leader", "doublezero-retransmit-eu", "vortex-fra", "helius-raw-auto-ax1"]) {
         assert.equal(dashboardInboundSourceFilterMatches(source, rawExecution, chainReport, "jito-primary"), false);
       }
     }
@@ -313,7 +314,7 @@ describe("dashboard UI contract", () => {
     assert.equal(dashboardInboundSourceFilterMatches("jito-primary", null, malformedChain, "jito-primary"), false);
 
     const jitoFilter = dashboardInboundSourcePredicate("jito-primary");
-    const protectedCanonicalContributors = 'contributors.cd."[\\"jito-primary\\",\\"doublezero-leader\\",\\"doublezero-retransmit-eu\\",\\"vortex-fra\\"]"';
+    const protectedCanonicalContributors = 'contributors.cd."[\\"jito-primary\\",\\"doublezero-leader\\",\\"doublezero-retransmit-eu\\",\\"vortex-fra\\",\\"helius-raw-auto-ax1\\"]"';
     assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->schemaVersion\.eq\.1/);
     assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->>selectedSource\.eq\.jito-primary/);
     assert.match(jitoFilter, /raw_execution->executionTelemetry->inbound->contributors\.cs\.\["jito-primary"\]/);
@@ -338,25 +339,25 @@ describe("dashboard UI contract", () => {
     assert.doesNotMatch(jitoFilter, /selectedSource\.ilike|source\.ilike|provider|shredstream/);
     const unknownFilter = dashboardInboundSourcePredicate("unknown");
     assert.equal(unknownFilter.includes(protectedCanonicalContributors), true);
-    assert.equal(unknownFilter.split(protectedCanonicalContributors).length - 1, 12);
+    assert.equal(unknownFilter.split(protectedCanonicalContributors).length - 1, 15);
     assert.equal(unknownFilter.includes('contributors.cd.["jito-primary","doublezero-leader"'), false);
     assert.match(unknownFilter, /raw_execution->executionTelemetry->inbound\.not\.is\.null,not\.or\(/);
     assert.match(unknownFilter, /raw_execution->executionTelemetry->inbound\.is\.null,raw_execution->rustTransactionConfirmation->executionTelemetry->inbound\.not\.is\.null,not\.or\(/);
     assert.match(unknownFilter, /raw_execution->executionTelemetry->inbound\.is\.null,raw_execution->rustTransactionConfirmation->executionTelemetry->inbound\.is\.null,chain_report->executionTelemetry->inbound\.not\.is\.null,not\.or\(/);
-    assert.match(unknownFilter, /or\(source\.is\.null,source\.not\.in\.\(jito-primary,doublezero-leader,doublezero-retransmit-eu,vortex-fra\)\)/);
+    assert.match(unknownFilter, /or\(source\.is\.null,source\.not\.in\.\(jito-primary,doublezero-leader,doublezero-retransmit-eu,vortex-fra,helius-raw-auto-ax1\)\)/);
     assert.equal((unknownFilter.match(/not\.or\(/g) || []).length, 3);
-    assert.equal((unknownFilter.match(/->schemaVersion\.eq\.1/g) || []).length, 12);
+    assert.equal((unknownFilter.match(/->schemaVersion\.eq\.1/g) || []).length, 15);
     for (const field of ["schemaVersion", "selectedSource", "contributors", "selectionGeneration"]) {
-      assert.equal((unknownFilter.match(new RegExp(`->>${field}\\.not\\.is\\.null`, "g")) || []).length, 12);
+      assert.equal((unknownFilter.match(new RegExp(`->>${field}\\.not\\.is\\.null`, "g")) || []).length, 15);
     }
-    assert.equal((unknownFilter.match(/->contributors\.cd\./g) || []).length, 12);
-    assert.equal((unknownFilter.match(/->selectionGeneration\.gt\.0/g) || []).length, 12);
+    assert.equal((unknownFilter.match(/->contributors\.cd\./g) || []).length, 15);
+    assert.equal((unknownFilter.match(/->selectionGeneration\.gt\.0/g) || []).length, 15);
     assert.equal(dashboardInboundSourcePredicate("shredstream"), "source.eq.__no_typed_feed_match__");
   });
 
   test("generated Unknown clauses are total-valued under SQL three-valued logic", () => {
     const UNKNOWN = Symbol("SQL UNKNOWN");
-    const canonical = ["jito-primary", "doublezero-leader", "doublezero-retransmit-eu", "vortex-fra"];
+    const canonical = ["jito-primary", "doublezero-leader", "doublezero-retransmit-eu", "vortex-fra", "helius-raw-auto-ax1"];
     const sqlAnd = (values) => values.includes(false) ? false : values.includes(UNKNOWN) ? UNKNOWN : true;
     const sqlOr = (values) => values.includes(true) ? true : values.includes(UNKNOWN) ? UNKNOWN : false;
     const sqlNot = (value) => value === UNKNOWN ? UNKNOWN : !value;
@@ -460,6 +461,9 @@ describe("dashboard UI contract", () => {
       { key: "jito-primary", label: "Jito", wins: 1, share: 25 },
       { key: "vortex-fra", label: "Vortex", wins: 1, share: 25 }
     ]);
+    assert.deepEqual(feedLeaderboard(["helius-raw-auto-ax1"]), [
+      { key: "helius-raw-auto-ax1", label: "Helius", wins: 1, share: 100 }
+    ]);
     assert.deepEqual(feedLeaderboard(["jito-primary", "shredstream", "vortex-fra"]), [
       { key: "jito-primary", label: "Jito", wins: 1, share: (1 / 3) * 100 },
       { key: "vortex-fra", label: "Vortex", wins: 1, share: (1 / 3) * 100 },
@@ -484,7 +488,8 @@ describe("dashboard UI contract", () => {
     assert.match(leaderboard, /Landed buy race/);
     assert.match(leaderboard, /landed buy/);
     assert.match(leaderboard, /execution evidence only/);
-    assert.match(leaderboard, /\["jito-primary", "doublezero-leader", "vortex-fra"\]/);
+    assert.match(leaderboard, /\["jito-primary", "doublezero-leader", "vortex-fra", "helius-raw-auto-ax1"\]/);
+    assert.match(styles, /\.feedHelius\s*\{\s*color:\s*oklch\(65% 0\.21 27\);\s*\}/);
     assert.match(leaderboard, /Feed leaderboard/);
     assert.doesNotMatch(readFileSync(new URL("../../components/dashboard/execution-table.tsx", import.meta.url), "utf8"), /feedTransportLabel/);
     assert.match(styles, /\.feedLeaderboard\s*\{[^}]*block-size:\s*auto;/s);

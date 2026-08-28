@@ -75,6 +75,12 @@ function transactionDistance(row: DashboardExecution): string {
   return typeof distance === "number" ? String(distance) : "n/a";
 }
 
+function buyDistance(row: DashboardExecution): string {
+  if (row.outcome !== "landed" || row.observedAction.toLowerCase() !== "buy") return "n/a";
+  const count = row.blockPositionDiagnostics?.sameMintBuysBetween;
+  return typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? String(count) : "n/a";
+}
+
 function sideClass(side: string) {
   return side.toLowerCase() === "sell" ? styles.sideSell : styles.sideBuy;
 }
@@ -165,6 +171,7 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
               <th title={timeZone}>Time · {timeZoneLabel}</th>
               <th>Act</th>
               <th>Result / placement</th>
+              <th title="Successful same-mint signer acquisitions strictly between the target and copy transactions">Buys between</th>
               <th>TX after</th>
               <th>Leader</th>
               <th>Feed</th>
@@ -201,6 +208,7 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
                     {gateway?.ok && gateway.status === "landed" ? null : <div className={styles.meta}>{gateway?.confirmationStatus || gateway?.gatewayState || gateway?.transactionRole}</div>}
                   </>}
                 </td>
+                <td className={styles.txDistance}>{canonical ? buyDistance(canonical) : "n/a"}</td>
                 <td className={styles.txDistance}>{canonical ? transactionDistance(canonical) : gatewayPlacement(gateway!)}</td>
                 <td className={styles.leaderCell} title={canonical ? leaderTitle(canonical) : gatewayLeaderTitle(gateway!)}>
                   <strong>{canonical ? leaderSummary(canonical) : gatewayLeader(gateway!)}</strong>
@@ -251,6 +259,7 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
               </>}
             </div>
             <div className={styles.cardMeta}>
+              <span>Buys between<strong className={styles.txDistance}>{canonical ? buyDistance(canonical) : "n/a"}</strong></span>
               <span>TX after<strong className={styles.txDistance}>{canonical ? transactionDistance(canonical) : gatewayPlacement(gateway!)}</strong></span>
               <span>Leader<strong title={canonical ? leaderTitle(canonical) : gatewayLeaderTitle(gateway!)}>{canonical ? leaderSummary(canonical) : gatewayLeader(gateway!)}</strong><small className={styles.meta}>{canonical ? leaderContext(canonical) : gatewayLeaderContext(gateway!)}</small></span>
               <span>Feed<strong className={FEED_CLASSES[feed.key]}>{feed.label}</strong></span>

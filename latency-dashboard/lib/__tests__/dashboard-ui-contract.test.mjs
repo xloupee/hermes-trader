@@ -166,13 +166,14 @@ describe("dashboard UI contract", () => {
     assert.match(diagnostics, /geoForIps\(ips\)/);
   });
 
-  test("execution table remains accessible with eleven columns", () => {
+  test("execution table remains accessible with buy and transaction distance", () => {
     const table = readFileSync(new URL("../../components/dashboard/execution-table.tsx", import.meta.url), "utf8");
     const styles = readFileSync(new URL("../../components/dashboard/dashboard-shared.module.css", import.meta.url), "utf8");
-    assert.equal((table.match(/<th(?:\s|>)/g) || []).length, 11);
+    assert.equal((table.match(/<th(?:\s|>)/g) || []).length, 12);
     assert.match(table, /aria-label="Execution results"/);
     assert.ok(table.indexOf("<th>Act</th>") < table.indexOf("<th>Result / placement</th>"));
-    assert.ok(table.indexOf("<th>Result / placement</th>") < table.indexOf("<th>TX after</th>"));
+    assert.ok(table.indexOf("<th>Result / placement</th>") < table.indexOf("Buys between"));
+    assert.ok(table.indexOf("Buys between") < table.indexOf("<th>TX after</th>"));
     assert.ok(table.indexOf("<th>TX after</th>") < table.indexOf("<th>Leader</th>"));
     assert.ok(table.indexOf("<th>Leader</th>") < table.indexOf("<th>Feed</th>"));
     assert.ok(table.indexOf("<th>Feed</th>") < table.indexOf("<th>Lane / ACK</th>"));
@@ -186,6 +187,8 @@ describe("dashboard UI contract", () => {
     assert.match(table, /title=\{lane\.raw \|\| undefined\}/);
     assert.match(table, /placementClass\(canonical\)/);
     assert.match(table, /transactionDistance\(canonical\)/);
+    assert.match(table, /buyDistance\(canonical\)/);
+    assert.match(table, /sameMintBuysBetween/);
     assert.match(table, /row\.sameSlotTxDelta/);
     assert.match(table, /crossSlotPositionSummary\?\.crossSlotTxDelta/);
     assert.doesNotMatch(table, /return landing\.secondary/);

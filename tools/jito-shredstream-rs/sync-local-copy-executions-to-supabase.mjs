@@ -18,6 +18,7 @@ const DEFAULT_BLOCK_POSITION_RETRY_ATTEMPTS = 3;
 const DEFAULT_BLOCK_POSITION_RETRY_MS = 500;
 const confirmedTransactionCache = new Map();
 const blockSignatureCache = new Map();
+const blockTransactionCache = new Map();
 
 function argValue(name, fallback = null) {
   const prefix = `--${name}=`;
@@ -704,6 +705,92 @@ async function fetchBlockSignatures(slot, rpcFn = rpc) {
   }
 }
 
+async function fetchBlockTransactions(slot, rpcFn = rpc) {
+  if (!Number.isFinite(slot)) {
+    return { transactions: null, unavailableReason: "missing slot" };
+  }
+  if (rpcFn === rpc && blockTransactionCache.has(slot)) {
+    return { transactions: blockTransactionCache.get(slot), unavailableReason: null };
+  }
+
+  try {
+    const block = await rpcFn("getBlock", [
+      slot,
+      {
+        commitment: "confirmed",
+        transactionDetails: "full",
+        encoding: "jsonParsed",
+        rewards: false,
+        maxSupportedTransactionVersion: 0
+      }
+    ]);
+    const transactions = Array.isArray(block?.transactions) ? block.transactions : null;
+    if (!transactions) {
+      return { transactions: null, unavailableReason: "block transactions unavailable" };
+    }
+    if (rpcFn === rpc) {
+      blockTransactionCache.set(slot, transactions);
+    }
+    return { transactions, unavailableReason: null };
+  } catch (error) {
+    return { transactions: null, unavailableReason: `getBlock failed: ${error.message}` };
+  }
+}
+
+function accountKey(value) {
+  if (typeof value === "string") return value;
+  return typeof value?.pubkey === "string" ? value.pubkey : null;
+}
+
+function signerKeys(blockTransaction) {
+  return new Set((blockTransaction?.transaction?.message?.accountKeys ?? [])
+    .filter((key) => typeof key === "object" && key?.signer === true)
+    .map(accountKey)
+    .filter((key) => key !== null));
+}
+
+function tokenAmount(balance) {
+  const amount = Number(balance?.uiTokenAmount?.uiAmountString ?? balance?.uiTokenAmount?.uiAmount);
+  return Number.isFinite(amount) ? amount : 0;
+}
+
+function isSuccessfulMintBuy(blockTransaction, mint) {
+  if (!mint || blockTransaction?.meta?.err) return false;
+  const signers = signerKeys(blockTransaction);
+  if (signers.size === 0) return false;
+
+  const ownerDeltas = new Map();
+  for (const balance of blockTransaction?.meta?.preTokenBalances ?? []) {
+    if (balance?.mint !== mint || !signers.has(balance?.owner)) continue;
+    ownerDeltas.set(balance.owner, (ownerDeltas.get(balance.owner) ?? 0) - tokenAmount(balance));
+  }
+  for (const balance of blockTransaction?.meta?.postTokenBalances ?? []) {
+    if (balance?.mint !== mint || !signers.has(balance?.owner)) continue;
+    ownerDeltas.set(balance.owner, (ownerDeltas.get(balance.owner) ?? 0) + tokenAmount(balance));
+  }
+  return [...ownerDeltas.values()].some((delta) => delta > 0);
+}
+
+async function sameMintBuysBetween(diagnostics, mint, rpcFn = rpc) {
+  if (!mint || diagnostics.slotDelta < 0) {
+    return { count: null, unavailableReason: "target does not precede copy" };
+  }
+
+  let count = 0;
+  for (let slot = diagnostics.targetSlot; slot <= diagnostics.copySlot; slot += 1) {
+    const block = await fetchBlockTransactions(slot, rpcFn);
+    if (!block.transactions) {
+      return { count: null, unavailableReason: `block ${slot} unavailable: ${block.unavailableReason}` };
+    }
+    const start = slot === diagnostics.targetSlot ? diagnostics.targetTxIndex + 1 : 0;
+    const end = slot === diagnostics.copySlot ? diagnostics.copyTxIndex : block.transactions.length;
+    for (const transaction of block.transactions.slice(start, end)) {
+      if (isSuccessfulMintBuy(transaction, mint)) count += 1;
+    }
+  }
+  return { count, unavailableReason: null };
+}
+
 function baseBlockPositionDiagnostics(row, copyTransaction) {
   const targetSlot = Number.isFinite(row.slot) ? row.slot : null;
   const copySlot = Number.isFinite(copyTransaction?.slot) ? copyTransaction.slot : null;
@@ -711,7 +798,7 @@ function baseBlockPositionDiagnostics(row, copyTransaction) {
     targetSlot !== null && copySlot !== null ? copySlot - targetSlot : null;
 
   return {
-    schema: "copytrade.blockPositionDiagnostics.v1",
+    schema: "copytrade.blockPositionDiagnostics.v2",
     status: "unknown",
     targetSignature: row.observedSignature ?? null,
     copySignature: row.sendSignature ?? null,
@@ -722,6 +809,8 @@ function baseBlockPositionDiagnostics(row, copyTransaction) {
     copyTxIndex: null,
     sameSlotTxDelta: null,
     txDelta: null,
+    sameMintBuysBetween: null,
+    sameMintBuyCountUnavailableReason: null,
     crossSlotPositionSummary: null,
     unavailableReason: null
   };
@@ -807,6 +896,12 @@ async function blockPositionDiagnostics(row, copyTransaction, rpcFn = rpc) {
       crossSlotTxDelta
     };
     diagnostics.txDelta = crossSlotTxDelta;
+  }
+
+  if (row.observedAction === "buy") {
+    const buyDistance = await sameMintBuysBetween(diagnostics, row.mint, rpcFn);
+    diagnostics.sameMintBuysBetween = buyDistance.count;
+    diagnostics.sameMintBuyCountUnavailableReason = buyDistance.unavailableReason;
   }
 
   return diagnostics;
@@ -1135,6 +1230,8 @@ function applyPositionDiagnostics(report, positionDiagnostics) {
   report.copyTxIndex = positionDiagnostics.copyTxIndex;
   report.sameSlotTxDelta = positionDiagnostics.sameSlotTxDelta;
   report.txDelta = positionDiagnostics.txDelta;
+  report.sameMintBuysBetween = positionDiagnostics.sameMintBuysBetween;
+  report.sameMintBuyCountUnavailableReason = positionDiagnostics.sameMintBuyCountUnavailableReason;
   report.crossSlotPositionSummary = positionDiagnostics.crossSlotPositionSummary;
   report.positionUnavailableReason = positionDiagnostics.unavailableReason;
 }
@@ -1194,6 +1291,11 @@ async function chainReportFromRustConfirmation(row, confirmation, rpcFn = rpc) {
     blockTime: null,
     autoSell: null
   };
+  if (positionDiagnostics.status === "found" && row.observedAction === "buy") {
+    const buyDistance = await sameMintBuysBetween(positionDiagnostics, row.mint, rpcFn);
+    positionDiagnostics.sameMintBuysBetween = buyDistance.count;
+    positionDiagnostics.sameMintBuyCountUnavailableReason = buyDistance.unavailableReason;
+  }
   if (positionDiagnostics.status !== "found" && slot !== null) {
     const refreshedPositionDiagnostics = await blockPositionDiagnosticsWithRetry(
       row,
@@ -2099,6 +2201,9 @@ export {
   DurableJsonlTail,
   executionKey,
   fetchBlockSignatures,
+  fetchBlockTransactions,
+  isSuccessfulMintBuy,
+  sameMintBuysBetween,
   displayTxDelta,
   mergeSidecarRows,
   needsBlockPositionRefresh,

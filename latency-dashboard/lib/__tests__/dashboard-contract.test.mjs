@@ -91,6 +91,20 @@ describe("dashboard contract", () => {
     assert.equal(JSON.stringify(dto).includes("never-return"), false);
   });
 
+  test("authenticated execution DTOs preserve same-mint buy distance", () => {
+    const dto = toDashboardExecution({
+      observedAction: "buy",
+      observedWallet: "target",
+      copyWallet: "copy",
+      blockPositionDiagnostics: {
+        schema: "copytrade.blockPositionDiagnostics.v2",
+        sameMintBuysBetween: 4,
+        sameMintBuyCountUnavailableReason: null
+      }
+    });
+    assert.equal(dto.blockPositionDiagnostics.sameMintBuysBetween, 4);
+  });
+
   test("Telegram subscriber IDs attach by exact copy-wallet match", () => {
     const rows = [
       toDashboardExecution({ id: 1, observedAction: "buy", observedWallet: "watched1", copyWallet: "copy1" }),

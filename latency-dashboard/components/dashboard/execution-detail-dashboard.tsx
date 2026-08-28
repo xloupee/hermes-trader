@@ -59,6 +59,7 @@ function GroupedDiagnostics({ row, timeZone }: { row: DashboardExecution; timeZo
     { label: "Target slot", value: formatCount(row.targetSlot) },
     { label: "Copy slot", value: formatCount(row.copySlot) },
     { label: "Slot delta", value: formatSlot(row.slotDelta) },
+    { label: "Same-mint buys between", value: formatCount(row.blockPositionDiagnostics?.sameMintBuysBetween) },
     { label: "Tx delta", value: formatCount(row.txDelta) },
     { label: "Landing comparison", value: row.landingComparison }
   ];

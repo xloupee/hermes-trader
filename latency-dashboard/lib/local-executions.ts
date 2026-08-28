@@ -18,6 +18,8 @@ export interface BlockPositionDiagnostics {
   copyTxIndex: number | null;
   sameSlotTxDelta: number | null;
   txDelta: number | null;
+  sameMintBuysBetween: number | null;
+  sameMintBuyCountUnavailableReason: string | null;
   crossSlotPositionSummary: CrossSlotPositionSummary | null;
   unavailableReason: string | null;
 }
@@ -517,6 +519,8 @@ function normalizeBlockPositionDiagnostics(row: RawLocalExecutionReport): BlockP
     copyTxIndex,
     sameSlotTxDelta: firstNumberValue(diagnostic?.sameSlotTxDelta, row.same_slot_tx_delta),
     txDelta,
+    sameMintBuysBetween: firstNumberValue(diagnostic?.sameMintBuysBetween),
+    sameMintBuyCountUnavailableReason: stringValue(diagnostic?.sameMintBuyCountUnavailableReason),
     crossSlotPositionSummary: objectValue(diagnostic?.crossSlotPositionSummary),
     unavailableReason: stringValue(diagnostic?.unavailableReason) || row.position_unavailable_reason
   };

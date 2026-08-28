@@ -156,9 +156,7 @@
 .feedStandings {
   align-content: center;
   display: grid;
-  max-block-size: 132px;
   min-width: 0;
-  overflow-y: auto;
 }
 
 .feedStanding {
@@ -851,7 +849,6 @@
 @media (max-width: 760px) {
   .compactTapePage { --tape-offset: 430px; }
   .feedLeaderboard { block-size: auto; grid-template-columns: 1fr; }
-  .feedStandings { max-block-size: 120px; }
   .feedLeaderboardHeading {
     align-items: center;
     border-bottom: 1px solid var(--line);

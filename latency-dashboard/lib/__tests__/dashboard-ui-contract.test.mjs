@@ -504,6 +504,7 @@ describe("dashboard UI contract", () => {
     assert.match(leaderboard, /Feed leaderboard/);
     assert.doesNotMatch(readFileSync(new URL("../../components/dashboard/execution-table.tsx", import.meta.url), "utf8"), /feedTransportLabel/);
     assert.match(styles, /\.feedLeaderboard\s*\{[^}]*block-size:\s*auto;/s);
-    assert.match(styles, /\.feedStandings\s*\{[^}]*max-block-size:\s*132px;/s);
+    assert.doesNotMatch(styles, /\.feedStandings\s*\{[^}]*max-block-size:/s);
+    assert.doesNotMatch(styles, /\.feedStandings\s*\{[^}]*overflow-y:/s);
   });
 });

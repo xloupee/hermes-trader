@@ -144,6 +144,11 @@ describe("dashboard UI contract", () => {
     assert.match(detail, /<details><summary>Normalized execution JSON<\/summary>/);
     assert.match(detail, /JSON\.stringify\(row, null, 2\)/);
     assert.match(detail, /Latency breakdown/);
+    assert.match(detail, /Detect → wire/);
+    assert.match(detail, /row\.detectToFirstPossibleWriteUs/);
+    assert.match(detail, /row\.detectToFirstAcknowledgedWriteUs/);
+    assert.match(detail, /Detect to first wire/);
+    assert.match(detail, /Detect to acknowledged wire/);
     assert.match(detail, /localDetectUs\(row\)/);
     assert.match(detail, /row\.entryDecodeUs, row\.feedReceivedToEntriesReadyUs, row\.feedReceivedToDecodedUs/);
     assert.match(detail, /row\.txParseUs\).*row\.routeParseUs/s);

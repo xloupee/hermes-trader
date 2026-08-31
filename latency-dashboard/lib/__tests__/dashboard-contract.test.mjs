@@ -20,8 +20,36 @@ import {
   toDashboardExecution,
   unmatchedGatewayConfirmations
 } from "../dashboard-contract.mjs";
+import { gatewayDispatchLatency } from "../gateway-dispatch-latency.mjs";
 
 describe("dashboard contract", () => {
+  test("gateway receipt exposes exact direct-path wire boundaries", () => {
+    const latency = gatewayDispatchLatency({
+      gatewayReceipt: {
+        dispatchEvidence: [
+          {
+            lanes: [
+              { outcome: "timed_out_after_possible_write", detectToPossibleWriteNs: 648_925 },
+              { outcome: "acknowledged", detectToPossibleWriteNs: 657_904 },
+              { outcome: "acknowledged", detectToPossibleWriteNs: 740_794 }
+            ]
+          }
+        ]
+      }
+    });
+    assert.deepEqual(latency, {
+      detectToFirstPossibleWriteUs: 648.925,
+      detectToFirstAcknowledgedWriteUs: 657.904
+    });
+    assert.deepEqual(gatewayDispatchLatency({ gatewayReceipt: { dispatchEvidence: [{ lanes: [
+      { outcome: "acknowledged", detectToPossibleWriteNs: "not-a-number" },
+      { outcome: "acknowledged", detectToPossibleWriteNs: -1 }
+    ] }] } }), {
+      detectToFirstPossibleWriteUs: null,
+      detectToFirstAcknowledgedWriteUs: null
+    });
+  });
+
   test("gateway confirmations only fill gaps in the canonical execution tape", () => {
     const rows = [
       { sendSignature: "canonical-copy-signature", observedSignature: "target-signature" },

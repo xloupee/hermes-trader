@@ -4,6 +4,7 @@ import {
   dashboardInboundSourcePredicate,
   normalizeInboundFeedAttribution,
 } from "@/lib/feed-winners";
+import { gatewayDispatchLatency } from "@/lib/gateway-dispatch-latency.mjs";
 import type { SignalFilters } from "@/lib/signals";
 
 export interface BlockPositionDiagnostics {
@@ -89,6 +90,8 @@ export interface LocalExecutionReport {
   observedToSendSubmittedMs: number | null;
   observedToSignatureReturnedMs: number | null;
   dispatchToAckMs: number | null;
+  detectToFirstPossibleWriteUs: number | null;
+  detectToFirstAcknowledgedWriteUs: number | null;
   feedReceivedAtMs: number | null;
   decodedAtMs: number | null;
   matchedAtMs: number | null;
@@ -614,6 +617,7 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     confirmation
   );
   const ackEvidence = durableAckEvidence(rawExecution, chainReport);
+  const directDispatchLatency = gatewayDispatchLatency(rawExecution);
   const inbound = normalizeInboundFeedAttribution(row.raw_execution, row.chain_report, row.source);
   const rawNumber = (key: string) => numberValue(rawExecution?.[key]);
   const firstNumber = (...values: Array<unknown>): number | null => {
@@ -679,6 +683,8 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     observedToSendSubmittedMs: row.observed_to_send_submitted_ms,
     observedToSignatureReturnedMs: row.observed_to_signature_returned_ms,
     dispatchToAckMs: ackEvidence.dispatchToAckMs,
+    detectToFirstPossibleWriteUs: directDispatchLatency.detectToFirstPossibleWriteUs,
+    detectToFirstAcknowledgedWriteUs: directDispatchLatency.detectToFirstAcknowledgedWriteUs,
     feedReceivedAtMs: firstNumber(row.feed_received_at_ms, rawNumber("feedReceivedAtMs")),
     decodedAtMs: firstNumber(row.decoded_at_ms, rawNumber("decodedAtMs")),
     matchedAtMs: firstNumber(row.matched_at_ms, rawNumber("matchedAtMs")),

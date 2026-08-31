@@ -33,7 +33,12 @@ function ackDurationMs(row: DashboardExecution): number | null {
 
 function LatencyBreakdown({ row }: { row: DashboardExecution }) {
   const stages = [
-    { label: "Local", value: us(localDetectUs(row)), context: "detect total" },
+    {
+      label: row.detectToFirstPossibleWriteUs === null ? "Local" : "Detect → wire",
+      value: us(firstNumber(row.detectToFirstPossibleWriteUs, localDetectUs(row))),
+      context: row.detectToFirstPossibleWriteUs === null ? "detect total" : "first possible write"
+    },
+    { label: "Detect → ACK lane", value: us(row.detectToFirstAcknowledgedWriteUs), context: "first acknowledged write" },
     { label: "Entry decode", value: us(firstNumber(row.entryDecodeUs, row.feedReceivedToEntriesReadyUs, row.feedReceivedToDecodedUs)), context: "entries ready" },
     { label: "Scan", value: us(row.batchScanUs), context: "batch scan" },
     { label: "Tx / route parse", value: `${us(row.txParseUs)} / ${us(row.routeParseUs)}`, context: "tx / route" },
@@ -52,6 +57,8 @@ function GroupedDiagnostics({ row, timeZone }: { row: DashboardExecution; timeZo
   const timingRows = [
     { label: "Observed", value: formatUserDateTime(row.observedAtMs, timeZone) },
     { label: "Outcome", value: landingSummary(row) },
+    { label: "Detect to first wire", value: us(row.detectToFirstPossibleWriteUs) },
+    { label: "Detect to acknowledged wire", value: us(row.detectToFirstAcknowledgedWriteUs) },
     { label: "Observed to signature", value: formatMs(row.observedToSignatureReturnedMs) },
     { label: "Observed to send", value: formatMs(row.observedToSendSubmittedMs) }
   ];

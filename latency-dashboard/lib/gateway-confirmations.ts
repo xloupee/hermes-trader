@@ -1,6 +1,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { DashboardExecutionFilters } from "@/lib/local-executions";
 import type { LeaderDiagnostics } from "@/lib/leader-diagnostics";
+import { normalizeInboundFeedAttribution, type HeliusFeedStage } from "@/lib/feed-winners";
 
 export interface GatewayConfirmation {
   id: number;
@@ -10,6 +11,7 @@ export interface GatewayConfirmation {
   provider: string;
   source: string;
   inboundSource: string | null;
+  heliusFeedStage: HeliusFeedStage | null;
   observedWallet: string;
   copyWallet: string;
   observedSignature: string;
@@ -123,13 +125,15 @@ function mapGatewayConfirmation(row: Record<string, unknown>): GatewayConfirmati
   const telemetry = row.execution_telemetry && typeof row.execution_telemetry === "object" && !Array.isArray(row.execution_telemetry)
     ? row.execution_telemetry as Record<string, unknown>
     : null;
-  const inbound = telemetry?.inbound && typeof telemetry.inbound === "object" && !Array.isArray(telemetry.inbound)
-    ? telemetry.inbound as Record<string, unknown>
-    : null;
   const rawConfirmation = objectValue(row.raw_confirmation);
   const rawTelemetry = objectValue(rawConfirmation?.executionTelemetry);
   const rawTimeline = objectValue(rawTelemetry?.timeline);
   const rawFirstAck = objectValue(rawTimeline?.firstAck);
+  const inboundAttribution = normalizeInboundFeedAttribution(
+    { executionTelemetry: telemetry },
+    null,
+    row.source
+  );
   const durableAckEvidence = telemetry?.retryAckEvidenceDurable !== false;
   const ackLane = durableAckEvidence
     ? stringValue(telemetry?.ackLane)
@@ -146,7 +150,8 @@ function mapGatewayConfirmation(row: Record<string, unknown>): GatewayConfirmati
     confirmationAtMs: numberValue(row.confirmation_at_ms),
     provider: stringValue(row.provider) ?? "unknown",
     source: stringValue(row.source) ?? "unknown",
-    inboundSource: stringValue(inbound?.selectedSource),
+    inboundSource: inboundAttribution.inboundSource,
+    heliusFeedStage: inboundAttribution.heliusFeedStage,
     observedWallet: stringValue(row.observed_wallet) ?? "",
     copyWallet: stringValue(row.copy_wallet) ?? "",
     observedSignature: stringValue(row.observed_signature) ?? "",

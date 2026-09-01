@@ -7,7 +7,13 @@ export const RECOGNIZED_FEED_SOURCES = [
 ] as const;
 
 export type RecognizedFeedSource = (typeof RECOGNIZED_FEED_SOURCES)[number];
-export type FeedKey = RecognizedFeedSource | "unknown";
+export type HeliusFeedStage = "preconf" | "raw";
+export type FeedKey = RecognizedFeedSource | "helius-preconf" | "helius-raw" | "unknown";
+
+export interface FeedObservation {
+  inboundSource: string | null | undefined;
+  heliusFeedStage?: HeliusFeedStage | null;
+}
 
 export interface FeedIdentity {
   key: FeedKey;
@@ -23,6 +29,7 @@ export interface InboundFeedAttribution {
   inboundSource: string | null;
   inboundContributors: string[];
   inboundSelectionGeneration: number | null;
+  heliusFeedStage: HeliusFeedStage | null;
 }
 
 export function isLandedBuy(row: { observedAction?: string | null; outcome?: string | null }): boolean {
@@ -37,10 +44,21 @@ const FEED_LABELS: Record<FeedKey, string> = {
   "doublezero-retransmit-eu": "DoubleZero",
   "vortex-fra": "Vortex",
   "helius-raw-auto-ax1": "Helius",
+  "helius-preconf": "Helius Preconf",
+  "helius-raw": "Helius Raw Shreds",
   unknown: "Unknown"
 };
 
-const FEED_ORDER: FeedKey[] = [...RECOGNIZED_FEED_SOURCES, "unknown"];
+const FEED_ORDER: FeedKey[] = [
+  "jito-primary",
+  "doublezero-leader",
+  "doublezero-retransmit-eu",
+  "vortex-fra",
+  "helius-preconf",
+  "helius-raw",
+  "helius-raw-auto-ax1",
+  "unknown"
+];
 
 export function recognizedFeedSource(value: unknown): RecognizedFeedSource | null {
   return typeof value === "string" && RECOGNIZED_FEED_SOURCE_SET.has(value)
@@ -123,6 +141,14 @@ function hasOwn(value: Record<string, unknown> | null, key: string): boolean {
   return value !== null && Object.prototype.hasOwnProperty.call(value, key);
 }
 
+function directHeliusFeedStage(telemetry: Record<string, unknown> | null): HeliusFeedStage | null {
+  const timeline = recordValue(telemetry?.timeline);
+  const attribution = recordValue(timeline?.directSourceAttribution);
+  return attribution?.feedArrivalStage === "preconf" || attribution?.feedArrivalStage === "raw"
+    ? attribution.feedArrivalStage
+    : null;
+}
+
 function validatedInboundAttribution(value: unknown): InboundFeedAttribution | null {
   const inbound = recordValue(value);
   if (!inbound || (inbound.schemaVersion !== 1 && inbound.schemaVersion !== 2)) return null;
@@ -140,7 +166,8 @@ function validatedInboundAttribution(value: unknown): InboundFeedAttribution | n
   return {
     inboundSource: selectedSource,
     inboundContributors: contributors,
-    inboundSelectionGeneration: selectionGeneration as number
+    inboundSelectionGeneration: selectionGeneration as number,
+    heliusFeedStage: null
   };
 }
 
@@ -159,17 +186,28 @@ export function normalizeInboundFeedAttribution(
 
   for (const telemetry of telemetryCandidates) {
     if (!hasOwn(telemetry, "inbound")) continue;
-    return validatedInboundAttribution(telemetry?.inbound) ?? {
+    const attribution = validatedInboundAttribution(telemetry?.inbound);
+    if (attribution) {
+      return {
+        ...attribution,
+        heliusFeedStage: attribution.inboundSource === "helius-raw-auto-ax1"
+          ? directHeliusFeedStage(telemetry)
+          : null
+      };
+    }
+    return {
       inboundSource: null,
       inboundContributors: [],
-      inboundSelectionGeneration: null
+      inboundSelectionGeneration: null,
+      heliusFeedStage: null
     };
   }
 
   return {
     inboundSource: recognizedFeedSource(legacySource),
     inboundContributors: [],
-    inboundSelectionGeneration: null
+    inboundSelectionGeneration: null,
+    heliusFeedStage: null
   };
 }
 
@@ -200,26 +238,30 @@ export function feedTransportLabel(
 
 export function executionFeed(
   inboundSource: string | null | undefined,
-  _provider?: string | null | undefined
+  heliusFeedStage?: HeliusFeedStage | null
 ): FeedIdentity {
+  if (inboundSource === "helius-raw-auto-ax1") {
+    if (heliusFeedStage === "preconf") return { key: "helius-preconf", label: FEED_LABELS["helius-preconf"] };
+    if (heliusFeedStage === "raw") return { key: "helius-raw", label: FEED_LABELS["helius-raw"] };
+  }
   return feedIdentity(inboundSource);
 }
 
-function leaderboardFeed(value: string | null | undefined): FeedIdentity {
-  const feed = feedIdentity(value);
+function leaderboardFeed(observation: FeedObservation): FeedIdentity {
+  const feed = executionFeed(observation.inboundSource, observation.heliusFeedStage);
   return feed.key === "doublezero-retransmit-eu"
     ? { key: "doublezero-leader", label: FEED_LABELS["doublezero-leader"] }
     : feed;
 }
 
-export function feedLeaderboard(sources: Array<string | null | undefined>): FeedStanding[] {
+export function feedLeaderboard(observations: FeedObservation[]): FeedStanding[] {
   const counts = new Map<FeedKey, number>();
-  for (const source of sources) {
-    const feed = leaderboardFeed(source);
+  for (const observation of observations) {
+    const feed = leaderboardFeed(observation);
     counts.set(feed.key, (counts.get(feed.key) || 0) + 1);
   }
 
-  const total = sources.length;
+  const total = observations.length;
   return [...counts.entries()]
     .map(([key, wins]) => ({
       key,
@@ -231,11 +273,11 @@ export function feedLeaderboard(sources: Array<string | null | undefined>): Feed
 }
 
 export function executionEvidenceCounts(
-  sources: Array<string | null | undefined>
+  observations: FeedObservation[]
 ): Map<FeedKey, number> {
   const counts = new Map<FeedKey, number>();
-  for (const source of sources) {
-    const feed = leaderboardFeed(source);
+  for (const observation of observations) {
+    const feed = leaderboardFeed(observation);
     counts.set(feed.key, (counts.get(feed.key) || 0) + 1);
   }
   return counts;

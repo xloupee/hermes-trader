@@ -3,6 +3,7 @@ import { dashboardOutcomePredicate } from "@/lib/dashboard-contract.mjs";
 import {
   dashboardInboundSourcePredicate,
   normalizeInboundFeedAttribution,
+  type HeliusFeedStage,
 } from "@/lib/feed-winners";
 import { gatewayDispatchLatency } from "@/lib/gateway-dispatch-latency.mjs";
 import type { SignalFilters } from "@/lib/signals";
@@ -46,6 +47,7 @@ export interface LocalExecutionReport {
   inboundSource: string | null;
   inboundContributors: string[];
   inboundSelectionGeneration: number | null;
+  heliusFeedStage: HeliusFeedStage | null;
   endpoint: string | null;
   observedWallet: string;
   copyWallet: string | null;
@@ -639,6 +641,7 @@ function normalizeReport(row: RawLocalExecutionReport): LocalExecutionReport {
     inboundSource: inbound.inboundSource,
     inboundContributors: inbound.inboundContributors,
     inboundSelectionGeneration: inbound.inboundSelectionGeneration,
+    heliusFeedStage: inbound.heliusFeedStage,
     endpoint: row.endpoint,
     observedWallet: row.observed_wallet,
     copyWallet: row.copy_wallet,

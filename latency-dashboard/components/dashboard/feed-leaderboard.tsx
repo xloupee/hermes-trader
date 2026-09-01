@@ -9,6 +9,8 @@ const FEED_TONES: Record<FeedKey, string> = {
   "doublezero-leader": styles.feedDoublezero,
   "doublezero-retransmit-eu": styles.feedDoublezero,
   "helius-raw-auto-ax1": styles.feedHelius,
+  "helius-preconf": styles.feedHelius,
+  "helius-raw": styles.feedHelius,
   unknown: styles.feedUnknown
 };
 
@@ -25,21 +27,29 @@ export function FeedLeaderboard({
 }) {
   const canonicalSignatures = new Set(rows.map((row) => row.sendSignature).filter(Boolean));
   const uniqueGatewayRows = gatewayRows.filter((row) => !canonicalSignatures.has(row.signature));
-  const landedBuySources = [
-    ...rows.filter(isLandedBuy).map((row) => row.inboundSource),
-    ...uniqueGatewayRows.filter(isGatewayLandedBuy).map((row) => row.inboundSource)
+  const landedBuyFeeds = [
+    ...rows.filter(isLandedBuy).map((row) => ({ inboundSource: row.inboundSource, heliusFeedStage: row.heliusFeedStage })),
+    ...uniqueGatewayRows.filter(isGatewayLandedBuy).map((row) => ({ inboundSource: row.inboundSource, heliusFeedStage: row.heliusFeedStage }))
   ];
-  const evidenceSources = [
-    ...rows.map((row) => row.inboundSource),
-    ...uniqueGatewayRows.map((row) => row.inboundSource)
+  const evidenceFeeds = [
+    ...rows.map((row) => ({ inboundSource: row.inboundSource, heliusFeedStage: row.heliusFeedStage })),
+    ...uniqueGatewayRows.map((row) => ({ inboundSource: row.inboundSource, heliusFeedStage: row.heliusFeedStage }))
   ];
-  const winnerStandings = feedLeaderboard(landedBuySources);
-  const evidence = executionEvidenceCounts(evidenceSources);
+  const winnerStandings = feedLeaderboard(landedBuyFeeds);
+  const evidence = executionEvidenceCounts(evidenceFeeds);
   const standingByKey = new Map(winnerStandings.map((standing) => [standing.key, standing]));
-  const trackedFeeds: FeedStanding[] = (["jito-primary", "doublezero-leader", "vortex-fra", "helius-raw-auto-ax1"] as const).map((key) => (
+  const trackedFeeds: FeedStanding[] = (["jito-primary", "doublezero-leader", "vortex-fra", "helius-preconf", "helius-raw"] as const).map((key) => (
     standingByKey.get(key) || {
       key,
-      label: key === "jito-primary" ? "Jito" : key === "vortex-fra" ? "Vortex" : key === "helius-raw-auto-ax1" ? "Helius" : "DoubleZero",
+      label: key === "jito-primary"
+        ? "Jito"
+        : key === "vortex-fra"
+          ? "Vortex"
+          : key === "helius-preconf"
+            ? "Helius Preconf"
+            : key === "helius-raw"
+              ? "Helius Raw Shreds"
+              : "DoubleZero",
       wins: 0,
       share: 0
     }
@@ -56,7 +66,7 @@ export function FeedLeaderboard({
           <span>Landed buy race</span>
           <h2>Feed leaderboard</h2>
         </div>
-        <small>{landedBuySources.length} landed buy{landedBuySources.length === 1 ? "" : "s"} · execution evidence only</small>
+        <small>{landedBuyFeeds.length} landed buy{landedBuyFeeds.length === 1 ? "" : "s"} · execution evidence only</small>
       </header>
       <div className={styles.feedStandings}>
         {standings.length > 0 ? standings.map((standing, index) => (

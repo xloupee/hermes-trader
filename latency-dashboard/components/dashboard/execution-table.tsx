@@ -131,6 +131,8 @@ const FEED_CLASSES: Record<FeedKey, string> = {
   "doublezero-leader": styles.feedDoublezero,
   "doublezero-retransmit-eu": styles.feedDoublezero,
   "helius-raw-auto-ax1": styles.feedHelius,
+  "helius-preconf": styles.feedHelius,
+  "helius-raw": styles.feedHelius,
   unknown: styles.feedUnknown
 };
 
@@ -189,8 +191,8 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
               const row = entry.row;
               const landing = canonical ? landingParts(canonical) : null;
               const feed = canonical
-                ? executionFeed(canonical.inboundSource)
-                : executionFeed(gateway?.inboundSource);
+                ? executionFeed(canonical.inboundSource, canonical.heliusFeedStage)
+                : executionFeed(gateway?.inboundSource, gateway?.heliusFeedStage);
               const lane = sendLaneIdentity(canonical?.firstAckLane ?? gateway?.firstAckLane ?? null);
               const ackMs = canonical ? canonical.dispatchToAckMs : gateway?.dispatchToAckMs ?? null;
               return <tr key={`${entry.kind}-${row.id}`}>
@@ -240,8 +242,8 @@ export function ExecutionTable({ rows, gatewayRows = [], emptyMessage, includeRo
           const row = entry.row;
           const landing = canonical ? landingParts(canonical) : null;
           const feed = canonical
-            ? executionFeed(canonical.inboundSource)
-            : executionFeed(gateway?.inboundSource);
+            ? executionFeed(canonical.inboundSource, canonical.heliusFeedStage)
+            : executionFeed(gateway?.inboundSource, gateway?.heliusFeedStage);
           const lane = sendLaneIdentity(canonical?.firstAckLane ?? gateway?.firstAckLane ?? null);
           const ackMs = canonical ? canonical.dispatchToAckMs : gateway?.dispatchToAckMs ?? null;
           return <article key={`${entry.kind}-${row.id}`} className={styles.card}>

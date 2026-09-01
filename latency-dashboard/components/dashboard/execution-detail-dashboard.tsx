@@ -53,7 +53,7 @@ function LatencyBreakdown({ row }: { row: DashboardExecution }) {
 }
 
 function GroupedDiagnostics({ row, timeZone }: { row: DashboardExecution; timeZone: string }) {
-  const feed = executionFeed(row.inboundSource);
+  const feed = executionFeed(row.inboundSource, row.heliusFeedStage);
   const timingRows = [
     { label: "Observed", value: formatUserDateTime(row.observedAtMs, timeZone) },
     { label: "Outcome", value: landingSummary(row) },

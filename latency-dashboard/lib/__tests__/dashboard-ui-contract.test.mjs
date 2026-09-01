@@ -155,7 +155,7 @@ describe("dashboard UI contract", () => {
     assert.match(detail, /row\.unsignedBuildUs\).*row\.signUs/s);
     assert.match(detail, /ackDurationMs\(row\)/);
     assert.match(detail, /row\.dispatchToAckMs/);
-    assert.match(detail, /executionFeed\(row\.inboundSource\)/);
+    assert.match(detail, /executionFeed\(row\.inboundSource, row\.heliusFeedStage\)/);
     assert.match(detail, /row\.inboundContributors/);
     assert.match(detail, /row\.inboundSelectionGeneration/);
     assert.doesNotMatch(detail, /rawExecution|chainReport|privateKey|keypair|mnemonic|seed|custody/);
@@ -186,7 +186,8 @@ describe("dashboard UI contract", () => {
     assert.ok(table.indexOf("<th>Wallet</th>") < table.indexOf("<th>Telegram ID</th>"));
     assert.ok(table.indexOf("<th>Telegram ID</th>") < table.indexOf("<th>Transaction</th>"));
     assert.doesNotMatch(table, /feedTransportLabel|row\.selectedRoute/);
-    assert.match(table, /executionFeed\(canonical\.inboundSource\)/);
+    assert.match(table, /executionFeed\(canonical\.inboundSource, canonical\.heliusFeedStage\)/);
+    assert.match(table, /executionFeed\(gateway\?\.inboundSource, gateway\?\.heliusFeedStage\)/);
     assert.match(table, /sendLaneIdentity\(canonical\?\.firstAckLane \?\? gateway\?\.firstAckLane/);
     assert.match(table, /gateway\?\.dispatchToAckMs/);
     assert.match(table, /title=\{lane\.raw \|\| undefined\}/);
@@ -230,7 +231,10 @@ describe("dashboard UI contract", () => {
     assert.deepEqual(feedIdentity("confirmed_rpc"), { key: "unknown", label: "Unknown" });
     assert.deepEqual(feedIdentity("JITO-PRIMARY"), { key: "unknown", label: "Unknown" });
     assert.deepEqual(feedIdentity(" jito-primary "), { key: "unknown", label: "Unknown" });
-    assert.deepEqual(executionFeed(null, "shredstream"), { key: "unknown", label: "Unknown" });
+    assert.deepEqual(executionFeed(null, null), { key: "unknown", label: "Unknown" });
+    assert.deepEqual(executionFeed("helius-raw-auto-ax1", "preconf"), { key: "helius-preconf", label: "Helius Preconf" });
+    assert.deepEqual(executionFeed("helius-raw-auto-ax1", "raw"), { key: "helius-raw", label: "Helius Raw Shreds" });
+    assert.deepEqual(executionFeed("helius-raw-auto-ax1", null), { key: "helius-raw-auto-ax1", label: "Helius" });
     assert.equal(feedTransportLabel("jito-primary", null), "ShredStream");
     assert.equal(feedTransportLabel("stable-ingress-active", "shredstream"), "ShredStream");
   });
@@ -243,22 +247,41 @@ describe("dashboard UI contract", () => {
       selectionGeneration: 1,
       ...overrides
     });
-    const unknown = { inboundSource: null, inboundContributors: [], inboundSelectionGeneration: null };
+    const unknown = { inboundSource: null, inboundContributors: [], inboundSelectionGeneration: null, heliusFeedStage: null };
 
     for (const selectedSource of ["jito-primary", "doublezero-leader", "doublezero-retransmit-eu", "vortex-fra", "helius-raw-auto-ax1"]) {
       assert.deepEqual(normalizeInboundFeedAttribution({ executionTelemetry: { inbound: inbound(selectedSource) } }, null, "shredstream"), {
         inboundSource: selectedSource,
         inboundContributors: [selectedSource],
-        inboundSelectionGeneration: 1
+        inboundSelectionGeneration: 1,
+        heliusFeedStage: null
       });
     }
     assert.deepEqual(normalizeInboundFeedAttribution({
-      executionTelemetry: { inbound: inbound("helius-raw-auto-ax1", { schemaVersion: 2, selectionGeneration: 13 }) }
+      executionTelemetry: {
+        inbound: inbound("helius-raw-auto-ax1", { schemaVersion: 2, selectionGeneration: 13 }),
+        timeline: { directSourceAttribution: { feedArrivalStage: "preconf" } }
+      }
     }, null, "shredstream"), {
       inboundSource: "helius-raw-auto-ax1",
       inboundContributors: ["helius-raw-auto-ax1"],
-      inboundSelectionGeneration: 13
+      inboundSelectionGeneration: 13,
+      heliusFeedStage: "preconf"
     });
+    assert.equal(normalizeInboundFeedAttribution({
+      rustTransactionConfirmation: {
+        executionTelemetry: {
+          inbound: inbound("helius-raw-auto-ax1", { schemaVersion: 2 }),
+          timeline: { directSourceAttribution: { feedArrivalStage: "raw" } }
+        }
+      }
+    }, null, null).heliusFeedStage, "raw");
+    assert.equal(normalizeInboundFeedAttribution({
+      executionTelemetry: {
+        inbound: inbound("helius-raw-auto-ax1", { schemaVersion: 2 }),
+        timeline: { directSourceAttribution: { feedArrivalStage: "scheduled" } }
+      }
+    }, null, null).heliusFeedStage, null);
 
     assert.deepEqual(normalizeInboundFeedAttribution({
       executionTelemetry: { inbound: inbound("vortex-fra", { contributors: ["vortex-fra", "jito-primary"], selectionGeneration: 17 }) },
@@ -266,7 +289,8 @@ describe("dashboard UI contract", () => {
     }, { executionTelemetry: { inbound: inbound("doublezero-leader") } }, "jito-primary"), {
       inboundSource: "vortex-fra",
       inboundContributors: ["vortex-fra", "jito-primary"],
-      inboundSelectionGeneration: 17
+      inboundSelectionGeneration: 17,
+      heliusFeedStage: null
     });
 
     assert.equal(normalizeInboundFeedAttribution({ rustTransactionConfirmation: { executionTelemetry: { inbound: inbound("doublezero-retransmit-eu") } } }, null, null).inboundSource, "doublezero-retransmit-eu");
@@ -447,7 +471,8 @@ describe("dashboard UI contract", () => {
       assert.deepEqual(normalizeInboundFeedAttribution(rawExecution, chainReport, "jito-primary"), {
         inboundSource: null,
         inboundContributors: [],
-        inboundSelectionGeneration: null
+        inboundSelectionGeneration: null,
+        heliusFeedStage: null
       });
       assert.equal(dashboardInboundSourceFilterMatches("unknown", rawExecution, chainReport, "jito-primary"), true);
       assert.equal(dashboardInboundSourceFilterMatches("jito-primary", rawExecution, chainReport, "jito-primary"), false);
@@ -468,29 +493,35 @@ describe("dashboard UI contract", () => {
   });
 
   test("feed leaderboard ranks visible buy winners with stable shares and colors", () => {
+    const feeds = (...sources) => sources.map((inboundSource) => ({ inboundSource }));
     assert.equal(isLandedBuy({ observedAction: "buy", outcome: "landed" }), true);
     assert.equal(isLandedBuy({ observedAction: "buy", outcome: "skipped" }), false);
     assert.equal(isLandedBuy({ observedAction: "buy", outcome: "failed_on_chain" }), false);
     assert.equal(isLandedBuy({ observedAction: "sell", outcome: "landed" }), false);
-    assert.deepEqual(feedLeaderboard(["jito-primary", "vortex-fra", "doublezero-leader", "doublezero-retransmit-eu"]), [
+    assert.deepEqual(feedLeaderboard(feeds("jito-primary", "vortex-fra", "doublezero-leader", "doublezero-retransmit-eu")), [
       { key: "doublezero-leader", label: "DoubleZero", wins: 2, share: 50 },
       { key: "jito-primary", label: "Jito", wins: 1, share: 25 },
       { key: "vortex-fra", label: "Vortex", wins: 1, share: 25 }
     ]);
-    assert.deepEqual(feedLeaderboard(["helius-raw-auto-ax1"]), [
-      { key: "helius-raw-auto-ax1", label: "Helius", wins: 1, share: 100 }
+    assert.deepEqual(feedLeaderboard([
+      { inboundSource: "helius-raw-auto-ax1", heliusFeedStage: "preconf" },
+      { inboundSource: "helius-raw-auto-ax1", heliusFeedStage: "raw" },
+      { inboundSource: "helius-raw-auto-ax1", heliusFeedStage: "preconf" }
+    ]), [
+      { key: "helius-preconf", label: "Helius Preconf", wins: 2, share: (2 / 3) * 100 },
+      { key: "helius-raw", label: "Helius Raw Shreds", wins: 1, share: (1 / 3) * 100 }
     ]);
-    assert.deepEqual(feedLeaderboard(["jito-primary", "shredstream", "vortex-fra"]), [
+    assert.deepEqual(feedLeaderboard(feeds("jito-primary", "shredstream", "vortex-fra")), [
       { key: "jito-primary", label: "Jito", wins: 1, share: (1 / 3) * 100 },
       { key: "vortex-fra", label: "Vortex", wins: 1, share: (1 / 3) * 100 },
       { key: "unknown", label: "Unknown", wins: 1, share: (1 / 3) * 100 }
     ]);
-    assert.deepEqual([...executionEvidenceCounts(["jito-primary", "vortex-fra", "jito-backup"])], [
+    assert.deepEqual([...executionEvidenceCounts(feeds("jito-primary", "vortex-fra", "jito-backup"))], [
       ["jito-primary", 1],
       ["vortex-fra", 1],
       ["unknown", 1]
     ]);
-    assert.deepEqual([...executionEvidenceCounts(["doublezero-leader", "doublezero-retransmit-eu"])], [
+    assert.deepEqual([...executionEvidenceCounts(feeds("doublezero-leader", "doublezero-retransmit-eu"))], [
       ["doublezero-leader", 2]
     ]);
     const overview = readFileSync(new URL("../../components/dashboard/overview-dashboard.tsx", import.meta.url), "utf8");
@@ -500,11 +531,13 @@ describe("dashboard UI contract", () => {
     assert.match(leaderboard, /rows\.filter\(isLandedBuy\)/);
     assert.match(leaderboard, /uniqueGatewayRows\.filter\(isGatewayLandedBuy\)/);
     assert.match(leaderboard, /canonicalSignatures\.has\(row\.signature\)/);
-    assert.match(leaderboard, /feedLeaderboard\(landedBuySources\)/);
+    assert.match(leaderboard, /feedLeaderboard\(landedBuyFeeds\)/);
     assert.match(leaderboard, /Landed buy race/);
     assert.match(leaderboard, /landed buy/);
     assert.match(leaderboard, /execution evidence only/);
-    assert.match(leaderboard, /\["jito-primary", "doublezero-leader", "vortex-fra", "helius-raw-auto-ax1"\]/);
+    assert.match(leaderboard, /\["jito-primary", "doublezero-leader", "vortex-fra", "helius-preconf", "helius-raw"\]/);
+    assert.match(leaderboard, /Helius Preconf/);
+    assert.match(leaderboard, /Helius Raw Shreds/);
     assert.match(styles, /\.feedHelius\s*\{\s*color:\s*oklch\(65% 0\.21 27\);\s*\}/);
     assert.match(leaderboard, /Feed leaderboard/);
     assert.doesNotMatch(readFileSync(new URL("../../components/dashboard/execution-table.tsx", import.meta.url), "utf8"), /feedTransportLabel/);
